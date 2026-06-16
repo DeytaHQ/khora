@@ -119,12 +119,49 @@ async def cascade_forget_extraction(
     orphan_rel_ids = [r.id for r in relationships if _is_orphan(r, document_id)]
     survive_rel_ids = [r.id for r in relationships if _is_survivor(r, document_id)]
 
+    degradations: list[Degradation] = []
+
     if orphan_ent_ids:
         await primary.delete_entities_batch(orphan_ent_ids, namespace_id=namespace_id)
         await _delete_entities(mirror, orphan_ent_ids, namespace_id)
     if orphan_rel_ids:
         await primary.delete_relationships_batch(orphan_rel_ids, namespace_id=namespace_id)
         await _delete_relationships(mirror, orphan_rel_ids, namespace_id)
+
+    # Orphan relationships whose endpoint node is missing its id cannot be
+    # deserialized by ``list_relationships`` (skip-and-warn, #1237), so their
+    # ids never reach the enumerate-and-delete path above and they would
+    # survive the forget. Sweep them directly in the graph store (Cypher,
+    # no deserialization). Neo4j-only today; a getattr miss is a no-op so
+    # other graph backends keep current behavior.
+    #
+    # Only sweep when the namespace had at least one deserializable
+    # relationship: the sweep is an unindexed full-relationship scan (#1241)
+    # and the common forget_session/expire_sessions case is a document whose
+    # namespace has no graph edges at all. Trade-off: a namespace whose edges
+    # are *all* malformed (so enumeration returns nothing) is not swept until a
+    # well-formed edge exists — a transient/repair-tool concern, tracked in
+    # #1241. (Multi-source malformed survivors are also not handled here: #1242.)
+    swept = await _sweep_malformed_orphan_relationships(graph, document_id, namespace_id) if relationships else 0
+    if swept:
+        _FORGET_DEGRADED_COUNTER.add(swept, {"reason": "malformed_relationship_swept"})
+        logger.warning(
+            "{}: forget cascade swept {} malformed orphan relationship(s) for document {} that "
+            "list_relationships could not deserialize (null endpoint id)",
+            engine,
+            swept,
+            document_id,
+        )
+        degradations.append(
+            Degradation(
+                component="forget_cascade",
+                reason="malformed_relationship_swept",
+                detail=(
+                    f"{swept} orphan relationship(s) with a null endpoint id were force-deleted via "
+                    "direct Cypher; they could not be enumerated by list_relationships."
+                ),
+            )
+        )
 
     if survive_ent_ids:
         await _strip_entities(primary, survive_ent_ids, document_id, namespace_id)
@@ -143,7 +180,20 @@ async def cascade_forget_extraction(
         len(survive_ent_ids),
         len(survive_rel_ids),
     )
-    return []
+    return degradations
+
+
+async def _sweep_malformed_orphan_relationships(store: Any, document_id: UUID, namespace_id: UUID) -> int:
+    """Force-delete orphan relationships the enumeration path can't deserialize.
+
+    Neo4j exposes ``delete_malformed_orphan_relationships``; other graph
+    backends don't yet, so a getattr miss returns 0 (no-op) and they keep
+    their current behavior (#1237).
+    """
+    fn = getattr(store, "delete_malformed_orphan_relationships", None)
+    if not callable(fn):
+        return 0
+    return await fn(document_id, namespace_id=namespace_id)
 
 
 def _is_orphan(record: Any, document_id: UUID) -> bool:

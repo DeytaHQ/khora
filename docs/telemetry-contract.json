@@ -1119,9 +1119,9 @@
       "unit": "1",
       "owner": "engines",
       "labels": [
-        {"name": "reason", "values": ["no_store_with_primitives", "memory_facts_cleanup_failed"], "_comment": "Low-cardinality enum; extend when adding new forget-cascade fallback paths."}
+        {"name": "reason", "values": ["no_store_with_primitives", "memory_facts_cleanup_failed", "malformed_relationship_swept"], "_comment": "Low-cardinality enum; extend when adding new forget-cascade fallback paths."}
       ],
-      "description": "Issue #923 (ADR-001). Forget-cascade cleanup degradations. reason=no_store_with_primitives: entity/relationship cleanup could not run because no configured store (vector or graph) exposes the list/delete primitives; a Degradation is returned from _cascade_forget_extraction. reason=memory_facts_cleanup_failed (#1140): chronicle could not delete the memory_facts derived from the forgotten document's chunks. The forget still deletes the document + chunks. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
+      "description": "Issue #923 (ADR-001). Forget-cascade cleanup degradations. reason=no_store_with_primitives: entity/relationship cleanup could not run because no configured store (vector or graph) exposes the list/delete primitives; a Degradation is returned from _cascade_forget_extraction. reason=memory_facts_cleanup_failed (#1140): chronicle could not delete the memory_facts derived from the forgotten document's chunks. reason=malformed_relationship_swept (#1237): orphan relationship(s) whose endpoint node was missing its id (so list_relationships could not deserialize them) were force-deleted via direct Cypher; the count is the number swept. The forget still deletes the document + chunks. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
     },
     {
       "name": "khora.ingest.relationships_skipped_total",

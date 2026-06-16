@@ -142,10 +142,16 @@ def parse_uuid(val: Any) -> UUID:
 
 
 def parse_uuid_list(val: list | None) -> list[UUID]:
-    """Parse a list of UUIDs."""
+    """Parse a list of UUIDs, dropping null / empty elements.
+
+    Graph backends store provenance ids (``source_document_ids`` etc.) as
+    list properties that can carry stray ``None`` / ``""`` entries on
+    partial or externally-written data. Filtering them here keeps a single
+    malformed element from aborting the whole deserialize (#1237).
+    """
     if not val:
         return []
-    return [parse_uuid(v) for v in val]
+    return [parse_uuid(v) for v in val if v]
 
 
 def parse_datetime(val: str | datetime | None, default: datetime | None = None) -> datetime | None:

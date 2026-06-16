@@ -69,6 +69,9 @@ class TestChronicleEngineForget:
         engine._storage.graph.delete_relationships_batch = AsyncMock()
         engine._storage.graph.remove_document_from_entity_sources_batch = AsyncMock()
         engine._storage.graph.remove_document_from_relationship_sources_batch = AsyncMock()
+        # #1237: the Neo4j graph backend now sweeps malformed orphan edges that
+        # list_relationships can't deserialize. Default to "nothing swept".
+        engine._storage.graph.delete_malformed_orphan_relationships = AsyncMock(return_value=0)
         return engine
 
     @pytest.mark.asyncio

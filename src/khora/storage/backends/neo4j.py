@@ -24,6 +24,7 @@ from neo4j.exceptions import ClientError, ConnectionAcquisitionTimeoutError
 from khora.core.models import Entity, Episode, Relationship
 from khora.storage.backends.mixins import (
     GraphBackendBase,
+    parse_uuid_list,
     sanitize_cypher_label,
 )
 from khora.storage.backends.mixins import deserialize_dict as _deserialize_dict
@@ -2508,8 +2509,8 @@ RETURN count(r) AS updated
             entity_type=node["entity_type"],
             description=node.get("description", ""),
             attributes=_deserialize_dict(node.get("attributes")),
-            source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
-            source_chunk_ids=[UUID(c) for c in node.get("source_chunk_ids", [])],
+            source_document_ids=parse_uuid_list(node.get("source_document_ids")),
+            source_chunk_ids=parse_uuid_list(node.get("source_chunk_ids")),
             mention_count=node.get("mention_count", 1),
             valid_from=datetime.fromisoformat(node["valid_from"]) if node.get("valid_from") else None,
             valid_until=datetime.fromisoformat(node["valid_until"]) if node.get("valid_until") else None,
@@ -2661,6 +2662,39 @@ RETURN count(r) AS updated
             deleted = await session.execute_write(_delete)
             return deleted > 0
 
+    async def delete_malformed_orphan_relationships(self, document_id: UUID, *, namespace_id: UUID) -> int:
+        """Force-delete orphan relationships whose endpoints are malformed.
+
+        The forget cascade enumerates relationships via ``list_relationships``
+        and deletes them by id. A relationship whose endpoint node is missing
+        its ``id`` property cannot be deserialized into a domain
+        ``Relationship`` (its id never reaches ``delete_relationships_batch``),
+        so it would survive ``forget()``. This sweep deletes such edges
+        directly in Cypher — no deserialization — scoped to ``namespace_id``
+        and limited to edges whose sole source document is the one being
+        forgotten (orphans). Returns the number of edges deleted (#1237).
+        """
+
+        async def _sweep(tx: AsyncManagedTransaction) -> int:
+            result = await tx.run(
+                """
+                MATCH (source)-[r]->(target)
+                WHERE r.namespace_id = $namespace_id
+                  AND $document_id IN r.source_document_ids
+                  AND size(r.source_document_ids) = 1
+                  AND (source.id IS NULL OR target.id IS NULL)
+                DELETE r
+                RETURN count(r) as deleted
+                """,
+                namespace_id=str(namespace_id),
+                document_id=str(document_id),
+            )
+            record = await result.single()
+            return record["deleted"] if record else 0
+
+        async with self._session() as session:
+            return await session.execute_write(_sweep)
+
     class RetirementRow(TypedDict):
         """A row for retire_orphaned_relationships_batch()."""
 
@@ -2774,14 +2808,30 @@ RETURN count(r) AS updated
                 limit=limit,
             )
             records = await result.data()
-            return [
+            rels = (
                 self._record_to_relationship(r["r"], r["source_id"], r["target_id"], r["rel_type"]) for r in records
-            ]
+            )
+            return [rel for rel in rels if rel is not None]
 
     def _record_to_relationship(
-        self, rel: dict[str, Any], source_id: str, target_id: str, rel_type: str
-    ) -> Relationship:
-        """Convert a Neo4j relationship to a domain Relationship."""
+        self, rel: dict[str, Any], source_id: str | None, target_id: str | None, rel_type: str
+    ) -> Relationship | None:
+        """Convert a Neo4j relationship to a domain Relationship.
+
+        Returns ``None`` when an endpoint id is null. Unlike ``id`` /
+        ``namespace_id`` (scalar attributes that are synthesized when absent,
+        #767), an endpoint id is a foreign key: synthesizing a ``uuid4()`` for
+        it would point at a non-existent entity — a dangling FK that the
+        ``forget()`` cascade and graph traversal would then act on. Dropping
+        the malformed row (skip-and-warn) is the honest behavior (#1237).
+        """
+        if source_id is None or target_id is None:
+            logger.warning(
+                f"Dropping relationship with null endpoint id (type={rel_type}, "
+                f"source_id={source_id}, target_id={target_id}); endpoint node is "
+                "missing its id property."
+            )
+            return None
         rel_id = rel.get("id")
         rel_ns = rel.get("namespace_id")
         if rel_id is None or rel_ns is None:
@@ -2797,8 +2847,8 @@ RETURN count(r) AS updated
             relationship_type=rel_type,
             description=rel.get("description", ""),
             properties=_deserialize_dict(rel.get("properties")),
-            source_document_ids=[UUID(d) for d in rel.get("source_document_ids", [])],
-            source_chunk_ids=[UUID(c) for c in rel.get("source_chunk_ids", [])],
+            source_document_ids=parse_uuid_list(rel.get("source_document_ids")),
+            source_chunk_ids=parse_uuid_list(rel.get("source_chunk_ids")),
             valid_from=datetime.fromisoformat(rel["valid_from"]) if rel.get("valid_from") else None,
             valid_until=datetime.fromisoformat(rel["valid_until"]) if rel.get("valid_until") else None,
             confidence=rel.get("confidence", 1.0),
@@ -2821,8 +2871,12 @@ RETURN count(r) AS updated
         # Build relationship type filter
         rel_filter = f":{_sanitize_neo4j_label(relationship_type)}" if relationship_type else ""
 
+        # Both endpoints are constrained to in-namespace ``:Entity`` nodes,
+        # matching get_relationship() / get_entity_relationships() (IDOR
+        # family): edges whose endpoints are non-Entity or live in another
+        # namespace never surface here (#1237).
         query = f"""
-        MATCH (source)-[r{rel_filter}]->(target)
+        MATCH (source:Entity {{namespace_id: $namespace_id}})-[r{rel_filter}]->(target:Entity {{namespace_id: $namespace_id}})
         WHERE r.namespace_id = $namespace_id
         RETURN properties(r) as rel_props, source.id as source_id, target.id as target_id, type(r) as rel_type
         ORDER BY r.created_at DESC
@@ -2838,10 +2892,11 @@ RETURN count(r) AS updated
                 limit=limit,
             )
             records = await result.data()
-            return [
+            rels = (
                 self._record_to_relationship(r["rel_props"], r["source_id"], r["target_id"], r["rel_type"])
                 for r in records
-            ]
+            )
+            return [rel for rel in rels if rel is not None]
 
     # =========================================================================
     # Episode operations
@@ -2956,9 +3011,9 @@ RETURN count(r) AS updated
             description=node.get("description", ""),
             occurred_at=datetime.fromisoformat(node["occurred_at"]),
             duration_seconds=node.get("duration_seconds"),
-            entity_ids=[UUID(e) for e in node.get("entity_ids", [])],
-            source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
-            source_chunk_ids=[UUID(c) for c in node.get("source_chunk_ids", [])],
+            entity_ids=parse_uuid_list(node.get("entity_ids")),
+            source_document_ids=parse_uuid_list(node.get("source_document_ids")),
+            source_chunk_ids=parse_uuid_list(node.get("source_chunk_ids")),
             metadata=_deserialize_dict(node.get("metadata")),
             created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
             updated_at=datetime.fromisoformat(node["updated_at"]) if node.get("updated_at") else datetime.now(),

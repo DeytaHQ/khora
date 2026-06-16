@@ -944,3 +944,113 @@ class TestNeo4jBackendCountRelationships:
         count = await backend.count_relationships(uuid4())
 
         assert count == 100
+
+
+@pytest.mark.unit
+@pytest.mark.security
+class TestNeo4jBackendListRelationships:
+    """list_relationships endpoint scoping + null-endpoint hardening (#1237)."""
+
+    @pytest.mark.asyncio
+    async def test_constrains_both_endpoints_to_namespace(self) -> None:
+        """Both endpoints must be ``:Entity {namespace_id: $namespace_id}``.
+
+        Matches the already-hardened get_relationship / get_entity_relationships
+        (IDOR family); the old unlabeled ``(source)-[r]->(target)`` form must
+        be gone so cross-namespace / non-Entity endpoints can't leak.
+        """
+        driver, session = _make_neo4j_driver()
+        result = MagicMock()
+        result.data = AsyncMock(return_value=[])
+        session.run = AsyncMock(return_value=result)
+
+        backend = Neo4jBackend.from_driver(driver, query_timeout=None)
+        await backend.list_relationships(uuid4())
+
+        query = session.run.call_args.args[0]
+        assert "(source:Entity {namespace_id: $namespace_id})" in query
+        assert "(target:Entity {namespace_id: $namespace_id})" in query
+        # Negative check: the pre-fix unlabeled endpoints must be gone.
+        assert "MATCH (source)-[r" not in query
+
+    @pytest.mark.asyncio
+    async def test_relationship_type_filter_applied(self) -> None:
+        """``relationship_type`` is injected as ``:TYPE`` into the pattern."""
+        driver, session = _make_neo4j_driver()
+        result = MagicMock()
+        result.data = AsyncMock(return_value=[])
+        session.run = AsyncMock(return_value=result)
+
+        backend = Neo4jBackend.from_driver(driver, query_timeout=None)
+        await backend.list_relationships(uuid4(), relationship_type="KNOWS")
+
+        query = session.run.call_args.args[0]
+        assert ":KNOWS]" in query
+
+    @pytest.mark.asyncio
+    async def test_skips_rows_with_null_endpoint_without_raising(self) -> None:
+        """A row with a null endpoint id is skipped (not crashed on).
+
+        Pre-#1237 a single null ``source.id`` / ``target.id`` made
+        ``_record_to_relationship`` call ``UUID(None)`` → TypeError, aborting
+        the whole call (and the forget() cascade). Now the malformed row is
+        dropped and the well-formed rows still return.
+        """
+        driver, session = _make_neo4j_driver()
+        good = {
+            "rel_props": _make_rel_props(),
+            "source_id": str(uuid4()),
+            "target_id": str(uuid4()),
+            "rel_type": "KNOWS",
+        }
+        null_source = {
+            "rel_props": _make_rel_props(),
+            "source_id": None,
+            "target_id": str(uuid4()),
+            "rel_type": "KNOWS",
+        }
+        result = MagicMock()
+        result.data = AsyncMock(return_value=[good, null_source])
+        session.run = AsyncMock(return_value=result)
+
+        backend = Neo4jBackend.from_driver(driver, query_timeout=None)
+        rels = await backend.list_relationships(uuid4())
+
+        assert len(rels) == 1
+        assert all(isinstance(r, Relationship) for r in rels)
+
+
+@pytest.mark.unit
+class TestRecordToRelationshipEndpointGuard:
+    """_record_to_relationship null-endpoint + null-element hardening (#1237)."""
+
+    def _backend(self) -> Neo4jBackend:
+        return Neo4jBackend("bolt://localhost:7687", query_timeout=None)
+
+    def test_null_source_id_returns_none(self) -> None:
+        backend = self._backend()
+        rel = backend._record_to_relationship(_make_rel_props(), None, str(uuid4()), "RELATES_TO")
+        assert rel is None
+
+    def test_null_target_id_returns_none(self) -> None:
+        backend = self._backend()
+        rel = backend._record_to_relationship(_make_rel_props(), str(uuid4()), None, "RELATES_TO")
+        assert rel is None
+
+    def test_well_formed_endpoints_return_relationship(self) -> None:
+        backend = self._backend()
+        source, target = uuid4(), uuid4()
+        rel = backend._record_to_relationship(_make_rel_props(), str(source), str(target), "RELATES_TO")
+        assert rel is not None
+        assert rel.source_entity_id == source
+        assert rel.target_entity_id == target
+
+    def test_null_provenance_elements_filtered(self) -> None:
+        """A null element inside source_document_ids/source_chunk_ids is dropped."""
+        backend = self._backend()
+        good = uuid4()
+        props = _make_rel_props(source_document_ids=[str(good), None], source_chunk_ids=[None])
+        rel = backend._record_to_relationship(props, str(uuid4()), str(uuid4()), "WORKS_FOR")
+        assert rel is not None
+        assert rel.source_document_ids == [good]
+        assert rel.source_chunk_ids == []
