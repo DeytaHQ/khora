@@ -2475,9 +2475,6 @@ postgres = [
     { name = "asyncpg" },
     { name = "pgvector" },
 ]
-reranking = [
-    { name = "sentence-transformers" },
-]
 rust = [
     { name = "khora-accel" },
 ]
@@ -2593,7 +2590,6 @@ requires-dist = [
     { name = "rapidfuzz", marker = "extra == 'accel'", specifier = ">=3.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "~=0.15.12" },
     { name = "sentence-transformers", specifier = ">=5.4.1" },
-    { name = "sentence-transformers", marker = "extra == 'reranking'", specifier = ">=5.4.1" },
     { name = "spacy", marker = "extra == 'nlp'", specifier = ">=3.8.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.49" },
     { name = "surrealdb", marker = "extra == 'all-backends'", specifier = ">=2.0.0,<3.0" },

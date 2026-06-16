@@ -54,7 +54,7 @@ Programmatic values take priority over environment variables.
 | `sqlite` | SQLite embedded relational + vector | `aiosqlite>=0.21.0` |
 | `lancedb` | LanceDB embedded vector store | `lancedb>=0.30.0`, `pyarrow>=24.0.0` |
 | `sqlite-lance` | **[experimental]** Unified SQLite + LanceDB embedded backend. Recommended embedded stack; covers VectorCypher / Skeleton / Chronicle | `lancedb>=0.30.0`, `aiosqlite>=0.21.0`, `pyarrow>=24.0.0` |
-| `reranking` | Neural reranking via cross-encoders | `sentence-transformers>=5.4.1` |
+| `reranking` | Cross-encoder reranking now ships in core; this extra is a reserved no-op kept for back-compat | - |
 | `binary-readers` | docx / xlsx readers (used by downstream ingestors). PDF extraction is not bundled — preprocess PDFs upstream. | `openpyxl>=3.1.0`, `python-docx>=1.2.0` |
 | `parquet` | Parquet readers | `pyarrow>=24.0.0` |
 | `accel` | Accelerated CPU ops (string-matching fuzz, used by dream-phase centroid recompute) | `rapidfuzz>=3.0.0` |
