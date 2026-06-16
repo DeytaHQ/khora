@@ -41,6 +41,11 @@ dependencies = [
     # TracerProvider/MeterProvider is installed (see khora[otel] /
     # khora[logfire]).
     "opentelemetry-api>=1.34.1",
+    # Numerical arrays. Hard-required on the eager ``import khora`` path
+    # (hooks/embedding_filter.py imports numpy unconditionally) but until
+    # now only pulled in transitively via sentence-transformers -> torch ->
+    # numpy. Declare it directly so ``import khora`` stays self-sufficient.
+    "numpy>=2.1",
 ]
 
 # Entry-point group used by khora.integrations.registry.discover().
