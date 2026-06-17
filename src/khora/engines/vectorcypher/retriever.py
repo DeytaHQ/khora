@@ -66,7 +66,8 @@ from .temporal_detection import (
 if TYPE_CHECKING:
     from neo4j import AsyncDriver
 
-    from khora.engines.skeleton.backends import TemporalFilter, TemporalVectorStore
+    from khora.core.temporal import ChunkTemporalFilter
+    from khora.engines.skeleton.backends import TemporalVectorStore
     from khora.extraction.embedders import EmbedderProtocol  # type: ignore[unresolved-import]
     from khora.filter import FilterNode
     from khora.query.reranking import CrossEncoderReranker, LLMReranker
@@ -315,7 +316,7 @@ class RetrieverConfig:
     #   or when ``KHORA_BENCH_MODE=true`` overrides for benchmark replay.
     # ``temporal_recency_floor_enabled``: when True, RECENCY/CHANGE queries
     #   that lack an explicit date and contain no anti-recency token receive
-    #   a synthesized ``TemporalFilter(occurred_after=now-default_window_days)``.
+    #   a synthesized ``ChunkTemporalFilter(occurred_after=now-default_window_days)``.
     # ``temporal_per_source_decay``: when True, ``_calculate_recency_scores``
     #   looks up a per-chunk decay window via
     #   ``chunk.metadata["source_system"]`` against
@@ -647,7 +648,7 @@ class VectorCypherRetriever:
         query: str,
         namespace_id: UUID,
         *,
-        temporal_filter: TemporalFilter | None = None,
+        temporal_filter: ChunkTemporalFilter | None = None,
         temporal_signal: TemporalSignal | None = None,
         graph_depth: int | None = None,
         limit: int | None = None,
@@ -758,7 +759,7 @@ class VectorCypherRetriever:
                             veto = True
 
                     if not veto:
-                        from khora.engines.skeleton.backends import TemporalFilter as _SynthTF
+                        from khora.core.temporal import ChunkTemporalFilter as _SynthTF
 
                         temporal_filter = _SynthTF(
                             occurred_after=datetime.now(UTC) - timedelta(days=params.default_window_days),
@@ -963,7 +964,7 @@ class VectorCypherRetriever:
         query: str,
         query_embedding: list[float],
         namespace_id: UUID,
-        temporal_filter: TemporalFilter | None,
+        temporal_filter: ChunkTemporalFilter | None,
         graph_depth: int | None,
         limit: int,
         routing: RoutingDecision,
@@ -1168,7 +1169,7 @@ class VectorCypherRetriever:
         query: str,
         query_embedding: list[float],
         namespace_id: UUID,
-        temporal_filter: TemporalFilter | None,
+        temporal_filter: ChunkTemporalFilter | None,
         graph_depth: int | None,
         limit: int,
         routing: RoutingDecision,
@@ -1417,7 +1418,7 @@ class VectorCypherRetriever:
                     f"Session-aware search: {len(fanout_channels)} sessions, {per_session_limit} chunks/session"
                 )
 
-                from khora.engines.skeleton.backends import TemporalFilter as _TF
+                from khora.core.temporal import ChunkTemporalFilter as _TF
 
                 session_tasks: list[asyncio.Task[list[tuple[UUID, float, Chunk]]]] = []
                 for ch in fanout_channels:
@@ -1442,7 +1443,7 @@ class VectorCypherRetriever:
                     # partitioning of the same query — it replaces the cancelled
                     # global vector task), so it carries the caller filter.
                     # filter_ast composes orthogonally with the per-session
-                    # TemporalFilter (both AND in the same conditions list).
+                    # ChunkTemporalFilter (both AND in the same conditions list).
                     session_tasks.append(
                         asyncio.create_task(
                             self._vector_search_chunks(
@@ -2291,7 +2292,7 @@ class VectorCypherRetriever:
         query: str,
         query_embedding: list[float],
         namespace_id: UUID,
-        temporal_filter: TemporalFilter | None,
+        temporal_filter: ChunkTemporalFilter | None,
         limit: int,
         routing: RoutingDecision,
         *,
@@ -2642,7 +2643,7 @@ class VectorCypherRetriever:
         query: str,
         query_embedding: list[float],
         namespace_id: UUID,
-        temporal_filter: TemporalFilter | None,
+        temporal_filter: ChunkTemporalFilter | None,
         limit: int,
         routing: RoutingDecision,
         *,
@@ -3452,7 +3453,7 @@ class VectorCypherRetriever:
         self,
         entity_ids: list[UUID],
         namespace_id: UUID,
-        temporal_filter: TemporalFilter | None,
+        temporal_filter: ChunkTemporalFilter | None,
         limit: int,
         *,
         temporal_sort: bool = False,
@@ -3569,7 +3570,7 @@ class VectorCypherRetriever:
         self,
         query_embedding: list[float],
         namespace_id: UUID,
-        temporal_filter: TemporalFilter | None,
+        temporal_filter: ChunkTemporalFilter | None,
         query_text: str,
         limit: int,
         *,
@@ -3645,7 +3646,7 @@ class VectorCypherRetriever:
         *,
         query_embedding: list[float],
         namespace_id: UUID,
-        temporal_filter: TemporalFilter | None,
+        temporal_filter: ChunkTemporalFilter | None,
         filter_ast: FilterNode | None = None,
         filter_channel_plans: dict[str, ChannelPlan] | None = None,
         degradations: list[Degradation] | None = None,

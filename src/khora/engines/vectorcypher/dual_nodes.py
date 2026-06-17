@@ -32,7 +32,7 @@ from khora.telemetry import trace, trace_span
 if TYPE_CHECKING:
     from neo4j import AsyncDriver, AsyncSession
 
-    from khora.engines.skeleton.backends import TemporalChunk, TemporalFilter
+    from khora.core.temporal import ChunkTemporalFilter, TemporalChunk
     from khora.filter import FilterNode
     from khora.storage.backends.neo4j import Neo4jBackend
 
@@ -470,7 +470,7 @@ class DualNodeManager:
         entity_ids: list[UUID],
         namespace_id: UUID,
         *,
-        temporal_filter: TemporalFilter | None = None,
+        temporal_filter: ChunkTemporalFilter | None = None,
         temporal_sort: bool = False,
         prefer_current: bool = False,
         limit: int = 50,

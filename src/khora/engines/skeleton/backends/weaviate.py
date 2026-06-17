@@ -43,10 +43,12 @@ from uuid import UUID, uuid4
 from loguru import logger
 from pydantic import SecretStr
 
-from khora.engines.skeleton.backends import (
+from khora.core.temporal import (
+    ChunkTemporalFilter,
     TemporalChunk,
-    TemporalFilter,
     TemporalSearchResult,
+)
+from khora.engines.skeleton.backends import (
     TemporalVectorStore,
 )
 from khora.filter.report import ChannelPlan
@@ -439,7 +441,7 @@ class WeaviateTemporalStore(TemporalVectorStore):
         *,
         limit: int = 10,
         min_similarity: float = 0.0,
-        temporal_filter: TemporalFilter | None = None,
+        temporal_filter: ChunkTemporalFilter | None = None,
         hybrid_alpha: float | None = None,
         query_text: str | None = None,
         filter_ast: FilterNode | None = None,
@@ -460,7 +462,7 @@ class WeaviateTemporalStore(TemporalVectorStore):
            the two DATE properties ``occurred_at`` / ``created_at`` are stored as
            queryable Weaviate properties, so only date predicates push down). That
            filter is AND-ed alongside the legacy ``temporal_filter`` result and
-           passed as ``filters=``; the two coexist during the ``TemporalFilter``
+           passed as ``filters=``; the two coexist during the ``ChunkTemporalFilter``
            deprecation window.
         2. **Post-filter.** ``compile_python`` compiles the *whole* AST to an
            in-memory predicate that is re-applied to every returned chunk. Because
@@ -596,8 +598,8 @@ class WeaviateTemporalStore(TemporalVectorStore):
 
         return search_results
 
-    def _build_weaviate_filter(self, f: TemporalFilter) -> Any:
-        """Build Weaviate filter from TemporalFilter."""
+    def _build_weaviate_filter(self, f: ChunkTemporalFilter) -> Any:
+        """Build Weaviate filter from ChunkTemporalFilter."""
         from weaviate.classes.query import Filter
 
         filters = []

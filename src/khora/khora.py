@@ -2136,7 +2136,7 @@ class Khora:
                 # Normalize tz: naive → UTC, aware → UTC.
                 norm_start = _normalize_recall_bound(start_time)
                 norm_end = _normalize_recall_bound(end_time)
-                from khora.engines.skeleton.backends import TemporalFilter as SkeletonTemporalFilter
+                from khora.core.temporal import ChunkTemporalFilter as SkeletonTemporalFilter
 
                 # Window-axis only: the recency bounds narrow on
                 # ``COALESCE(source_timestamp, created_at)`` inside each engine.

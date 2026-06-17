@@ -34,12 +34,14 @@ import pyarrow as pa
 from loguru import logger
 
 from khora.core.models.document import Chunk
-from khora.engines.skeleton.backends import (
+from khora.core.temporal import (
+    ChunkTemporalFilter,
     TemporalChunk,
-    TemporalFilter,
     TemporalSearchResult,
-    TemporalVectorStore,
     temporal_chunk_to_chunk,
+)
+from khora.engines.skeleton.backends import (
+    TemporalVectorStore,
 )
 from khora.filter.report import ChannelPlan
 from khora.storage.backends._fts5 import escape_fts5_query
@@ -387,7 +389,7 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         *,
         limit: int = 10,
         min_similarity: float = 0.0,
-        temporal_filter: TemporalFilter | None = None,
+        temporal_filter: ChunkTemporalFilter | None = None,
         hybrid_alpha: float | None = None,
         query_text: str | None = None,
         filter_ast: FilterNode | None = None,
@@ -423,7 +425,7 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         *,
         limit: int,
         min_similarity: float,
-        temporal_filter: TemporalFilter | None,
+        temporal_filter: ChunkTemporalFilter | None,
         hybrid_alpha: float | None,
         query_text: str | None,
         filter_ast: FilterNode | None = None,
@@ -519,7 +521,7 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         self,
         namespace_id: UUID,
         query_embedding: list[float],
-        temporal_filter: TemporalFilter | None,
+        temporal_filter: ChunkTemporalFilter | None,
         limit: int,
         min_similarity: float,
         filter_ast: FilterNode | None = None,
@@ -646,9 +648,9 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
                 )
             else:
                 filter_plan_out.append(ChannelPlan())
-        temporal_filter: TemporalFilter | None = None
+        temporal_filter: ChunkTemporalFilter | None = None
         if created_after is not None or created_before is not None:
-            temporal_filter = TemporalFilter(
+            temporal_filter = ChunkTemporalFilter(
                 created_after=created_after,
                 created_before=created_before,
             )
@@ -659,7 +661,7 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         self,
         namespace_id: UUID,
         query_text: str,
-        temporal_filter: TemporalFilter | None,
+        temporal_filter: ChunkTemporalFilter | None,
         limit: int,
         filter_ast: FilterNode | None = None,
         post_filter: Callable[[TemporalChunk], bool] | None = None,
@@ -764,7 +766,7 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
 
     def _build_filter_clause(
         self,
-        f: TemporalFilter | None,
+        f: ChunkTemporalFilter | None,
         *,
         alias: str | None = None,
     ) -> tuple[str, list[Any]]:

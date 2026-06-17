@@ -373,7 +373,7 @@ the client fuses with Reciprocal Rank Fusion. Consequence: the
 rank-based, not score-weighted. If you need true server-blended linear
 alpha scores, stay on Weaviate.
 
-**Filter expressibility:** every `TemporalFilter` predicate compiles
+**Filter expressibility:** every `ChunkTemporalFilter` predicate compiles
 to turbopuffer's filter DSL (`Eq`, `Gte`, `Lte`, `Lt`, `In`, `Contains`,
 `ContainsAny`). The one workaround: ALL-tags semantics fold into an
 `And` of N `Contains` clauses (turbopuffer has no native `ContainsAll`).
@@ -421,13 +421,13 @@ wired into CI yet (would need a repo secret for the sandbox key).
 ### Temporal Filtering
 
 ```python
-from khora.engines.skeleton.backends import TemporalFilter
+from khora.core.temporal import ChunkTemporalFilter
 
 # By time range
 results = await engine.recall(
     "project updates",
     namespace_id=namespace_id,
-    temporal_filter=TemporalFilter(
+    temporal_filter=ChunkTemporalFilter(
         occurred_after=datetime(2024, 1, 1),
         occurred_before=datetime(2024, 3, 31),
     )
@@ -437,7 +437,7 @@ results = await engine.recall(
 results = await engine.recall(
     "decisions",
     namespace_id=namespace_id,
-    temporal_filter=TemporalFilter(
+    temporal_filter=ChunkTemporalFilter(
         author="alice@company.com",
         channel="leadership",
         tags=["important", "decision"]
@@ -448,7 +448,7 @@ results = await engine.recall(
 results = await engine.recall(
     "Q1 decisions",
     namespace_id=namespace_id,
-    temporal_filter=TemporalFilter(
+    temporal_filter=ChunkTemporalFilter(
         occurred_after=datetime(2024, 1, 1),
         occurred_before=datetime(2024, 3, 31),
         author="alice@company.com",
