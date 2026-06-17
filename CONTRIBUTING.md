@@ -1,8 +1,9 @@
 # Contributing to Khora
 
-Thanks for your interest in contributing. Khora is an open-source knowledge
-memory library - knowledge graphs + vector search + PostgreSQL (with an
-optional SQLite + LanceDB embedded path).
+Thanks for your interest in contributing. Khora is a Python library for
+creating knowledge repositories that ingest unstructured and structured
+multi-source data and expose a single query substrate, built for integrating
+into long-horizon AI agents.
 
 ## Local setup
 

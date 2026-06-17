@@ -1,7 +1,7 @@
 [project]
 name = "khora"
 dynamic = ["version", "readme"]
-description = "Knowledge memory library for long-horizon AI agents — hybrid retrieval over documents, embeddings, and graph relationships"
+description = "A Python library for creating knowledge repositories that ingest unstructured and structured multi-source data and expose a single query substrate, built for integrating into long-horizon AI agents"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [
