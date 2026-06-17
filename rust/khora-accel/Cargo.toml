@@ -15,8 +15,8 @@ name = "khora_accel"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.28" }
-numpy = "0.28"
+pyo3 = { version = "0.29" }
+numpy = "0.29"
 ndarray = "0.17"
 rayon = "1.10"
 strsim = "0.11"
