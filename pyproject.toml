@@ -362,6 +362,12 @@ constraint-dependencies = [
     # Security: CVE-2026-34993 / CVE-2026-47265 fixed in 3.14.0;
     # CVE-2026-54273 through CVE-2026-54280 fixed in 3.14.1
     "aiohttp>=3.14.1",
+    # Security: GHSA-537c-gmf6-5ccf (vulnerable OpenSSL in wheels) fixed in 48.0.1
+    "cryptography>=48.0.1",
+    # Security: GHSA-5rvq-cxj2-64vf (quadratic-time querystring DoS) fixed in 0.0.30
+    "python-multipart>=0.0.30",
+    # Security: GHSA-xgmm-8j9v-c9wx (JWK accepted as HMAC secret) fixed in 2.13.0
+    "pyjwt>=2.13.0",
     # #1163: keep logfire consistent with the opentelemetry-sdk that each
     # conflict fork resolves. The crewai fork pins opentelemetry-api<1.35
     # (so otel-sdk stays 1.34.x), where only logfire<4.7 is installable
