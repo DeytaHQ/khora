@@ -67,14 +67,12 @@ def select_core_chunks(
 
     from khora._accel import build_chunk_edges, extract_keywords, pagerank
 
-    # Per-chunk keyword sets, in chunk order. The keyword dict is built in
-    # first-seen order; each keyword node accumulates the chunk ids it appears
-    # in. Mirrors the original SkeletonIndexer.add_chunk insertion semantics.
-    chunk_keywords: list[set[str]] = []
+    # Build the keyword -> chunk-ids map in first-seen order; each keyword
+    # accumulates the chunk ids it appears in. Mirrors the original
+    # SkeletonIndexer.add_chunk insertion semantics.
     keywords: dict[str, list[UUID]] = {}
     for chunk in chunks:
         kw_set = set(extract_keywords(chunk.content))
-        chunk_keywords.append(kw_set)
         for keyword in kw_set:
             if keyword not in keywords:
                 keywords[keyword] = []

@@ -76,6 +76,12 @@ Chunk 3 ──── "neural"       (shared keyword)
         └─── "architecture"
 ```
 
+> **Note:** Steps 3–6 below describe the core-chunk selection algorithm. This
+> logic lives in the leaf module `khora.core.ranking`
+> (`select_core_chunks` / `select_core_chunk_ids`); `SkeletonIndexer` delegates
+> to it. The pseudocode here is illustrative of the algorithm, which is
+> unchanged.
+
 ### 3. Calculate IDF Scores
 
 ```python
