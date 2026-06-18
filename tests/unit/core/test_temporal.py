@@ -292,7 +292,7 @@ def test_deprecated_import_emits_warning() -> None:
     )
     assert result.returncode != 0, "expected DeprecationWarning to be raised as error"
     assert "DeprecationWarning" in result.stderr
-    assert "khora.core.temporal" in result.stderr
+    assert "khora.storage.temporal" in result.stderr
 
 
 def test_no_internal_importer_uses_deprecated_path_for_moved_types() -> None:
