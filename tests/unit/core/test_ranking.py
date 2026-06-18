@@ -111,9 +111,11 @@ def test_parity_default_ratio() -> None:
 def test_parity_two_chunk_ids_and_scores() -> None:
     """The n==2 small-doc case: util matches legacy on BOTH ids and scores.
 
-    The two-chunk path is the smallest case the engine's len<=2 fast path
-    guards; this pins core-id ordering AND the per-chunk PageRank score map
-    against the legacy ``SkeletonIndexer`` (real ``khora._accel``, not mocked).
+    Two chunks is the boundary at which callers (e.g. the VectorCypher engine)
+    skip skeleton selection entirely; the ranking util itself has no small-n
+    shortcut and runs full PageRank here. This pins core-id ordering AND the
+    per-chunk PageRank score map against the legacy ``SkeletonIndexer`` (real
+    ``khora._accel``, not mocked).
     """
     chunks = [
         _chunk("Machine learning models require large datasets for training."),
