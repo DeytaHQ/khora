@@ -158,14 +158,13 @@ class TestStageDocument:
         assert result is not None  # existing doc found, would skip
 
     @pytest.mark.asyncio
-    async def test_source_timestamp_used(self) -> None:
-        """Source timestamp from metadata is used for created_at."""
+    async def test_source_timestamp_lands_on_its_own_axis(self) -> None:
+        """Source timestamp from metadata lands on source_timestamp, not created_at (#993)."""
         from khora.core.models import Document
 
         ns_id = uuid4()
         custom_metadata = {"sent_at": "2024-01-15T10:00:00Z"}
         source_timestamp = _extract_source_timestamp(custom_metadata)
-        created_at = source_timestamp or datetime.now(UTC)
 
         content = "test content"
         checksum = _compute_checksum(content)
@@ -176,11 +175,15 @@ class TestStageDocument:
             checksum=checksum,
             size_bytes=len(content.encode("utf-8")),
             metadata=custom_metadata,
-            created_at=created_at,
+            source_timestamp=source_timestamp,
         )
 
-        assert doc.created_at.year == 2024
-        assert doc.created_at.month == 1
+        # source_timestamp (real-world) carries the metadata event time.
+        assert doc.source_timestamp is not None
+        assert doc.source_timestamp.year == 2024
+        assert doc.source_timestamp.month == 1
+        # created_at (khora-ops) stays ingest time, NOT the 2024 source time.
+        assert doc.created_at.year >= 2025
 
 
 class TestStreamExtractAndEmbedEntities:

@@ -686,3 +686,55 @@ async def test_chronicle_concurrent_remember(kb: Khora, namespace_id: UUID) -> N
     result = await kb.recall("widget", namespace=namespace_id, limit=20)
     contents_returned = {c.content for c in result.chunks}
     assert len(contents_returned) >= 5
+
+
+async def test_chronicle_batch_keeps_created_at_at_ingest_time(kb: Khora, namespace_id: UUID) -> None:
+    """Regression for issue #993.
+
+    ``remember_batch`` on Chronicle routes through
+    ``stage_documents_batch``, which previously wrote
+    ``Document.created_at = source_timestamp or now()`` - a cross-axis
+    violation. ``created_at`` is khora-ops (ingest time, never changes) and
+    must not be overwritten with the caller-supplied real-world
+    ``source_timestamp``; that value has its own ``source_timestamp`` column.
+
+    With a ``source_timestamp`` 30 days in the past, the document's
+    ``created_at`` must stay at ingest time (~now) while ``source_timestamp``
+    carries the supplied value - matching the single-``remember()`` path on
+    the same engine.
+    """
+    supplied = datetime.now(UTC) - timedelta(days=30)
+    ingest_lower = datetime.now(UTC) - timedelta(minutes=5)
+
+    await kb.remember_batch(
+        [{"content": "We shipped Pipeline v2.0 today."}],
+        namespace=namespace_id,
+        source_timestamp=supplied,
+        entity_types=["CONCEPT"],
+        relationship_types=["RELATES_TO"],
+        expertise=_no_extraction_expertise(),
+    )
+
+    docs = await kb.list_documents(namespace=namespace_id, limit=1)
+    assert docs, "batch ingest persisted no document"
+    doc = docs[0]
+
+    created_at = doc.created_at if doc.created_at.tzinfo else doc.created_at.replace(tzinfo=UTC)
+    src_ts = doc.source_timestamp
+    assert src_ts is not None, "source_timestamp must be persisted"
+    src_ts = src_ts if src_ts.tzinfo else src_ts.replace(tzinfo=UTC)
+
+    # created_at is ingest time (now-ish), NOT the 30-day-old source_timestamp.
+    assert created_at >= ingest_lower, (
+        f"Issue #993 regression: Document.created_at={created_at} was written "
+        f"from source_timestamp ({supplied}) instead of ingest time."
+    )
+    # source_timestamp carries the supplied real-world value.
+    assert abs((src_ts - supplied).total_seconds()) < 1, (
+        f"source_timestamp drifted: persisted {src_ts}, supplied {supplied}"
+    )
+    # The two axes are distinct (no conflation).
+    assert abs((created_at - src_ts).total_seconds()) > 86400, (
+        "Issue #993 regression: created_at and source_timestamp are conflated "
+        f"(created_at={created_at}, source_timestamp={src_ts})."
+    )

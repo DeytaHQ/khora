@@ -590,8 +590,6 @@ async def stage_document(
     Returns:
         Document if new or updated, None if unchanged
     """
-    from datetime import UTC, datetime
-
     from khora.core.models import Document
 
     content = doc_input.get("content", "")
@@ -606,12 +604,14 @@ async def stage_document(
     # Extract custom metadata
     custom_metadata = doc_input.get("metadata", {})
 
-    # Use source timestamp if available, otherwise use current time.
     # Explicit doc_input["source_timestamp"] wins; otherwise fall back to the
     # metadata-derived value (sent_at / occurred_at / created_at / ...).
+    # source_timestamp is the real-world event time and lands on its own
+    # column. created_at / updated_at are khora-ops (ingest time) and MUST NOT
+    # be written from source_timestamp (cross-axis violation, #993) - they
+    # fall to the Document model default datetime.now(UTC).
     _explicit_ts = coerce_source_timestamp(doc_input.get("source_timestamp"))
     source_timestamp = _explicit_ts if _explicit_ts is not None else _extract_source_timestamp(custom_metadata)
-    created_at = source_timestamp or datetime.now(UTC)
     session_id = _coerce_session_id(custom_metadata.get("session_id"))
 
     document = Document(
@@ -628,8 +628,6 @@ async def stage_document(
         checksum=checksum,
         size_bytes=len(content.encode("utf-8")),
         metadata=dict(custom_metadata),
-        created_at=created_at,
-        updated_at=created_at,  # Set updated_at to source time too
         source_timestamp=source_timestamp,
         session_id=session_id,
     )
@@ -650,8 +648,6 @@ async def stage_documents_batch(
     Returns:
         List parallel to doc_inputs: Document if new, None if unchanged
     """
-    from datetime import UTC, datetime
-
     from khora.core.models import Document
 
     if not doc_inputs:
@@ -690,9 +686,12 @@ async def stage_documents_batch(
 
         # Explicit doc_input["source_timestamp"] wins; otherwise fall back to
         # the metadata-derived value (sent_at / occurred_at / created_at / ...).
+        # source_timestamp is the real-world event time and lands on its own
+        # column. created_at / updated_at are khora-ops (ingest time) and MUST
+        # NOT be written from source_timestamp (cross-axis violation, #993) -
+        # they fall to the Document model default datetime.now(UTC).
         _explicit_ts = coerce_source_timestamp(doc_input.get("source_timestamp"))
         source_timestamp = _explicit_ts if _explicit_ts is not None else _extract_source_timestamp(custom_metadata)
-        created_at = source_timestamp or datetime.now(UTC)
         session_id = _coerce_session_id(custom_metadata.get("session_id"))
 
         document = Document(
@@ -711,8 +710,6 @@ async def stage_documents_batch(
             metadata=dict(custom_metadata),
             extraction_config_hash=doc_input.get("extraction_config_hash"),
             external_id=doc_input.get("external_id"),
-            created_at=created_at,
-            updated_at=created_at,
             source_timestamp=source_timestamp,
             session_id=session_id,
         )
@@ -748,8 +745,6 @@ async def _stage_all_documents(
     Used in rewrite mode where documents should be re-processed even
     if their content hasn't changed.
     """
-    from datetime import UTC, datetime
-
     from khora.core.models import Document
 
     if not doc_inputs:
@@ -765,9 +760,12 @@ async def _stage_all_documents(
 
         # Explicit doc_input["source_timestamp"] wins; otherwise fall back to
         # the metadata-derived value (sent_at / occurred_at / created_at / ...).
+        # source_timestamp is the real-world event time and lands on its own
+        # column. created_at / updated_at are khora-ops (ingest time) and MUST
+        # NOT be written from source_timestamp (cross-axis violation, #993) -
+        # they fall to the Document model default datetime.now(UTC).
         _explicit_ts = coerce_source_timestamp(doc_input.get("source_timestamp"))
         source_timestamp = _explicit_ts if _explicit_ts is not None else _extract_source_timestamp(custom_metadata)
-        created_at = source_timestamp or datetime.now(UTC)
         session_id = _coerce_session_id(custom_metadata.get("session_id"))
 
         document = Document(
@@ -786,8 +784,6 @@ async def _stage_all_documents(
             metadata=dict(custom_metadata),
             extraction_config_hash=doc_input.get("extraction_config_hash"),
             external_id=doc_input.get("external_id"),
-            created_at=created_at,
-            updated_at=created_at,
             source_timestamp=source_timestamp,
             session_id=session_id,
         )
