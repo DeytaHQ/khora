@@ -301,8 +301,8 @@ class TemporalDetector:
         )
 
     def _extract_date_filter(self, query: str) -> Any | None:
-        """Extract a TemporalFilter from explicit date mentions in the query."""
-        from khora.engines.skeleton.backends import TemporalFilter
+        """Extract a ChunkTemporalFilter from explicit date mentions in the query."""
+        from khora.core.temporal import ChunkTemporalFilter
 
         date_match = _DATE_EXTRACT_RE.search(query)
         if not date_match:
@@ -316,12 +316,12 @@ class TemporalDetector:
 
         query_lower = query.lower()
         if "before" in query_lower:
-            return TemporalFilter(occurred_before=parsed_dt)
+            return ChunkTemporalFilter(occurred_before=parsed_dt)
         elif "after" in query_lower or "since" in query_lower:
-            return TemporalFilter(occurred_after=parsed_dt)
+            return ChunkTemporalFilter(occurred_after=parsed_dt)
         else:
             # Within ±30 days of the mentioned date
-            return TemporalFilter(
+            return ChunkTemporalFilter(
                 occurred_after=parsed_dt - timedelta(days=30),
                 occurred_before=parsed_dt + timedelta(days=30),
             )

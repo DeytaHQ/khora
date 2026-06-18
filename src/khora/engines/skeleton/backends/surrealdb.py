@@ -15,12 +15,14 @@ from uuid import UUID, uuid4
 from loguru import logger
 
 from khora.core.models.document import Chunk
-from khora.engines.skeleton.backends import (
+from khora.core.temporal import (
+    ChunkTemporalFilter,
     TemporalChunk,
-    TemporalFilter,
     TemporalSearchResult,
-    TemporalVectorStore,
     temporal_chunk_to_chunk,
+)
+from khora.engines.skeleton.backends import (
+    TemporalVectorStore,
 )
 from khora.filter.model import Op
 from khora.filter.report import ChannelPlan
@@ -98,7 +100,7 @@ DEFINE INDEX IF NOT EXISTS idx_tc_embedding ON temporal_chunk FIELDS embedding H
 DEFINE INDEX IF NOT EXISTS idx_tc_content_ft ON temporal_chunk FIELDS content SEARCH ANALYZER khora_fulltext BM25;
 """
 
-# Legacy ``TemporalFilter.additional`` range-op names → the canonical filter Op,
+# Legacy ``ChunkTemporalFilter.additional`` range-op names → the canonical filter Op,
 # so the deterministic-filter compiler can build a type-gated metadata compare.
 _LEGACY_RANGE_OPS: dict[str, Op] = {
     "gt": Op.GT,
@@ -366,7 +368,7 @@ class SurrealDBTemporalStore(TemporalVectorStore):
         *,
         limit: int = 10,
         min_similarity: float = 0.0,
-        temporal_filter: TemporalFilter | None = None,
+        temporal_filter: ChunkTemporalFilter | None = None,
         hybrid_alpha: float | None = None,
         query_text: str | None = None,
         filter_ast: FilterNode | None = None,
@@ -405,7 +407,7 @@ class SurrealDBTemporalStore(TemporalVectorStore):
         *,
         limit: int = 10,
         min_similarity: float = 0.0,
-        temporal_filter: TemporalFilter | None = None,
+        temporal_filter: ChunkTemporalFilter | None = None,
         hybrid_alpha: float | None = None,
         query_text: str | None = None,
         filter_ast: FilterNode | None = None,
@@ -556,9 +558,9 @@ class SurrealDBTemporalStore(TemporalVectorStore):
         """
         if not query_text or not query_text.strip():
             return []
-        temporal_filter: TemporalFilter | None = None
+        temporal_filter: ChunkTemporalFilter | None = None
         if created_after is not None or created_before is not None:
-            temporal_filter = TemporalFilter(
+            temporal_filter = ChunkTemporalFilter(
                 created_after=created_after,
                 created_before=created_before,
             )
@@ -767,9 +769,9 @@ class SurrealDBTemporalStore(TemporalVectorStore):
     @staticmethod
     def _build_filter_clauses(
         namespace_id: UUID,
-        temporal_filter: TemporalFilter | None,
+        temporal_filter: ChunkTemporalFilter | None,
     ) -> tuple[list[str], dict[str, Any]]:
-        """Build WHERE clauses and bindings from a TemporalFilter.
+        """Build WHERE clauses and bindings from a ChunkTemporalFilter.
 
         The namespace_id may be either the row-level ``id`` or the stable
         ``namespace_id`` — we match both so the filter works regardless of
@@ -828,7 +830,7 @@ class SurrealDBTemporalStore(TemporalVectorStore):
 
         # Additional structured filters. EVERY user key is routed through the
         # deterministic-filter SurrealDB compiler so its injection guard validates
-        # each path segment (``TemporalFilter.additional`` keys are NOT
+        # each path segment (``ChunkTemporalFilter.additional`` keys are NOT
         # char-restricted upstream — interpolating one verbatim is an injection
         # surface). Range comparisons additionally get a ``type::is::*`` gate
         # (numeric ordering, not lexicographic; wrong-typed values gated out);

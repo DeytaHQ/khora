@@ -196,12 +196,12 @@ results = await engine.recall(
 After fusion, results are filtered by temporal constraints:
 
 ```python
-from khora.engines.skeleton.backends import TemporalFilter
+from khora.core.temporal import ChunkTemporalFilter
 
 results = await engine.recall(
     "project updates",
     namespace_id=namespace_id,
-    temporal_filter=TemporalFilter(
+    temporal_filter=ChunkTemporalFilter(
         occurred_after=datetime(2024, 1, 1),
         occurred_before=datetime(2024, 6, 30),
         author="alice@company.com",
@@ -232,9 +232,9 @@ Filters are converted to SQL WHERE clauses:
 ```python
 def _build_filter_conditions(
     self,
-    tf: TemporalFilter,
+    tf: ChunkTemporalFilter,
 ) -> tuple[str, dict]:
-    """Build SQL conditions from TemporalFilter."""
+    """Build SQL conditions from ChunkTemporalFilter."""
     conditions = []
     params = {}
 
@@ -270,7 +270,7 @@ async def search(
     limit: int = 10,
     hybrid_alpha: float | None = None,
     query_text: str | None = None,
-    temporal_filter: TemporalFilter | None = None,
+    temporal_filter: ChunkTemporalFilter | None = None,
 ) -> list[TemporalSearchResult]:
     """Search with optional hybrid mode."""
 
@@ -314,7 +314,7 @@ async def search(
     limit: int = 10,
     hybrid_alpha: float | None = None,
     query_text: str | None = None,
-    temporal_filter: TemporalFilter | None = None,
+    temporal_filter: ChunkTemporalFilter | None = None,
 ) -> list[TemporalSearchResult]:
     """Search using Weaviate's native hybrid."""
 

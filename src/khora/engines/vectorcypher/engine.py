@@ -44,14 +44,16 @@ from khora.core.models.recall import (
     RecallRelationship,
 )
 from khora.core.recall_abstention import compute_abstention_signals
+from khora.core.temporal import (
+    ChunkTemporalFilter,
+    TemporalChunk,
+    document_denorm_fields,
+)
 from khora.engines._forget_cascade import cascade_forget_extraction
 from khora.engines._stats import gather_counts
 from khora.engines._storage_config import build_storage_config
 from khora.engines.skeleton.backends import (
-    TemporalChunk,
-    TemporalFilter,
     create_temporal_store,
-    document_denorm_fields,
 )
 from khora.engines.skeleton.skeleton import SkeletonIndexer
 from khora.exceptions import EngineCapabilityError
@@ -2095,7 +2097,7 @@ class VectorCypherEngine:
         mode: SearchMode = SearchMode.HYBRID,
         min_similarity: float = 0.0,
         # VectorCypher-specific parameters
-        temporal_filter: TemporalFilter | None = None,
+        temporal_filter: ChunkTemporalFilter | None = None,
         graph_depth: int | None = None,
         hybrid_alpha: float | None = None,
         recency_bias: float | None = None,
@@ -2177,7 +2179,7 @@ class VectorCypherEngine:
                 td_span.set_attribute("category", temporal_signal.category.value)
                 td_span.set_attribute("confidence", temporal_signal.confidence)
                 td_span.set_attribute("source", temporal_signal.source)
-                # EXPLICIT category produces a date-range TemporalFilter for pushdown
+                # EXPLICIT category produces a date-range ChunkTemporalFilter for pushdown
                 if temporal_signal.temporal_filter is not None:
                     temporal_filter = temporal_signal.temporal_filter
 
@@ -3430,10 +3432,10 @@ class VectorCypherEngine:
         re.IGNORECASE,
     )
 
-    def _detect_temporal_filter(self, query: str) -> TemporalFilter | None:
+    def _detect_temporal_filter(self, query: str) -> ChunkTemporalFilter | None:
         """Lightweight regex-based temporal detection — no LLM call.
 
-        Returns a TemporalFilter if temporal keywords and parseable dates
+        Returns a ChunkTemporalFilter if temporal keywords and parseable dates
         are found, otherwise None. Cost: ~0.25ms.
         """
         if not self._TEMPORAL_KW_RE.search(query):
@@ -3448,14 +3450,14 @@ class VectorCypherEngine:
                 # "before" / "after" / default to "around that date" (±30 days)
                 query_lower = query.lower()
                 if "before" in query_lower:
-                    return TemporalFilter(occurred_before=parsed_dt)
+                    return ChunkTemporalFilter(occurred_before=parsed_dt)
                 elif "after" in query_lower or "since" in query_lower:
-                    return TemporalFilter(occurred_after=parsed_dt)
+                    return ChunkTemporalFilter(occurred_after=parsed_dt)
                 else:
                     # Within ±30 days of the mentioned date
                     from datetime import timedelta
 
-                    return TemporalFilter(
+                    return ChunkTemporalFilter(
                         occurred_after=parsed_dt - timedelta(days=30),
                         occurred_before=parsed_dt + timedelta(days=30),
                     )

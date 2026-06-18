@@ -46,10 +46,12 @@ from uuid import UUID, uuid4
 from loguru import logger
 from pydantic import SecretStr
 
-from khora.engines.skeleton.backends import (
+from khora.core.temporal import (
+    ChunkTemporalFilter,
     TemporalChunk,
-    TemporalFilter,
     TemporalSearchResult,
+)
+from khora.engines.skeleton.backends import (
     TemporalVectorStore,
 )
 from khora.filter import RecallFilterUnsupportedError
@@ -326,7 +328,7 @@ class TurbopufferTemporalStore(TemporalVectorStore):
         *,
         limit: int = 10,
         min_similarity: float = 0.0,
-        temporal_filter: TemporalFilter | None = None,
+        temporal_filter: ChunkTemporalFilter | None = None,
         hybrid_alpha: float | None = None,
         query_text: str | None = None,
         filter_ast: FilterNode | None = None,
@@ -546,8 +548,8 @@ def _coerce_datetime(value: Any) -> datetime | None:
     return None
 
 
-def _build_turbopuffer_filter(f: TemporalFilter | None) -> Any:
-    """Translate a ``TemporalFilter`` to turbopuffer's filter tuple grammar.
+def _build_turbopuffer_filter(f: ChunkTemporalFilter | None) -> Any:
+    """Translate a ``ChunkTemporalFilter`` to turbopuffer's filter tuple grammar.
 
     turbopuffer's filter language is a recursive tuple form:
         ("And", (clause1, clause2, ...))

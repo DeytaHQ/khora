@@ -35,12 +35,14 @@ from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
 from khora.core.models.document import Chunk
-from khora.engines.skeleton.backends import (
+from khora.core.temporal import (
+    ChunkTemporalFilter,
     TemporalChunk,
-    TemporalFilter,
     TemporalSearchResult,
-    TemporalVectorStore,
     temporal_chunk_to_chunk,
+)
+from khora.engines.skeleton.backends import (
+    TemporalVectorStore,
 )
 from khora.filter.model import Op
 from khora.filter.report import ChannelPlan
@@ -93,7 +95,7 @@ khora_chunks_table = Table(
 )
 
 
-# Legacy ``TemporalFilter.additional`` range-op names → the canonical filter Op,
+# Legacy ``ChunkTemporalFilter.additional`` range-op names → the canonical filter Op,
 # so the deterministic-filter compiler can build a type-gated metadata compare.
 _LEGACY_RANGE_OPS: dict[str, Op] = {
     "gt": Op.GT,
@@ -405,7 +407,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
         *,
         limit: int = 10,
         min_similarity: float = 0.0,
-        temporal_filter: TemporalFilter | None = None,
+        temporal_filter: ChunkTemporalFilter | None = None,
         hybrid_alpha: float | None = None,
         query_text: str | None = None,
         filter_ast: FilterNode | None = None,
@@ -424,7 +426,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
         ``filter_ast`` is the deterministic recall-filter AST. When
         provided it is compiled to a single-table ``khora_chunks`` WHERE predicate
         and AND-ed alongside the legacy ``temporal_filter`` conditions. The two
-        coexist during the ``TemporalFilter`` deprecation window.
+        coexist during the ``ChunkTemporalFilter`` deprecation window.
         """
         with trace_span(
             "khora.temporal_store.search",
@@ -453,7 +455,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
         *,
         limit: int = 10,
         min_similarity: float = 0.0,
-        temporal_filter: TemporalFilter | None = None,
+        temporal_filter: ChunkTemporalFilter | None = None,
         hybrid_alpha: float | None = None,
         query_text: str | None = None,
         filter_ast: FilterNode | None = None,
@@ -827,8 +829,8 @@ class PgVectorTemporalStore(TemporalVectorStore):
 
         return results
 
-    def _build_filter_conditions(self, f: TemporalFilter) -> list:
-        """Build SQL conditions from TemporalFilter."""
+    def _build_filter_conditions(self, f: ChunkTemporalFilter) -> list:
+        """Build SQL conditions from ChunkTemporalFilter."""
         conditions = []
 
         if f.occurred_after:

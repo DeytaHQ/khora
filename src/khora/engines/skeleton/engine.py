@@ -28,6 +28,11 @@ from khora.core.models import (
 )
 from khora.core.models.recall import DocumentProjection, RecallChunk
 from khora.core.recall_scoring import min_max_normalize
+from khora.core.temporal import (
+    ChunkTemporalFilter,
+    TemporalChunk,
+    document_denorm_fields,
+)
 from khora.engines._stats import gather_counts
 from khora.engines._storage_config import build_storage_config
 from khora.exceptions import EngineCapabilityError, UnsupportedEngineKwargError
@@ -39,11 +44,8 @@ from khora.storage import StorageConfig, StorageCoordinator, create_storage_coor
 from khora.telemetry import trace, trace_span
 
 from .backends import (
-    TemporalChunk,
-    TemporalFilter,
     TemporalVectorStore,
     create_temporal_store,
-    document_denorm_fields,
 )
 
 if TYPE_CHECKING:
@@ -499,7 +501,7 @@ class SkeletonConstructionEngine:
         mode: SearchMode = SearchMode.HYBRID,
         min_similarity: float = 0.0,
         # Khora-specific parameters
-        temporal_filter: TemporalFilter | None = None,
+        temporal_filter: ChunkTemporalFilter | None = None,
         temporal_reference: datetime | None = None,
         hybrid_alpha: float | None = None,
         filters: dict[str, Any] | None = None,
@@ -517,7 +519,7 @@ class SkeletonConstructionEngine:
             temporal_filter: Structured temporal filter
             temporal_reference: Reference point for relative time (e.g., message timestamp)
             hybrid_alpha: Blend factor for hybrid search (0=BM25, 1=vector)
-            filters: Additional structured filters (converted to TemporalFilter)
+            filters: Additional structured filters (converted to ChunkTemporalFilter)
             filter_ast: Canonical recall-filter AST. Threaded through to the
                 temporal store's ``search``; the pgvector backend compiles it
                 to a WHERE predicate, the other backends accept-and-ignore it.
@@ -682,8 +684,8 @@ class SkeletonConstructionEngine:
             engine_info=engine_info,
         )
 
-    def _build_temporal_filter_from_dict(self, filters: dict[str, Any]) -> TemporalFilter:
-        """Convert a filters dict to a TemporalFilter.
+    def _build_temporal_filter_from_dict(self, filters: dict[str, Any]) -> ChunkTemporalFilter:
+        """Convert a filters dict to a ChunkTemporalFilter.
 
         Example:
             filters = {
@@ -693,7 +695,7 @@ class SkeletonConstructionEngine:
             }
         """
 
-        tf = TemporalFilter()
+        tf = ChunkTemporalFilter()
 
         for key, value in filters.items():
             if not isinstance(value, dict):
@@ -759,9 +761,9 @@ class SkeletonConstructionEngine:
 
     def _adjust_relative_time(
         self,
-        temporal_filter: TemporalFilter,
+        temporal_filter: ChunkTemporalFilter,
         reference: datetime,
-    ) -> TemporalFilter:
+    ) -> ChunkTemporalFilter:
         """Adjust temporal filter for relative time references.
 
         This enables queries like "yesterday" to be relative to the message timestamp,

@@ -1087,7 +1087,7 @@ async def process_document(
                 if temporal_store is not None:
                     from datetime import UTC, datetime
 
-                    from khora.engines.skeleton.backends import TemporalChunk, document_denorm_fields
+                    from khora.core.temporal import TemporalChunk, document_denorm_fields
                     from khora.telemetry import trace_span
                     from khora.telemetry.temporal_metrics import record_ingestion_fallback
 

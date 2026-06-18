@@ -185,6 +185,73 @@ def test_deprecated_import_emits_warning() -> None:
     assert "khora.core.temporal" in result.stderr
 
 
+def test_no_internal_importer_uses_deprecated_path_for_moved_types() -> None:
+    """No internal module imports a relocated temporal *data type* from the
+    deprecated ``khora.engines.skeleton.backends`` path.
+
+    Locks in the import-rewire: every internal consumer must resolve
+    ``TemporalChunk`` / ``ChunkTemporalFilter`` (and its legacy ``TemporalFilter``
+    alias) / ``TemporalSearchResult`` / ``document_denorm_fields`` /
+    ``temporal_chunk_to_chunk`` from :mod:`khora.core.temporal`. If a future
+    change re-introduces an old-path import of one of these names, the module
+    re-acquires the import-time ``DeprecationWarning`` and this test fails.
+
+    The ``TemporalVectorStore`` protocol and the ``create_temporal_store``
+    factory are *not* moved types — they legitimately remain on the old path
+    until a later slice — so importing those from the shim is allowed. A static
+    scan is the right tool here because the shim warns eagerly at module-import
+    time regardless of which symbol is requested, so a runtime ``-W error``
+    import check would false-fail on the still-legal ``TemporalVectorStore``
+    imports.
+
+    The shim module itself (``.../skeleton/backends/__init__.py``) is the
+    deprecated re-export and is excluded.
+    """
+    moved_type_names = {
+        "TemporalChunk",
+        "TemporalFilter",  # legacy alias of ChunkTemporalFilter
+        "ChunkTemporalFilter",
+        "TemporalSearchResult",
+        "document_denorm_fields",
+        "temporal_chunk_to_chunk",
+    }
+    deprecated_module = "khora.engines.skeleton.backends"
+    khora_src = Path(khora.__file__).resolve().parent  # .../src/khora
+    src_root = khora_src.parent  # .../src
+    shim = (khora_src / "engines" / "skeleton" / "backends" / "__init__.py").resolve()
+
+    def _absolute_from_module(path: Path, node: ast.ImportFrom) -> str | None:
+        """Resolve an ``ImportFrom`` node to its absolute dotted module name."""
+        if not node.level:
+            return node.module
+        dotted = ".".join(path.resolve().relative_to(src_root).with_suffix("").parts)
+        # Containing package, for both a plain ``.py`` module and an
+        # ``__init__.py`` (whose dotted form already ends in ``.__init__``).
+        package = dotted.rsplit(".", 1)[0]
+        base_parts = package.split(".")
+        anchor = base_parts[: len(base_parts) - (node.level - 1)]
+        return ".".join([*anchor, node.module]) if node.module else ".".join(anchor)
+
+    offenders: list[str] = []
+    for py in khora_src.rglob("*.py"):
+        if py.resolve() == shim:
+            continue  # the shim is the re-export; it must keep the old names
+        tree = ast.parse(py.read_text(), filename=str(py))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            if _absolute_from_module(py, node) != deprecated_module:
+                continue
+            for alias in node.names:
+                if alias.name in moved_type_names:
+                    offenders.append(f"{py.relative_to(khora_src)}:{node.lineno} imports {alias.name}")
+
+    assert not offenders, (
+        "internal modules import relocated temporal data types from the deprecated "
+        "khora.engines.skeleton.backends path; rewire them to khora.core.temporal:\n  " + "\n  ".join(sorted(offenders))
+    )
+
+
 def test_legacy_alias_preserves_identity() -> None:
     """``TemporalFilter`` is the very same object as ``ChunkTemporalFilter``."""
     with warnings.catch_warnings():

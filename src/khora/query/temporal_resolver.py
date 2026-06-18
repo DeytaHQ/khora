@@ -286,7 +286,7 @@ def resolve_temporal_filter(
     Parses relative date expressions ("last 7 days", "this week", "since Monday")
     into absolute datetime ranges suitable for WHERE clause filtering.
 
-    Returns a ``khora.engines.skeleton.backends.TemporalFilter`` with
+    Returns a ``khora.core.temporal.ChunkTemporalFilter`` with
     ``occurred_after`` / ``occurred_before`` set, or *None* if the query
     doesn't contain parseable temporal expressions.
 
@@ -307,7 +307,7 @@ def resolve_temporal_filter(
         resolver = TemporalResolver()
         resolved = resolver.resolve_fast(query)
         if resolved and resolved.start:
-            from khora.engines.skeleton.backends import TemporalFilter as SkeletonTemporalFilter
+            from khora.core.temporal import ChunkTemporalFilter as SkeletonTemporalFilter
 
             return SkeletonTemporalFilter(
                 occurred_after=resolved.start,
@@ -322,7 +322,7 @@ def resolve_temporal_filter(
 def to_query_temporal_filter(
     skeleton_filter: Any,
 ) -> Any | None:
-    """Convert a skeleton TemporalFilter to a ``khora.query.temporal.TemporalFilter``.
+    """Convert a ChunkTemporalFilter to a ``khora.query.temporal.TemporalFilter``.
 
     Useful for engines (VectorCypher, Chronicle) that pass the filter into
     ``HybridQueryEngine`` or ``_temporal_channel`` which read
