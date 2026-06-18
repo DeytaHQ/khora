@@ -11,7 +11,6 @@ Expected cost reduction: 5-10x fewer LLM extraction calls compared to full KG.
 
 from __future__ import annotations
 
-import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -118,42 +117,44 @@ class SkeletonIndexer:
         if not self._chunks:
             return []
 
-        from khora._accel import build_chunk_edges, pagerank
+        import math
+        from types import SimpleNamespace
 
-        # Calculate IDF scores for keywords
-        self._calculate_idf_scores()
+        from khora.core.ranking import select_core_chunks
 
-        # Map UUIDs to integer indices for accelerated computation
-        chunk_ids = list(self._chunks.keys())
-        n = len(chunk_ids)
-        chunk_idx = {cid: i for i, cid in enumerate(chunk_ids)}
+        # Populate keyword IDF on the indexer's own keyword nodes so the
+        # keyword-search helpers (get_related_chunks / search_by_keywords) keep
+        # their IDF weighting. The ranking util computes IDF internally for the
+        # graph; this mirrors it onto the retained per-keyword state.
+        n_docs = len(self._chunks)
+        for keyword_node in self._keywords.values():
+            df = len(keyword_node.chunk_ids)
+            keyword_node.idf_score = math.log(n_docs / (1 + df)) + 1
 
-        # Build keyword data for accelerated edge construction
-        keyword_list = list(self._keywords.values())
-        keyword_chunk_ids = [
-            [chunk_idx[cid] for cid in kw_node.chunk_ids if cid in chunk_idx] for kw_node in keyword_list
-        ]
-        idf_scores = [kw_node.idf_score for kw_node in keyword_list]
-
-        # Build edges via _accel (Rust or Python fallback)
-        edges = build_chunk_edges(n, keyword_chunk_ids, idf_scores)
-
-        # Run PageRank via _accel (Rust or Python fallback)
-        scores = pagerank(n, edges, self._damping_factor, self._max_iterations, self._convergence_threshold)
-
-        # Store scores back to chunk nodes
-        for i, cid in enumerate(chunk_ids):
-            self._chunks[cid].pagerank_score = scores[i]
-
-        # Select core chunks
-        core_ids = self._select_core_chunks()
-
-        logger.info(
-            f"Skeleton built: {len(core_ids)}/{len(self._chunks)} core chunks "
-            f"({len(core_ids) / len(self._chunks) * 100:.1f}%)"
+        # Rank the accumulated chunks in insertion order. The util re-derives
+        # keywords / IDF / edges from chunk content, so the ChunkNode carriers
+        # only need to expose ``.id`` / ``.content``.
+        carriers = [SimpleNamespace(id=node.chunk_id, content=node.content) for node in self._chunks.values()]
+        result = select_core_chunks(
+            carriers,
+            self._core_ratio,
+            damping_factor=self._damping_factor,
+            max_iterations=self._max_iterations,
+            convergence_threshold=self._convergence_threshold,
         )
 
-        return core_ids
+        # Repopulate node state from the result.
+        core_set = set(result.core_ids)
+        for cid, node in self._chunks.items():
+            node.pagerank_score = result.scores.get(cid, 0.0)
+            node.is_core = cid in core_set
+
+        logger.info(
+            f"Skeleton built: {len(result.core_ids)}/{len(self._chunks)} core chunks "
+            f"({len(result.core_ids) / len(self._chunks) * 100:.1f}%)"
+        )
+
+        return result.core_ids
 
     def get_core_chunks(self) -> list[UUID]:
         """Get list of core chunk IDs.
@@ -444,117 +445,6 @@ class SkeletonIndexer:
         from khora._accel import extract_keywords
 
         return set(extract_keywords(content))
-
-    def _calculate_idf_scores(self) -> None:
-        """Calculate IDF scores for all keywords."""
-        n_docs = len(self._chunks)
-        if n_docs == 0:
-            return
-
-        for keyword_node in self._keywords.values():
-            df = len(keyword_node.chunk_ids)
-            keyword_node.idf_score = math.log(n_docs / (1 + df)) + 1
-
-    def _build_chunk_edges(self) -> dict[UUID, list[tuple[UUID, float]]]:
-        """Build weighted edges between chunks via shared keywords.
-
-        Returns:
-            Dict mapping chunk_id -> list of (neighbor_id, weight)
-        """
-        edges: dict[UUID, list[tuple[UUID, float]]] = defaultdict(list)
-
-        # For each keyword, connect all chunks that share it
-        for keyword_node in self._keywords.values():
-            chunk_list = list(keyword_node.chunk_ids)
-            weight = keyword_node.idf_score
-
-            for i, cid1 in enumerate(chunk_list):
-                for cid2 in chunk_list[i + 1 :]:
-                    edges[cid1].append((cid2, weight))
-                    edges[cid2].append((cid1, weight))
-
-        return edges
-
-    def _calculate_pagerank(
-        self,
-        edges: dict[UUID, list[tuple[UUID, float]]],
-    ) -> None:
-        """Calculate PageRank scores for all chunks."""
-        if not self._chunks:
-            return
-
-        n = len(self._chunks)
-        chunk_ids = list(self._chunks.keys())
-
-        # Initialize scores
-        scores = {cid: 1.0 / n for cid in chunk_ids}
-
-        # Calculate out-degree (sum of weights)
-        out_degree: dict[UUID, float] = {}
-        for cid in chunk_ids:
-            if cid in edges:
-                out_degree[cid] = sum(w for _, w in edges[cid])
-            else:
-                out_degree[cid] = 0.0
-
-        # Iterative PageRank
-        d = self._damping_factor
-        base = (1 - d) / n
-
-        for iteration in range(self._max_iterations):
-            new_scores: dict[UUID, float] = {}
-            diff = 0.0
-
-            for cid in chunk_ids:
-                # Sum contributions from neighbors
-                contrib = 0.0
-                if cid in edges:
-                    for neighbor_id, weight in edges[cid]:
-                        if out_degree[neighbor_id] > 0:
-                            contrib += scores[neighbor_id] * weight / out_degree[neighbor_id]
-
-                new_score = base + d * contrib
-                diff += abs(new_score - scores[cid])
-                new_scores[cid] = new_score
-
-            scores = new_scores
-
-            if diff < self._convergence_threshold:
-                logger.debug(f"PageRank converged after {iteration + 1} iterations")
-                break
-
-        # Store scores
-        for cid, score in scores.items():
-            self._chunks[cid].pagerank_score = score
-
-    def _select_core_chunks(self) -> list[UUID]:
-        """Select core chunks based on PageRank scores.
-
-        Returns:
-            List of core chunk IDs
-        """
-        if not self._chunks:
-            return []
-
-        # Sort by PageRank score
-        sorted_chunks = sorted(
-            self._chunks.items(),
-            key=lambda x: x[1].pagerank_score,
-            reverse=True,
-        )
-
-        # Select top N%
-        n_core = max(1, int(len(sorted_chunks) * self._core_ratio))
-        core_ids = []
-
-        for i, (cid, node) in enumerate(sorted_chunks):
-            if i < n_core:
-                node.is_core = True
-                core_ids.append(cid)
-            else:
-                node.is_core = False
-
-        return core_ids
 
 
 class LazyEntityExpander:
