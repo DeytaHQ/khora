@@ -183,7 +183,7 @@ def test_embedded_search_fulltext_now_enforces_filter_ast() -> None:
     the doc note can't silently drift from reality.
     """
     backend = (
-        Path(__file__).resolve().parents[2] / "src" / "khora" / "engines" / "skeleton" / "backends" / "sqlite_lance.py"
+        Path(__file__).resolve().parents[2] / "src" / "khora" / "storage" / "temporal" / "sqlite_lance.py"
     )
     tree = ast.parse(backend.read_text())
     fn = next(
@@ -228,7 +228,7 @@ def test_surrealdb_search_fulltext_now_enforces_filter_ast() -> None:
     the doc note can't silently drift from reality.
     """
     backend = (
-        Path(__file__).resolve().parents[2] / "src" / "khora" / "engines" / "skeleton" / "backends" / "surrealdb.py"
+        Path(__file__).resolve().parents[2] / "src" / "khora" / "storage" / "temporal" / "surrealdb.py"
     )
     tree = ast.parse(backend.read_text())
     fn = next(
@@ -354,7 +354,7 @@ def test_turbopuffer_search_fails_loud_on_filter_ast() -> None:
     guard shape AND the raise within it.
     """
     backend = (
-        Path(__file__).resolve().parents[2] / "src" / "khora" / "engines" / "skeleton" / "backends" / "turbopuffer.py"
+        Path(__file__).resolve().parents[2] / "src" / "khora" / "storage" / "temporal" / "turbopuffer.py"
     )
     tree = ast.parse(backend.read_text())
     fn = next(
