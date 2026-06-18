@@ -1,6 +1,6 @@
 # Architecture Overview
 
-Khora is our open source python library for creating knowledge repositories that ingest unstructured and structured multi-source data and expose a single query substrate, built for integrating into long-horizon AI agents.
+Khora is a Python library for creating knowledge repositories that ingest unstructured and structured multi-source data and expose a single query substrate, built for integrating into long-horizon AI agents.
 
 ## The Big Picture
 
