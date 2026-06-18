@@ -43,6 +43,7 @@ from khora.core.models.recall import (
     RecallEntity,
     RecallRelationship,
 )
+from khora.core.ranking import select_core_chunk_ids
 from khora.core.recall_abstention import compute_abstention_signals
 from khora.core.temporal import (
     ChunkTemporalFilter,
@@ -55,7 +56,6 @@ from khora.engines._storage_config import build_storage_config
 from khora.engines.skeleton.backends import (
     create_temporal_store,
 )
-from khora.engines.skeleton.skeleton import SkeletonIndexer
 from khora.exceptions import EngineCapabilityError
 from khora.extraction.embedders import LiteLLMEmbedder
 from khora.khora import BatchResult, RecallResult, RememberResult, Stats
@@ -1370,14 +1370,14 @@ class VectorCypherEngine:
             if len(chunks) <= 2:
                 core_ids = {c.id for c in chunks}
             else:
-                skeleton = SkeletonIndexer(core_ratio=self._vc_config.skeleton_core_ratio)
-                skeleton.add_chunks_batch(chunks)
                 with trace_span(
                     "khora.vectorcypher.skeleton_build",
                     chunk_count=len(chunks),
                     core_ratio=self._vc_config.skeleton_core_ratio,
                 ):
-                    core_ids = await asyncio.to_thread(skeleton.build_skeleton)
+                    core_ids = await asyncio.to_thread(
+                        select_core_chunk_ids, chunks, self._vc_config.skeleton_core_ratio
+                    )
 
             logger.debug(f"Skeleton indexing: {len(core_ids)}/{len(chunks)} core chunks")
             span.set_attribute("core_chunks", len(core_ids))
@@ -1552,14 +1552,12 @@ class VectorCypherEngine:
             core_ids = {c.id for c in chunks}
         else:
             effective_ratio = skeleton_ratio_override or self._vc_config.skeleton_core_ratio
-            skeleton = SkeletonIndexer(core_ratio=effective_ratio)
-            skeleton.add_chunks_batch(chunks)
             with trace_span(
                 "khora.vectorcypher.skeleton_build",
                 chunk_count=len(chunks),
                 core_ratio=effective_ratio,
             ):
-                core_ids = await asyncio.to_thread(skeleton.build_skeleton)
+                core_ids = await asyncio.to_thread(select_core_chunk_ids, chunks, effective_ratio)
 
         logger.debug(f"Skeleton indexing (deferred): {len(core_ids)}/{len(chunks)} core chunks")
 
@@ -1740,7 +1738,6 @@ class VectorCypherEngine:
             if len(new_chunks) <= 2:
                 core_chunks = new_chunks
             else:
-                skeleton = SkeletonIndexer(core_ratio=self._vc_config.skeleton_core_ratio)
                 skeleton_input = [
                     TemporalChunk(
                         id=c.id,
@@ -1754,8 +1751,9 @@ class VectorCypherEngine:
                     )
                     for c in new_chunks
                 ]
-                skeleton.add_chunks_batch(skeleton_input)
-                core_ids = await asyncio.to_thread(skeleton.build_skeleton)
+                core_ids = await asyncio.to_thread(
+                    select_core_chunk_ids, skeleton_input, self._vc_config.skeleton_core_ratio
+                )
                 core_chunks = [c for c in new_chunks if c.id in core_ids]
 
             if core_chunks:
@@ -3011,9 +3009,7 @@ class VectorCypherEngine:
                         core_ids = {c.id for c in doc_chunks}
                     else:
                         effective_ratio = skeleton_ratio or self._vc_config.skeleton_core_ratio
-                        skeleton = SkeletonIndexer(core_ratio=effective_ratio)
-                        skeleton.add_chunks_batch(doc_chunks)
-                        core_ids = await asyncio.to_thread(skeleton.build_skeleton)
+                        core_ids = await asyncio.to_thread(select_core_chunk_ids, doc_chunks, effective_ratio)
 
                     for tc in doc_chunks:
                         if tc.id in core_ids:
