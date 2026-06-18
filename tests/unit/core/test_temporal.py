@@ -161,6 +161,116 @@ def test_leaf_purity_static_import_closure() -> None:
     )
 
 
+def test_leaf_purity_runtime_isolated_import() -> None:
+    """``khora.core.temporal``'s OWN closure loads with backends poisoned.
+
+    Runtime complement to the static-AST closure test. In a fresh
+    subprocess we poison ``sys.modules`` so any real import of an engine,
+    the recall-filter, or a DB driver raises, seed bare package stubs for
+    ``khora`` / ``khora.core`` / ``khora.core.models`` (so the import does
+    NOT execute the eager top-level ``khora/__init__.py``), then load the
+    real source of ``khora.core.temporal`` and its one declared dependency
+    ``khora.core.models.document`` and assert they import cleanly and that
+    no poisoned module was actually pulled in.
+
+    Why the stub seeding: a bare ``import khora.core.temporal`` TODAY would
+    execute ``khora/__init__.py``, which eagerly imports ``khora.engines`` /
+    ``khora.filter`` (dragging sqlalchemy in) — so a naive poisoned import
+    would fail on the *parent package*, not on the leaf module. Full runtime
+    ``sys.modules`` isolation for a bare import awaits a later
+    dependency-inversion slice that makes the top-level package lazy; until
+    then this test proves the achievable guarantee — the module's own import
+    closure is genuinely leaf-pure at runtime, not just statically.
+    """
+    script = textwrap.dedent(
+        """
+        import importlib.util
+        import sys
+        import types
+        from pathlib import Path
+
+        import khora  # locate the source tree only
+
+        src_root = Path(khora.__file__).resolve().parent  # .../src/khora
+
+        heavy = ["khora.engines", "khora.filter", "sqlalchemy", "neo4j", "lancedb", "surrealdb"]
+
+        # Drop every khora.* + heavy module so package state rebuilds cleanly.
+        heavy_roots = {"sqlalchemy", "neo4j", "lancedb", "surrealdb"}
+        for name in list(sys.modules):
+            if name == "khora" or name.startswith("khora.") or name.split(".")[0] in heavy_roots:
+                del sys.modules[name]
+
+        # Poison: importing any heavy module now raises ImportError.
+        for h in heavy:
+            sys.modules[h] = None
+
+        # Seed bare package stubs so importing a submodule does NOT run the
+        # eager khora/__init__.py.
+        def _seed_pkg(dotted, path):
+            mod = types.ModuleType(dotted)
+            mod.__path__ = [str(path)]
+            mod.__package__ = dotted
+            sys.modules[dotted] = mod
+
+        _seed_pkg("khora", src_root)
+        _seed_pkg("khora.core", src_root / "core")
+        _seed_pkg("khora.core.models", src_root / "core" / "models")
+
+        def _load(dotted, file):
+            spec = importlib.util.spec_from_file_location(dotted, file)
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[dotted] = mod
+            spec.loader.exec_module(mod)
+            return mod
+
+        _load("khora.core.models.document", src_root / "core" / "models" / "document.py")
+        temporal = _load("khora.core.temporal", src_root / "core" / "temporal.py")
+
+        assert hasattr(temporal, "TemporalChunk")
+        assert hasattr(temporal, "ChunkTemporalFilter")
+        leaked = [h for h in heavy if isinstance(sys.modules.get(h), types.ModuleType)]
+        assert not leaked, f"heavy modules imported: {leaked}"
+        """
+    )
+    result = subprocess.run(  # noqa: S603 — test harness, sys.executable is trusted
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, (
+        f"isolated leaf import failed:\nstdout: {result.stdout.strip()}\nstderr: {result.stderr.strip()}"
+    )
+
+
+def test_deprecated_re_exports_all_five_names_resolve() -> None:
+    """All five relocated names resolve from the deprecated shim path.
+
+    Complements :func:`test_legacy_alias_preserves_identity` (which only
+    checks ``TemporalFilter``) and :func:`test_deprecated_import_emits_warning`
+    (which owns the warning guarantee via a fresh subprocess — asserting it
+    again here would be flaky, since the shim is module-cached and only warns
+    on first import). Here we just assert every relocated name is reachable as
+    an attribute of the shim, and that ``TemporalFilter`` is the very
+    ``khora.core.temporal.ChunkTemporalFilter`` object.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        import khora.engines.skeleton.backends as shim
+
+    for name in (
+        "TemporalChunk",
+        "TemporalFilter",
+        "TemporalSearchResult",
+        "document_denorm_fields",
+        "temporal_chunk_to_chunk",
+    ):
+        assert hasattr(shim, name), f"{name} not re-exported from the deprecated shim"
+
+    assert shim.TemporalFilter is ChunkTemporalFilter
+
+
 def test_deprecated_import_emits_warning() -> None:
     """Importing the relocated names from the old path raises under -W error.
 

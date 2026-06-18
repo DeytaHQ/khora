@@ -108,6 +108,33 @@ def test_parity_default_ratio() -> None:
     assert util == legacy
 
 
+def test_parity_two_chunk_ids_and_scores() -> None:
+    """The n==2 small-doc case: util matches legacy on BOTH ids and scores.
+
+    The two-chunk path is the smallest case the engine's len<=2 fast path
+    guards; this pins core-id ordering AND the per-chunk PageRank score map
+    against the legacy ``SkeletonIndexer`` (real ``khora._accel``, not mocked).
+    """
+    chunks = [
+        _chunk("Machine learning models require large datasets for training."),
+        _chunk("PostgreSQL provides transactional guarantees and rich indexing."),
+    ]
+    ratio = 0.5
+
+    indexer = SkeletonIndexer(core_ratio=ratio)
+    indexer.add_chunks_batch(chunks)
+    legacy_ids = indexer.build_skeleton()
+
+    result = select_core_chunks(chunks, ratio)
+
+    # Core-id ordering parity.
+    assert result.core_ids == legacy_ids
+
+    # Per-chunk score parity against the legacy indexer's node state.
+    for c in chunks:
+        assert result.scores[c.id] == indexer.get_pagerank_score(c.id)
+
+
 # ---------------------------------------------------------------------------
 # CoreSelection shape
 # ---------------------------------------------------------------------------
