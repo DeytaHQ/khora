@@ -30,12 +30,12 @@ from uuid import uuid4
 import pytest
 
 from khora.core.models import Chunk, Entity
-from khora.engines.skeleton.backends import TemporalChunk, TemporalSearchResult
 from khora.engines.vectorcypher.retriever import (
     RetrieverConfig,
     VectorCypherRetriever,
     _coerce_occurred_at,
 )
+from khora.storage.temporal import TemporalChunk, TemporalSearchResult
 
 T_SOURCE = datetime(2024, 6, 15, 12, 30, 0, tzinfo=UTC)
 

@@ -27,10 +27,10 @@ import pytest
 # Importing these modules fires their module-level ``CompilerRegistry.register``
 # calls (the registry is empty until an engine/backend module imports).
 import khora.engines.chronicle.engine  # noqa: F401
-import khora.engines.skeleton.backends.pgvector  # noqa: F401
-import khora.engines.skeleton.backends.sqlite_lance  # noqa: F401
-import khora.engines.skeleton.backends.surrealdb  # noqa: F401
-import khora.engines.skeleton.backends.weaviate  # noqa: F401
+import khora.storage.temporal.pgvector  # noqa: F401
+import khora.storage.temporal.sqlite_lance  # noqa: F401
+import khora.storage.temporal.surrealdb  # noqa: F401
+import khora.storage.temporal.weaviate  # noqa: F401
 from khora.filter.registry import CompilerRegistry
 
 pytestmark = [pytest.mark.filter_conformance]

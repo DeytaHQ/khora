@@ -1147,7 +1147,7 @@ class TestRetrieveBackendGate:
                 metadata={},
             )
         )
-        from khora.engines.skeleton.backends import TemporalFilter
+        from khora.storage.temporal import TemporalFilter
 
         tf = TemporalFilter(occurred_after=datetime(2025, 6, 1, tzinfo=UTC))
         result = await retriever.retrieve("any", uuid4(), temporal_filter=tf)

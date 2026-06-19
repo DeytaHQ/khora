@@ -1,4 +1,4 @@
-"""Coverage: ``khora.engines.skeleton.backends.create_temporal_store``.
+"""Coverage: ``khora.storage.temporal.create_temporal_store``.
 
 Pins the dispatch table for the four supported backends (pgvector, weaviate,
 surrealdb, sqlite_lance) plus the validation errors. Each branch is covered
@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from khora.engines.skeleton.backends import (
+from khora.storage.temporal import (
     TemporalChunk,
     TemporalFilter,
     TemporalSearchResult,

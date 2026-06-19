@@ -262,7 +262,7 @@ class TestDualNodeManagerCreateChunkNode:
     @pytest.mark.asyncio
     async def test_create_chunk_node(self, manager: DualNodeManager) -> None:
         """Test creating a single chunk node."""
-        from khora.engines.skeleton.backends import TemporalChunk
+        from khora.storage.temporal import TemporalChunk
 
         chunk = TemporalChunk(
             id=uuid4(),
@@ -278,7 +278,7 @@ class TestDualNodeManagerCreateChunkNode:
     @pytest.mark.asyncio
     async def test_create_chunk_node_generates_id(self, manager: DualNodeManager) -> None:
         """Test that a UUID is generated if chunk has no ID."""
-        from khora.engines.skeleton.backends import TemporalChunk
+        from khora.storage.temporal import TemporalChunk
 
         chunk = TemporalChunk(
             id=None,
@@ -305,7 +305,7 @@ class TestDualNodeManagerBatchOperations:
     @pytest.mark.asyncio
     async def test_create_chunk_nodes_batch(self, manager: DualNodeManager) -> None:
         """Test creating chunk nodes in batch."""
-        from khora.engines.skeleton.backends import TemporalChunk
+        from khora.storage.temporal import TemporalChunk
 
         namespace_id = uuid4()
         chunks = [
@@ -344,7 +344,7 @@ class TestDualNodeManagerDenormProjection:
 
     @staticmethod
     def _chunk(**overrides):
-        from khora.engines.skeleton.backends import TemporalChunk
+        from khora.storage.temporal import TemporalChunk
 
         base = dict(
             id=uuid4(),

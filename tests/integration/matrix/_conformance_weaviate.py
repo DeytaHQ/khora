@@ -48,15 +48,15 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from khora.config import KhoraConfig
-from khora.engines.skeleton.backends import TemporalChunk
-from khora.engines.skeleton.backends.weaviate import (
+from khora.filter import CompiledFilter
+from khora.filter.ast import FilterNode
+from khora.filter.conformance import _DOC_STRING_KEYS, ConformanceCase, SeedRecord, WeaviateExecutor
+from khora.storage.temporal import TemporalChunk
+from khora.storage.temporal.weaviate import (
     WeaviateBackendConfig,
     WeaviateTemporalStore,
     _coerce_datetime,
 )
-from khora.filter import CompiledFilter
-from khora.filter.ast import FilterNode
-from khora.filter.conformance import _DOC_STRING_KEYS, ConformanceCase, SeedRecord, WeaviateExecutor
 
 # One fixed tenant for the whole conformance corpus. Chunk ids are globally unique
 # (a fresh ``uuid4`` per seed record), so scoping a read by chunk id inside this one

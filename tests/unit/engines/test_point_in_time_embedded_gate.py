@@ -20,10 +20,10 @@ from uuid import uuid4
 
 import pytest
 
-from khora.engines.skeleton.backends import TemporalFilter as SkeletonTemporalFilter
 from khora.engines.vectorcypher.retriever import VectorCypherRetriever
 from khora.engines.vectorcypher.router import QueryComplexity, RoutingDecision
 from khora.engines.vectorcypher.temporal_detection import TemporalCategory, TemporalSignal
+from khora.storage.temporal import TemporalFilter as SkeletonTemporalFilter
 
 
 def _make_retriever(backend: str) -> VectorCypherRetriever:

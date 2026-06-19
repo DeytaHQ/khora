@@ -49,11 +49,11 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from khora.core.models import Chunk, Document, Entity, Relationship
-    from khora.engines.skeleton.backends import TemporalVectorStore
     from khora.extraction.embedders import Embedder
     from khora.extraction.expansion.entity_index import EntityIndex
     from khora.extraction.skills import ExpertiseConfig
     from khora.storage import StorageCoordinator
+    from khora.storage.temporal import TemporalVectorStore
 
 
 def _should_skip_entity_embedding(

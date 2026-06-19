@@ -55,8 +55,6 @@ from uuid import UUID
 
 from khora.core.models import Chunk
 from khora.db.session import run_migrations
-from khora.engines.skeleton.backends import TemporalChunk
-from khora.engines.skeleton.backends.sqlite_lance import SQLiteLanceTemporalStore
 from khora.filter import CompiledFilter
 from khora.filter.ast import FilterNode
 from khora.filter.conformance import _DOC_STRING_KEYS, ConformanceCase, LanceExecutor, seed_case
@@ -67,6 +65,8 @@ from khora.storage.backends.sqlite_lance.connection import (
     EmbeddedStorageHandleConfig,
 )
 from khora.storage.coordinator import StorageCoordinator
+from khora.storage.temporal import TemporalChunk
+from khora.storage.temporal.sqlite_lance import SQLiteLanceTemporalStore
 from tests.integration._sqlite_lance_fixtures import EMBED_DIM
 
 # The 14 corpus family generators, by name (resolved off ``khora.filter.conformance``

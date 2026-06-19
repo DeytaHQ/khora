@@ -869,7 +869,7 @@ class TestGracefulDegradation:
         # Build temporal signal for EXPLICIT path (triggers _version_filter_entities)
         from datetime import datetime
 
-        from khora.engines.skeleton.backends import TemporalFilter
+        from khora.storage.temporal import TemporalFilter
 
         tf = TemporalFilter(occurred_before=datetime(2025, 1, 1, tzinfo=UTC))
         temporal_signal = TemporalSignal(
@@ -989,11 +989,11 @@ class TestGracefulDegradation:
 
         from neo4j.exceptions import ServiceUnavailable
 
-        from khora.engines.skeleton.backends import TemporalFilter
         from khora.engines.vectorcypher.temporal_detection import (
             TemporalCategory,
             TemporalSignal,
         )
+        from khora.storage.temporal import TemporalFilter
 
         expanded_id = uuid4()
         retriever._cypher_expand = AsyncMock(
@@ -1143,11 +1143,11 @@ class TestExplicitTemporalSignalSkipsFallback:
         from datetime import datetime
         from unittest.mock import patch
 
-        from khora.engines.skeleton.backends import TemporalFilter
         from khora.engines.vectorcypher.temporal_detection import (
             TemporalCategory,
             TemporalSignal,
         )
+        from khora.storage.temporal import TemporalFilter
 
         ns_id = uuid4()
 

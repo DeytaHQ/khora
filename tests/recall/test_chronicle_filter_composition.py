@@ -403,7 +403,7 @@ async def test_unanchored_chunk_survives_recency_window_with_no_filter_ast() -> 
     # this chunk (the shape a plain remember() with no timestamp produces). The
     # window narrows on COALESCE(source_timestamp, created_at), so a chunk recent by
     # ingest time belongs in it even with no event-time anchor.
-    from khora.engines.skeleton.backends import TemporalFilter as SkeletonTemporalFilter
+    from khora.storage.temporal import TemporalFilter as SkeletonTemporalFilter
 
     unanchored = _chunk(
         "alpha unanchored",

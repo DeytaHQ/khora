@@ -53,9 +53,6 @@ from khora.core.temporal import (
 from khora.engines._forget_cascade import cascade_forget_extraction
 from khora.engines._stats import gather_counts
 from khora.engines._storage_config import build_storage_config
-from khora.engines.skeleton.backends import (
-    create_temporal_store,
-)
 from khora.exceptions import EngineCapabilityError
 from khora.extraction.embedders import LiteLLMEmbedder
 from khora.khora import BatchResult, RecallResult, RememberResult, Stats
@@ -670,42 +667,11 @@ class VectorCypherEngine:
 
         await self._storage.connect()
 
-        # Create and connect temporal vector store
-        if is_surrealdb:
-            # Share the coordinator's SurrealDB connection to avoid isolated
-            # embedded views (each embedded connection has its own write buffer)
-            shared_conn = getattr(self._storage._relational, "_conn", None)
-            from khora.engines.skeleton.backends.surrealdb import SurrealDBTemporalStore
-
-            self._temporal_store = SurrealDBTemporalStore(
-                self._config,
-                connection=shared_conn,
-            )
-        elif is_sqlite_lance:
-            # Reuse the coordinator's shared EmbeddedStorageHandle (single
-            # aiosqlite + LanceDB pair across all adapters). The vector
-            # adapter holds the canonical reference. Mirrors the Skeleton
-            # engine wiring landed in #481.
-            if self._storage._vector is None:
-                raise RuntimeError("sqlite_lance coordinator did not provide a vector backend")
-            sqlite_lance_handle = getattr(self._storage._vector, "_handle", None)
-            if sqlite_lance_handle is None:
-                raise RuntimeError("sqlite_lance vector adapter is missing its EmbeddedStorageHandle")
-            self._temporal_store = create_temporal_store(
-                "sqlite_lance",
-                self._config,
-                sqlite_lance_handle=sqlite_lance_handle,
-            )
-        else:
-            # Share the coordinator's SQLAlchemy engine so the temporal store
-            # does not create a second connection pool against the same PG.
-            shared_pg_engine = None
-            if self._storage._vector is not None:
-                shared_pg_engine = getattr(self._storage._vector, "_engine", None)
-            if shared_pg_engine is None and self._storage._relational is not None:
-                shared_pg_engine = getattr(self._storage._relational, "_engine", None)
-            self._temporal_store = create_temporal_store("pgvector", self._config, engine=shared_pg_engine)
-        await self._temporal_store.connect()
+        # Create and connect temporal vector store. The coordinator gathers the
+        # per-backend shared resource (SurrealDB connection / EmbeddedStorageHandle
+        # / SQLAlchemy engine) and returns an already-connected store.
+        temporal_backend = backend if is_surrealdb or is_sqlite_lance else "pgvector"
+        self._temporal_store = await self._storage.temporal_store(temporal_backend, self._config)
 
         # Create embedder
         # Connector fields are forwarded so YAML-configured values reach the

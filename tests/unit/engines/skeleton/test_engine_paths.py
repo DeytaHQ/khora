@@ -21,9 +21,9 @@ from uuid import uuid4
 
 import pytest
 
-from khora.engines.skeleton.backends import TemporalChunk, TemporalFilter, TemporalSearchResult
 from khora.engines.skeleton.engine import SkeletonConstructionEngine
 from khora.query import SearchMode
+from khora.storage.temporal import TemporalChunk, TemporalFilter, TemporalSearchResult
 
 
 def _mock_config(*, backend: str = "pgvector") -> MagicMock:

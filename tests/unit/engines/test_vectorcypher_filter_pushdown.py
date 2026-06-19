@@ -1211,7 +1211,7 @@ class TestRestrictiveFallbackSkippedUnderFilter:
 
         retriever._vector_search_chunks = _spy  # type: ignore[method-assign]
 
-        from khora.engines.skeleton.backends import TemporalFilter
+        from khora.storage.temporal import TemporalFilter
 
         await retriever.retrieve(
             "what happened recently",
@@ -1245,7 +1245,7 @@ class TestRestrictiveFallbackSkippedUnderFilter:
 
         retriever._vector_search_chunks = _spy  # type: ignore[method-assign]
 
-        from khora.engines.skeleton.backends import TemporalFilter
+        from khora.storage.temporal import TemporalFilter
 
         await retriever.retrieve(
             "what happened recently",

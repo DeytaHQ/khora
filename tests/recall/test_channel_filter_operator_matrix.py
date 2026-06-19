@@ -885,7 +885,7 @@ def _install_recency_spy(monkeypatch: pytest.MonkeyPatch, kb: Khora, seeded: dic
     ``assert_fired`` sees the returned chunks AND the seeded violating doc id without
     a closure. Returns the live record list.
     """
-    from khora.engines.skeleton.backends.pgvector import PgVectorTemporalStore
+    from khora.storage.temporal.pgvector import PgVectorTemporalStore
 
     real = PgVectorTemporalStore.search_recent_chunks
     violating_doc_id = seeded[_VIOLATING_EXTERNAL_ID]

@@ -297,7 +297,7 @@ backend accepts a `WeaviateBackendConfig` in place of the URL string
 for cloud, authenticated, or custom-port deployments:
 
 ```python
-from khora.engines.skeleton.backends.weaviate import WeaviateBackendConfig
+from khora.storage.temporal.weaviate import WeaviateBackendConfig
 
 # Weaviate Cloud
 cloud_config = WeaviateBackendConfig(
@@ -345,7 +345,7 @@ Pitched at scale tiers above what pgvector / self-hosted Weaviate
 make economical (2.5T vectors in production at Cursor, Notion):
 
 ```python
-from khora.engines.skeleton.backends.turbopuffer import TurbopufferBackendConfig
+from khora.storage.temporal.turbopuffer import TurbopufferBackendConfig
 
 cfg = TurbopufferBackendConfig(
     api_key="tpuf_...",            # str or SecretStr

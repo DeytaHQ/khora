@@ -36,8 +36,8 @@ from uuid import uuid4
 
 import pytest
 
-from khora.engines.skeleton.backends import TemporalFilter
-from khora.engines.skeleton.backends.surrealdb import SurrealDBTemporalStore
+from khora.storage.temporal import TemporalFilter
+from khora.storage.temporal.surrealdb import SurrealDBTemporalStore
 
 # Hard import (NOT importorskip): ``_build_filter_clauses`` is a pure static
 # string-builder — it imports the recall-filter compiler (pure Python, no SDK)

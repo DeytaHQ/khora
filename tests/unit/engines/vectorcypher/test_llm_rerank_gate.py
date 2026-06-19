@@ -134,7 +134,7 @@ def _make_temporal_search_result(
     version: int | None = None,
 ):
     """Build a TemporalSearchResult mirroring the production shape."""
-    from khora.engines.skeleton.backends import TemporalChunk, TemporalSearchResult
+    from khora.storage.temporal import TemporalChunk, TemporalSearchResult
 
     metadata: dict[str, Any] = {}
     if version is not None:

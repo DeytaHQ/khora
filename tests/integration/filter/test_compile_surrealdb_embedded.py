@@ -28,8 +28,6 @@ import pytest
 
 pytest.importorskip("surrealdb")
 
-from khora.engines.skeleton.backends import TemporalFilter  # noqa: E402
-from khora.engines.skeleton.backends.surrealdb import SurrealDBTemporalStore  # noqa: E402
 from khora.filter import RecallFilter  # noqa: E402
 from khora.filter.ast import parse_to_ast  # noqa: E402
 from khora.filter.compilers.python import compile_python  # noqa: E402
@@ -37,6 +35,8 @@ from khora.filter.compilers.surrealdb import compile_surrealdb  # noqa: E402
 from khora.filter.context import CompileContext, RecallFilterUnsupportedError  # noqa: E402
 from khora.storage.backends.surrealdb._helpers import _rid  # noqa: E402
 from khora.storage.backends.surrealdb.connection import SurrealDBConnection  # noqa: E402
+from khora.storage.temporal import TemporalFilter  # noqa: E402
+from khora.storage.temporal.surrealdb import SurrealDBTemporalStore  # noqa: E402
 
 pytestmark = pytest.mark.integration
 

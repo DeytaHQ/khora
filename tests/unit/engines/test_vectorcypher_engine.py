@@ -620,8 +620,8 @@ class TestVectorCypherEngineRemember:
         (via DualNodeManager) directly, so the replace path must mirror that or
         retrieval returns stale content after a replace.
         """
-        from khora.engines.skeleton.backends import TemporalChunk
         from khora.storage.coordinator import ReplaceResult
+        from khora.storage.temporal import TemporalChunk
 
         namespace_id = uuid4()
         old_doc_id = uuid4()
@@ -2623,8 +2623,8 @@ class TestVectorCypherEngineApiTemporalFilter:
         confidence=1.0, and forward it (along with the original filter) to the
         retriever — bypassing the dictionary/semantic temporal detector entirely.
         """
-        from khora.engines.skeleton.backends import TemporalFilter
         from khora.engines.vectorcypher.temporal_detection import TemporalCategory
+        from khora.storage.temporal import TemporalFilter
 
         # occurred_before is exclusive in pgvector; using two distinct dates.
         tf = TemporalFilter(

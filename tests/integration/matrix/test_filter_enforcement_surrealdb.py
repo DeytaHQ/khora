@@ -43,10 +43,10 @@ pytest.importorskip("surrealdb")
 
 from khora.config import KhoraConfig  # noqa: E402
 from khora.config.schema import SurrealDBConfig  # noqa: E402
-from khora.engines.skeleton.backends.surrealdb import SurrealDBTemporalStore  # noqa: E402
 from khora.extraction.skills import ExpertiseConfig  # noqa: E402
 from khora.filter import RecallFilter, parse_to_ast  # noqa: E402
 from khora.khora import Khora  # noqa: E402
+from khora.storage.temporal.surrealdb import SurrealDBTemporalStore  # noqa: E402
 from tests.test_helpers.filter_spy import EMBED_DIM, seed_corpus, stub_llm  # noqa: E402
 
 pytestmark = [

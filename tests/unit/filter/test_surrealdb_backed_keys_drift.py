@@ -2,7 +2,7 @@
 
 The SurrealDB recall path can only push a predicate over a system key the
 ``temporal_chunk`` table actually backs with a real column. The store declares that
-queryable set as :data:`~khora.engines.skeleton.backends.surrealdb._BACKED_SYSTEM_KEYS`
+queryable set as :data:`~khora.storage.temporal.surrealdb._BACKED_SYSTEM_KEYS`
 (``{"occurred_at", "created_at"}``) and the compiler refuses (raising) any predicate
 over a system key outside it.
 
@@ -26,8 +26,8 @@ import re
 
 import pytest
 
-from khora.engines.skeleton.backends.surrealdb import _BACKED_SYSTEM_KEYS, _TEMPORAL_CHUNK_SCHEMA
 from khora.filter.model import SYSTEM_KEYS
+from khora.storage.temporal.surrealdb import _BACKED_SYSTEM_KEYS, _TEMPORAL_CHUNK_SCHEMA
 
 pytestmark = pytest.mark.unit
 

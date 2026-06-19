@@ -16,7 +16,7 @@ string directly and check ``params`` for the bound values.
 
 **Backed vs unbacked system keys.** Only two of the ten :data:`SYSTEM_KEYS`
 (``occurred_at`` / ``created_at`` — the store's
-:data:`~khora.engines.skeleton.backends.surrealdb._BACKED_SYSTEM_KEYS`) are real
+:data:`~khora.storage.temporal.surrealdb._BACKED_SYSTEM_KEYS`) are real
 columns on the SCHEMAFULL ``temporal_chunk`` table; the other eight denormalized
 document keys are not. The live recall context only maps the backed keys (plus the
 ``metadata`` root), so the compiler FAILS LOUD (``RecallFilterUnsupportedError`` in
@@ -58,12 +58,12 @@ from datetime import UTC, datetime
 
 import pytest
 
-from khora.engines.skeleton.backends.surrealdb import _BACKED_SYSTEM_KEYS
 from khora.filter import RecallFilter
 from khora.filter.ast import FilterClause, FilterNode, canonical_hash, parse_to_ast
 from khora.filter.compilers.surrealdb import compile_surrealdb
 from khora.filter.context import CompileContext, RecallFilterUnsupportedError
 from khora.filter.model import SYSTEM_KEYS, Op
+from khora.storage.temporal.surrealdb import _BACKED_SYSTEM_KEYS
 
 # Hard import (NOT importorskip): the compiler is pure-Python string emission with
 # no SurrealDB SDK dependency, so an import failure here must be a LOUD test error,

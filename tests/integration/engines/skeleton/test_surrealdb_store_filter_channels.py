@@ -4,7 +4,7 @@ The compiler-level tests (``tests/unit/filter/test_compile_surrealdb.py``) and t
 predicate row-set tests (``tests/integration/filter/test_compile_surrealdb_embedded.py``)
 prove the SurrealDB compiler raises on an unbacked system key and pushes a backed
 one. This module proves the SAME contract holds at the STORE seam — through
-:class:`~khora.engines.skeleton.backends.surrealdb.SurrealDBTemporalStore`'s two
+:class:`~khora.storage.temporal.surrealdb.SurrealDBTemporalStore`'s two
 public read channels:
 
 * the **vector** channel — ``store.search(..., hybrid_alpha=1.0, filter_ast=…)``
@@ -35,13 +35,13 @@ import pytest
 pytest.importorskip("surrealdb")
 
 from khora.config import KhoraConfig  # noqa: E402
-from khora.engines.skeleton.backends import TemporalChunk  # noqa: E402
-from khora.engines.skeleton.backends.surrealdb import _BACKED_SYSTEM_KEYS, SurrealDBTemporalStore  # noqa: E402
 from khora.filter import RecallFilter  # noqa: E402
 from khora.filter.ast import FilterNode, parse_to_ast  # noqa: E402
 from khora.filter.context import RecallFilterUnsupportedError  # noqa: E402
 from khora.filter.model import SYSTEM_KEYS  # noqa: E402
 from khora.storage.backends.surrealdb.connection import SurrealDBConnection  # noqa: E402
+from khora.storage.temporal import TemporalChunk  # noqa: E402
+from khora.storage.temporal.surrealdb import _BACKED_SYSTEM_KEYS, SurrealDBTemporalStore  # noqa: E402
 
 pytestmark = pytest.mark.integration
 

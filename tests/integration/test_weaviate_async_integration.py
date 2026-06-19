@@ -24,8 +24,8 @@ import pytest
 from pydantic_settings import BaseSettings
 
 from khora.config import KhoraConfig
-from khora.engines.skeleton.backends import TemporalChunk
-from khora.engines.skeleton.backends.weaviate import (
+from khora.storage.temporal import TemporalChunk
+from khora.storage.temporal.weaviate import (
     WeaviateBackendConfig,
     WeaviateTemporalStore,
 )

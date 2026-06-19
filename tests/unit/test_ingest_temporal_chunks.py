@@ -14,7 +14,7 @@ from uuid import uuid4
 
 import pytest
 
-from khora.engines.skeleton.backends import TemporalChunk
+from khora.storage.temporal import TemporalChunk
 
 
 def _make_storage_mock() -> MagicMock:

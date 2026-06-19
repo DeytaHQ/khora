@@ -4,8 +4,8 @@ from uuid import uuid4
 
 import pytest
 
-from khora.engines.skeleton.backends import TemporalChunk
 from khora.engines.skeleton.skeleton import ChunkNode, KeywordNode, SkeletonIndexer
+from khora.storage.temporal import TemporalChunk
 
 
 class TestChunkNode:

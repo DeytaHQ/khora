@@ -18,8 +18,8 @@ from uuid import uuid4
 
 import pytest
 
-from khora.engines.skeleton.backends import TemporalChunk
 from khora.engines.vectorcypher.dual_nodes import DualNodeManager
+from khora.storage.temporal import TemporalChunk
 
 # ---------------------------------------------------------------------------
 # Bug #1: pipeline vs pipelines attribute mismatch

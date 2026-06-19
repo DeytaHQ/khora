@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pytest
 
-from khora.engines.skeleton.backends import TemporalChunk, TemporalFilter, TemporalSearchResult
+from khora.storage.temporal import TemporalChunk, TemporalFilter, TemporalSearchResult
 
 
 class TestTemporalFilter:
@@ -260,8 +260,8 @@ class TestCreateTemporalStore:
 
     def test_create_pgvector_store(self):
         """Test creating pgvector store."""
-        from khora.engines.skeleton.backends import create_temporal_store
-        from khora.engines.skeleton.backends.pgvector import PgVectorTemporalStore
+        from khora.storage.temporal import create_temporal_store
+        from khora.storage.temporal.pgvector import PgVectorTemporalStore
 
         config = MagicMock()
         config.get_postgresql_url.return_value = "postgresql://localhost/test"
@@ -272,8 +272,8 @@ class TestCreateTemporalStore:
 
     def test_create_weaviate_store(self):
         """Test creating weaviate store."""
-        from khora.engines.skeleton.backends import create_temporal_store
-        from khora.engines.skeleton.backends.weaviate import WeaviateTemporalStore
+        from khora.storage.temporal import create_temporal_store
+        from khora.storage.temporal.weaviate import WeaviateTemporalStore
 
         config = MagicMock()
         config.llm.embedding_dimension = 1536
@@ -283,7 +283,7 @@ class TestCreateTemporalStore:
 
     def test_create_weaviate_store_requires_url(self):
         """Test that weaviate store requires URL."""
-        from khora.engines.skeleton.backends import create_temporal_store
+        from khora.storage.temporal import create_temporal_store
 
         config = MagicMock()
 
@@ -292,7 +292,7 @@ class TestCreateTemporalStore:
 
     def test_create_unknown_backend_raises(self):
         """Test that unknown backend raises error."""
-        from khora.engines.skeleton.backends import create_temporal_store
+        from khora.storage.temporal import create_temporal_store
 
         config = MagicMock()
 

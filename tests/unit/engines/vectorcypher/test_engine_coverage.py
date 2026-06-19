@@ -962,7 +962,7 @@ class TestRecallContextFormatting:
     async def test_recall_explicit_temporal_filter_synthesizes_signal(self) -> None:
         """When the caller passes temporal_filter, the engine synthesizes an
         EXPLICIT TemporalSignal (source='api')."""
-        from khora.engines.skeleton.backends import TemporalFilter
+        from khora.storage.temporal import TemporalFilter
 
         engine = self._make_recall_engine()
         tf = TemporalFilter(occurred_after=datetime(2024, 1, 1, tzinfo=UTC))
@@ -1117,7 +1117,7 @@ class TestRunSkeletonExtractionDeferred:
     @pytest.mark.asyncio
     async def test_all_chunks_below_token_threshold_skipped(self) -> None:
         """If every chunk has ≤ min_extraction_tokens tokens, extraction is skipped."""
-        from khora.engines.skeleton.backends import TemporalChunk
+        from khora.storage.temporal import TemporalChunk
 
         engine = _make_connected_engine()
         # Use a tiny token budget so the short chunks below trip the threshold
@@ -1139,7 +1139,7 @@ class TestRunSkeletonExtractionDeferred:
     @pytest.mark.asyncio
     async def test_returns_entities_with_embeddings_and_links(self, monkeypatch) -> None:
         """When extraction yields entities, they get embeddings + chunk links."""
-        from khora.engines.skeleton.backends import TemporalChunk
+        from khora.storage.temporal import TemporalChunk
 
         engine = _make_connected_engine()
         engine._vc_config.min_extraction_tokens = 0  # Don't skip on token count
@@ -1181,7 +1181,7 @@ class TestRunSkeletonExtractionDeferred:
 
     @pytest.mark.asyncio
     async def test_no_entities_extracted_returns_empty_triple(self, monkeypatch) -> None:
-        from khora.engines.skeleton.backends import TemporalChunk
+        from khora.storage.temporal import TemporalChunk
 
         engine = _make_connected_engine()
         engine._vc_config.min_extraction_tokens = 0
@@ -1222,7 +1222,7 @@ class TestRunSkeletonExtraction:
     @pytest.mark.asyncio
     async def test_few_chunks_skip_skeleton(self, monkeypatch) -> None:
         """≤2 chunks bypass the skeleton indexer (all chunks are core)."""
-        from khora.engines.skeleton.backends import TemporalChunk
+        from khora.storage.temporal import TemporalChunk
 
         engine = _make_connected_engine()
         ns_id = uuid4()
@@ -1252,7 +1252,7 @@ class TestRunSkeletonExtraction:
 
     @pytest.mark.asyncio
     async def test_entities_extracted_writes_to_storage(self, monkeypatch) -> None:
-        from khora.engines.skeleton.backends import TemporalChunk
+        from khora.storage.temporal import TemporalChunk
 
         engine = _make_connected_engine()
         ns_id = uuid4()

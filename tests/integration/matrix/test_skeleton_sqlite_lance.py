@@ -39,9 +39,9 @@ except ImportError:
 
 from khora.config import KhoraConfig
 from khora.config.schema import SQLiteLanceConfig
-from khora.engines.skeleton.backends import TemporalFilter
 from khora.khora import Khora
 from khora.query import SearchMode
+from khora.storage.temporal import TemporalFilter
 
 EMBED_DIM = 32  # small dim keeps LanceDB index build cheap in tmp_path
 

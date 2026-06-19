@@ -21,7 +21,6 @@ from uuid import uuid4
 import pytest
 
 from khora.core.models import Chunk
-from khora.engines.skeleton.backends import TemporalFilter
 from khora.engines.vectorcypher.fusion import FusedResult
 from khora.engines.vectorcypher.retriever import (
     RetrieverConfig,
@@ -29,6 +28,7 @@ from khora.engines.vectorcypher.retriever import (
 )
 from khora.engines.vectorcypher.router import QueryComplexity, RoutingDecision
 from khora.query.temporal_detection import TemporalCategory, TemporalSignal
+from khora.storage.temporal import TemporalFilter
 
 
 def _chunk(occurred_at: datetime | None, *, source_system: str | None = None) -> Chunk:
