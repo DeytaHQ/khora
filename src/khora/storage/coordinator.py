@@ -36,7 +36,9 @@ from khora.storage.backends.base import PaginatedResult
 from khora.telemetry import get_collector, metric_counter, trace_span
 
 if TYPE_CHECKING:
+    from khora.config.schema import KhoraConfig
     from khora.filter.ast import FilterNode
+    from khora.storage.temporal import TemporalVectorStore
 
     from .backends.base import (
         EventStoreProtocol,
@@ -381,6 +383,74 @@ class StorageCoordinator:
             raise
         finally:
             await session.close()
+
+    async def temporal_store(
+        self,
+        backend: str,
+        config: KhoraConfig,
+        *,
+        weaviate_url: str | Any | None = None,
+        turbopuffer_config: str | Any | None = None,
+    ) -> TemporalVectorStore:
+        """Build a connected ``TemporalVectorStore`` for ``backend``.
+
+        Factory method (not an accessor): every call returns a fresh,
+        already-``connect()``-ed store. The instance is intentionally NOT
+        cached on the coordinator — callers own its lifecycle and must
+        disconnect it.
+
+        Backend selection is delegated to
+        :func:`khora.storage.temporal.create_temporal_store` (imported
+        lazily so optional backend dependencies stay lazy). The coordinator
+        only gathers the per-backend shared resource so the store reuses the
+        coordinator's existing connections instead of opening its own:
+
+        - ``pgvector``: shares the coordinator's SQLAlchemy engine (vector
+          adapter's, falling back to the relational adapter's) so the
+          connection pool is not doubled.
+        - ``surrealdb``: shares the coordinator's ``SurrealDBConnection``.
+          Embedded ``surrealkv://`` allows only one open handle per
+          directory, so a second connection would fail on first write.
+        - ``sqlite_lance``: shares the vector adapter's
+          ``EmbeddedStorageHandle`` (single aiosqlite + LanceDB pair).
+        - ``weaviate`` / ``turbopuffer``: pass through the caller-supplied
+          connection config. ``weaviate``/``turbopuffer`` require their
+          respective config kwarg; the factory raises ``ValueError`` if it
+          is missing.
+        """
+        from khora.storage.temporal import create_temporal_store
+
+        shared_pg_engine = None
+        surrealdb_connection = None
+        sqlite_lance_handle = None
+
+        if backend == "pgvector":
+            if self._vector is not None:
+                shared_pg_engine = getattr(self._vector, "_engine", None)
+            if shared_pg_engine is None and self._relational is not None:
+                shared_pg_engine = getattr(self._relational, "_engine", None)
+        elif backend == "surrealdb":
+            if self._relational is not None:
+                surrealdb_connection = getattr(self._relational, "_conn", None)
+        elif backend == "sqlite_lance":
+            if self._vector is None:
+                raise RuntimeError("sqlite_lance backend requires a vector adapter on the coordinator")
+            sqlite_lance_handle = getattr(self._vector, "_handle", None)
+            if sqlite_lance_handle is None:
+                raise RuntimeError("sqlite_lance vector adapter is missing its EmbeddedStorageHandle")
+
+        store = create_temporal_store(
+            backend,
+            config,
+            weaviate_url=weaviate_url,
+            turbopuffer_config=turbopuffer_config,
+            surrealdb_config=config.storage.surrealdb if backend == "surrealdb" else None,
+            surrealdb_connection=surrealdb_connection,
+            engine=shared_pg_engine,
+            sqlite_lance_handle=sqlite_lance_handle,
+        )
+        await store.connect()
+        return store
 
     # =========================================================================
     # Tenancy operations (delegated to relational)
