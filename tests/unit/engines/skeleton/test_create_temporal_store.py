@@ -43,7 +43,7 @@ def stub_pgvector_store(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     cls = MagicMock(return_value=instance)
     _install_module(
         monkeypatch,
-        "khora.engines.skeleton.backends.pgvector",
+        "khora.storage.temporal.pgvector",
         {"PgVectorTemporalStore": cls},
     )
     return cls
@@ -55,7 +55,7 @@ def stub_weaviate_store(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     cls = MagicMock(return_value=instance)
     _install_module(
         monkeypatch,
-        "khora.engines.skeleton.backends.weaviate",
+        "khora.storage.temporal.weaviate",
         {"WeaviateTemporalStore": cls},
     )
     return cls
@@ -67,7 +67,7 @@ def stub_turbopuffer_store(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     cls = MagicMock(return_value=instance)
     _install_module(
         monkeypatch,
-        "khora.engines.skeleton.backends.turbopuffer",
+        "khora.storage.temporal.turbopuffer",
         {"TurbopufferTemporalStore": cls},
     )
     return cls
@@ -79,7 +79,7 @@ def stub_surrealdb_store(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     cls = MagicMock(return_value=instance)
     _install_module(
         monkeypatch,
-        "khora.engines.skeleton.backends.surrealdb",
+        "khora.storage.temporal.surrealdb",
         {"SurrealDBTemporalStore": cls},
     )
     return cls
@@ -91,7 +91,7 @@ def stub_sqlite_lance_store(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     cls = MagicMock(return_value=instance)
     _install_module(
         monkeypatch,
-        "khora.engines.skeleton.backends.sqlite_lance",
+        "khora.storage.temporal.sqlite_lance",
         {"SQLiteLanceTemporalStore": cls},
     )
     return cls
