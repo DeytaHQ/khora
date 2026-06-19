@@ -123,6 +123,9 @@ class DreamResult:
     - ``"op_disabled_at_runtime"`` - planner ran but a runtime config
       flag (e.g. ``DreamConfig.community_summary_enabled``) gated the
       op out.
+    - ``"op_requires_expertise"`` - the op needs an ``ExpertiseConfig``
+      (e.g. ``schema_drift``) but the caller omitted one; pass
+      ``kb.dream(..., expertise=...)`` to run it (#1036).
     - ``"guardrail_tripped:<which>"`` - safety guardrail short-circuited
       the op (forbidden op kind, kill-switch, etc.).
     - ``"backend_unsupported"`` - the active storage backend cannot

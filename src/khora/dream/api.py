@@ -21,6 +21,7 @@ from khora.dream.result import DreamProgress, DreamResult, DreamRunInfo
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
+    from khora.extraction.skills.base import ExpertiseConfig
     from khora.khora import Khora
 
 
@@ -32,6 +33,7 @@ async def dream(
     scope: DreamScope | None = None,
     ops: Iterable[OpKind] | None = None,
     config: DreamConfig | None = None,
+    expertise: ExpertiseConfig | None = None,
     on_progress: Callable[[DreamProgress], None] | None = None,
     resume_from: UUID | None = None,
 ) -> DreamResult:
@@ -64,6 +66,7 @@ async def dream(
         mode=mode,
         scope=scope,
         ops=ops,
+        expertise=expertise,
         on_progress=on_progress,
         resume_from=resume_from,
     )
