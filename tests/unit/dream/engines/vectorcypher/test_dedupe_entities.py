@@ -119,14 +119,19 @@ async def test_emits_planned_op_for_high_similarity_pair() -> None:
     payload = op.inputs[0]
     assert payload["op_type"] == "entity_merge"
     assert payload["entity_type"] == "PERSON"
-    # Higher mention_count → keeper.
+    # Higher mention_count → canonical keeper.
     assert payload["keep_id"] == str(a.id)
     assert payload["drop_ids"] == (str(b.id),)
     assert payload["similarity_score"] >= 0.90
-    output = op.outputs[0]
+    # #1265: the apply contract lives in outputs[0]["merges"].
+    merges = op.outputs[0]["merges"]
+    assert len(merges) == 1
+    merge = merges[0]
+    assert merge["canonical_id"] == str(a.id)
+    assert merge["absorbed_id"] == str(b.id)
     # Merged provenance is the union of both entities' source ids.
-    assert len(output["merged_source_document_ids"]) == 2
-    assert len(output["merged_source_chunk_ids"]) == 3
+    assert len(merge["merged_source_document_ids"]) == 2
+    assert len(merge["merged_source_chunk_ids"]) == 3
     assert coord.mutations == []
 
 
@@ -284,8 +289,12 @@ async def test_op_payloads_are_json_round_trippable() -> None:
     assert restored_inputs[0]["op_type"] == "entity_merge"
     assert "keep_id" in restored_inputs[0]
     assert "drop_ids" in restored_inputs[0]
-    assert "merged_source_document_ids" in restored_outputs[0]
-    assert "merged_source_chunk_ids" in restored_outputs[0]
+    # #1265: the apply-readable merge payload survives JSON round-trip.
+    merge = restored_outputs[0]["merges"][0]
+    assert "canonical_id" in merge
+    assert "absorbed_id" in merge
+    assert "merged_source_document_ids" in merge
+    assert "merged_source_chunk_ids" in merge
 
 
 # ---------------------------------------------------------------------------

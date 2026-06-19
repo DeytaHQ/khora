@@ -31,13 +31,16 @@ from khora.dream.engines.chronicle import (
     plan_chronicle_tombstone_audit,
 )
 from khora.dream.engines.vectorcypher import (
+    plan_vectorcypher_centroid_recompute,
     plan_vectorcypher_community_summary,
     plan_vectorcypher_contradiction_detect,
+    plan_vectorcypher_dedupe_entities,
     plan_vectorcypher_normalize_schema,
     plan_vectorcypher_orphan_report,
     plan_vectorcypher_prune_edges,
     plan_vectorcypher_schema_drift,
     plan_vectorcypher_source_chunk_ids_audit,
+    plan_vectorcypher_source_chunk_ids_gc,
 )
 from khora.dream.exceptions import DreamForbiddenOpError
 from khora.dream.plan import Checkpoint, DreamOp, DreamPlan, DreamScope, OpKind
@@ -65,9 +68,13 @@ ApplyHandler = Callable[..., Awaitable["UndoRecord"]]
 def canonical_plan_payload(plan: DreamPlan) -> str:
     """Return a stable JSON serialization for hashing a :class:`DreamPlan`.
 
-    Only the ops' identity-bearing fields (``op_type``, ``inputs``,
-    ``decision``) feed the hash. ``op_id`` is excluded because it is
-    randomly generated per plan-build and would defeat the purpose of a
+    The ops' decision-bearing fields (``op_type``, ``inputs``,
+    ``outputs``, ``decision``) feed the hash. ``outputs`` is included
+    because for mutation ops (notably dedupe, #1266) the merge/retire set
+    lives in ``outputs[0]["merges"]`` — excluding it would make a
+    merge-set drift between the planned and resumed run invisible to the
+    checkpoint guard. ``op_id`` is excluded because it is randomly
+    generated per plan-build and would defeat the purpose of a
     drift-detection hash on resume.
     """
     payload = {
@@ -76,6 +83,7 @@ def canonical_plan_payload(plan: DreamPlan) -> str:
             {
                 "op_type": str(op.op_type),
                 "inputs": _jsonable(op.inputs),
+                "outputs": _jsonable(op.outputs),
                 "decision": op.decision,
             }
             for op in plan.ops
@@ -317,10 +325,13 @@ class _VectorCypherPlugin:
                 OpKind.VECTORCYPHER_SCHEMA_DRIFT_REPORT,
                 OpKind.VECTORCYPHER_ORPHAN_REPORT,
                 OpKind.VECTORCYPHER_SOURCE_CHUNK_IDS_AUDIT,
+                OpKind.VECTORCYPHER_SOURCE_CHUNK_IDS_GC,
                 OpKind.VECTORCYPHER_COMMUNITY_SUMMARY,
                 OpKind.VECTORCYPHER_PRUNE_EDGES,
                 OpKind.VECTORCYPHER_CONTRADICTION_DETECT,
                 OpKind.VECTORCYPHER_NORMALIZE_SCHEMA,
+                OpKind.VECTORCYPHER_DEDUPE_ENTITIES,
+                OpKind.VECTORCYPHER_CENTROID_RECOMPUTE,
             }
         )
 
@@ -403,6 +414,70 @@ class _VectorCypherPlugin:
             )
             ops.extend(normalize_ops)
 
+        # #1263 — make the three mutation ops reachable from plan_dream.
+        # Each is gated by a default-OFF master switch; when requested but
+        # disabled we record a structured skip_reason so the caller can
+        # tell "off" apart from "no work". The dedupe op feeds the
+        # centroid-recompute clusters so the two stay coherent in one plan.
+        dedupe_ops: list[DreamOp] = []
+        if OpKind.VECTORCYPHER_DEDUPE_ENTITIES in wanted:
+            if config.dedupe_entities_enabled:
+                degradations: list[dict[str, Any]] = []
+                dedupe_ops = await plan_vectorcypher_dedupe_entities(
+                    namespace_id,
+                    coordinator=coordinator,
+                    default_threshold=config.dedupe_entities_default_threshold,
+                    per_type_thresholds=config.dedupe_entities_per_type_thresholds,
+                    degradations=degradations,
+                )
+                ops.extend(dedupe_ops)
+                skip_reasons.extend(_degradations_as_skip_reasons(degradations))
+            else:
+                skip_reasons.append(
+                    _disabled_skip_reason(OpKind.VECTORCYPHER_DEDUPE_ENTITIES, "dedupe_entities_enabled")
+                )
+
+        if OpKind.VECTORCYPHER_SOURCE_CHUNK_IDS_GC in wanted:
+            if config.source_chunk_ids_gc_enabled:
+                gc_ops = await plan_vectorcypher_source_chunk_ids_gc(
+                    namespace_id,
+                    coordinator=coordinator,
+                    min_dead=config.source_chunk_ids_gc_min_dead,
+                )
+                ops.extend(gc_ops)
+            else:
+                skip_reasons.append(
+                    _disabled_skip_reason(OpKind.VECTORCYPHER_SOURCE_CHUNK_IDS_GC, "source_chunk_ids_gc_enabled")
+                )
+
+        if OpKind.VECTORCYPHER_CENTROID_RECOMPUTE in wanted:
+            if config.centroid_recompute_enabled:
+                clusters = _merge_clusters_from_dedupe(dedupe_ops)
+                if clusters:
+                    centroid_ops = await plan_vectorcypher_centroid_recompute(
+                        namespace_id,
+                        coordinator=coordinator,
+                        merge_clusters=clusters,
+                        lev_threshold=config.centroid_lev_threshold,
+                        min_intra_cluster_cosine=config.centroid_min_intra_cluster_cosine,
+                    )
+                    ops.extend(centroid_ops)
+                else:
+                    skip_reasons.append(
+                        {
+                            "op_kind": str(OpKind.VECTORCYPHER_CENTROID_RECOMPUTE),
+                            "reason": "no_merge_clusters",
+                            "detail": (
+                                "centroid_recompute requires merge clusters from a dedupe plan; "
+                                "none were produced (enable VECTORCYPHER_DEDUPE_ENTITIES with candidate pairs)."
+                            ),
+                        }
+                    )
+            else:
+                skip_reasons.append(
+                    _disabled_skip_reason(OpKind.VECTORCYPHER_CENTROID_RECOMPUTE, "centroid_recompute_enabled")
+                )
+
         return DreamPlan(
             plan_id=uuid4(),
             namespace_id=namespace_id,
@@ -425,6 +500,68 @@ class _VectorCypherPlugin:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _disabled_skip_reason(op_kind: OpKind, flag_name: str) -> dict[str, Any]:
+    """Structured skip_reason for a requested-but-disabled mutation op (#1263)."""
+    return {
+        "op_kind": str(op_kind),
+        "reason": "op_disabled_by_config",
+        "detail": f"{flag_name} is False; enable it (default OFF) to plan this op.",
+    }
+
+
+def _degradations_as_skip_reasons(degradations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Forward planner ADR-001 degradations onto the plan's skip_reasons.
+
+    The dedupe planner records degradations (e.g. missing embeddings) in an
+    out-parameter list; the dream result carries them through the
+    ``skip_reasons`` channel so operators can see *why* a plan
+    under-consolidated.
+    """
+    out: list[dict[str, Any]] = []
+    for deg in degradations:
+        out.append(
+            {
+                "op_kind": str(OpKind.VECTORCYPHER_DEDUPE_ENTITIES),
+                "reason": deg.get("reason", "degraded"),
+                "detail": deg.get("detail", ""),
+                "component": deg.get("component"),
+                "count": deg.get("count"),
+            }
+        )
+    return out
+
+
+def _merge_clusters_from_dedupe(dedupe_ops: list[DreamOp]) -> list[list[UUID]]:
+    """Reconstruct merge clusters (canonical + absorbed ids) from dedupe ops.
+
+    Each planned dedupe op carries ``outputs[0]["merges"]``; the cluster
+    is ``{canonical_id} ∪ {absorbed_id ...}`` for that op. Centroid
+    recompute consumes these to decide each cluster's post-merge embedding.
+    """
+    clusters: list[list[UUID]] = []
+    for op in dedupe_ops:
+        if op.decision != "planned" or not op.outputs:
+            continue
+        merges = op.outputs[0].get("merges") or []
+        member_ids: list[UUID] = []
+        seen: set[UUID] = set()
+        for merge in merges:
+            for key in ("canonical_id", "absorbed_id"):
+                raw = merge.get(key)
+                if raw is None:
+                    continue
+                try:
+                    uid = UUID(str(raw))
+                except (TypeError, ValueError):
+                    continue
+                if uid not in seen:
+                    seen.add(uid)
+                    member_ids.append(uid)
+        if len(member_ids) >= 2:
+            clusters.append(member_ids)
+    return clusters
 
 
 def _resolved_scope(
