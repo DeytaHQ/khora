@@ -475,9 +475,14 @@ def _build_component_op(
         )
 
     merges: list[dict[str, Any]] = []
+    # Component-wide provenance: every merge entry carries the full union over
+    # the whole component (canonical + all absorbed), not just canonical + the
+    # current member, so a consumer that applies entries with overwrite
+    # semantics (e.g. the Phase-2 graph mirror) cannot drop an earlier member's
+    # provenance.
+    merged_docs, merged_chunks = _merged_provenance(members)
     for member in absorbed:
         score = member_score(member)
-        merged_docs, merged_chunks = _merged_provenance([canonical, member])
         merges.append(
             {
                 "canonical_id": str(canonical.id),

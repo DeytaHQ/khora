@@ -537,7 +537,7 @@ def _merge_clusters_from_dedupe(dedupe_ops: list[DreamOp]) -> list[list[UUID]]:
     """Reconstruct merge clusters (canonical + absorbed ids) from dedupe ops.
 
     Each planned dedupe op carries ``outputs[0]["merges"]``; the cluster
-    is ``{canonical_id} ∪ {absorbed_id ...}`` for that op. Centroid
+    is ``{canonical_id}`` plus ``{absorbed_id ...}`` for that op. Centroid
     recompute consumes these to decide each cluster's post-merge embedding.
     """
     clusters: list[list[UUID]] = []
