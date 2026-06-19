@@ -509,3 +509,24 @@ async def test_apply_handler_respects_configurable_model(monkeypatch: pytest.Mon
     )
 
     assert captured["model"] == "gpt-4o-2025-test"
+
+
+# ---------------------------------------------------------------------------
+# #1264 — honest docstring: the orchestrator does NOT enforce a token budget
+# (the real enforcer is wired in #1270; before that, the module docstring
+# falsely claimed enforcement).
+# ---------------------------------------------------------------------------
+
+
+def test_module_docstring_does_not_overclaim_budget_enforcement() -> None:
+    """The module docstring must not claim the orchestrator enforces a
+    rolling-hour LLM token budget over acompletion - that enforcer did not
+    exist when the claim was written (#1264 / #1270)."""
+    import khora.dream.engines.vectorcypher.community_summary as mod
+
+    doc = mod.__doc__ or ""
+    lowered = doc.lower()
+    assert "rolling-hour" not in lowered, (
+        "docstring still claims a rolling-hour budget enforcer that the orchestrator does not implement that way"
+    )
+    assert "enforces the ceiling" not in lowered

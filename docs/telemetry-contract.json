@@ -1384,6 +1384,15 @@
       "_comment": "Issue #666. NO namespace_id label - cardinality rule."
     },
     {
+      "name": "khora.dream.llm.throttled_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "description": "Dream LLM-using ops skipped because the per-run or per-namespace-per-day token budget was exhausted. Each increment corresponds to one op that was not dispatched to the LLM; already-applied ops in the same run stay committed.",
+      "labels": [],
+      "_comment": "Issue #1270. NO namespace_id label - cardinality rule. Default budgets live on DreamConfig.llm_max_tokens_per_run / llm_max_tokens_per_namespace_per_day; 0 disables a budget."
+    },
+    {
       "name": "khora.dream.undo_invocations_total",
       "type": "counter",
       "stability": "public",

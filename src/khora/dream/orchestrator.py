@@ -76,6 +76,7 @@ from khora.dream.result import (
 )
 from khora.dream.safety import _assert_no_chunk_id_mutation
 from khora.telemetry import bounded_text_hash
+from khora.telemetry.metrics import metric_counter
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -106,14 +107,98 @@ _APPLY_DISABLED_FALSEY: frozenset[str] = frozenset({"", "0", "false", "False", "
 # ``sqlite3.ProgrammingError: type 'UUID' is not supported``; the
 # orchestrator catches that at the dialect gate below and skips the op
 # instead of crashing the run. See #875.
+#
+# ``vectorcypher_normalize_schema`` (#1264) belongs here too: its apply
+# handler rewrites ``entities.entity_type`` / ``relationships.relationship_type``
+# via ``session.execute`` binding raw ``uuid.UUID`` row ids, so it needs
+# Postgres for the same reason. Listing it also makes it visible to
+# ``_warn_graph_divergence`` - a schema rename desyncs Neo4j labels every
+# apply, and before #1264 that divergence was silent because the op was
+# absent from this set.
 _POSTGRES_ONLY_OP_KINDS: frozenset[str] = frozenset(
     {
         "vectorcypher_dedupe_entities",
         "vectorcypher_centroid_recompute",
         "vectorcypher_prune_edges",
         "vectorcypher_source_chunk_ids_gc",
+        "vectorcypher_normalize_schema",
     }
 )
+
+
+# Op kinds that issue LLM calls during apply. The dream LLM token budget
+# (#1270) is checked before dispatching any of these; non-LLM mutation
+# ops are never gated. ``community_summary`` is the only reachable
+# LLM-using op today; future LLM ops add their kind here.
+_LLM_OP_KINDS: frozenset[str] = frozenset(
+    {
+        "vectorcypher_community_summary",
+    }
+)
+
+
+# Number of seconds in the rolling "per day" window for the
+# per-namespace token budget (#1270).
+_LLM_BUDGET_DAY_SECONDS = 86_400.0
+
+
+# Emitted once per LLM-using op skipped by the token budget. No labels -
+# the namespace_id cardinality rule forbids a per-tenant label.
+_THROTTLE_COUNTER = metric_counter(
+    "khora.dream.llm.throttled_total",
+    description="Dream LLM-using ops skipped because a token budget was exhausted.",
+)
+
+
+class _NamespaceDayBudget:
+    """Process-global rolling-day token bucket for one namespace (#1270).
+
+    Mirrors the hooks Level-2 rolling-hour bucket shape: a monotonic
+    window start plus a running token count. The window resets lazily on
+    read once :data:`_LLM_BUDGET_DAY_SECONDS` have elapsed.
+    """
+
+    __slots__ = ("tokens_used", "window_started_at")
+
+    def __init__(self) -> None:
+        self.tokens_used = 0
+        self.window_started_at = time_monotonic()
+
+
+# Keyed by namespace_id. Persists across DreamOrchestrator instances /
+# runs in the same process so the per-day budget spans runs.
+_NAMESPACE_DAY_BUDGETS: dict[UUID, _NamespaceDayBudget] = {}
+
+
+def time_monotonic() -> float:
+    """Indirection over ``time.monotonic`` so tests can freeze the clock."""
+    import time
+
+    return time.monotonic()
+
+
+def _reset_namespace_llm_budgets() -> None:
+    """Clear the process-global per-namespace-per-day buckets.
+
+    Test-only escape hatch - production code never resets the buckets
+    (they self-expire on the rolling window).
+    """
+    _NAMESPACE_DAY_BUDGETS.clear()
+
+
+def _get_namespace_day_budget(namespace_id: UUID) -> _NamespaceDayBudget:
+    """Return the rolling-day bucket for ``namespace_id``, resetting it
+    when the window has rolled over."""
+    bucket = _NAMESPACE_DAY_BUDGETS.get(namespace_id)
+    now = time_monotonic()
+    if bucket is None:
+        bucket = _NamespaceDayBudget()
+        _NAMESPACE_DAY_BUDGETS[namespace_id] = bucket
+        return bucket
+    if now - bucket.window_started_at >= _LLM_BUDGET_DAY_SECONDS:
+        bucket.tokens_used = 0
+        bucket.window_started_at = now
+    return bucket
 
 
 def _is_apply_disabled_via_env() -> bool:
@@ -169,6 +254,9 @@ class DreamOrchestrator:
         # Long-lived orchestrators carry their original value — see the
         # module-level helper docstring.
         self._apply_disabled = _is_apply_disabled_via_env()
+        # Per-run LLM token spend, accumulated from the context-local usage
+        # path each LLM-using op records into (#1270). Reset per run.
+        self._llm_tokens_this_run = 0
 
     # ------------------------------------------------------------------
     # Public methods
@@ -475,6 +563,16 @@ class DreamOrchestrator:
         undo_records: list[UndoRecord] = []
         file_sink = self._file_sink()
         skipped_by_op_type: dict[str, int] = {}
+        budget_skip_reasons: list[dict[str, Any]] = []
+
+        # Reset the per-run token counter and open a context-local usage
+        # accumulator so each LLM-using op's spend (recorded through
+        # ``record_usage`` inside ``acompletion``) can be read back and
+        # checked against the budgets (#1270).
+        self._llm_tokens_this_run = 0
+        from khora.telemetry.context import start_usage_collection
+
+        start_usage_collection()
 
         for seq, op in enumerate(plan.ops):
             if cancel_flag.is_set():
@@ -489,6 +587,32 @@ class DreamOrchestrator:
                 # the audit and re-publish its event.
                 await self._record_committed(run_id, seq)
                 await self._emit_op_event(run_id, op)
+                self._fire_progress(on_progress, run_id, plan, seq, op, "apply")
+                continue
+
+            # LLM token budget (#1270): for LLM-using ops, refuse to
+            # dispatch once a per-run or per-namespace-per-day budget is
+            # exhausted. Already-applied ops stay committed; the skipped
+            # op does NOT advance the checkpoint so a later run (or a
+            # fresh rolling-day window) can retry it.
+            breach = self._llm_budget_breach(op, plan.namespace_id)
+            if breach is not None:
+                _THROTTLE_COUNTER.add(1)
+                skipped_by_op_type[str(op.op_type)] = skipped_by_op_type.get(str(op.op_type), 0) + 1
+                budget_skip_reasons.append(
+                    {
+                        "op_kind": str(op.op_type),
+                        "reason": "llm_budget_exhausted",
+                        "detail": breach,
+                    }
+                )
+                from loguru import logger
+
+                logger.warning(
+                    "dream apply op {op_type!s} skipped: LLM token budget exhausted ({detail})",
+                    op_type=op.op_type,
+                    detail=breach,
+                )
                 self._fire_progress(on_progress, run_id, plan, seq, op, "apply")
                 continue
 
@@ -517,6 +641,11 @@ class DreamOrchestrator:
             _assert_no_chunk_id_mutation(undo)
             undo_records.append(undo)
 
+            # Roll the LLM token spend this op just incurred into both
+            # budget buckets (#1270). Non-LLM ops record nothing, so the
+            # drain returns 0 and the buckets are untouched.
+            self._drain_llm_usage(plan.namespace_id)
+
             # Persist the undo file before announcing the op — readers
             # of `undo.json` will see this op's snapshot even if the
             # next step crashes the process between emit and the next
@@ -531,6 +660,12 @@ class DreamOrchestrator:
 
             await self._emit_op_event(run_id, op)
             self._fire_progress(on_progress, run_id, plan, seq, op, "apply")
+
+        # Drain and discard any usage left in the context accumulator so
+        # we don't leak the contextvar into a later call on this loop.
+        from khora.telemetry.context import collect_usage
+
+        collect_usage()
 
         await self._emit_all(
             DreamPhaseCompleted(
@@ -549,6 +684,7 @@ class DreamOrchestrator:
             plan=plan,
             mode="apply",
             skipped_by_op_type=skipped_by_op_type,
+            extra_skip_reasons=budget_skip_reasons,
         )
 
     async def _apply_one_op(
@@ -619,6 +755,60 @@ class DreamOrchestrator:
         if sig is not None and "dream_config" in sig.parameters:
             kwargs["dream_config"] = self._config
         return await handler(op, **kwargs)
+
+    # ------------------------------------------------------------------
+    # LLM token budget (#1270)
+    # ------------------------------------------------------------------
+
+    def _llm_budget_breach(self, op: DreamOp, namespace_id: UUID) -> str | None:
+        """Return a breach detail string if ``op`` would exceed a budget.
+
+        Returns ``None`` when ``op`` is not an LLM-using op or when both
+        budgets still have headroom. A budget value of ``0`` disables
+        that budget (mirrors the hooks per-subscription convention).
+
+        The check is pre-dispatch and conservative: it compares the
+        spend already accumulated this run / this rolling-day window
+        against the cap. An op is refused once the cap is met (a fresh
+        run with the cap already consumed by prior ops fans out zero new
+        LLM calls).
+        """
+        if str(op.op_type) not in _LLM_OP_KINDS:
+            return None
+
+        per_run = self._config.llm_max_tokens_per_run
+        if per_run and self._llm_tokens_this_run >= per_run:
+            return f"per_run cap reached: {self._llm_tokens_this_run} >= {per_run} (DreamConfig.llm_max_tokens_per_run)"
+
+        per_day = self._config.llm_max_tokens_per_namespace_per_day
+        if per_day:
+            bucket = _get_namespace_day_budget(namespace_id)
+            if bucket.tokens_used >= per_day:
+                return (
+                    f"per_namespace_per_day cap reached: {bucket.tokens_used} >= {per_day} "
+                    "(DreamConfig.llm_max_tokens_per_namespace_per_day)"
+                )
+        return None
+
+    def _drain_llm_usage(self, namespace_id: UUID) -> int:
+        """Drain context-local LLM usage into both budget buckets.
+
+        Reads back whatever the just-applied op recorded through
+        ``record_usage`` (the same path ``record_llm_call`` feeds), adds
+        the total tokens to the per-run counter and the per-namespace
+        rolling-day bucket, then re-opens a fresh accumulator for the
+        next op. Returns the number of tokens drained (0 for non-LLM
+        ops, which record nothing).
+        """
+        from khora.telemetry.context import collect_usage, start_usage_collection
+
+        entries = collect_usage()
+        start_usage_collection()
+        total = sum(int(getattr(u, "total_tokens", 0) or 0) for u in entries)
+        if total:
+            self._llm_tokens_this_run += total
+            _get_namespace_day_budget(namespace_id).tokens_used += total
+        return total
 
     # ------------------------------------------------------------------
     # Lock acquisition
@@ -902,6 +1092,7 @@ def _build_result(
     plan: DreamPlan,
     mode: str,
     skipped_by_op_type: dict[str, int] | None = None,
+    extra_skip_reasons: list[dict[str, Any]] | None = None,
 ) -> DreamResult:
     now = datetime.now(UTC)
     skipped_remaining = dict(skipped_by_op_type or {})
@@ -935,8 +1126,12 @@ def _build_result(
     # entries to ``plan.metadata["skip_reasons"]`` when an op was
     # requested but produced no work (op not supported by the active
     # engine, no candidate rows, runtime flag off, guardrail tripped).
-    # An empty list signals "every requested op did work".
+    # The orchestrator appends apply-time skips here too - e.g. the
+    # ``llm_budget_exhausted`` entries from the #1270 token budget. An
+    # empty list signals "every requested op did work".
     skip_reasons = list(plan.metadata.get("skip_reasons", ()))
+    if extra_skip_reasons:
+        skip_reasons.extend(extra_skip_reasons)
     return DreamResult(
         run=info,
         diff=DreamDiff(),

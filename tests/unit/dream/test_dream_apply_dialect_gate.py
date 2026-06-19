@@ -186,10 +186,16 @@ def test_assert_backend_supported_passes_when_dialect_unknown() -> None:
 
 
 def test_assert_backend_supported_ignores_non_gated_ops() -> None:
-    """Audit / non-gated op kinds never trip the gate even on sqlite."""
+    """Audit / non-gated op kinds never trip the gate even on sqlite.
+
+    ``normalize_schema`` is no longer a valid example here - #1264 moved
+    it into the gated set because its apply handler binds raw uuid.UUID
+    row ids into ``session.execute`` (Postgres-only), so audit-only ops
+    that touch no SQL stand in instead.
+    """
     session = _SqliteSession()
     _assert_backend_supported(session, OpKind.CHRONICLE_TOMBSTONE_AUDIT)
-    _assert_backend_supported(session, OpKind.VECTORCYPHER_NORMALIZE_SCHEMA)
+    _assert_backend_supported(session, OpKind.VECTORCYPHER_ORPHAN_REPORT)
 
 
 # ---------------------------------------------------------------------------
