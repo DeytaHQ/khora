@@ -29,6 +29,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID, uuid4
 
+from loguru import logger
 from sqlalchemy import text
 
 from khora import _accel
@@ -55,15 +56,35 @@ async def plan_vectorcypher_dedupe_entities(
     default_threshold: float = _DEFAULT_THRESHOLD,
     per_type_thresholds: dict[str, float] | None = None,
     mode: Literal["dry-run", "apply"] = "dry-run",
+    degradations: list[dict[str, Any]] | None = None,
 ) -> list[DreamOp]:
     """Plan cross-batch entity merges in ``namespace_id`` — never writes.
 
-    For each ``entity_type`` bucket: collect entities with non-empty
-    embeddings, call :func:`khora._accel.block_and_score_pairs` at the
-    bucket's threshold, then emit one :class:`DreamOp` per candidate
-    pair. Pairs whose predicted survivor would collide with an unrelated
-    third entity on ``(namespace_id, name, entity_type)`` are emitted
-    with ``decision="skip_unique_collision"`` for operator review.
+    For each ``entity_type`` bucket, score candidate pairs with
+    :func:`khora._accel.block_and_score_pairs`, then group every
+    candidate edge into connected components via union-find (#1265). One
+    :class:`DreamOp` is emitted per component carrying a single
+    ``outputs[0] = {"merges": [...]}`` payload — the exact shape
+    :func:`apply_vectorcypher_dedupe_entities`, the future graph mirror,
+    and the undo path all read. Each component has exactly one canonical
+    (highest mention_count, then earliest created_at, then lexicographic
+    id); every other member is absorbed directly into that canonical so
+    no merge entry ever points at a retired intermediate (A->B, B->C
+    yields one component, all edges resolved to one survivor).
+
+    Determinism (#1266 INVARIANT 0): the entity list is stable-sorted by
+    ``(name, entity_type, str(id))`` and the per-bucket index is built
+    from the sorted list *before* any kernel call, and the kernel's
+    unordered pair output is sorted, so a shuffled input yields
+    byte-identical merge payloads and an identical ``plan_hash``.
+
+    Embedding re-join (#1267): the coordinator's ``list_entities`` prefers
+    the graph, and graph-routed entities carry no embedding. On a
+    graph+pgvector stack the planner re-joins L2-normalized embeddings by
+    id from pgvector before the kernel runs (preserving dot == cosine).
+    When embeddings cannot be sourced at all, an ADR-001 degradation is
+    appended to ``degradations`` (and logged at WARNING) rather than
+    silently under-consolidating.
 
     Args:
         namespace_id: Namespace to scan.
@@ -73,25 +94,30 @@ async def plan_vectorcypher_dedupe_entities(
         per_type_thresholds: Optional per-type overrides. Missing types
             fall back to ``default_threshold``.
         mode: ``"dry-run"`` (default) plans without writing. ``"apply"``
-            raises :class:`NotImplementedError` — apply lands in v0.15
-            (umbrella #649 Phase 4, ticket #667).
+            raises :class:`NotImplementedError` — apply runs through the
+            orchestrator handler, not this planner.
+        degradations: Optional out-parameter. When supplied, ADR-001
+            :class:`khora.core.diagnostics.Degradation`-shaped dicts are
+            appended in place (e.g. when entities have no usable
+            embedding). The caller forwards these onto the dream result's
+            observability dict.
 
     Returns:
-        List of :class:`DreamOp` — one per candidate pair. Empty when
+        List of :class:`DreamOp` — one per connected component. Empty when
         the namespace has no entities, no embedded entities, or no
         candidate pairs cross the threshold. Each op carries:
 
         - ``op_type`` = :data:`OpKind.VECTORCYPHER_DEDUPE_ENTITIES`
         - ``decision`` = ``"planned"`` for proposed merges; or
-          ``"skip_unique_collision"`` for skipped collisions.
-        - ``inputs`` = a single dict with ``keep_id`` (UUID str),
-          ``drop_ids`` (tuple of UUID strs), ``similarity_score``,
-          ``entity_type``, ``threshold``, ``op_type=entity_merge``.
-          Collision skips also carry ``collision_entity_id``,
-          ``collision_name``, ``surviving_name``.
-        - ``outputs`` = a single dict with
-          ``merged_source_document_ids`` (tuple) and
-          ``merged_source_chunk_ids`` (tuple) of UUID strs.
+          ``"skip_unique_collision"`` when the component's surviving
+          ``(name, entity_type)`` collides with an unrelated third entity.
+        - ``inputs[0]`` = a dict with ``keep_id`` (canonical UUID str),
+          ``drop_ids`` (tuple of absorbed UUID strs), ``entity_type``,
+          ``threshold``, ``component_size``, ``op_type=entity_merge``.
+        - ``outputs[0]`` = ``{"merges": [{"canonical_id", "absorbed_id",
+          "similarity_score", "canonical_name", "absorbed_name",
+          "entity_type", "merged_source_document_ids",
+          "merged_source_chunk_ids"}, ...]}``.
 
     Raises:
         NotImplementedError: when ``mode="apply"``.
@@ -123,6 +149,23 @@ async def plan_vectorcypher_dedupe_entities(
             span.set_attribute("skip_collision_count", 0)
             return []
 
+        # #1267: graph-routed entities carry no embedding. Re-join from
+        # pgvector before bucketing so the dedupe plan on a graph stack
+        # matches the PG-only plan. Records a degradation when embeddings
+        # remain absent (ADR-001).
+        entities = await _rejoin_embeddings(
+            entities,
+            coordinator=coordinator,
+            namespace_id=namespace_id,
+            degradations=degradations,
+        )
+
+        # #1266 INVARIANT 0: stable-sort the full entity list before any
+        # index is built or any kernel runs. The kernel sees a fixed row
+        # order, so its (i, j) indices map to a deterministic id ordering
+        # independent of the backend's list_entities order.
+        entities = sorted(entities, key=lambda e: (e.name, e.entity_type, str(e.id)))
+
         buckets: dict[str, list[Entity]] = defaultdict(list)
         for entity in entities:
             if not entity.embedding:
@@ -130,18 +173,22 @@ async def plan_vectorcypher_dedupe_entities(
             buckets[entity.entity_type].append(entity)
         span.set_attribute("total_buckets", len(buckets))
 
-        # Build an O(1) (name, entity_type) → entity index so we can
-        # predict UNIQUE-violation collisions across the full namespace
-        # (not just within a bucket).
-        by_name_type: dict[tuple[str, str], Entity] = {}
+        # Build a (name, entity_type) → entities index so we can predict
+        # UNIQUE-violation collisions across the full namespace (not just
+        # within a component). A surviving (name, type) collides when an
+        # entity carrying it lives OUTSIDE the merge component. Entities
+        # are appended in sorted order so the reported collision id is
+        # deterministic (#1266).
+        by_name_type: dict[tuple[str, str], list[Entity]] = defaultdict(list)
         for entity in entities:
-            by_name_type[(entity.name, entity.entity_type)] = entity
+            by_name_type[(entity.name, entity.entity_type)].append(entity)
 
         ops: list[DreamOp] = []
         planned = 0
         skipped = 0
 
-        for entity_type, bucket in buckets.items():
+        for entity_type in sorted(buckets):
+            bucket = buckets[entity_type]
             if len(bucket) < 2:
                 continue
             threshold = float(per_type.get(entity_type, default_threshold))
@@ -153,41 +200,31 @@ async def plan_vectorcypher_dedupe_entities(
                 threshold=threshold,
                 name_token_blocking=True,
             )
-            for i, j, score in pairs:
-                a, b = bucket[i], bucket[j]
-                keeper, dropped = _pick_survivor(a, b)
-                surviving_name = keeper.name
+            # The kernel makes no deterministic global sort guarantee.
+            # Sort so component formation is order-independent (#1266).
+            pairs = sorted(pairs, key=lambda p: (p[0], p[1]))
 
-                collision = by_name_type.get((surviving_name, entity_type))
-                if collision is not None and collision.id != keeper.id and collision.id != dropped.id:
-                    ops.append(
-                        _build_skip_collision_op(
-                            namespace_id=namespace_id,
-                            entity_type=entity_type,
-                            threshold=threshold,
-                            similarity_score=float(score),
-                            keeper=keeper,
-                            dropped=dropped,
-                            surviving_name=surviving_name,
-                            collision=collision,
-                            started_at=started_at,
-                        )
-                    )
-                    skipped += 1
-                    continue
+            # #1265: union-find over every candidate edge in the bucket.
+            components = _connected_components(len(bucket), pairs)
+            best_score = _best_pair_scores(pairs)
 
-                ops.append(
-                    _build_planned_op(
-                        namespace_id=namespace_id,
-                        entity_type=entity_type,
-                        threshold=threshold,
-                        similarity_score=float(score),
-                        keeper=keeper,
-                        dropped=dropped,
-                        started_at=started_at,
-                    )
+            for member_indices in components:
+                members = [bucket[i] for i in sorted(member_indices)]
+                op = _build_component_op(
+                    namespace_id=namespace_id,
+                    entity_type=entity_type,
+                    threshold=threshold,
+                    members=members,
+                    member_indices=sorted(member_indices),
+                    best_score=best_score,
+                    by_name_type=by_name_type,
+                    started_at=started_at,
                 )
-                planned += 1
+                ops.append(op)
+                if op.decision == "skip_unique_collision":
+                    skipped += 1
+                else:
+                    planned += 1
 
         span.set_attribute("planned_count", planned)
         span.set_attribute("skip_collision_count", skipped)
@@ -198,119 +235,290 @@ async def plan_vectorcypher_dedupe_entities(
     return ops
 
 
-def _pick_survivor(a: Entity, b: Entity) -> tuple[Entity, Entity]:
-    """Return ``(keeper, dropped)`` for a candidate merge pair.
+# ---------------------------------------------------------------------------
+# Union-find connected components (#1265)
+# ---------------------------------------------------------------------------
 
-    Tiebreakers: highest ``mention_count``, then earliest ``created_at``.
-    Stable on ties via ``id`` lexicographic order so re-runs produce the
-    same plan.
+
+class _UnionFind:
+    """Disjoint-set with path compression + union by size.
+
+    Operates on bucket-local integer indices. ``components()`` returns the
+    member-index sets, each a transitive closure of the candidate edges.
     """
-    if a.mention_count != b.mention_count:
-        return (a, b) if a.mention_count > b.mention_count else (b, a)
-    if a.created_at != b.created_at:
-        return (a, b) if a.created_at < b.created_at else (b, a)
-    return (a, b) if str(a.id) < str(b.id) else (b, a)
+
+    def __init__(self, n: int) -> None:
+        self._parent = list(range(n))
+        self._size = [1] * n
+
+    def find(self, x: int) -> int:
+        root = x
+        while self._parent[root] != root:
+            root = self._parent[root]
+        # Path compression.
+        while self._parent[x] != root:
+            self._parent[x], x = root, self._parent[x]
+        return root
+
+    def union(self, a: int, b: int) -> None:
+        ra, rb = self.find(a), self.find(b)
+        if ra == rb:
+            return
+        if self._size[ra] < self._size[rb]:
+            ra, rb = rb, ra
+        self._parent[rb] = ra
+        self._size[ra] += self._size[rb]
 
 
-def _merged_provenance(keeper: Entity, dropped: Entity) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Union the source-document and source-chunk id lists, keeper first.
+def _connected_components(n: int, pairs: list[tuple[int, int, float]]) -> list[list[int]]:
+    """Group bucket indices into connected components from candidate edges.
+
+    Only indices that participate in at least one edge form a component;
+    singletons (no candidate edge) are dropped — nothing to merge. The
+    returned list is sorted by each component's minimum index so the op
+    emission order is deterministic (#1266).
+    """
+    uf = _UnionFind(n)
+    touched: set[int] = set()
+    for i, j, _ in pairs:
+        uf.union(i, j)
+        touched.add(i)
+        touched.add(j)
+
+    grouped: dict[int, list[int]] = defaultdict(list)
+    for idx in sorted(touched):
+        grouped[uf.find(idx)].append(idx)
+
+    return sorted((sorted(members) for members in grouped.values()), key=lambda m: m[0])
+
+
+def _best_pair_scores(pairs: list[tuple[int, int, float]]) -> dict[tuple[int, int], float]:
+    """Map each undirected bucket-index pair to its similarity score."""
+    out: dict[tuple[int, int], float] = {}
+    for i, j, score in pairs:
+        key = (i, j) if i < j else (j, i)
+        out[key] = float(score)
+    return out
+
+
+async def _rejoin_embeddings(
+    entities: list[Entity],
+    *,
+    coordinator: StorageCoordinator,
+    namespace_id: UUID,
+    degradations: list[dict[str, Any]] | None,
+) -> list[Entity]:
+    """Fill in missing embeddings from pgvector on graph-routed stacks (#1267).
+
+    ``coordinator.list_entities`` prefers the graph backend, and graph
+    entities carry no embedding (the Neo4j ``_record_to_entity`` sets it
+    to ``None``). When a graph + pgvector stack is configured, fetch the
+    embeddings by id from pgvector and graft them onto the entity objects
+    so the dedupe plan matches the PG-only plan (dot == cosine preserved —
+    pgvector embeddings are L2-normalized at ingest).
+
+    Entities whose embedding cannot be sourced are recorded as an ADR-001
+    degradation (and logged at WARNING) rather than silently dropped from
+    the candidate set.
+    """
+    missing = [e for e in entities if not e.embedding]
+    if not missing:
+        return entities
+
+    vector = getattr(coordinator, "_vector", None)
+    getter = getattr(coordinator, "get_entities_batch", None)
+    if vector is not None and getter is not None:
+        try:
+            fetched = await getter([e.id for e in missing], namespace_id=namespace_id)
+        except Exception as exc:  # noqa: BLE001 - boundary read; degrade, don't crash the plan
+            logger.warning(
+                "dream dedupe: pgvector embedding re-join failed; entities without "
+                "an embedding will be excluded from this plan: {exc}",
+                exc=exc,
+                exc_info=True,
+            )
+            fetched = {}
+        for entity in missing:
+            joined = fetched.get(entity.id)
+            if joined is not None and joined.embedding is not None:
+                entity.embedding = joined.embedding
+
+    still_missing = [e for e in entities if not e.embedding]
+    if still_missing and degradations is not None:
+        logger.warning(
+            "dream dedupe: {n} entit{suffix} in namespace {ns} lack an embedding and "
+            "cannot be scored; the dedupe plan may under-consolidate.",
+            n=len(still_missing),
+            suffix="y" if len(still_missing) == 1 else "ies",
+            ns=namespace_id,
+        )
+        degradations.append(
+            {
+                "component": "dedupe_entities",
+                "reason": "missing_entity_embedding",
+                "detail": (
+                    f"{len(still_missing)} entit"
+                    f"{'y' if len(still_missing) == 1 else 'ies'} had no usable embedding "
+                    "after the pgvector re-join; excluded from the candidate set."
+                ),
+                "count": len(still_missing),
+            }
+        )
+    return entities
+
+
+def _pick_canonical(members: list[Entity]) -> Entity:
+    """Return the single canonical for a merge component.
+
+    Ordering: highest ``mention_count``, then earliest ``created_at``,
+    then lexicographically smallest ``id``. Total + deterministic so the
+    plan is identical across input permutations (#1266).
+    """
+    return min(members, key=lambda e: (-e.mention_count, e.created_at, str(e.id)))
+
+
+def _merged_provenance(members: list[Entity]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Union the source-document / source-chunk id lists across a component.
 
     Returns ``(document_ids, chunk_ids)`` as tuples of UUID strings so
-    the op outputs are JSON-serialisable for the file sink.
+    the op outputs are JSON-serialisable for the file sink. Order is
+    stable: members are visited in the order passed (already sorted).
     """
-    docs: list[UUID] = list(keeper.source_document_ids)
-    for doc_id in dropped.source_document_ids:
-        if doc_id not in docs:
-            docs.append(doc_id)
-    chunks: list[UUID] = list(keeper.source_chunk_ids)
-    for chunk_id in dropped.source_chunk_ids:
-        if chunk_id not in chunks:
-            chunks.append(chunk_id)
+    docs: list[UUID] = []
+    chunks: list[UUID] = []
+    for member in members:
+        for doc_id in member.source_document_ids:
+            if doc_id not in docs:
+                docs.append(doc_id)
+        for chunk_id in member.source_chunk_ids:
+            if chunk_id not in chunks:
+                chunks.append(chunk_id)
     return tuple(str(d) for d in docs), tuple(str(c) for c in chunks)
 
 
-def _build_planned_op(
+def _build_component_op(
     *,
     namespace_id: UUID,
     entity_type: str,
     threshold: float,
-    similarity_score: float,
-    keeper: Entity,
-    dropped: Entity,
+    members: list[Entity],
+    member_indices: list[int],
+    best_score: dict[tuple[int, int], float],
+    by_name_type: dict[tuple[str, str], list[Entity]],
     started_at: datetime,
 ) -> DreamOp:
-    """Construct a ``decision="planned"`` :class:`DreamOp`."""
-    merged_docs, merged_chunks = _merged_provenance(keeper, dropped)
-    inputs: dict[str, Any] = {
-        "op_type": _OP_TYPE,
-        "entity_type": entity_type,
-        "threshold": threshold,
-        "similarity_score": similarity_score,
-        "keep_id": str(keeper.id),
-        "drop_ids": (str(dropped.id),),
-        "surviving_name": keeper.name,
-    }
-    outputs: dict[str, Any] = {
-        "merged_source_document_ids": merged_docs,
-        "merged_source_chunk_ids": merged_chunks,
-    }
-    return DreamOp(
-        op_id=uuid4(),
-        phase=_PHASE,
-        op_type=OpKind.VECTORCYPHER_DEDUPE_ENTITIES,
-        inputs=(inputs,),
-        outputs=(outputs,),
-        decision="planned",
-        rationale=(
-            f"cross-batch ER candidate at score={similarity_score:.4f} "
-            f">= threshold={threshold:.4f} for entity_type={entity_type!r}; "
-            f"keeper picked by mention_count then earliest created_at."
-        ),
-        started_at=started_at,
-        namespace_id=namespace_id,
+    """Build one :class:`DreamOp` for a connected merge component (#1265).
+
+    A single canonical absorbs every other member; the op carries one
+    ``outputs[0]["merges"]`` entry per absorbed member (canonical_id ==
+    the resolved survivor for all of them, so no entry points at a
+    retired intermediate). When the surviving ``(name, entity_type)``
+    collides with an unrelated third entity, the whole component is
+    emitted as ``decision="skip_unique_collision"`` for operator review.
+    """
+    canonical = _pick_canonical(members)
+    absorbed = [m for m in members if m.id != canonical.id]
+    surviving_name = canonical.name
+
+    # Per-member best similarity to any other member of the component
+    # (the strongest candidate edge that pulled it in). Lets the apply
+    # verifier band still see a meaningful score per absorbed member.
+    index_of = {member.id: idx for member, idx in zip(members, member_indices, strict=True)}
+
+    def member_score(member: Entity) -> float:
+        mi = index_of[member.id]
+        ci = index_of[canonical.id]
+        # Prefer the direct edge to the canonical; otherwise (the member
+        # was pulled into the component transitively) use the strongest
+        # candidate edge touching this member.
+        direct = best_score.get((mi, ci) if mi < ci else (ci, mi))
+        if direct is not None:
+            return direct
+        scores = [s for (a, b), s in best_score.items() if mi in (a, b)]
+        return max(scores) if scores else threshold
+
+    component_ids = {m.id for m in members}
+    # A collision is any entity carrying the surviving (name, type) that
+    # lives outside this merge component — merging would violate the
+    # entities UNIQUE constraint on (namespace_id, name, entity_type).
+    collision = next(
+        (e for e in by_name_type.get((surviving_name, entity_type), []) if e.id not in component_ids),
+        None,
     )
 
+    if collision is not None:
+        inputs: dict[str, Any] = {
+            "op_type": _OP_TYPE,
+            "entity_type": entity_type,
+            "threshold": threshold,
+            "keep_id": str(canonical.id),
+            "drop_ids": tuple(str(m.id) for m in absorbed),
+            "surviving_name": surviving_name,
+            "component_size": len(members),
+            "collision_entity_id": str(collision.id),
+            "collision_name": collision.name,
+        }
+        return DreamOp(
+            op_id=uuid4(),
+            phase=_PHASE,
+            op_type=OpKind.VECTORCYPHER_DEDUPE_ENTITIES,
+            inputs=(inputs,),
+            outputs=(),
+            decision="skip_unique_collision",
+            rationale=(
+                f"merge would collide with existing entity {collision.id} "
+                f"on (namespace_id, {surviving_name!r}, {entity_type!r}); "
+                f"UNIQUE constraint would reject the apply."
+            ),
+            started_at=started_at,
+            namespace_id=namespace_id,
+        )
 
-def _build_skip_collision_op(
-    *,
-    namespace_id: UUID,
-    entity_type: str,
-    threshold: float,
-    similarity_score: float,
-    keeper: Entity,
-    dropped: Entity,
-    surviving_name: str,
-    collision: Entity,
-    started_at: datetime,
-) -> DreamOp:
-    """Construct a ``decision="skip_unique_collision"`` :class:`DreamOp`.
+    merges: list[dict[str, Any]] = []
+    # Component-wide provenance: every merge entry carries the full union over
+    # the whole component (canonical + all absorbed), not just canonical + the
+    # current member, so a consumer that applies entries with overwrite
+    # semantics (e.g. the Phase-2 graph mirror) cannot drop an earlier member's
+    # provenance.
+    merged_docs, merged_chunks = _merged_provenance(members)
+    for member in absorbed:
+        score = member_score(member)
+        merges.append(
+            {
+                "canonical_id": str(canonical.id),
+                "absorbed_id": str(member.id),
+                "similarity_score": score,
+                "canonical_name": canonical.name,
+                "absorbed_name": member.name,
+                "entity_type": entity_type,
+                "merged_source_document_ids": merged_docs,
+                "merged_source_chunk_ids": merged_chunks,
+            }
+        )
 
-    Emitted when the surviving (namespace_id, name, entity_type) tuple
-    would collide with an unrelated third entity post-merge — the merge
-    would violate the entities UNIQUE constraint.
-    """
-    inputs: dict[str, Any] = {
+    top_score = max((m["similarity_score"] for m in merges), default=threshold)
+    inputs = {
         "op_type": _OP_TYPE,
         "entity_type": entity_type,
         "threshold": threshold,
-        "similarity_score": similarity_score,
-        "keep_id": str(keeper.id),
-        "drop_ids": (str(dropped.id),),
-        "surviving_name": surviving_name,
-        "collision_entity_id": str(collision.id),
-        "collision_name": collision.name,
+        "similarity_score": top_score,
+        "keep_id": str(canonical.id),
+        "drop_ids": tuple(str(m.id) for m in absorbed),
+        "surviving_name": canonical.name,
+        "component_size": len(members),
     }
     return DreamOp(
         op_id=uuid4(),
         phase=_PHASE,
         op_type=OpKind.VECTORCYPHER_DEDUPE_ENTITIES,
         inputs=(inputs,),
-        outputs=(),
-        decision="skip_unique_collision",
+        outputs=({"merges": merges},),
+        decision="planned",
         rationale=(
-            f"merge would collide with existing entity {collision.id} "
-            f"on (namespace_id, {surviving_name!r}, {entity_type!r}); "
-            f"UNIQUE constraint would reject the apply."
+            f"cross-batch ER component of {len(members)} entities for "
+            f"entity_type={entity_type!r} at threshold={threshold:.4f}; "
+            f"canonical picked by mention_count then earliest created_at; "
+            f"{len(absorbed)} member(s) absorbed into a single survivor."
         ),
         started_at=started_at,
         namespace_id=namespace_id,

@@ -298,6 +298,16 @@ class DreamConfig(BaseSettings):
     )
 
     # Vectorcypher source_chunk_ids GC knob (#662).
+    source_chunk_ids_gc_enabled: bool = Field(
+        default=False,
+        description=(
+            "Master switch for the vectorcypher source_chunk_ids GC op "
+            "(OpKind.VECTORCYPHER_SOURCE_CHUNK_IDS_GC, #1263). Default OFF "
+            "— the apply path rewrites the entity source_chunk_ids array. "
+            "When False the op is skipped even if requested by "
+            "scope.op_kinds, and a structured skip_reason is recorded."
+        ),
+    )
     source_chunk_ids_gc_min_dead: int = Field(
         default=1,
         ge=1,
@@ -309,6 +319,16 @@ class DreamConfig(BaseSettings):
     )
 
     # Vectorcypher centroid-recompute knobs (#660).
+    centroid_recompute_enabled: bool = Field(
+        default=False,
+        description=(
+            "Master switch for the vectorcypher centroid-recompute op "
+            "(OpKind.VECTORCYPHER_CENTROID_RECOMPUTE, #1263). Default OFF "
+            "— the apply path rewrites a merged entity's canonical "
+            "embedding. When False the op is skipped even if requested by "
+            "scope.op_kinds, and a structured skip_reason is recorded."
+        ),
+    )
     centroid_lev_threshold: int = Field(
         default=2,
         ge=0,
@@ -332,6 +352,17 @@ class DreamConfig(BaseSettings):
     )
 
     # Phase 2.1 — vectorcypher cross-batch entity-resolution dedupe (#658).
+    dedupe_entities_enabled: bool = Field(
+        default=False,
+        description=(
+            "Master switch for the vectorcypher cross-batch dedupe op "
+            "(OpKind.VECTORCYPHER_DEDUPE_ENTITIES, #1263/#1265). Default "
+            "OFF — dedupe soft-deletes absorbed entity rows and rewrites "
+            "relationship endpoints on apply, so operators opt in. When "
+            "False the op is skipped even if requested by scope.op_kinds, "
+            "and a structured skip_reason is recorded."
+        ),
+    )
     dedupe_entities_default_threshold: float = Field(
         default=0.90,
         ge=0.0,
