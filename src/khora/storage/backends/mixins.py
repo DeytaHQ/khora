@@ -16,8 +16,11 @@ from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
+from khora.dream.exceptions import DreamBackendUnsupported
+
 if TYPE_CHECKING:
     from khora.core.models import Entity, Relationship
+    from khora.dream.plan import OpKind
 
 # ---------------------------------------------------------------------------
 # Async session mixin (shared across SQL-based backends)
@@ -369,6 +372,78 @@ class GraphBackendBase:
                 await self.create_relationship(rel)  # type: ignore[attr-defined]
                 updated += 1
         return updated
+
+    # -- Dream bi-temporal mirror verbs (#1271) -----------------------------
+    # Capability-gated default: a backend that has NOT implemented native
+    # graph-mirror support advertises nothing and raises DreamBackendUnsupported
+    # so the orchestrator (#1272) records a structured skip_reason. We do NOT
+    # provide a hard-delete-based default — the honest contract is "capability
+    # flags + structured skip", never a silent destructive fallback. Empty
+    # batches are a no-op (return 0) on every backend so an empty plan op never
+    # trips the gate. Per-backend native impls (Neo4j here; sqlite_lance /
+    # Memgraph / Neptune / AGE / SurrealDB in Phase 4) override these.
+
+    def supports_dream_mirror(self) -> frozenset[OpKind]:
+        """Op kinds this backend can mirror to the graph. Empty by default."""
+        return frozenset()
+
+    async def soft_invalidate_relationships_batch(
+        self,
+        relationship_ids: list[UUID],
+        *,
+        namespace_id: UUID,
+        invalidated_at: datetime,
+    ) -> int:
+        """Default: unsupported (raises). See :class:`GraphBackendProtocol`."""
+        if not relationship_ids:
+            return 0
+        raise DreamBackendUnsupported(
+            f"{type(self).__name__} does not support dream-mirror "
+            "soft_invalidate_relationships_batch; the op will be skipped"
+        )
+
+    async def soft_retire_entities_batch(
+        self,
+        entity_ids: list[UUID],
+        *,
+        namespace_id: UUID,
+        retired_at: datetime,
+        reason: str = "dream_consolidated",
+    ) -> int:
+        """Default: unsupported (raises). See :class:`GraphBackendProtocol`."""
+        if not entity_ids:
+            return 0
+        raise DreamBackendUnsupported(
+            f"{type(self).__name__} does not support dream-mirror soft_retire_entities_batch; the op will be skipped"
+        )
+
+    async def rewrite_relationship_endpoints_batch(
+        self,
+        rewrites: list[dict[str, Any]],
+        *,
+        namespace_id: UUID,
+        rewritten_at: datetime,
+    ) -> int:
+        """Default: unsupported (raises). See :class:`GraphBackendProtocol`."""
+        if not rewrites:
+            return 0
+        raise DreamBackendUnsupported(
+            f"{type(self).__name__} does not support dream-mirror "
+            "rewrite_relationship_endpoints_batch; the op will be skipped"
+        )
+
+    async def rename_types_batch(
+        self,
+        renames: list[dict[str, str]],
+        *,
+        namespace_id: UUID,
+    ) -> int:
+        """Default: unsupported (raises). See :class:`GraphBackendProtocol`."""
+        if not renames:
+            return 0
+        raise DreamBackendUnsupported(
+            f"{type(self).__name__} does not support dream-mirror rename_types_batch; the op will be skipped"
+        )
 
 
 # ---------------------------------------------------------------------------

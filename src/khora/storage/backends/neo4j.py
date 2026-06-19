@@ -22,6 +22,7 @@ from neo4j import AsyncDriver, AsyncGraphDatabase, AsyncManagedTransaction, unit
 from neo4j.exceptions import ClientError, ConnectionAcquisitionTimeoutError
 
 from khora.core.models import Entity, Episode, Relationship
+from khora.dream.plan import OpKind
 from khora.storage.backends.mixins import (
     GraphBackendBase,
     parse_uuid_list,
@@ -2759,6 +2760,281 @@ RETURN count(r) AS updated
 
         async with self._session() as session:
             return await session.execute_write(_retire)
+
+    # -- Dream bi-temporal mirror verbs (#1271) -----------------------------
+    # These are the dream-predicate-keyed graph-mirror primitives (confidence
+    # + chunk-liveness, document-independent) that #1272 wires into the dream
+    # orchestrator. They differ from the document-replace-shaped
+    # ``retire_orphaned_*`` primitives above: those key off a replaced source
+    # document; these key off a relationship/entity id the dream planner chose.
+    # All are namespace-scoped and idempotent by id (replay is a no-op on rows
+    # already invalidated). The mirror wiring itself is NOT in this PR.
+
+    def supports_dream_mirror(self) -> frozenset[OpKind]:
+        """Neo4j natively mirrors prune / dedupe / normalize-schema to the graph.
+
+        - ``VECTORCYPHER_PRUNE_EDGES`` -> :meth:`soft_invalidate_relationships_batch`
+        - ``VECTORCYPHER_DEDUPE_ENTITIES`` -> :meth:`soft_retire_entities_batch`
+          + :meth:`rewrite_relationship_endpoints_batch`
+        - ``VECTORCYPHER_NORMALIZE_SCHEMA`` -> :meth:`rename_types_batch`
+        """
+        return frozenset(
+            {
+                OpKind.VECTORCYPHER_PRUNE_EDGES,
+                OpKind.VECTORCYPHER_DEDUPE_ENTITIES,
+                OpKind.VECTORCYPHER_NORMALIZE_SCHEMA,
+            }
+        )
+
+    async def soft_invalidate_relationships_batch(
+        self,
+        relationship_ids: list[UUID],
+        *,
+        namespace_id: UUID,
+        invalidated_at: datetime,
+    ) -> int:
+        """Soft-delete edges by stamping ``valid_until`` (the column recall honors).
+
+        Mirrors ``prune_edges``. Matched by relationship id within
+        ``namespace_id`` (IDOR family); idempotent — only edges with a null
+        ``valid_until`` are touched, so a replay is a no-op. Never deletes.
+
+        Returns the number of edges actually invalidated.
+        """
+        if not relationship_ids:
+            return 0
+        ids = [str(r) for r in relationship_ids]
+        ts = invalidated_at.isoformat()
+
+        _CYPHER = """\
+UNWIND $relationship_ids AS rid
+MATCH ()-[rel {id: rid, namespace_id: $namespace_id}]-()
+WHERE rel.valid_until IS NULL
+SET rel.valid_until = $invalidated_at,
+    rel.updated_at = $invalidated_at
+RETURN count(DISTINCT rel) AS invalidated
+"""
+
+        async def _invalidate(tx: AsyncManagedTransaction) -> int:
+            result = await tx.run(
+                _CYPHER,
+                relationship_ids=ids,
+                namespace_id=str(namespace_id),
+                invalidated_at=ts,
+            )
+            record = await result.single()
+            return record["invalidated"] if record else 0
+
+        async with self._session() as session:
+            count = await session.execute_write(_invalidate)
+        logger.debug(f"Dream-invalidated {count} relationships in namespace {namespace_id}")
+        return count
+
+    async def soft_retire_entities_batch(
+        self,
+        entity_ids: list[UUID],
+        *,
+        namespace_id: UUID,
+        retired_at: datetime,
+        reason: str = "dream_consolidated",
+    ) -> int:
+        """Soft-retire entities by id, snapshotting the live node into :EntityVersion.
+
+        Mirrors the absorbed-entity soft-delete in ``dedupe_entities``. Reuses
+        the existing :EntityVersion / [:SUPERSEDES] Cypher shape (see
+        :meth:`retire_orphaned_entities_batch`) but keys off entity id + the
+        dream predicate, not a replaced document. Scoped to ``namespace_id``
+        (IDOR family); idempotent — only entities with a null ``valid_until``
+        are retired, so a replay neither double-snapshots nor re-stamps. Never
+        hard-deletes.
+
+        Returns the number of entities actually retired.
+        """
+        if not entity_ids:
+            return 0
+        ts = retired_at.isoformat()
+        rows = [{"current_id": str(eid), "snapshot_id": str(uuid4())} for eid in entity_ids]
+
+        _CYPHER = """\
+UNWIND $rows AS r
+MATCH (current:Entity {id: r.current_id, namespace_id: $namespace_id})
+WHERE current.valid_until IS NULL
+CREATE (old:EntityVersion {
+    id: r.snapshot_id,
+    namespace_id: current.namespace_id,
+    name: current.name,
+    entity_type: current.entity_type,
+    description: current.description,
+    attributes: current.attributes,
+    source_document_ids: current.source_document_ids,
+    source_chunk_ids: current.source_chunk_ids,
+    mention_count: current.mention_count,
+    valid_from: current.valid_from,
+    valid_until: current.valid_until,
+    confidence: current.confidence,
+    metadata: current.metadata,
+    created_at: current.created_at,
+    updated_at: $retired_at,
+    version_valid_from: coalesce(current.version_valid_from, $retired_at),
+    version_valid_to: $retired_at,
+    retirement_reason: $reason
+})
+CREATE (current)-[:SUPERSEDES {
+    superseded_at: $retired_at,
+    reason: $reason
+}]->(old)
+SET current.valid_until = $retired_at,
+    current.version_valid_to = $retired_at,
+    current.updated_at = $retired_at
+RETURN current.id AS id
+"""
+
+        async def _retire(tx: AsyncManagedTransaction) -> list[dict[str, Any]]:
+            result = await tx.run(
+                _CYPHER,
+                rows=rows,
+                namespace_id=str(namespace_id),
+                retired_at=ts,
+                reason=reason,
+            )
+            return await result.data()
+
+        async with self._session() as session:
+            records = await session.execute_write(_retire)
+        count = len(records)
+        logger.debug(f"Dream-retired {count} entities in namespace {namespace_id}")
+        return count
+
+    async def rewrite_relationship_endpoints_batch(
+        self,
+        rewrites: list[dict[str, Any]],
+        *,
+        namespace_id: UUID,
+        rewritten_at: datetime,
+    ) -> int:
+        """Re-point relationship endpoints by id.
+
+        Mirrors the absorbed-endpoint rewrite in ``dedupe_entities``. Neo4j
+        cannot move an existing edge's endpoints in place, so each edge is
+        re-created between the new endpoints with its properties preserved and
+        the stale edge deleted - keyed by relationship id within
+        ``namespace_id`` (IDOR family). Idempotent: an edge already pointing at
+        the new endpoints matches nothing to move.
+
+        Each dict carries ``relationship_id``, ``source_entity_id``,
+        ``target_entity_id`` (the post-rewrite endpoints), and
+        ``relationship_type`` (the Cypher edge label). The type is a Cypher
+        LABEL and CANNOT be ``$``-parameterized, so it is routed through
+        ``_sanitize_neo4j_label`` and rewrites are grouped by sanitized label
+        so each CREATE uses a static literal - no APOC dependency.
+
+        Returns the number of edges actually re-pointed.
+        """
+        if not rewrites:
+            return 0
+        ts = rewritten_at.isoformat()
+
+        # Group by sanitized relationship type so the new edge's label is a
+        # static literal (labels cannot be $-parameterized).
+        by_label: dict[str, list[dict[str, str]]] = {}
+        for rw in rewrites:
+            label = _sanitize_neo4j_label(str(rw["relationship_type"]))
+            by_label.setdefault(label, []).append(
+                {
+                    "relationship_id": str(rw["relationship_id"]),
+                    "source_entity_id": str(rw["source_entity_id"]),
+                    "target_entity_id": str(rw["target_entity_id"]),
+                }
+            )
+
+        total = 0
+        async with self._session() as session:
+            # Sorted for deterministic lock ordering (deadlock avoidance).
+            for label in sorted(by_label):
+                rows = by_label[label]
+                cypher = f"""\
+UNWIND $rows AS r
+MATCH (oldSrc)-[rel:{label} {{id: r.relationship_id, namespace_id: $namespace_id}}]->(oldTgt)
+MATCH (newSrc:Entity {{id: r.source_entity_id, namespace_id: $namespace_id}})
+MATCH (newTgt:Entity {{id: r.target_entity_id, namespace_id: $namespace_id}})
+WHERE elementId(oldSrc) <> elementId(newSrc) OR elementId(oldTgt) <> elementId(newTgt)
+WITH rel, newSrc, newTgt, properties(rel) AS relProps
+CREATE (newSrc)-[newRel:{label}]->(newTgt)
+SET newRel = relProps,
+    newRel.updated_at = $rewritten_at
+DELETE rel
+RETURN count(newRel) AS rewritten
+"""
+
+                async def _rewrite(
+                    tx: AsyncManagedTransaction, _cypher: str = cypher, _rows: list[dict[str, str]] = rows
+                ) -> int:
+                    result = await tx.run(
+                        _cypher,
+                        rows=_rows,
+                        namespace_id=str(namespace_id),
+                        rewritten_at=ts,
+                    )
+                    record = await result.single()
+                    return record["rewritten"] if record else 0
+
+                total += await session.execute_write(_rewrite)
+        logger.debug(f"Dream-rewrote endpoints on {total} relationships in namespace {namespace_id}")
+        return total
+
+    async def rename_types_batch(
+        self,
+        renames: list[dict[str, str]],
+        *,
+        namespace_id: UUID,
+    ) -> int:
+        """Relabel relationship types (Cypher edge labels).
+
+        Mirrors ``normalize_schema``. The relationship type is a Cypher edge
+        LABEL and CANNOT be ``$``-parameterized, so both ``old_type`` (the
+        MATCH label) and ``new_type`` (the new label) are routed through
+        ``_sanitize_neo4j_label`` (hard-validation; the Cypher-injection
+        surface). One MATCH/CREATE/DELETE pass per distinct (old, new) pair so
+        each label is a static, sanitized literal. Scoped to ``namespace_id``.
+
+        Returns the total number of edges relabeled.
+        """
+        if not renames:
+            return 0
+
+        total = 0
+        async with self._session() as session:
+            for rename in renames:
+                old_label = _sanitize_neo4j_label(rename["old_type"])
+                new_label = _sanitize_neo4j_label(rename["new_type"])
+                if old_label == new_label:
+                    continue
+                ts = datetime.now(UTC).isoformat()
+                # Labels are sanitized literals (NOT params). Endpoints / props
+                # are preserved by re-creating the edge under the new label and
+                # deleting the old one.
+                cypher = f"""\
+MATCH (s:Entity {{namespace_id: $namespace_id}})-[rel:{old_label} {{namespace_id: $namespace_id}}]->(t:Entity {{namespace_id: $namespace_id}})
+WITH s, t, rel, properties(rel) AS relProps
+CREATE (s)-[newRel:{new_label}]->(t)
+SET newRel = relProps,
+    newRel.updated_at = $updated_at
+DELETE rel
+RETURN count(newRel) AS renamed
+"""
+
+                async def _rename(tx: AsyncManagedTransaction, _cypher: str = cypher, _ts: str = ts) -> int:
+                    result = await tx.run(
+                        _cypher,
+                        namespace_id=str(namespace_id),
+                        updated_at=_ts,
+                    )
+                    record = await result.single()
+                    return record["renamed"] if record else 0
+
+                total += await session.execute_write(_rename)
+        logger.debug(f"Dream-renamed {total} relationship-type edges in namespace {namespace_id}")
+        return total
 
     @trace(
         "khora.neo4j.get_entity_relationships",
