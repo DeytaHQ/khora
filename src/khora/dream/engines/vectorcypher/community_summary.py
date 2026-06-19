@@ -56,13 +56,17 @@ Cost framing
 ------------
 
 At ``gpt-4o-mini`` rates, a single dream cycle over a 100k-entity
-namespace runs ~$15-25 in API spend. The dream orchestrator's
+namespace runs ~$15-25 in API spend. The dream orchestrator enforces two
+token budgets read off :class:`khora.dream.DreamConfig`:
 ``llm_max_tokens_per_run`` (default 200k) and
-``llm_max_tokens_per_namespace_per_day`` (default 1M) caps apply: the
-``acompletion`` helper records every call via the central telemetry
-collector, and the orchestrator's rolling-hour bucket enforces the
-ceiling. Operators control the cost surface via the configurable
-``community_summary_*`` knobs on :class:`khora.dream.DreamConfig`.
+``llm_max_tokens_per_namespace_per_day`` (default 1M). Each
+``acompletion`` call here records its spend through the context-local
+usage path; the orchestrator reads that spend back and checks both
+budgets *before* dispatching the next community-summary op, skipping the
+remaining ops (and emitting ``khora.dream.llm.throttled_total``) once a
+budget is exhausted (#1270). Operators control the cost surface via the
+configurable ``community_summary_*`` knobs on
+:class:`khora.dream.DreamConfig`.
 
 Stability
 ---------
@@ -403,10 +407,11 @@ async def apply_vectorcypher_community_summary(
     and never re-issues the LLM call.
 
     Cost: roughly ~$15-25 per dream cycle on a 100k-entity namespace at
-    ``gpt-4o-mini`` rates. The orchestrator's
-    :attr:`khora.dream.DreamConfig.llm_max_tokens_per_run` and
+    ``gpt-4o-mini`` rates. The orchestrator caps the upper bound by
+    checking :attr:`khora.dream.DreamConfig.llm_max_tokens_per_run` and
     :attr:`khora.dream.DreamConfig.llm_max_tokens_per_namespace_per_day`
-    caps enforce the upper bound.
+    before each LLM-using op and skipping the remainder once a budget is
+    exhausted (#1270); this handler does not enforce the budget itself.
     """
     del coordinator  # apply writes via session
 

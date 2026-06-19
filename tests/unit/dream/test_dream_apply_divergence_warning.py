@@ -120,11 +120,34 @@ def test_warn_graph_divergence_ignores_non_gated_ops() -> None:
     sink_id = logger.add(lambda m: messages.append(str(m)), level="WARNING")
     try:
         _warn_graph_divergence(coordinator, OpKind.CHRONICLE_TOMBSTONE_AUDIT)
-        _warn_graph_divergence(coordinator, OpKind.VECTORCYPHER_NORMALIZE_SCHEMA)
     finally:
         logger.remove(sink_id)
 
     assert messages == []
+
+
+def test_warn_graph_divergence_fires_for_normalize_schema() -> None:
+    """#1264: normalize_schema rewrites entity/relationship types PG-side and
+    desyncs Neo4j labels - it MUST trip the divergence warning when a graph
+    backend is attached (it was silently absent from the gate before)."""
+    coordinator = _PgCoordinator(graph=_GraphStub())
+    messages: list[str] = []
+    sink_id = logger.add(lambda m: messages.append(str(m)), level="WARNING")
+    try:
+        _warn_graph_divergence(coordinator, OpKind.VECTORCYPHER_NORMALIZE_SCHEMA)
+    finally:
+        logger.remove(sink_id)
+
+    joined = "\n".join(messages)
+    assert "vectorcypher_normalize_schema" in joined
+    assert "graph store will not reflect" in joined
+
+
+def test_normalize_schema_is_in_postgres_only_gate() -> None:
+    """#1264: normalize_schema binds raw uuid.UUID into session.execute like the
+    other vectorcypher mutation handlers, so it belongs in the gate that drives
+    both the dialect skip and the divergence accounting."""
+    assert OpKind.VECTORCYPHER_NORMALIZE_SCHEMA.value in _POSTGRES_ONLY_OP_KINDS
 
 
 # ---------------------------------------------------------------------------
