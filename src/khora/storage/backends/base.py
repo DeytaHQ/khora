@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     )
     from khora.core.models.document import DocumentSource
     from khora.core.models.recall import DocumentProjection
+    from khora.dream.plan import OpKind
     from khora.filter.ast import FilterNode
 
 
@@ -813,6 +814,93 @@ class GraphBackendProtocol(Protocol):
         """Batch create relationships.
 
         Returns the number of relationships created.
+        """
+        ...
+
+    # Dream bi-temporal mirror verbs (#1271) — optional. The dream-apply
+    # phase mirrors its PG-side soft-delete / rewrite / relabel to the graph
+    # through these. They are dream-predicate-keyed (confidence + chunk
+    # liveness, document-independent), NOT the document-replace-shaped
+    # ``retire_orphaned_*`` primitives. ``GraphBackendBase`` provides a
+    # capability-gated default that raises ``DreamBackendUnsupported`` so a
+    # backend without native support degrades to a structured skip_reason
+    # rather than silently no-op-ing or hard-deleting. The mirror wiring into
+    # the orchestrator is #1272; this seam only declares the contract.
+
+    def supports_dream_mirror(self) -> frozenset[OpKind]:
+        """The ``OpKind`` values this backend can mirror to the graph.
+
+        The dream orchestrator (#1272) intersects the plan's op kinds with
+        this set; ops outside it record a structured skip_reason instead of
+        diverging the two stores. Empty set = no graph-mirror support.
+        """
+        ...
+
+    async def soft_invalidate_relationships_batch(
+        self,
+        relationship_ids: list[UUID],
+        *,
+        namespace_id: UUID,
+        invalidated_at: datetime,
+    ) -> int:
+        """Soft-delete relationships by id by stamping ``valid_until``.
+
+        Mirrors ``prune_edges`` (the dream predicate: low-confidence +
+        chunk-dead edges). Idempotent by id (only edges with a null
+        ``valid_until`` are touched), namespace-scoped. Never hard-deletes.
+        Returns the number of edges actually invalidated.
+        """
+        ...
+
+    async def soft_retire_entities_batch(
+        self,
+        entity_ids: list[UUID],
+        *,
+        namespace_id: UUID,
+        retired_at: datetime,
+        reason: str = "dream_consolidated",
+    ) -> int:
+        """Soft-retire entities by id, snapshotting the pre-state.
+
+        Mirrors the absorbed-entity soft-delete in ``dedupe_entities``:
+        snapshots the live node into a version record and stamps
+        ``valid_until`` / ``version_valid_to`` on the original. Idempotent
+        by id (only still-live entities are retired), namespace-scoped.
+        Never hard-deletes. Returns the number of entities actually retired.
+        """
+        ...
+
+    async def rewrite_relationship_endpoints_batch(
+        self,
+        rewrites: list[dict[str, Any]],
+        *,
+        namespace_id: UUID,
+        rewritten_at: datetime,
+    ) -> int:
+        """Re-point relationship endpoints by id.
+
+        Mirrors the absorbed-endpoint rewrite in ``dedupe_entities``. Each
+        dict carries ``relationship_id``, ``source_entity_id``,
+        ``target_entity_id`` (the post-rewrite endpoints), and
+        ``relationship_type`` (the Cypher edge label - sanitized by backends
+        that store types as labels). Idempotent by id, namespace-scoped.
+        Returns the number of edges actually re-pointed.
+        """
+        ...
+
+    async def rename_types_batch(
+        self,
+        renames: list[dict[str, str]],
+        *,
+        namespace_id: UUID,
+    ) -> int:
+        """Relabel relationship types (Cypher edge labels).
+
+        Mirrors ``normalize_schema``. Each dict carries ``old_type`` and
+        ``new_type``. The relationship type is a Cypher edge label and CANNOT
+        be ``$``-parameterized, so backends MUST route both ends through the
+        shared ``sanitize_cypher_label`` hard-validation. Namespace-scoped.
+        Returns the number of edges relabeled.
         """
         ...
 
