@@ -37,7 +37,17 @@ pub fn detect_communities(
     resolution: f64,
     max_iter: usize,
 ) -> Vec<i32> {
-    py.detach(|| {
+    py.detach(|| detect_communities_inner(n, &edges, resolution, max_iter))
+}
+
+/// Pure-Rust implementation (no Python dependency), used by both PyO3 binding and tests.
+pub fn detect_communities_inner(
+    n: usize,
+    edges: &[(usize, usize, f64)],
+    resolution: f64,
+    max_iter: usize,
+) -> Vec<i32> {
+    {
         if n == 0 {
             return Vec::new();
         }
@@ -47,7 +57,7 @@ pub fn detect_communities(
         let mut strengths: Vec<f64> = vec![0.0; n];
         let mut total_weight = 0.0f64;
 
-        for &(src, dst, weight) in &edges {
+        for &(src, dst, weight) in edges {
             if src < n && dst < n && src != dst {
                 adj[src].push((dst, weight));
                 strengths[src] += weight;
@@ -147,7 +157,7 @@ pub fn detect_communities(
         }
 
         result
-    })
+    }
 }
 
 #[cfg(test)]
@@ -156,69 +166,60 @@ mod tests {
 
     #[test]
     fn test_empty_graph() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            let result = detect_communities(py, 0, vec![], 1.0, 10);
-            assert!(result.is_empty());
-        });
+        let result = detect_communities_inner(0, &[], 1.0, 10);
+        assert!(result.is_empty());
     }
 
     #[test]
     fn test_single_component() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            // Triangle: 0-1-2, all strongly connected
-            let edges = vec![
-                (0, 1, 1.0),
-                (1, 0, 1.0),
-                (1, 2, 1.0),
-                (2, 1, 1.0),
-                (0, 2, 1.0),
-                (2, 0, 1.0),
-            ];
-            let result = detect_communities(py, 3, edges, 1.0, 10);
-            assert_eq!(result.len(), 3);
-            // All nodes should end up in the same community
-            assert_eq!(result[0], result[1]);
-            assert_eq!(result[1], result[2]);
-            assert!(result[0] >= 0);
-        });
+        // Triangle: 0-1-2, all strongly connected
+        let edges = vec![
+            (0, 1, 1.0),
+            (1, 0, 1.0),
+            (1, 2, 1.0),
+            (2, 1, 1.0),
+            (0, 2, 1.0),
+            (2, 0, 1.0),
+        ];
+        let result = detect_communities_inner(3, &edges, 1.0, 10);
+        assert_eq!(result.len(), 3);
+        // All nodes should end up in the same community
+        assert_eq!(result[0], result[1]);
+        assert_eq!(result[1], result[2]);
+        assert!(result[0] >= 0);
     }
 
     #[test]
     fn test_two_clear_clusters() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            // Two dense triangles {0,1,2} and {3,4,5} with a weak bridge
-            let edges = vec![
-                // Cluster A
-                (0, 1, 10.0),
-                (1, 0, 10.0),
-                (1, 2, 10.0),
-                (2, 1, 10.0),
-                (0, 2, 10.0),
-                (2, 0, 10.0),
-                // Cluster B
-                (3, 4, 10.0),
-                (4, 3, 10.0),
-                (4, 5, 10.0),
-                (5, 4, 10.0),
-                (3, 5, 10.0),
-                (5, 3, 10.0),
-                // Weak inter-cluster bridge
-                (2, 3, 0.1),
-                (3, 2, 0.1),
-            ];
-            let result = detect_communities(py, 6, edges, 1.0, 10);
-            assert_eq!(result.len(), 6);
-            // Each cluster forms one community
-            assert_eq!(result[0], result[1]);
-            assert_eq!(result[1], result[2]);
-            assert_eq!(result[3], result[4]);
-            assert_eq!(result[4], result[5]);
-            // The two clusters must be distinct communities
-            assert_ne!(result[0], result[3]);
-        });
+        // Two dense triangles {0,1,2} and {3,4,5} with a weak bridge
+        let edges = vec![
+            // Cluster A
+            (0, 1, 10.0),
+            (1, 0, 10.0),
+            (1, 2, 10.0),
+            (2, 1, 10.0),
+            (0, 2, 10.0),
+            (2, 0, 10.0),
+            // Cluster B
+            (3, 4, 10.0),
+            (4, 3, 10.0),
+            (4, 5, 10.0),
+            (5, 4, 10.0),
+            (3, 5, 10.0),
+            (5, 3, 10.0),
+            // Weak inter-cluster bridge
+            (2, 3, 0.1),
+            (3, 2, 0.1),
+        ];
+        let result = detect_communities_inner(6, &edges, 1.0, 10);
+        assert_eq!(result.len(), 6);
+        // Each cluster forms one community
+        assert_eq!(result[0], result[1]);
+        assert_eq!(result[1], result[2]);
+        assert_eq!(result[3], result[4]);
+        assert_eq!(result[4], result[5]);
+        // The two clusters must be distinct communities
+        assert_ne!(result[0], result[3]);
     }
 
     #[test]
@@ -227,45 +228,39 @@ mod tests {
         // to two otherwise-separate triangles ties between the two communities.
         // Before the smallest-id tie-break, the winner depended on hashbrown's
         // randomly-seeded HashMap iteration order. Repeated runs must agree.
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            let edges = vec![
-                (0, 1, 1.0), (1, 0, 1.0),
-                (1, 2, 1.0), (2, 1, 1.0),
-                (0, 2, 1.0), (2, 0, 1.0),
-                (3, 4, 1.0), (4, 3, 1.0),
-                (4, 5, 1.0), (5, 4, 1.0),
-                (3, 5, 1.0), (5, 3, 1.0),
-                (6, 2, 1.0), (2, 6, 1.0),
-                (6, 3, 1.0), (3, 6, 1.0),
-            ];
-            let first = detect_communities(py, 7, edges.clone(), 1.0, 10);
-            for _ in 0..50 {
-                assert_eq!(detect_communities(py, 7, edges.clone(), 1.0, 10), first);
-            }
-        });
+        let edges = vec![
+            (0, 1, 1.0), (1, 0, 1.0),
+            (1, 2, 1.0), (2, 1, 1.0),
+            (0, 2, 1.0), (2, 0, 1.0),
+            (3, 4, 1.0), (4, 3, 1.0),
+            (4, 5, 1.0), (5, 4, 1.0),
+            (3, 5, 1.0), (5, 3, 1.0),
+            (6, 2, 1.0), (2, 6, 1.0),
+            (6, 3, 1.0), (3, 6, 1.0),
+        ];
+        let first = detect_communities_inner(7, &edges, 1.0, 10);
+        for _ in 0..50 {
+            assert_eq!(detect_communities_inner(7, &edges, 1.0, 10), first);
+        }
     }
 
     #[test]
     fn test_disconnected_components() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            // Two disconnected pairs {0,1} and {2,3}, plus isolated node 4
-            let edges = vec![
-                (0, 1, 1.0),
-                (1, 0, 1.0),
-                (2, 3, 1.0),
-                (3, 2, 1.0),
-            ];
-            let result = detect_communities(py, 5, edges, 1.0, 10);
-            assert_eq!(result.len(), 5);
-            // Each pair shares a community
-            assert_eq!(result[0], result[1]);
-            assert_eq!(result[2], result[3]);
-            // The two pairs are in different communities
-            assert_ne!(result[0], result[2]);
-            // Isolated node has no community
-            assert_eq!(result[4], -1);
-        });
+        // Two disconnected pairs {0,1} and {2,3}, plus isolated node 4
+        let edges = vec![
+            (0, 1, 1.0),
+            (1, 0, 1.0),
+            (2, 3, 1.0),
+            (3, 2, 1.0),
+        ];
+        let result = detect_communities_inner(5, &edges, 1.0, 10);
+        assert_eq!(result.len(), 5);
+        // Each pair shares a community
+        assert_eq!(result[0], result[1]);
+        assert_eq!(result[2], result[3]);
+        // The two pairs are in different communities
+        assert_ne!(result[0], result[2]);
+        // Isolated node has no community
+        assert_eq!(result[4], -1);
     }
 }

@@ -44,7 +44,19 @@ pub fn pagerank(
     tol: f64,
     personalization: Option<Vec<f64>>,
 ) -> Vec<f64> {
-    py.detach(|| {
+    py.detach(|| pagerank_inner(n, &edges, damping, max_iter, tol, personalization))
+}
+
+/// Pure-Rust implementation (no Python dependency), used by both PyO3 binding and tests.
+pub fn pagerank_inner(
+    n: usize,
+    edges: &[(usize, usize, f64)],
+    damping: f64,
+    max_iter: usize,
+    tol: f64,
+    personalization: Option<Vec<f64>>,
+) -> Vec<f64> {
+    {
         if n == 0 {
             return Vec::new();
         }
@@ -72,7 +84,7 @@ pub fn pagerank(
         // Accumulate out-degree (sum of outgoing weights) per node
         let mut out_degree: Vec<f64> = vec![0.0; n];
 
-        for &(src, dst, weight) in &edges {
+        for &(src, dst, weight) in edges {
             if src < n && dst < n {
                 incoming[dst].push((src, weight));
                 out_degree[src] += weight;
@@ -106,7 +118,7 @@ pub fn pagerank(
         }
 
         scores
-    })
+    }
 }
 
 /// Build chunk-to-chunk edges from keyword memberships (co-occurrence graph).
@@ -162,111 +174,82 @@ mod tests {
 
     #[test]
     fn test_simple_graph_convergence() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            // Simple 3-node cycle: 0 → 1, 1 → 2, 2 → 0
-            let edges = vec![
-                (0, 1, 1.0),
-                (1, 2, 1.0),
-                (2, 0, 1.0),
-            ];
-            let scores = pagerank(py, 3, edges, 0.85, 100, 1e-6, None);
-            assert_eq!(scores.len(), 3);
-            // All nodes should have equal scores in a symmetric cycle
-            assert!((scores[0] - scores[1]).abs() < 1e-4);
-            assert!((scores[1] - scores[2]).abs() < 1e-4);
-        });
+        // Simple 3-node cycle: 0 → 1, 1 → 2, 2 → 0
+        let edges = vec![
+            (0, 1, 1.0),
+            (1, 2, 1.0),
+            (2, 0, 1.0),
+        ];
+        let scores = pagerank_inner(3, &edges, 0.85, 100, 1e-6, None);
+        assert_eq!(scores.len(), 3);
+        // All nodes should have equal scores in a symmetric cycle
+        assert!((scores[0] - scores[1]).abs() < 1e-4);
+        assert!((scores[1] - scores[2]).abs() < 1e-4);
     }
 
     #[test]
     fn test_isolated_nodes() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            // 3 nodes, no edges → all get base score (1-d)/n
-            let scores = pagerank(py, 3, vec![], 0.85, 100, 1e-6, None);
-            assert_eq!(scores.len(), 3);
-            let expected = 0.15 / 3.0;
-            for s in &scores {
-                assert!((*s - expected).abs() < 1e-4);
-            }
-        });
+        // 3 nodes, no edges → all get base score (1-d)/n
+        let scores = pagerank_inner(3, &[], 0.85, 100, 1e-6, None);
+        assert_eq!(scores.len(), 3);
+        let expected = 0.15 / 3.0;
+        for s in &scores {
+            assert!((*s - expected).abs() < 1e-4);
+        }
     }
 
     #[test]
     fn test_empty_graph() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            let scores = pagerank(py, 0, vec![], 0.85, 100, 1e-6, None);
-            assert!(scores.is_empty());
-        });
+        let scores = pagerank_inner(0, &[], 0.85, 100, 1e-6, None);
+        assert!(scores.is_empty());
     }
 
     #[test]
     fn test_star_graph() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            // All nodes point to node 0
-            let edges = vec![
-                (1, 0, 1.0),
-                (2, 0, 1.0),
-                (3, 0, 1.0),
-            ];
-            let scores = pagerank(py, 4, edges, 0.85, 100, 1e-6, None);
-            assert_eq!(scores.len(), 4);
-            // Node 0 should have the highest score
-            assert!(scores[0] > scores[1]);
-            assert!(scores[0] > scores[2]);
-            assert!(scores[0] > scores[3]);
-        });
+        // All nodes point to node 0
+        let edges = vec![
+            (1, 0, 1.0),
+            (2, 0, 1.0),
+            (3, 0, 1.0),
+        ];
+        let scores = pagerank_inner(4, &edges, 0.85, 100, 1e-6, None);
+        assert_eq!(scores.len(), 4);
+        // Node 0 should have the highest score
+        assert!(scores[0] > scores[1]);
+        assert!(scores[0] > scores[2]);
+        assert!(scores[0] > scores[3]);
     }
 
     #[test]
     fn test_personalized_seeded_chain() {
         // PPR seeded on node 0 of a 3-node chain (0 → 1 → 2): seed dominates,
         // then 1, then 2 — the depth-decay property the retriever needs.
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            let edges = vec![(0, 1, 1.0), (1, 2, 1.0)];
-            let personalization = Some(vec![1.0, 0.0, 0.0]);
-            let scores = pagerank(py, 3, edges, 0.85, 200, 1e-8, personalization);
-            assert_eq!(scores.len(), 3);
-            assert!(scores[0] > scores[1]);
-            assert!(scores[1] > scores[2]);
-        });
+        let edges = vec![(0, 1, 1.0), (1, 2, 1.0)];
+        let personalization = Some(vec![1.0, 0.0, 0.0]);
+        let scores = pagerank_inner(3, &edges, 0.85, 200, 1e-8, personalization);
+        assert_eq!(scores.len(), 3);
+        assert!(scores[0] > scores[1]);
+        assert!(scores[1] > scores[2]);
     }
 
     #[test]
     fn test_uniform_personalization_matches_default() {
         // Explicit uniform p must produce the same scores as None.
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            let edges = vec![(0, 1, 1.0), (1, 2, 1.0), (2, 0, 1.0)];
-            let default_scores = pagerank(py, 3, edges.clone(), 0.85, 200, 1e-9, None);
-            let uniform_scores = pagerank(
-                py,
-                3,
-                edges,
-                0.85,
-                200,
-                1e-9,
-                Some(vec![1.0 / 3.0; 3]),
-            );
-            for i in 0..3 {
-                assert!((default_scores[i] - uniform_scores[i]).abs() < 1e-6);
-            }
-        });
+        let edges = vec![(0, 1, 1.0), (1, 2, 1.0), (2, 0, 1.0)];
+        let default_scores = pagerank_inner(3, &edges, 0.85, 200, 1e-9, None);
+        let uniform_scores = pagerank_inner(3, &edges, 0.85, 200, 1e-9, Some(vec![1.0 / 3.0; 3]));
+        for i in 0..3 {
+            assert!((default_scores[i] - uniform_scores[i]).abs() < 1e-6);
+        }
     }
 
     #[test]
     fn test_personalization_length_mismatch_falls_back_to_uniform() {
         // Wrong-length p → uniform; must not panic.
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            let edges = vec![(0, 1, 1.0), (1, 2, 1.0), (2, 0, 1.0)];
-            let scores = pagerank(py, 3, edges, 0.85, 100, 1e-6, Some(vec![1.0, 0.0]));
-            // Symmetric cycle + uniform → equal scores
-            assert!((scores[0] - scores[1]).abs() < 1e-4);
-            assert!((scores[1] - scores[2]).abs() < 1e-4);
-        });
+        let edges = vec![(0, 1, 1.0), (1, 2, 1.0), (2, 0, 1.0)];
+        let scores = pagerank_inner(3, &edges, 0.85, 100, 1e-6, Some(vec![1.0, 0.0]));
+        // Symmetric cycle + uniform → equal scores
+        assert!((scores[0] - scores[1]).abs() < 1e-4);
+        assert!((scores[1] - scores[2]).abs() < 1e-4);
     }
 }
