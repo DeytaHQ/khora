@@ -326,6 +326,27 @@ DEFINE FIELD IF NOT EXISTS created_at ON memory_fact TYPE datetime DEFAULT time:
 DEFINE FIELD IF NOT EXISTS updated_at ON memory_fact TYPE datetime DEFAULT time::now();
 DEFINE INDEX IF NOT EXISTS idx_memory_fact_namespace ON memory_fact FIELDS namespace_id;
 DEFINE INDEX IF NOT EXISTS idx_memory_fact_ns_subject_active ON memory_fact FIELDS namespace_id, subject, is_active;
+
+-- Dream run-state (mirrors khora_dream_runs on PG/SQLite; see #1274).
+-- The unified stack has no Alembic, so the dream orchestrator's run-state
+-- store (record / checkpoint / status / history / resume) and the #1272
+-- reconciler's graph_mirror_pending list live here. ``run_id`` is the
+-- business key; the RecordID is derived from it for O(1) lookup.
+DEFINE TABLE IF NOT EXISTS khora_dream_runs SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS run_id ON khora_dream_runs TYPE string;
+DEFINE FIELD IF NOT EXISTS namespace_id ON khora_dream_runs TYPE string;
+DEFINE FIELD IF NOT EXISTS trigger ON khora_dream_runs TYPE string DEFAULT 'manual';
+DEFINE FIELD IF NOT EXISTS mode ON khora_dream_runs TYPE string;
+DEFINE FIELD IF NOT EXISTS state ON khora_dream_runs TYPE string DEFAULT 'planning';
+DEFINE FIELD IF NOT EXISTS plan_hash ON khora_dream_runs TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS started_at ON khora_dream_runs TYPE datetime DEFAULT time::now();
+DEFINE FIELD IF NOT EXISTS finished_at ON khora_dream_runs TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS last_committed_op_seq ON khora_dream_runs TYPE int DEFAULT -1;
+DEFINE FIELD IF NOT EXISTS total_ops ON khora_dream_runs TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS error ON khora_dream_runs FLEXIBLE TYPE option<object>;
+DEFINE FIELD IF NOT EXISTS graph_mirror_pending ON khora_dream_runs FLEXIBLE TYPE option<array>;
+DEFINE INDEX IF NOT EXISTS idx_khora_dream_runs_run_id ON khora_dream_runs FIELDS run_id;
+DEFINE INDEX IF NOT EXISTS idx_khora_dream_runs_ns_started ON khora_dream_runs FIELDS namespace_id, started_at;
 """
 
 
