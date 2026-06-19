@@ -501,11 +501,17 @@ def _build_op(cluster: list[_EventRow], *, namespace_id: UUID) -> DreamOp:
 
 
 def _bind_uuid(session: AsyncSession, value: UUID) -> str | UUID:
-    """Convert UUID to str for SQLite; pass-through for Postgres asyncpg."""
+    """Bind a UUID for raw ``text()`` SQL, per-dialect (#1067).
+
+    Postgres asyncpg binds ``uuid.UUID`` natively. On SQLite the
+    sqlite_lance store persists UUIDs as 32-char hex (no dashes) via
+    SQLAlchemy ``Uuid(as_uuid=True)``, so a raw ``text()`` ``WHERE`` must
+    bind ``value.hex`` - binding the dashed ``str(value)`` matched 0 rows.
+    """
     dialect = session.bind.dialect.name if session.bind is not None else ""
     if dialect == "postgresql":
         return value
-    return str(value)
+    return value.hex
 
 
 def _as_uuid(value: UUID | str) -> UUID:

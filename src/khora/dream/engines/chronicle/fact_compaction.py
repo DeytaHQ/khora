@@ -279,9 +279,10 @@ async def _delete_rows(session: AsyncSession, ids: list[UUID]) -> None:
             {"ids": list(ids)},
         )
         return
-    # SQLite / aiosqlite path — expanding bind.
+    # SQLite / aiosqlite path — expanding bind. Bind the 32-char hex form
+    # the sqlite_lance store wrote (see :func:`_bind_uuid`), not dashed str.
     placeholders = ", ".join(f":id_{i}" for i in range(len(ids)))
-    params = {f"id_{i}": str(fid) for i, fid in enumerate(ids)}
+    params = {f"id_{i}": fid.hex for i, fid in enumerate(ids)}
     await session.execute(
         text(f"DELETE FROM memory_facts WHERE id IN ({placeholders})"),  # noqa: S608
         params,
@@ -368,11 +369,17 @@ async def _select_candidates(
 
 
 def _bind_uuid(session: AsyncSession, value: UUID) -> str | UUID:
-    """Convert UUID to str for SQLite; pass-through for Postgres asyncpg."""
+    """Bind a UUID for raw ``text()`` SQL, per-dialect (#1067).
+
+    Postgres asyncpg binds ``uuid.UUID`` natively. On SQLite the
+    sqlite_lance store persists UUIDs as 32-char hex (no dashes) via
+    SQLAlchemy ``Uuid(as_uuid=True)``, so a raw ``text()`` ``WHERE`` must
+    bind ``value.hex`` - binding the dashed ``str(value)`` matched 0 rows.
+    """
     dialect = session.bind.dialect.name if session.bind is not None else ""
     if dialect == "postgresql":
         return value
-    return str(value)
+    return value.hex
 
 
 def _as_aware(value: datetime | str) -> datetime:

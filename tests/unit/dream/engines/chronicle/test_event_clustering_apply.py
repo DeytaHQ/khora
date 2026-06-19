@@ -111,9 +111,12 @@ async def _insert_event(
             "VALUES (:id, :ns, :ch, :subj, 'did', '', :obs, :ref, :conf, :emb)"
         ),
         {
-            "id": str(ev_id),
-            "ns": str(namespace_id),
-            "ch": str(ch_id),
+            # Seed UUIDs as 32-char hex - the form the sqlite_lance
+            # production adapter writes, which is what ``_bind_uuid`` now
+            # binds against on SQLite (#1067).
+            "id": ev_id.hex,
+            "ns": namespace_id.hex,
+            "ch": ch_id.hex,
             "subj": subject,
             "obs": now,
             "ref": now,
@@ -130,7 +133,7 @@ async def _row(session: AsyncSession, event_id: UUID) -> dict:
             "SELECT id, chunk_id, subject, invalidated_at, invalidated_by, merged_into_event_id "
             "FROM chronicle_events WHERE id = :id"
         ),
-        {"id": str(event_id)},
+        {"id": event_id.hex},
     )
     r = res.first()
     if r is None:
@@ -340,7 +343,9 @@ async def test_undo_round_trip(session: AsyncSession) -> None:
                 "iat": prev["invalidated_at"],
                 "iby": prev["invalidated_by"],
                 "mid": prev["merged_into_event_id"],
-                "id": prev["id"],
+                # Snapshot stores the canonical dashed UUID; SQLite keys the
+                # row by 32-char hex, so an undo executor re-binds per-dialect.
+                "id": UUID(prev["id"]).hex,
             },
         )
     await session.commit()
