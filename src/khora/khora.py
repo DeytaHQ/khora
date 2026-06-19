@@ -2364,6 +2364,7 @@ class Khora:
         scope: Any = None,
         ops: Any = None,
         config: Any = None,
+        expertise: Any = None,
         on_progress: Callable[[Any], None] | None = None,
         resume_from: UUID | None = None,
     ) -> Any:
@@ -2372,6 +2373,11 @@ class Khora:
         Phase 0.1 scaffolding — body raises ``NotImplementedError`` until
         the orchestrator ships in #661. The signature is settled so
         callers can wire against it.
+
+        ``expertise`` is an optional :class:`ExpertiseConfig` forwarded to
+        the schema-drift planner (#1036). It is required for the
+        ``schema_drift`` op; when omitted, that op is skipped with a
+        ``skip_reasons`` entry rather than dropped silently.
         """
         from khora.dream.api import dream as _dream
 
@@ -2382,6 +2388,7 @@ class Khora:
             scope=scope,
             ops=ops,
             config=config,
+            expertise=expertise,
             on_progress=on_progress,
             resume_from=resume_from,
         )

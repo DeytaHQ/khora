@@ -353,6 +353,23 @@ class _VectorCypherPlugin:
                     expertise=expertise,
                 )
                 ops.append(op)
+            else:
+                # Requested but no ExpertiseConfig to diff against - record a
+                # skip_reason so the omission is observable rather than a
+                # silent drop (#1036, ADR-001).
+                op_label = str(OpKind.VECTORCYPHER_SCHEMA_DRIFT_REPORT)
+                logger.warning(
+                    "dream: dropping {op} - it requires an ExpertiseConfig; "
+                    "pass kb.dream(..., expertise=...) to run it",
+                    op=op_label,
+                )
+                skip_reasons.append(
+                    {
+                        "op_kind": op_label,
+                        "reason": "op_requires_expertise",
+                        "detail": "schema_drift needs an ExpertiseConfig to diff the observed type taxonomy against; none supplied",
+                    }
+                )
 
         if OpKind.VECTORCYPHER_ORPHAN_REPORT in wanted:
             op = await plan_vectorcypher_orphan_report(
