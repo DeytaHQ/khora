@@ -104,9 +104,12 @@ async def _insert_event(
             ":obs, :ref, :conf, :emb, :inv)"
         ),
         {
-            "id": str(ev_id),
-            "ns": str(namespace_id),
-            "chunk": str(ch_id),
+            # Seed UUIDs as 32-char hex - the form the sqlite_lance
+            # production adapter writes, which is what ``_bind_uuid`` now
+            # binds against on SQLite (#1067).
+            "id": ev_id.hex,
+            "ns": namespace_id.hex,
+            "chunk": ch_id.hex,
             "subject": subject,
             "obs": obs.isoformat(),
             "ref": referenced_date.isoformat(),
@@ -121,7 +124,7 @@ async def _insert_event(
 async def _count_rows(session: AsyncSession, namespace_id: UUID) -> int:
     result = await session.execute(
         sa.text("SELECT COUNT(*) FROM chronicle_events WHERE namespace_id=:ns"),
-        {"ns": str(namespace_id)},
+        {"ns": namespace_id.hex},
     )
     return int(result.scalar_one())
 

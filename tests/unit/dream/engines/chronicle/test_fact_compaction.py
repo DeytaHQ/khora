@@ -59,12 +59,15 @@ async def session(sqlite_url: str) -> AsyncIterator[AsyncSession]:
 
 
 async def _create_namespace(session: AsyncSession, ns_id: UUID) -> None:
+    # Seed UUIDs as 32-char hex - the form the sqlite_lance production
+    # adapter writes (SQLAlchemy ``Uuid(as_uuid=True)``), which is what
+    # ``_bind_uuid`` now binds against on SQLite (#1067).
     await session.execute(
         sa.text(
             "INSERT INTO memory_namespaces (id, namespace_id, tenancy_mode, version, is_active) "
             "VALUES (:id, :ns, 'shared', 1, 1)"
         ),
-        {"id": str(ns_id), "ns": str(ns_id)},
+        {"id": ns_id.hex, "ns": ns_id.hex},
     )
     await session.commit()
 
@@ -83,8 +86,8 @@ async def _insert_fact(
 ) -> UUID:
     fact_id = uuid4()
     params: dict[str, object] = {
-        "id": str(fact_id),
-        "ns": str(namespace_id),
+        "id": fact_id.hex,
+        "ns": namespace_id.hex,
         "active": 1 if is_active else 0,
         "src": json.dumps([]),
         "subj": subject,
@@ -107,7 +110,7 @@ async def _insert_fact(
         inv_clause = ""
         inv_values = ""
     if superseded_by is not None:
-        params["sup"] = str(superseded_by)
+        params["sup"] = superseded_by.hex
         sup_clause = ", superseded_by"
         sup_values = ", :sup"
     else:
@@ -128,7 +131,7 @@ async def _insert_fact(
 async def _count_rows(session: AsyncSession, namespace_id: UUID) -> int:
     result = await session.execute(
         sa.text("SELECT COUNT(*) FROM memory_facts WHERE namespace_id=:ns"),
-        {"ns": str(namespace_id)},
+        {"ns": namespace_id.hex},
     )
     return int(result.scalar_one())
 
@@ -384,7 +387,7 @@ async def _one_op_for_serialisation() -> DreamOp:
                     "VALUES (:id, :ns, 'Alice', 'lives_in', 'Paris', 'Alice lives in Paris', "
                     "0.9, 0, '[]', :ts, :ts)"
                 ),
-                {"id": str(uuid4()), "ns": str(ns), "ts": old},
+                {"id": uuid4().hex, "ns": ns.hex, "ts": old},
             )
         factory = async_sessionmaker(eng, expire_on_commit=False)
         async with factory() as s:

@@ -28,6 +28,8 @@ from loguru import logger
 
 from khora.dream.engines.chronicle import (
     plan_chronicle_abstention_drift,
+    plan_chronicle_event_clustering,
+    plan_chronicle_fact_compaction,
     plan_chronicle_tombstone_audit,
 )
 from khora.dream.engines.vectorcypher import (
@@ -249,6 +251,8 @@ class _ChroniclePlugin:
             {
                 OpKind.CHRONICLE_ABSTENTION_DRIFT_REPORT,
                 OpKind.CHRONICLE_TOMBSTONE_AUDIT,
+                OpKind.CHRONICLE_FACT_COMPACTION,
+                OpKind.CHRONICLE_EVENT_CLUSTERING,
             }
         )
 
@@ -287,6 +291,31 @@ class _ChroniclePlugin:
             async with coordinator.transaction() as txn:
                 op = await plan_chronicle_tombstone_audit(namespace_id, session=txn.session, config=config)
             ops.append(op)
+
+        # Fact compaction is the only hard-delete op; gate it on the
+        # documented ``ops.compact_facts`` toggle so a plain
+        # ``kb.dream(mode="apply")`` does not reclaim rows unless the
+        # operator opted in (#1067). ``memory_facts`` rows are persisted
+        # under the resolved row-level namespace id, so resolve before
+        # selecting candidates (mirrors the vectorcypher planners).
+        if OpKind.CHRONICLE_FACT_COMPACTION in wanted and config.ops.compact_facts:
+            coordinator = kb.storage
+            resolved_ns = await coordinator.resolve_namespace(namespace_id)
+            async with coordinator.transaction() as txn:
+                compaction_ops = await plan_chronicle_fact_compaction(resolved_ns, session=txn.session, config=config)
+            ops.extend(compaction_ops)
+
+        # Event clustering soft-merges near-duplicate chronicle_events;
+        # gate on ``ops.cluster_events`` and resolve the namespace the same
+        # way (events are stored under the row-level id too).
+        if OpKind.CHRONICLE_EVENT_CLUSTERING in wanted and config.ops.cluster_events:
+            coordinator = kb.storage
+            resolved_ns = await coordinator.resolve_namespace(namespace_id)
+            async with coordinator.transaction() as txn:
+                clustering_ops = await plan_chronicle_event_clustering(
+                    resolved_ns, session=txn.session, config=config, _skip_reasons=skip_reasons
+                )
+            ops.extend(clustering_ops)
 
         return DreamPlan(
             plan_id=uuid4(),
