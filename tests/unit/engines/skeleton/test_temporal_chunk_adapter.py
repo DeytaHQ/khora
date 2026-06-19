@@ -19,7 +19,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from khora.engines.skeleton.backends import (
+from khora.storage.temporal import (
     TemporalChunk,
     temporal_chunk_to_chunk,
 )

@@ -45,11 +45,6 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from khora.config import KhoraConfig
 from khora.core.models import Chunk
-from khora.engines.skeleton.backends import TemporalChunk
-from khora.engines.skeleton.backends.pgvector import (
-    PgVectorTemporalStore,
-    khora_chunks_table,
-)
 from khora.filter.conformance import (
     ConformanceCase,
     f_array_cases,
@@ -69,6 +64,11 @@ from khora.filter.conformance import (
 )
 from khora.storage.backends.postgresql import PostgreSQLBackend
 from khora.storage.coordinator import StorageCoordinator
+from khora.storage.temporal import TemporalChunk
+from khora.storage.temporal.pgvector import (
+    PgVectorTemporalStore,
+    khora_chunks_table,
+)
 from tests.integration._sqlite_lance_fixtures import fake_embedding
 
 # Same default + normalization as the sibling skeleton/chronicle PG modules.

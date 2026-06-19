@@ -59,11 +59,11 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from khora.config import KhoraConfig
 from khora.db.session import run_migrations
-from khora.engines.skeleton.backends import TemporalChunk
-from khora.engines.skeleton.backends.pgvector import PgVectorTemporalStore
 from khora.extraction.extractors.base import ExtractedEntity, ExtractionResult
 from khora.khora import Khora
 from khora.query import SearchMode
+from khora.storage.temporal import TemporalChunk
+from khora.storage.temporal.pgvector import PgVectorTemporalStore
 
 EMBED_DIM = 1536  # matches the khora_chunks.embedding Vector(1536) column
 

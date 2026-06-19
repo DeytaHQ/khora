@@ -28,7 +28,7 @@ class TestChronicleTemporalShim:
 
     def test_skeleton_filter_primary_fields_used(self) -> None:
         """SkeletonTemporalFilter with occurred_after/occurred_before → primary fields used."""
-        from khora.engines.skeleton.backends import TemporalFilter as SkeletonTemporalFilter
+        from khora.storage.temporal import TemporalFilter as SkeletonTemporalFilter
 
         start = datetime(2024, 1, 1, tzinfo=UTC)
         end = datetime(2024, 12, 31, tzinfo=UTC)

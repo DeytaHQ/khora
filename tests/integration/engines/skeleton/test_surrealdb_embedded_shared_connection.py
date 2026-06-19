@@ -30,7 +30,7 @@ import pytest
 
 pytest.importorskip("surrealdb")
 
-from khora.engines.skeleton.backends.surrealdb import SurrealDBTemporalStore  # noqa: E402
+from khora.storage.temporal.surrealdb import SurrealDBTemporalStore  # noqa: E402
 
 pytestmark = pytest.mark.integration
 

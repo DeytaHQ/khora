@@ -54,11 +54,11 @@ from functools import lru_cache
 from typing import Any
 from uuid import UUID, uuid4
 
-from khora.engines.skeleton.backends import TemporalChunk
 from khora.engines.vectorcypher.dual_nodes import DualNodeManager
 from khora.filter import CompiledFilter
 from khora.filter.ast import FilterNode
 from khora.filter.conformance import ConformanceCase, CypherExecutor, SeedRecord
+from khora.storage.temporal import TemporalChunk
 
 # The node alias the ``CypherExecutor`` compiles against (``Chunk`` node, alias
 # ``c`` — see ``VectorCypherRetriever`` graph-channel filter pushdown). The executor

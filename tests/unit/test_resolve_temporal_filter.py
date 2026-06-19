@@ -43,7 +43,7 @@ class TestResolveTemporalFilter:
 
     def test_explicit_signal_with_filter_passed_through(self) -> None:
         """If temporal_signal already has a filter, use it directly."""
-        from khora.engines.skeleton.backends import TemporalFilter
+        from khora.storage.temporal import TemporalFilter
 
         existing = TemporalFilter(occurred_after=datetime(2026, 1, 1, tzinfo=UTC))
         mock_signal = MagicMock()
@@ -73,7 +73,7 @@ class TestResolveTemporalFilter:
 
     def test_returns_skeleton_temporal_filter_type(self) -> None:
         """resolve_temporal_filter returns the skeleton TemporalFilter type."""
-        from khora.engines.skeleton.backends import TemporalFilter
+        from khora.storage.temporal import TemporalFilter
 
         result = resolve_temporal_filter("What happened in the last 3 days?")
         assert result is not None
@@ -94,8 +94,8 @@ class TestToQueryTemporalFilter:
 
     def test_converts_skeleton_to_query_filter(self) -> None:
         """Skeleton TemporalFilter is converted to query TemporalFilter."""
-        from khora.engines.skeleton.backends import TemporalFilter as SkeletonTF
         from khora.query.temporal import TemporalFilter as QueryTF
+        from khora.storage.temporal import TemporalFilter as SkeletonTF
 
         after = datetime(2026, 1, 1, tzinfo=UTC)
         before = datetime(2026, 2, 1, tzinfo=UTC)
@@ -109,7 +109,7 @@ class TestToQueryTemporalFilter:
 
     def test_returns_none_for_empty_filter(self) -> None:
         """Returns None when skeleton filter has no time bounds."""
-        from khora.engines.skeleton.backends import TemporalFilter as SkeletonTF
+        from khora.storage.temporal import TemporalFilter as SkeletonTF
 
         skeleton = SkeletonTF()
         result = to_query_temporal_filter(skeleton)

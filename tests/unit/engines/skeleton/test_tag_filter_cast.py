@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from sqlalchemy.dialects import postgresql
 
-from khora.engines.skeleton.backends import TemporalFilter
-from khora.engines.skeleton.backends.pgvector import PgVectorTemporalStore
+from khora.storage.temporal import TemporalFilter
+from khora.storage.temporal.pgvector import PgVectorTemporalStore
 
 
 def test_tag_filter_compiles_with_varchar_array_cast() -> None:

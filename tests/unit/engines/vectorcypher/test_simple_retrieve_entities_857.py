@@ -22,12 +22,12 @@ from uuid import UUID, uuid4
 import pytest
 
 from khora.core.models import Entity, Relationship
-from khora.engines.skeleton.backends import TemporalChunk, TemporalSearchResult
 from khora.engines.vectorcypher.retriever import (
     RetrieverConfig,
     VectorCypherRetriever,
 )
 from khora.engines.vectorcypher.router import QueryComplexity, RoutingDecision
+from khora.storage.temporal import TemporalChunk, TemporalSearchResult
 
 
 def _make_retriever(*, storage: Any | None = None) -> VectorCypherRetriever:

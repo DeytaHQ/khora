@@ -13,8 +13,8 @@ from uuid import uuid4
 import numpy as np
 import pytest
 
-from khora.engines.skeleton.backends import TemporalChunk
-from khora.engines.skeleton.backends.pgvector import PgVectorTemporalStore
+from khora.storage.temporal import TemporalChunk
+from khora.storage.temporal.pgvector import PgVectorTemporalStore
 
 
 def _make_row(embedding=None, tags=None):

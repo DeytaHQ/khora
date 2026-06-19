@@ -25,8 +25,8 @@ from uuid import uuid4
 
 import pytest
 
-from khora.engines.skeleton.backends.surrealdb import SurrealDBTemporalStore
 from khora.engines.vectorcypher.retriever import _decode_chunker_info
+from khora.storage.temporal.surrealdb import SurrealDBTemporalStore
 
 # ---------------------------------------------------------------------------
 # Neo4j retriever boundary — ``_decode_chunker_info`` helper

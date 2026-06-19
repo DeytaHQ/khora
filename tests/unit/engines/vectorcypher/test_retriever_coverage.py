@@ -632,8 +632,8 @@ class TestRetrieveBackendGateExtra:
         entity-version narrowing; the occurred-bounds filter still pushes down,
         so retrieve() falls through to the normal path.
         """
-        from khora.engines.skeleton.backends import TemporalFilter
         from khora.engines.vectorcypher.retriever import VectorCypherResult
+        from khora.storage.temporal import TemporalFilter
 
         retriever = _make_retriever()
         retriever._backend = "sqlite_lance"
@@ -704,7 +704,7 @@ class TestRetrieveBackendGateExtra:
 
 
 def _make_temporal_search_result(content: str, occurred_at: datetime | None, similarity: float = 0.9):
-    from khora.engines.skeleton.backends import TemporalChunk, TemporalSearchResult
+    from khora.storage.temporal import TemporalChunk, TemporalSearchResult
 
     tc = TemporalChunk(
         id=uuid4(),
@@ -1032,7 +1032,7 @@ def _vectorcypher_retrieve_setup() -> tuple[VectorCypherRetriever, UUID, UUID]:
     retriever = _make_retriever(storage=storage)
     # Mock vector store search to return a chunk
     chunk = _make_chunk("hello world")
-    from khora.engines.skeleton.backends import TemporalChunk, TemporalSearchResult
+    from khora.storage.temporal import TemporalChunk, TemporalSearchResult
 
     tc = TemporalChunk(
         id=chunk.id, namespace_id=ns, document_id=chunk.document_id, content=chunk.content, embedding=None
@@ -1102,7 +1102,7 @@ class TestVectorCypherRetrieveFlow:
         assert retriever._dual_nodes is None
 
         # Mock vector store
-        from khora.engines.skeleton.backends import TemporalChunk, TemporalSearchResult
+        from khora.storage.temporal import TemporalChunk, TemporalSearchResult
 
         chunk_id = uuid4()
         tc = TemporalChunk(id=chunk_id, namespace_id=ns, document_id=uuid4(), content="hello", embedding=None)
@@ -1136,7 +1136,7 @@ class TestVectorCypherRetrieveFlow:
         storage.graph = MagicMock()
 
         retriever = _make_retriever(storage=storage)
-        from khora.engines.skeleton.backends import TemporalChunk, TemporalSearchResult
+        from khora.storage.temporal import TemporalChunk, TemporalSearchResult
 
         tc = TemporalChunk(id=uuid4(), namespace_id=ns, document_id=uuid4(), content="x", embedding=None)
         retriever._vector_store.search = AsyncMock(
@@ -1232,7 +1232,7 @@ class TestSessionAwareRetrieve:
         retriever._dual_nodes.get_relationships_between = AsyncMock(return_value=[])
 
         # Vector store returns one chunk per call
-        from khora.engines.skeleton.backends import TemporalChunk, TemporalSearchResult
+        from khora.storage.temporal import TemporalChunk, TemporalSearchResult
 
         def make_result(content: str):
             tc = TemporalChunk(id=uuid4(), namespace_id=ns, document_id=uuid4(), content=content, embedding=None)
@@ -1372,7 +1372,7 @@ def _make_temporal_search_result_with_version(
     similarity: float = 0.9,
 ):
     """Build a TemporalSearchResult with version metadata baked into the chunk metadata."""
-    from khora.engines.skeleton.backends import TemporalChunk, TemporalSearchResult
+    from khora.storage.temporal import TemporalChunk, TemporalSearchResult
 
     chunk_meta = {"version": version}
     if entity_refs:
@@ -1589,7 +1589,7 @@ class TestChangeDecompositionMerging:
         # Mock vector store search:
         # First call (main query) → empty
         # Second call (sub-query) → has a new chunk
-        from khora.engines.skeleton.backends import TemporalChunk, TemporalSearchResult
+        from khora.storage.temporal import TemporalChunk, TemporalSearchResult
 
         new_chunk_tc = TemporalChunk(id=uuid4(), namespace_id=ns, document_id=uuid4(), content="sub", embedding=None)
         new_result = TemporalSearchResult(chunk=new_chunk_tc, similarity=0.7, combined_score=0.7)
@@ -1607,7 +1607,7 @@ class TestChangeDecompositionMerging:
         retriever._embedder.embed = AsyncMock(return_value=[0.1] * 4)
 
         # Temporal signal: CHANGE with EXPLICIT filter
-        from khora.engines.skeleton.backends import TemporalFilter
+        from khora.storage.temporal import TemporalFilter
 
         change_tf = TemporalFilter(occurred_after=datetime(2024, 1, 1, tzinfo=UTC))
         signal = TemporalSignal(

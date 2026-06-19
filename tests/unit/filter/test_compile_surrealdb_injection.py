@@ -70,7 +70,7 @@ def test_safe_nested_segment_compiles() -> None:
 @pytest.fixture(name="store_module")
 def _store_module():  # noqa: ANN202 - test fixture
     """The skeleton SurrealDB backend module (importing it registers the compiler)."""
-    from khora.engines.skeleton.backends import surrealdb as mod
+    from khora.storage.temporal import surrealdb as mod
 
     return mod
 
@@ -92,7 +92,7 @@ def test_legacy_additional_unsafe_key_raises_compile_error(store_module, additio
     """
     from uuid import uuid4
 
-    from khora.engines.skeleton.backends import TemporalFilter
+    from khora.storage.temporal import TemporalFilter
 
     tf = TemporalFilter(additional=additional)
     with pytest.raises(CompileError):
@@ -109,7 +109,7 @@ def test_legacy_additional_eq_routes_through_guard(store_module) -> None:  # noq
     """
     from uuid import uuid4
 
-    from khora.engines.skeleton.backends import TemporalFilter
+    from khora.storage.temporal import TemporalFilter
 
     tf = TemporalFilter(
         additional={

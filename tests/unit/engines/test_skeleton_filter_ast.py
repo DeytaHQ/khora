@@ -32,7 +32,6 @@ from uuid import uuid4
 
 import pytest
 
-from khora.engines.skeleton.backends.turbopuffer import TurbopufferTemporalStore
 from khora.engines.skeleton.engine import SkeletonConstructionEngine
 from khora.filter import (
     FilterClause,
@@ -41,6 +40,7 @@ from khora.filter import (
     RecallFilterUnsupportedError,
 )
 from khora.query import SearchMode
+from khora.storage.temporal.turbopuffer import TurbopufferTemporalStore
 
 
 def _build_engine_with_stubs() -> tuple[SkeletonConstructionEngine, AsyncMock]:
@@ -194,12 +194,12 @@ def _all_search_owners() -> list[tuple[str, object]]:
     (weaviate / turbopuffer / surreal client) to a lazy in-method import, so
     the class object is reachable without the optional extra installed.
     """
-    from khora.engines.skeleton.backends import TemporalVectorStore
-    from khora.engines.skeleton.backends.pgvector import PgVectorTemporalStore
-    from khora.engines.skeleton.backends.sqlite_lance import SQLiteLanceTemporalStore
-    from khora.engines.skeleton.backends.surrealdb import SurrealDBTemporalStore
-    from khora.engines.skeleton.backends.turbopuffer import TurbopufferTemporalStore
-    from khora.engines.skeleton.backends.weaviate import WeaviateTemporalStore
+    from khora.storage.temporal import TemporalVectorStore
+    from khora.storage.temporal.pgvector import PgVectorTemporalStore
+    from khora.storage.temporal.sqlite_lance import SQLiteLanceTemporalStore
+    from khora.storage.temporal.surrealdb import SurrealDBTemporalStore
+    from khora.storage.temporal.turbopuffer import TurbopufferTemporalStore
+    from khora.storage.temporal.weaviate import WeaviateTemporalStore
 
     return [
         ("TemporalVectorStore", TemporalVectorStore),

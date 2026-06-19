@@ -67,11 +67,11 @@ if TYPE_CHECKING:
     from neo4j import AsyncDriver
 
     from khora.core.temporal import ChunkTemporalFilter
-    from khora.engines.skeleton.backends import TemporalVectorStore
     from khora.extraction.embedders import EmbedderProtocol  # type: ignore[unresolved-import]
     from khora.filter import FilterNode
     from khora.query.reranking import CrossEncoderReranker, LLMReranker
     from khora.storage import StorageCoordinator
+    from khora.storage.temporal import TemporalVectorStore
 
 # Transient Neo4j errors that trigger graceful degradation rather than
 # failing the entire request. Excludes ClientError (query bugs) and

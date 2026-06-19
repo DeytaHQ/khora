@@ -60,7 +60,7 @@ from pydantic import SecretStr
 
 from khora import Khora
 from khora.config import KhoraConfig
-from khora.engines.skeleton.backends.pgvector import PgVectorTemporalStore
+from khora.storage.temporal.pgvector import PgVectorTemporalStore
 from tests.recall.test_channel_filter_operator_matrix import (
     _CHANGE_QUERY,
     _assert_channel_cell,

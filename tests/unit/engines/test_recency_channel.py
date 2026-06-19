@@ -15,12 +15,12 @@ from uuid import UUID, uuid4
 import pytest
 
 from khora.core.models import Chunk
-from khora.engines.skeleton.backends import TemporalVectorStore
 from khora.engines.vectorcypher.retriever import RetrieverConfig, VectorCypherRetriever
 from khora.filter import FilterNode, RecallFilter, parse_to_ast
 from khora.filter.compilers.python import compile_python
 from khora.filter.execute import build_compile_context
 from khora.filter.report import ChannelPlan
+from khora.storage.temporal import TemporalVectorStore
 
 
 def _make_chunk(content: str, occurred_at: datetime | None, embedding: list[float]) -> Chunk:

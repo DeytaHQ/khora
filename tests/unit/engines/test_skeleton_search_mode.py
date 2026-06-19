@@ -134,7 +134,7 @@ async def test_recall_chunk_scores_are_min_max_normalized() -> None:
     on an arbitrary scale (e.g. 0.013-0.015 for raw cosine). The unified
     contract: top chunk = 1.0, bottom chunk = 0.0 when 2+ chunks are returned.
     """
-    from khora.engines.skeleton.backends import TemporalChunk, TemporalSearchResult
+    from khora.storage.temporal import TemporalChunk, TemporalSearchResult
 
     engine, temporal_store = _build_engine_with_stubs()
     namespace_id = uuid4()
@@ -165,7 +165,7 @@ async def test_recall_chunk_scores_are_min_max_normalized() -> None:
 
 async def test_recall_chunk_scores_single_chunk_is_one() -> None:
     """Edge case: a single chunk gets score=1.0 (degenerate min-max)."""
-    from khora.engines.skeleton.backends import TemporalChunk, TemporalSearchResult
+    from khora.storage.temporal import TemporalChunk, TemporalSearchResult
 
     engine, temporal_store = _build_engine_with_stubs()
     namespace_id = uuid4()
@@ -191,7 +191,7 @@ async def test_recall_chunk_scores_single_chunk_is_one() -> None:
 
 async def test_recall_chunk_scores_all_tied_collapse_to_one() -> None:
     """Edge case: when max == min, every chunk collapses to 1.0."""
-    from khora.engines.skeleton.backends import TemporalChunk, TemporalSearchResult
+    from khora.storage.temporal import TemporalChunk, TemporalSearchResult
 
     engine, temporal_store = _build_engine_with_stubs()
     namespace_id = uuid4()

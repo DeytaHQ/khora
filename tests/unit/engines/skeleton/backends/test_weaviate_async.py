@@ -17,8 +17,10 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import SecretStr
 
-from khora.engines.skeleton.backends import TemporalChunk
-from khora.engines.skeleton.backends.weaviate import (
+from khora.filter import RecallFilter
+from khora.filter.ast import parse_to_ast
+from khora.storage.temporal import TemporalChunk
+from khora.storage.temporal.weaviate import (
     _DENORM_TEXT_KEYS,
     _FILTER_OVERFETCH,
     COLLECTION_NAME,
@@ -31,8 +33,6 @@ from khora.engines.skeleton.backends.weaviate import (
     _extract_vector,
     _parse_host_port,
 )
-from khora.filter import RecallFilter
-from khora.filter.ast import parse_to_ast
 
 # ---------------------------------------------------------------------------
 # WeaviateBackendConfig validation

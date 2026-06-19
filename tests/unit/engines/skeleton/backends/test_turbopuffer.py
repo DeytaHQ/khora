@@ -17,16 +17,6 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import SecretStr
 
-from khora.engines.skeleton.backends import TemporalChunk, TemporalFilter
-from khora.engines.skeleton.backends.turbopuffer import (
-    TurbopufferBackendConfig,
-    TurbopufferTemporalStore,
-    _build_turbopuffer_filter,
-    _chunk_to_row,
-    _coerce_datetime,
-    _row_to_chunk,
-    _rrf_fuse,
-)
 from khora.filter import (
     FilterClause,
     FilterNode,
@@ -34,6 +24,16 @@ from khora.filter import (
     RecallFilter,
     RecallFilterUnsupportedError,
     parse_to_ast,
+)
+from khora.storage.temporal import TemporalChunk, TemporalFilter
+from khora.storage.temporal.turbopuffer import (
+    TurbopufferBackendConfig,
+    TurbopufferTemporalStore,
+    _build_turbopuffer_filter,
+    _chunk_to_row,
+    _coerce_datetime,
+    _row_to_chunk,
+    _rrf_fuse,
 )
 
 # ---------------------------------------------------------------------------

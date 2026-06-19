@@ -25,8 +25,8 @@ from uuid import uuid4
 import pytest
 
 from khora.core.models.document import Document, DocumentStatus
-from khora.engines.skeleton.backends import TemporalChunk
 from khora.engines.vectorcypher.engine import VectorCypherEngine
+from khora.storage.temporal import TemporalChunk
 
 # ---------------------------------------------------------------------------
 # Stub chunker — emits ChunkResult-shaped objects with a known metadata dict

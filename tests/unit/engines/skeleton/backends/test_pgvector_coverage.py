@@ -1,4 +1,4 @@
-"""Coverage tests for ``khora.engines.skeleton.backends.pgvector``.
+"""Coverage tests for ``khora.storage.temporal.pgvector``.
 
 Heavily mocks SQLAlchemy ``AsyncEngine`` / ``AsyncSession`` — no real DB.
 
@@ -19,12 +19,12 @@ from uuid import uuid4
 
 import pytest
 
-from khora.engines.skeleton.backends import (
+from khora.storage.temporal import (
     TemporalChunk,
     TemporalFilter,
     TemporalSearchResult,
 )
-from khora.engines.skeleton.backends.pgvector import (
+from khora.storage.temporal.pgvector import (
     PgVectorTemporalStore,
 )
 

@@ -41,12 +41,8 @@ from khora.filter.report import ChannelPlan, build_filter_report
 from khora.khora import BatchResult, RecallResult, RememberResult, Stats
 from khora.query import SearchMode
 from khora.storage import StorageConfig, StorageCoordinator, create_storage_coordinator
+from khora.storage.temporal import TemporalVectorStore
 from khora.telemetry import trace, trace_span
-
-from .backends import (
-    TemporalVectorStore,
-    create_temporal_store,
-)
 
 if TYPE_CHECKING:
     from khora.extraction.chunkers import ChunkStrategy
@@ -134,48 +130,16 @@ class SkeletonConstructionEngine:
         self._storage = create_storage_coordinator(self._storage_config)
         await self._storage.connect()
 
-        # Create and connect temporal vector store.
-        # Share the coordinator's PG engine so we don't double the pool.
-        shared_pg_engine = None
-        if self._backend_type == "pgvector":
-            if self._storage._vector is not None:
-                shared_pg_engine = getattr(self._storage._vector, "_engine", None)
-            if shared_pg_engine is None and self._storage._relational is not None:
-                shared_pg_engine = getattr(self._storage._relational, "_engine", None)
-
-        # For the sqlite_lance unified backend the temporal store reuses
-        # the coordinator's shared EmbeddedStorageHandle (single aiosqlite
-        # + LanceDB pair across all adapters).  The vector adapter holds
-        # the canonical reference.
-        sqlite_lance_handle = None
-        if self._backend_type == "sqlite_lance":
-            if self._storage._vector is None:
-                raise RuntimeError("sqlite_lance backend requires a vector adapter on the coordinator")
-            sqlite_lance_handle = getattr(self._storage._vector, "_handle", None)
-            if sqlite_lance_handle is None:
-                raise RuntimeError("sqlite_lance vector adapter is missing its EmbeddedStorageHandle")
-
-        # For the SurrealDB unified backend, reuse the coordinator's
-        # shared SurrealDBConnection. surrealkv (embedded mode) allows
-        # only one open handle per on-disk directory — opening a second
-        # connection raises ``InternalError: Invalid revision 0 for type
-        # Value`` on the first write (issue #718). Mirrors vectorcypher.
-        surrealdb_connection = None
-        if self._backend_type == "surrealdb":
-            if self._storage._relational is not None:
-                surrealdb_connection = getattr(self._storage._relational, "_conn", None)
-
-        self._temporal_store = create_temporal_store(
+        # Create and connect temporal vector store. The coordinator gathers the
+        # per-backend shared resource (PG engine / EmbeddedStorageHandle /
+        # SurrealDBConnection) so the store reuses existing connections, and
+        # returns an already-connected store.
+        self._temporal_store = await self._storage.temporal_store(
             self._backend_type,
             self._config,
             weaviate_url=self._weaviate_url,
             turbopuffer_config=self._turbopuffer_config,
-            surrealdb_config=self._config.storage.surrealdb if self._backend_type == "surrealdb" else None,
-            surrealdb_connection=surrealdb_connection,
-            engine=shared_pg_engine,
-            sqlite_lance_handle=sqlite_lance_handle,
         )
-        await self._temporal_store.connect()
 
         # Create embedder
         llm_config = LiteLLMConfig(
