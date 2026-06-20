@@ -1629,14 +1629,31 @@ class Neo4jBackend(GraphBackendBase):
         limit: int = 100,
         offset: int = 0,
     ) -> list[Entity]:
-        """List entities in a namespace."""
+        """List entities in a namespace.
+
+        Hides dream-retired nodes unconditionally (#1272): the dream
+        tombstone-mirror stamps ``valid_until`` on the absorbed node, and recall
+        now filters it out in lockstep with the PG read filter so the two stores
+        agree on the live set. A future ``valid_until`` is still a live temporal
+        window; retirement stamps ``valid_until = retired_at`` (now), so it is
+        hidden.
+        """
 
         query = "MATCH (e:Entity {namespace_id: $namespace_id})"
-        params: dict[str, Any] = {"namespace_id": str(namespace_id)}
+        # ``valid_until`` is stored as an ISO-8601 string (see soft-retire /
+        # upsert), so compare lexicographically against an ISO ``$now`` bind -
+        # matching the existing valid_from/valid_until traversal filters - rather
+        # than the Neo4j ``datetime()`` temporal (a string-vs-temporal mismatch).
+        params: dict[str, Any] = {
+            "namespace_id": str(namespace_id),
+            "now": datetime.now(UTC).isoformat(),
+        }
 
+        conditions = ["(e.valid_until IS NULL OR e.valid_until > $now)"]
         if entity_type:
-            query += " WHERE e.entity_type = $entity_type"
+            conditions.append("e.entity_type = $entity_type")
             params["entity_type"] = entity_type
+        query += " WHERE " + " AND ".join(conditions)
 
         query += " RETURN e ORDER BY e.name SKIP $offset LIMIT $limit"
         params["offset"] = offset
@@ -3142,7 +3159,13 @@ RETURN count(newRel) AS renamed
         limit: int = 1000,
         offset: int = 0,
     ) -> list[Relationship]:
-        """List all relationships in a namespace."""
+        """List all relationships in a namespace.
+
+        Hides dream-pruned / merged-self-loop edges unconditionally (#1272): the
+        tombstone-mirror stamps ``valid_until`` on the edge (translating PG's
+        ``valid_to`` / ``invalidated_at``), and recall now filters it out in
+        lockstep with the PG read filter so the two stores agree on the live set.
+        """
 
         # Build relationship type filter
         rel_filter = f":{_sanitize_neo4j_label(relationship_type)}" if relationship_type else ""
@@ -3151,9 +3174,12 @@ RETURN count(newRel) AS renamed
         # matching get_relationship() / get_entity_relationships() (IDOR
         # family): edges whose endpoints are non-Entity or live in another
         # namespace never surface here (#1237).
+        # ``valid_until`` is an ISO-8601 string, so compare lexicographically
+        # against an ISO ``$now`` bind (same pattern as the traversal filters).
         query = f"""
         MATCH (source:Entity {{namespace_id: $namespace_id}})-[r{rel_filter}]->(target:Entity {{namespace_id: $namespace_id}})
         WHERE r.namespace_id = $namespace_id
+          AND (r.valid_until IS NULL OR r.valid_until > $now)
         RETURN properties(r) as rel_props, source.id as source_id, target.id as target_id, type(r) as rel_type
         ORDER BY r.created_at DESC
         SKIP $offset
@@ -3166,6 +3192,7 @@ RETURN count(newRel) AS renamed
                 namespace_id=str(namespace_id),
                 offset=offset,
                 limit=limit,
+                now=datetime.now(UTC).isoformat(),
             )
             records = await result.data()
             rels = (

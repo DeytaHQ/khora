@@ -1,20 +1,22 @@
-"""Guard: bi-temporal columns are RESERVED, never filtered on read (#888).
+"""Bi-temporal columns are now ACTIVE on the read path (#888 -> #970 -> #1272).
 
-Migrations 033/034 added ``valid_to`` / ``invalidated_at`` / ``invalidated_by``
-columns plus ``WHERE invalidated_at IS NULL`` partial indexes on ``entities``,
-``relationships``, ``memory_facts`` and ``chronicle_events``. Per ADR-003
-(option B) these columns are reserved scaffolding: written only by dream-apply
-on the PostgreSQL side, and NOT filtered on the ingest / recall read paths.
+History: migrations 033/034 added ``valid_to`` / ``invalidated_at`` /
+``invalidated_by`` (plus ``WHERE invalidated_at IS NULL`` partial indexes) on
+``entities`` / ``relationships`` / ``memory_facts`` / ``chronicle_events``. They
+were RESERVED scaffolding - written by dream-apply on the PG side, never
+filtered on read - and this module was a tripwire that FAILED if a read filter
+landed before the Neo4j tombstone-mirror existed, because a PG-only filter would
+diverge from the (unfiltered) graph reads.
 
-Adding a read-side ``WHERE invalidated_at IS NULL`` filter before a Neo4j
-tombstone-mirror exists would make pg-side reads diverge from graph-side reads
-(the latent hazard the issue tracks). This test is a tripwire: if a future PR
-adds such a filter to a read path, CI fails here with a pointer to #888 so the
-divergence is caught before it ships.
+The mirror landed in #1272: dream apply now mirrors its PG tombstones onto the
+graph ``valid_until`` (post-commit, reconciler-backed), and the read filter is
+applied to BOTH stores in lockstep. The reserve is over - so the old tripwire is
+RETIRED and inverted. This module now asserts the read filters are PRESENT (the
+contract is now "filter on read", not "never filter on read"), widened to cover
+the ``valid_to`` (relationship prune) and chronicle-side columns the original
+guard called out for the widen-then-retire handoff.
 
-The scan is scoped to the read paths (``engines/`` and ``storage/backends/``).
-``src/khora/dream/`` is explicitly allowlisted - it is the legitimate writer
-and its idempotency guards use ``invalidated_at IS NULL`` by design.
+See ``docs/architecture/storage-backends.md`` (bi-temporal section) and #970.
 """
 
 from __future__ import annotations
@@ -26,35 +28,41 @@ import pytest
 
 # tests/unit/ -> project root -> src/khora
 _SRC = Path(__file__).resolve().parents[2] / "src" / "khora"
-
-# Read paths to scan. The dream package (the legitimate writer) is NOT in this
-# list, so it is excluded by construction; see the module docstring.
-_READ_PATH_DIRS = [
-    _SRC / "engines",
-    _SRC / "storage" / "backends",
-]
-
-# Matches the dangerous read-side soft-delete predicate in any spacing/case,
-# e.g. ``invalidated_at IS NULL`` or ``invalidated_at  is   null``. This is the
-# SQL column from migrations 033/034 - distinct from the Neo4j node-versioning
-# property ``version_valid_to`` (a different column that is safe to filter on).
-_FILTER_PATTERN = re.compile(r"\binvalidated_at\b\s+is\s+null", re.IGNORECASE)
+_PGVECTOR = _SRC / "storage" / "backends" / "pgvector.py"
+_NEO4J = _SRC / "storage" / "backends" / "neo4j.py"
 
 
 @pytest.mark.unit
-def test_no_premature_invalidated_at_read_filter() -> None:
-    offenders: list[str] = []
-    for root in _READ_PATH_DIRS:
-        for path in root.rglob("*.py"):
-            text = path.read_text(encoding="utf-8")
-            for lineno, line in enumerate(text.splitlines(), start=1):
-                if _FILTER_PATTERN.search(line):
-                    offenders.append(f"{path}:{lineno}: {line.strip()}")
+def test_pgvector_list_paths_filter_soft_deletes() -> None:
+    """The pgvector recall list paths now hide soft-deleted rows (#1272).
 
-    assert not offenders, (
-        "Found a `WHERE invalidated_at IS NULL` read filter on a bi-temporal "
-        "column in the ingest/recall read path. These columns (migrations "
-        "033/034) are RESERVED: written only by dream-apply (pg-side), never "
-        "filtered on read, until the Neo4j tombstone-mirror lands - otherwise "
-        "pg/neo4j reads diverge. See #888 and ADR-003. Offending lines:\n" + "\n".join(offenders)
-    )
+    Widened from the original guard to cover all three soft-delete columns:
+    ``valid_until`` (entity dedupe), ``valid_to`` (relationship prune) and
+    ``invalidated_at`` (relationship self-loop), via the shared filter helpers.
+    """
+    text = _PGVECTOR.read_text(encoding="utf-8")
+    # The shared filter helpers exist and encode the three columns.
+    assert "_entity_live_filter" in text
+    assert "_relationship_live_filter" in text
+    assert "EntityModel.valid_until" in text
+    assert "RelationshipModel.valid_to.is_(None)" in text
+    assert "RelationshipModel.invalidated_at.is_(None)" in text
+    # And the list paths apply them.
+    assert text.count("_entity_live_filter()") >= 1
+    assert text.count("_relationship_live_filter()") >= 1
+
+
+@pytest.mark.unit
+def test_neo4j_read_paths_filter_valid_until_unconditionally() -> None:
+    """The Neo4j read paths now filter ``valid_until`` unconditionally (#1272).
+
+    The mirror folds PG ``valid_to`` / ``invalidated_at`` / ``valid_until`` onto
+    the single graph ``valid_until``; recall hides it in lockstep with PG so the
+    two stores agree on the live set.
+    """
+    text = _NEO4J.read_text(encoding="utf-8")
+    # Both list paths carry the unconditional valid_until read filter.
+    pattern = re.compile(r"valid_until\s+IS\s+NULL\s+OR\s+\S*valid_until\s*>\s*\$now", re.IGNORECASE)
+    matches = pattern.findall(text)
+    # One for list_entities (e.valid_until), one for list_relationships (r.valid_until).
+    assert len(matches) >= 2, f"expected >=2 unconditional valid_until read filters, found {len(matches)}"
