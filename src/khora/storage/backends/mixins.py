@@ -19,7 +19,7 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 from khora.dream.exceptions import DreamBackendUnsupported
 
 if TYPE_CHECKING:
-    from khora.core.models import Entity, Relationship
+    from khora.core.models import CommunityNode, Entity, Relationship
     from khora.dream.plan import OpKind
 
 # ---------------------------------------------------------------------------
@@ -444,6 +444,48 @@ class GraphBackendBase:
         raise DreamBackendUnsupported(
             f"{type(self).__name__} does not support dream-mirror rename_types_batch; the op will be skipped"
         )
+
+    # -- Dream community materialization (#1276) ----------------------------
+    # The GraphRAG payoff: materialize the dream community_summary rows into
+    # :Community nodes + [:HAS_MEMBER] edges, queryable at recall. Same
+    # capability-gated default contract as the mirror verbs above: a backend
+    # without native support advertises nothing and raises so the orchestrator
+    # records a structured skip. The recall readers default to an empty list
+    # (read-only, never raise) so a backend without communities degrades to
+    # "no community context" rather than failing recall.
+
+    async def materialize_communities_batch(
+        self,
+        communities: list[CommunityNode],
+        *,
+        namespace_id: UUID,
+        materialized_at: datetime,
+    ) -> int:
+        """Default: unsupported (raises). See :class:`GraphBackendProtocol`."""
+        if not communities:
+            return 0
+        raise DreamBackendUnsupported(
+            f"{type(self).__name__} does not support dream-mirror materialize_communities_batch; the op will be skipped"
+        )
+
+    async def get_communities(
+        self,
+        namespace_id: UUID,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[CommunityNode]:
+        """Default: no materialized communities. See :class:`GraphBackendProtocol`."""
+        return []
+
+    async def get_entity_communities(
+        self,
+        entity_ids: list[UUID],
+        *,
+        namespace_id: UUID,
+    ) -> list[CommunityNode]:
+        """Default: no materialized communities. See :class:`GraphBackendProtocol`."""
+        return []
 
 
 # ---------------------------------------------------------------------------

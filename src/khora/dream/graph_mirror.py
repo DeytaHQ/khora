@@ -35,6 +35,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from khora.core.models import CommunityNode
 from khora.telemetry.metrics import metric_counter
 
 if TYPE_CHECKING:
@@ -47,11 +48,16 @@ if TYPE_CHECKING:
 # (VECTORCYPHER_DEDUPE_ENTITIES also advertises the rewrite verb) is #1273.
 _PRUNE_EDGES = "vectorcypher_prune_edges"
 _DEDUPE_ENTITIES = "vectorcypher_dedupe_entities"
+# Additive community materialization (#1276): the GraphRAG payoff. Unlike the
+# prune / dedupe legs (soft-deletes), this MERGEs :Community nodes + member
+# edges into the graph so the dream summaries are queryable at recall.
+_COMMUNITY_SUMMARY = "vectorcypher_community_summary"
 
-# Op kinds whose soft-deletes this module knows how to mirror. Anything outside
-# this set (centroid recompute, normalize_schema relabel, source-chunk GC) is
-# recorded as a structured skip rather than mirrored - see ``mirror_skip_reason``.
-MIRRORABLE_OP_KINDS: frozenset[str] = frozenset({_PRUNE_EDGES, _DEDUPE_ENTITIES})
+# Op kinds whose soft-deletes / materializations this module knows how to
+# mirror. Anything outside this set (centroid recompute, normalize_schema
+# relabel, source-chunk GC) is recorded as a structured skip rather than
+# mirrored - see ``mirror_skip_reason``.
+MIRRORABLE_OP_KINDS: frozenset[str] = frozenset({_PRUNE_EDGES, _DEDUPE_ENTITIES, _COMMUNITY_SUMMARY})
 
 
 # Emitted once per op whose PG commit succeeded but whose graph mirror raised.
@@ -124,6 +130,33 @@ def extract_mirror_targets(op_type: str, undo: UndoRecord) -> dict[str, list[UUI
     }
 
 
+def extract_community_targets(op_type: str, undo: UndoRecord) -> list[CommunityNode]:
+    """Translate a just-committed community_summary ``UndoRecord`` into nodes (#1276).
+
+    The community apply handler stamps the persisted summary text + member ids
+    onto ``UndoRecord.before`` (the same source-of-truth pattern the soft-delete
+    legs use). A no-op apply (already-live replay, no grounded claims) carries
+    ``before["noop"]`` and yields no node, so the materialization is a no-op too.
+    """
+    if op_type != _COMMUNITY_SUMMARY:
+        return []
+    before = undo.before or {}
+    if before.get("noop"):
+        return []
+    community_id = _coerce_uuid(before.get("community_id"))
+    if community_id is None:
+        return []
+    member_ids = [u for u in (_coerce_uuid(m) for m in before.get("member_ids") or []) if u]
+    return [
+        CommunityNode(
+            id=community_id,
+            summary=str(before.get("summary_text") or ""),
+            member_ids=member_ids,
+            summary_depth=int(before.get("summary_depth") or 1),
+        )
+    ]
+
+
 def mirror_payload(op: DreamOp, undo: UndoRecord) -> dict[str, Any]:
     """Serialize the mirror targets for the ``graph_mirror_pending`` slot.
 
@@ -131,10 +164,21 @@ def mirror_payload(op: DreamOp, undo: UndoRecord) -> dict[str, Any]:
     undo file - it carries the exact id lists plus the stamp time, so a replay
     after a crash mirrors precisely what PG committed.
     """
-    targets = extract_mirror_targets(str(op.op_type), undo)
+    op_type = str(op.op_type)
+    targets = extract_mirror_targets(op_type, undo)
+    communities = extract_community_targets(op_type, undo)
     return {
         "retire_entity_ids": [str(eid) for eid in targets["retire_entity_ids"]],
         "invalidate_relationship_ids": [str(rid) for rid in targets["invalidate_relationship_ids"]],
+        "communities": [
+            {
+                "id": str(c.id),
+                "summary": c.summary,
+                "member_ids": [str(m) for m in c.member_ids],
+                "summary_depth": c.summary_depth,
+            }
+            for c in communities
+        ],
         "applied_at": undo.applied_at.isoformat() if undo.applied_at else None,
     }
 
@@ -147,6 +191,25 @@ def targets_from_payload(payload: dict[str, Any]) -> dict[str, list[UUID]]:
             u for u in (_coerce_uuid(x) for x in payload.get("invalidate_relationship_ids") or []) if u
         ],
     }
+
+
+def communities_from_payload(payload: dict[str, Any]) -> list[CommunityNode]:
+    """Inverse of the ``communities`` slot in :func:`mirror_payload` (reconciler)."""
+    out: list[CommunityNode] = []
+    for entry in payload.get("communities") or []:
+        cid = _coerce_uuid(entry.get("id"))
+        if cid is None:
+            continue
+        member_ids = [u for u in (_coerce_uuid(m) for m in entry.get("member_ids") or []) if u]
+        out.append(
+            CommunityNode(
+                id=cid,
+                summary=str(entry.get("summary") or ""),
+                member_ids=member_ids,
+                summary_depth=int(entry.get("summary_depth") or 1),
+            )
+        )
+    return out
 
 
 def _parse_applied_at(payload: dict[str, Any], fallback: datetime) -> datetime:
@@ -165,15 +228,18 @@ async def apply_mirror_targets(
     *,
     namespace_id: UUID,
     stamp_at: datetime,
+    communities: list[CommunityNode] | None = None,
 ) -> dict[str, int]:
-    """Push the soft-deletes to the graph via the #1271 verbs.
+    """Push the soft-deletes + community materialization to the graph (#1271/#1276).
 
-    Idempotent by-id (the verbs only touch rows with ``valid_until IS NULL``).
-    Empty target lists short-circuit inside the verbs (return 0), so a no-op
-    apply costs zero Cypher round-trips. Returns the per-verb affected counts.
+    Idempotent by-id (the soft-delete verbs only touch rows with
+    ``valid_until IS NULL``; community materialization MERGEs on community id).
+    Empty inputs short-circuit inside the verbs (return 0), so a no-op apply
+    costs zero Cypher round-trips. Returns the per-verb affected counts.
     """
     retired = 0
     invalidated = 0
+    materialized = 0
     if targets["retire_entity_ids"]:
         retired = await graph.soft_retire_entities_batch(
             targets["retire_entity_ids"],
@@ -187,7 +253,17 @@ async def apply_mirror_targets(
             namespace_id=namespace_id,
             invalidated_at=stamp_at,
         )
-    return {"entities_retired": retired, "relationships_invalidated": invalidated}
+    if communities:
+        materialized = await graph.materialize_communities_batch(
+            communities,
+            namespace_id=namespace_id,
+            materialized_at=stamp_at,
+        )
+    return {
+        "entities_retired": retired,
+        "relationships_invalidated": invalidated,
+        "communities_materialized": materialized,
+    }
 
 
 async def apply_mirror_payload(
@@ -199,5 +275,8 @@ async def apply_mirror_payload(
 ) -> dict[str, int]:
     """Reconciler entry: re-mirror from a persisted ``graph_mirror_pending`` payload."""
     targets = targets_from_payload(payload)
+    communities = communities_from_payload(payload)
     stamp_at = _parse_applied_at(payload, fallback_stamp)
-    return await apply_mirror_targets(graph, targets, namespace_id=namespace_id, stamp_at=stamp_at)
+    return await apply_mirror_targets(
+        graph, targets, namespace_id=namespace_id, stamp_at=stamp_at, communities=communities
+    )

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from .document import Chunk, Document, DocumentSource
-from .entity import Entity, Episode, Relationship
+from .entity import CommunityNode, Entity, Episode, Relationship
 from .event import EventType, MemoryEvent
 from .recall import (
     DocumentProjection,
@@ -23,6 +23,7 @@ __all__ = [
     "DocumentSource",
     "Chunk",
     # Entity
+    "CommunityNode",
     "Entity",
     "Episode",
     "Relationship",
