@@ -40,11 +40,13 @@ from khora.dream.runstore import GraphMirrorPending
 class _FakeGraph:
     """Records the #1271 verb calls; advertises the mirrorable op kinds."""
 
-    def __init__(self, *, fail_invalidate: bool = False, fail_retire: bool = False) -> None:
+    def __init__(self, *, fail_invalidate: bool = False, fail_retire: bool = False, fail_rewrite: bool = False) -> None:
         self.retired: list[dict[str, Any]] = []
         self.invalidated: list[dict[str, Any]] = []
+        self.rewritten: list[dict[str, Any]] = []
         self._fail_invalidate = fail_invalidate
         self._fail_retire = fail_retire
+        self._fail_rewrite = fail_rewrite
 
     def supports_dream_mirror(self) -> frozenset[OpKind]:
         return frozenset(
@@ -72,6 +74,14 @@ class _FakeGraph:
             {"ids": list(relationship_ids), "namespace_id": namespace_id, "invalidated_at": invalidated_at}
         )
         return len(relationship_ids)
+
+    async def rewrite_relationship_endpoints_batch(
+        self, rewrites: list[dict[str, Any]], *, namespace_id: UUID, rewritten_at: datetime
+    ) -> int:
+        if self._fail_rewrite:
+            raise RuntimeError("neo4j rewrite boom")
+        self.rewritten.append({"rewrites": list(rewrites), "namespace_id": namespace_id, "rewritten_at": rewritten_at})
+        return len(rewrites)
 
 
 class _NoMirrorGraph:
@@ -161,20 +171,29 @@ def test_extract_targets_prune_noop() -> None:
 
 
 def test_extract_targets_dedupe_entity_and_self_loop() -> None:
+    canonical = uuid4()
     absorbed = uuid4()
     self_loop = uuid4()
     rewritten = uuid4()
+    other = uuid4()
     undo = UndoRecord(
         op_id=uuid4(),
         op_type="vectorcypher_dedupe_entities",
         before={
             "merges": [
                 {
-                    "canonical_id": str(uuid4()),
+                    "canonical_id": str(canonical),
                     "absorbed_id": str(absorbed),
                     "self_loops_invalidated": [str(self_loop)],
-                    # An endpoint rewrite is #1273 - it must NOT be mirrored here.
-                    "previous_relationships": [{"id": str(rewritten)}],
+                    # Incident edge: absorbed -> other re-points to canonical -> other (#1273).
+                    "previous_relationships": [
+                        {
+                            "id": str(rewritten),
+                            "source_entity_id": str(absorbed),
+                            "target_entity_id": str(other),
+                            "relationship_type": "RELATES_TO",
+                        }
+                    ],
                     "applied": True,
                 }
             ]
@@ -184,8 +203,149 @@ def test_extract_targets_dedupe_entity_and_self_loop() -> None:
     targets = extract_mirror_targets("vectorcypher_dedupe_entities", undo)
     assert targets["retire_entity_ids"] == [absorbed]
     assert targets["invalidate_relationship_ids"] == [self_loop]
-    # The rewritten edge id is not a mirror target (endpoint rewrite = #1273).
+    # The incident edge is re-pointed to the canonical (#1273), not invalidated.
     assert rewritten not in targets["invalidate_relationship_ids"]
+    assert targets["rewrite_relationships"] == [
+        {
+            "relationship_id": str(rewritten),
+            "source_entity_id": str(canonical),
+            "target_entity_id": str(other),
+            "relationship_type": "RELATES_TO",
+        }
+    ]
+
+
+def test_extract_targets_dedupe_repoints_incident_edges() -> None:
+    """Both directions of an incident edge re-point to the canonical (#1273)."""
+    canonical = uuid4()
+    absorbed = uuid4()
+    neighbor = uuid4()
+    out_edge = uuid4()  # absorbed -> neighbor
+    in_edge = uuid4()  # neighbor -> absorbed
+    undo = UndoRecord(
+        op_id=uuid4(),
+        op_type="vectorcypher_dedupe_entities",
+        before={
+            "merges": [
+                {
+                    "canonical_id": str(canonical),
+                    "absorbed_id": str(absorbed),
+                    "self_loops_invalidated": [],
+                    "previous_relationships": [
+                        {
+                            "id": str(out_edge),
+                            "source_entity_id": str(absorbed),
+                            "target_entity_id": str(neighbor),
+                            "relationship_type": "KNOWS",
+                        },
+                        {
+                            "id": str(in_edge),
+                            "source_entity_id": str(neighbor),
+                            "target_entity_id": str(absorbed),
+                            "relationship_type": "KNOWS",
+                        },
+                    ],
+                    "applied": True,
+                }
+            ]
+        },
+        applied_at=datetime.now(UTC),
+    )
+    targets = extract_mirror_targets("vectorcypher_dedupe_entities", undo)
+    rewrites = {rw["relationship_id"]: rw for rw in targets["rewrite_relationships"]}
+    assert rewrites[str(out_edge)]["source_entity_id"] == str(canonical)
+    assert rewrites[str(out_edge)]["target_entity_id"] == str(neighbor)
+    assert rewrites[str(in_edge)]["source_entity_id"] == str(neighbor)
+    assert rewrites[str(in_edge)]["target_entity_id"] == str(canonical)
+
+
+def test_extract_targets_dedupe_self_loop_excluded_from_rewrite() -> None:
+    """An edge listed in self_loops_invalidated is never also a rewrite target."""
+    canonical = uuid4()
+    absorbed = uuid4()
+    loop = uuid4()  # canonical -> absorbed, becomes canonical -> canonical
+    undo = UndoRecord(
+        op_id=uuid4(),
+        op_type="vectorcypher_dedupe_entities",
+        before={
+            "merges": [
+                {
+                    "canonical_id": str(canonical),
+                    "absorbed_id": str(absorbed),
+                    "self_loops_invalidated": [str(loop)],
+                    "previous_relationships": [
+                        {
+                            "id": str(loop),
+                            "source_entity_id": str(canonical),
+                            "target_entity_id": str(absorbed),
+                            "relationship_type": "RELATES_TO",
+                        }
+                    ],
+                    "applied": True,
+                }
+            ]
+        },
+        applied_at=datetime.now(UTC),
+    )
+    targets = extract_mirror_targets("vectorcypher_dedupe_entities", undo)
+    assert targets["invalidate_relationship_ids"] == [loop]
+    assert targets["rewrite_relationships"] == []
+
+
+def test_extract_targets_dedupe_transitive_collapses_to_one_canonical() -> None:
+    """A->B and B's edges fold to a single canonical; no edge points at an
+    absorbed intermediate (#806 id-remap, global map across merges)."""
+    canonical = uuid4()
+    b = uuid4()  # absorbed
+    c = uuid4()  # absorbed in a second merge entry of the same op
+    neighbor = uuid4()
+    edge_to_b = uuid4()  # neighbor -> b  (b absorbed)
+    edge_b_to_c = uuid4()  # b -> c  (both absorbed -> becomes canonical self-loop)
+    undo = UndoRecord(
+        op_id=uuid4(),
+        op_type="vectorcypher_dedupe_entities",
+        before={
+            "merges": [
+                {
+                    "canonical_id": str(canonical),
+                    "absorbed_id": str(b),
+                    "self_loops_invalidated": [],
+                    "previous_relationships": [
+                        {
+                            "id": str(edge_to_b),
+                            "source_entity_id": str(neighbor),
+                            "target_entity_id": str(b),
+                            "relationship_type": "KNOWS",
+                        },
+                        {
+                            "id": str(edge_b_to_c),
+                            "source_entity_id": str(b),
+                            "target_entity_id": str(c),
+                            "relationship_type": "KNOWS",
+                        },
+                    ],
+                    "applied": True,
+                },
+                {
+                    "canonical_id": str(canonical),
+                    "absorbed_id": str(c),
+                    "self_loops_invalidated": [],
+                    "previous_relationships": [],
+                    "applied": True,
+                },
+            ]
+        },
+        applied_at=datetime.now(UTC),
+    )
+    targets = extract_mirror_targets("vectorcypher_dedupe_entities", undo)
+    assert set(targets["retire_entity_ids"]) == {b, c}
+    rewrites = {rw["relationship_id"]: rw for rw in targets["rewrite_relationships"]}
+    # neighbor -> b re-points to neighbor -> canonical (no edge at the absorbed b).
+    assert rewrites[str(edge_to_b)]["target_entity_id"] == str(canonical)
+    # b -> c: both endpoints map to canonical -> a cross-component self-loop the
+    # PG handler did not list. Mirrored as an invalidate, never a rewrite.
+    assert str(edge_b_to_c) not in rewrites
+    assert edge_b_to_c in targets["invalidate_relationship_ids"]
 
 
 def test_extract_targets_dedupe_skips_unapplied_merge() -> None:
@@ -200,21 +360,51 @@ def test_extract_targets_dedupe_skips_unapplied_merge() -> None:
 
 
 def test_payload_round_trips() -> None:
+    canonical = uuid4()
     absorbed = uuid4()
     self_loop = uuid4()
+    incident = uuid4()
+    neighbor = uuid4()
     op = _dedupe_op()
     undo = UndoRecord(
         op_id=op.op_id,
         op_type="vectorcypher_dedupe_entities",
         before={
-            "merges": [{"absorbed_id": str(absorbed), "self_loops_invalidated": [str(self_loop)], "applied": True}]
+            "merges": [
+                {
+                    "canonical_id": str(canonical),
+                    "absorbed_id": str(absorbed),
+                    "self_loops_invalidated": [str(self_loop)],
+                    "previous_relationships": [
+                        {
+                            "id": str(incident),
+                            "source_entity_id": str(absorbed),
+                            "target_entity_id": str(neighbor),
+                            "relationship_type": "RELATES_TO",
+                        }
+                    ],
+                    "applied": True,
+                }
+            ]
         },
         applied_at=datetime.now(UTC),
     )
     payload = mirror_payload(op, undo)
+    # JSON-serialisable (the reconciler persists this verbatim).
+    import json
+
+    json.dumps(payload)
     recovered = targets_from_payload(payload)
     assert recovered["retire_entity_ids"] == [absorbed]
     assert recovered["invalidate_relationship_ids"] == [self_loop]
+    assert recovered["rewrite_relationships"] == [
+        {
+            "relationship_id": str(incident),
+            "source_entity_id": str(canonical),
+            "target_entity_id": str(neighbor),
+            "relationship_type": "RELATES_TO",
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +451,99 @@ async def test_mirror_dedupe_calls_retire_and_invalidate() -> None:
     assert degradation is None
     assert graph.retired[0]["ids"] == [absorbed]
     assert graph.invalidated[0]["ids"] == [self_loop]
+
+
+@pytest.mark.asyncio
+async def test_mirror_dedupe_calls_rewrite_endpoints() -> None:
+    """The dedupe mirror re-points incident edges via the rewrite verb (#1273)."""
+    graph = _FakeGraph()
+    ns = uuid4()
+    orch = _orch(graph)
+    op = _dedupe_op()
+    canonical = uuid4()
+    absorbed = uuid4()
+    neighbor = uuid4()
+    incident = uuid4()
+    undo = UndoRecord(
+        op_id=op.op_id,
+        op_type=str(op.op_type),
+        before={
+            "merges": [
+                {
+                    "canonical_id": str(canonical),
+                    "absorbed_id": str(absorbed),
+                    "self_loops_invalidated": [],
+                    "previous_relationships": [
+                        {
+                            "id": str(incident),
+                            "source_entity_id": str(absorbed),
+                            "target_entity_id": str(neighbor),
+                            "relationship_type": "RELATES_TO",
+                        }
+                    ],
+                    "applied": True,
+                }
+            ]
+        },
+        applied_at=datetime.now(UTC),
+    )
+    degradation = await orch._mirror_dream_op(uuid4(), 0, ns, op, undo)
+    assert degradation is None
+    assert graph.retired[0]["ids"] == [absorbed]
+    assert len(graph.rewritten) == 1
+    assert graph.rewritten[0]["namespace_id"] == ns
+    assert graph.rewritten[0]["rewrites"] == [
+        {
+            "relationship_id": str(incident),
+            "source_entity_id": str(canonical),
+            "target_entity_id": str(neighbor),
+            "relationship_type": "RELATES_TO",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_mirror_rewrite_failure_queues_pending_and_degrades() -> None:
+    """A rewrite-verb failure after the PG commit queues the op + degrades."""
+    graph = _FakeGraph(fail_rewrite=True)
+    store = _RunStore()
+    orch = _orch(graph, run_store=store)
+    op = _dedupe_op()
+    canonical = uuid4()
+    absorbed = uuid4()
+    neighbor = uuid4()
+    incident = uuid4()
+    undo = UndoRecord(
+        op_id=op.op_id,
+        op_type=str(op.op_type),
+        before={
+            "merges": [
+                {
+                    "canonical_id": str(canonical),
+                    "absorbed_id": str(absorbed),
+                    "self_loops_invalidated": [],
+                    "previous_relationships": [
+                        {
+                            "id": str(incident),
+                            "source_entity_id": str(absorbed),
+                            "target_entity_id": str(neighbor),
+                            "relationship_type": "RELATES_TO",
+                        }
+                    ],
+                    "applied": True,
+                }
+            ]
+        },
+        applied_at=datetime.now(UTC),
+    )
+    degradation = await orch._mirror_dream_op(uuid4(), 7, uuid4(), op, undo)
+    assert degradation is not None
+    assert degradation["reason"] == "graph_mirror_failed_after_pg_commit"
+    # The rewrite payload survives into the pending slot for the reconciler.
+    assert 7 in store.pending
+    rewrites = store.pending[7].payload["rewrite_relationships"]
+    assert rewrites[0]["relationship_id"] == str(incident)
+    assert rewrites[0]["source_entity_id"] == str(canonical)
 
 
 @pytest.mark.asyncio
