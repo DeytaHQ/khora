@@ -351,7 +351,7 @@ exclude-newer = "7 days"
 # staging window so a same-week CVE fix isn't held back. Use sparingly —
 # every entry here is an explicit "we trust this package enough to skip
 # the staging window".
-exclude-newer-package = { urllib3 = "0 days", litellm = "0 days", idna = "0 days", "turbopuffer" = "0 days", aiohttp = "0 days" }  # urllib3: CVE-2026-44431/44432; litellm: CVE-2026-42208/42271/40217 (1.83.10+); idna: CVE-2026-45409 (3.15+); turbopuffer: 2.1.0 newer than the 7-day window when introduced in #824 - opt-in extra so safe to bypass; aiohttp: CVE-2026-34993/47265 (3.14.0+), CVE-2026-54273..54280 (3.14.1+).
+exclude-newer-package = { urllib3 = "0 days", litellm = "0 days", idna = "0 days", "turbopuffer" = "0 days", aiohttp = "0 days", "pydantic-settings" = "0 days" }  # urllib3: CVE-2026-44431/44432; litellm: CVE-2026-42208/42271/40217 (1.83.10+); idna: CVE-2026-45409 (3.15+); turbopuffer: 2.1.0 newer than the 7-day window when introduced in #824 - opt-in extra so safe to bypass; aiohttp: CVE-2026-34993/47265 (3.14.0+), CVE-2026-54273..54280 (3.14.1+); pydantic-settings: GHSA-4xgf-cpjx-pc3j (fixed 2.14.2).
 constraint-dependencies = [
     # Security: CVE-2026-25645 fixed in 2.33.0
     "requests>=2.33.1",
