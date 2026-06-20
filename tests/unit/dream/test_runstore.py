@@ -152,29 +152,31 @@ async def test_sqlite_mark_pending_in_caller_session_atomic_with_checkpoint() ->
     tmp = tempfile.mkdtemp(prefix="khora-runstore-sess-")
     db_path = str(Path(tmp) / "runstore.db")
     engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}", future=True)
-    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    store = SqliteDreamRunStore(session_factory=factory)
-    await store.ensure_schema()
+    try:
+        factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        store = SqliteDreamRunStore(session_factory=factory)
+        await store.ensure_schema()
 
-    ns = uuid4()
-    run_id = uuid4()
-    await store.record_run(run_id, ns, mode="apply")
+        ns = uuid4()
+        run_id = uuid4()
+        await store.record_run(run_id, ns, mode="apply")
 
-    op = uuid4()
-    entry = GraphMirrorPending(op_seq=2, op_id=op, op_type="vectorcypher_prune_edges", payload={"ids": [1]})
-    # Advance the checkpoint AND mark pending in the same session, then commit
-    # once - the crash-durable shape the apply loop relies on.
-    async with factory() as session:
-        await store.advance_checkpoint(run_id, 2, session=session)
-        await store.mark_graph_mirror_pending(run_id, entry, session=session)
-        await session.commit()
+        op = uuid4()
+        entry = GraphMirrorPending(op_seq=2, op_id=op, op_type="vectorcypher_prune_edges", payload={"ids": [1]})
+        # Advance the checkpoint AND mark pending in the same session, then commit
+        # once - the crash-durable shape the apply loop relies on.
+        async with factory() as session:
+            await store.advance_checkpoint(run_id, 2, session=session)
+            await store.mark_graph_mirror_pending(run_id, entry, session=session)
+            await session.commit()
 
-    assert await store.read_last_committed(run_id) == 2
-    pending = await store.get_graph_mirror_pending(run_id)
-    assert len(pending) == 1
-    assert pending[0].op_seq == 2
-    assert pending[0].op_id == op
-    await engine.dispose()
+        assert await store.read_last_committed(run_id) == 2
+        pending = await store.get_graph_mirror_pending(run_id)
+        assert len(pending) == 1
+        assert pending[0].op_seq == 2
+        assert pending[0].op_id == op
+    finally:
+        await engine.dispose()
 
 
 async def test_sqlite_mark_pending_in_session_rolls_back_with_caller() -> None:
@@ -182,23 +184,26 @@ async def test_sqlite_mark_pending_in_session_rolls_back_with_caller() -> None:
     tmp = tempfile.mkdtemp(prefix="khora-runstore-rb-")
     db_path = str(Path(tmp) / "runstore.db")
     engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}", future=True)
-    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    store = SqliteDreamRunStore(session_factory=factory)
-    await store.ensure_schema()
+    try:
+        factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        store = SqliteDreamRunStore(session_factory=factory)
+        await store.ensure_schema()
 
-    ns = uuid4()
-    run_id = uuid4()
-    await store.record_run(run_id, ns, mode="apply")
+        ns = uuid4()
+        run_id = uuid4()
+        await store.record_run(run_id, ns, mode="apply")
 
-    async with factory() as session:
-        await store.mark_graph_mirror_pending(
-            run_id,
-            GraphMirrorPending(op_seq=0, op_id=uuid4(), op_type="t", payload={}),
-            session=session,
-        )
-        await session.rollback()
+        async with factory() as session:
+            await store.mark_graph_mirror_pending(
+                run_id,
+                GraphMirrorPending(op_seq=0, op_id=uuid4(), op_type="t", payload={}),
+                session=session,
+            )
+            await session.rollback()
 
-    assert await store.get_graph_mirror_pending(run_id) == []
+        assert await store.get_graph_mirror_pending(run_id) == []
+    finally:
+        await engine.dispose()
 
 
 async def test_sqlite_open_pending_by_namespace_spans_runs() -> None:

@@ -381,11 +381,17 @@ class _SqlDreamRunStore:
 
     async def get_open_graph_mirror_pending(self, namespace_id: UUID) -> list[tuple[UUID, GraphMirrorPending]]:
         async with self._open() as session:
+            # ``clear_graph_mirror_pending`` writes ``'[]'`` (not NULL) when the
+            # last entry is drained, so skip both NULL and the empty-array case
+            # to match the SurrealDB ``!= []`` filter and avoid loading cleared
+            # rows. The empty-array literal is dialect-aware (jsonb vs text).
+            empty = "'[]'::jsonb" if _is_postgres_session(session) else "'[]'"
             rows = (
                 await session.execute(
                     text(
-                        "SELECT run_id, graph_mirror_pending FROM khora_dream_runs "
-                        "WHERE namespace_id = :ns AND graph_mirror_pending IS NOT NULL"
+                        "SELECT run_id, graph_mirror_pending FROM khora_dream_runs "  # noqa: S608 - empty literal is dialect-gated, not user input
+                        f"WHERE namespace_id = :ns AND graph_mirror_pending IS NOT NULL "
+                        f"AND graph_mirror_pending != {empty}"
                     ),
                     {"ns": _uuid_param(session, namespace_id)},
                 )
