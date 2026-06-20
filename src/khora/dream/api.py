@@ -75,9 +75,10 @@ async def dream(
 async def dream_status(kb: Khora, run_id: UUID) -> dict[str, object]:
     """Return ``khora_dream_runs`` row metadata for ``run_id``.
 
-    Returns an empty dict when the row does not exist or the backend
-    isn't Postgres (embedded path mirrors checkpoints to a JSONL file —
-    out of scope for this entry point).
+    Resolved through the stack's :class:`~khora.dream.runstore.DreamRunStore`
+    (PostgreSQL, SQLite sidecar, or SurrealDB-relational since #1274), so
+    it works on non-PG stacks. Returns an empty dict when the row does not
+    exist or no run-state backend is reachable.
     """
     orchestrator = DreamOrchestrator(kb, kb._config.dream)
     info = await orchestrator.status(run_id)

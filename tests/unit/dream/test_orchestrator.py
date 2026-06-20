@@ -323,6 +323,29 @@ async def test_resume_from_run_id_carried_through(monkeypatch: pytest.MonkeyPatc
     assert started.run_id == resume_id
 
 
+@pytest.mark.asyncio
+async def test_init_run_row_skips_record_run_on_resume() -> None:
+    """On resume the run row already exists; _init_run_row must not re-run
+    record_run, which would reset state / last_committed_op_seq on a backend
+    whose write is not conflict-preserving (the SurrealDB UPSERT), replaying
+    already-committed ops."""
+    orch = DreamOrchestrator(_FakeKB(), DreamConfig(enabled=True), sinks=[])
+    calls: list[str] = []
+
+    class _MockStore:
+        async def record_run(self, *args: object, **kwargs: object) -> None:
+            calls.append("record_run")
+
+    orch._run_store_cache = _MockStore()  # type: ignore[assignment]
+    orch._run_store_resolved = True
+
+    await orch._init_run_row(uuid4(), uuid4(), "apply", is_resume=True)
+    assert calls == [], "record_run must be skipped on resume"
+
+    await orch._init_run_row(uuid4(), uuid4(), "apply", is_resume=False)
+    assert calls == ["record_run"], "record_run must run on a fresh start"
+
+
 # ---------------------------------------------------------------------------
 # Cancel registry hygiene
 # ---------------------------------------------------------------------------

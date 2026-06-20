@@ -5,7 +5,8 @@ FINALIZE``. Acquires the per-namespace advisory lock for the entire
 plan-through-finalize block (#677), dispatches plan-stage discovery to
 the engine-registered :class:`DreamCapable` plugin, fans every plan op
 out through the configured sinks (#678), and persists run state to
-``khora_dream_runs`` (Postgres) when available.
+``khora_dream_runs`` via a backend-portable :class:`DreamRunStore` -
+PostgreSQL, a SQLite sidecar, or a SurrealDB-relational table (#1274).
 
 Crash semantics:
 
@@ -38,8 +39,6 @@ import os
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
-
-from sqlalchemy import text
 
 from khora.dream.config import DreamConfig
 from khora.dream.engines.registry import (
@@ -74,6 +73,7 @@ from khora.dream.result import (
     OpSummary,
     UndoRecord,
 )
+from khora.dream.runstore import DreamRunStore, select_run_store
 from khora.dream.safety import _assert_no_chunk_id_mutation
 from khora.telemetry import bounded_text_hash
 from khora.telemetry.metrics import metric_counter
@@ -257,6 +257,22 @@ class DreamOrchestrator:
         # Per-run LLM token spend, accumulated from the context-local usage
         # path each LLM-using op records into (#1270). Reset per run.
         self._llm_tokens_this_run = 0
+        # Run-state store, resolved lazily from the active stack (#1274):
+        # PG / SQLite-sidecar / SurrealDB-relational. ``None`` means no
+        # run-state backend is reachable (graph-only embedded stub).
+        self._run_store_cache: DreamRunStore | None = None
+        self._run_store_resolved = False
+
+    # ------------------------------------------------------------------
+    # Run-state store (#1274)
+    # ------------------------------------------------------------------
+
+    def _run_store(self) -> DreamRunStore | None:
+        """Return the run-state store for the active stack (cached)."""
+        if not self._run_store_resolved:
+            self._run_store_cache = select_run_store(self._kb.storage)
+            self._run_store_resolved = True
+        return self._run_store_cache
 
     # ------------------------------------------------------------------
     # Public methods
@@ -288,7 +304,7 @@ class DreamOrchestrator:
         # in-process lock (see acquire_namespace_dream_lock).
         try:
             async with self._lock(namespace_id):
-                await self._init_run_row(run_id, namespace_id, mode)
+                await self._init_run_row(run_id, namespace_id, mode, is_resume=resume_from is not None)
                 await self._emit_all(
                     DreamRunStarted(
                         run_id=run_id,
@@ -354,70 +370,17 @@ class DreamOrchestrator:
 
     async def status(self, run_id: UUID) -> DreamRunInfo | None:
         """Return run-level metadata from ``khora_dream_runs`` for ``run_id``."""
-        coordinator = self._kb.storage
-        try:
-            async with coordinator.transaction() as txn:
-                session = txn.session
-                row = (
-                    await session.execute(
-                        text(
-                            "SELECT run_id, namespace_id, mode, started_at, finished_at "
-                            "FROM khora_dream_runs WHERE run_id = :rid"
-                        ),
-                        {"rid": _uuid_param(session, run_id)},
-                    )
-                ).first()
-        except RuntimeError:
+        store = self._run_store()
+        if store is None:
             return None
-        if row is None:
-            return None
-        started_at = _coerce_dt(row.started_at)
-        finished_at = _coerce_dt(row.finished_at)
-        duration_ms = (finished_at - started_at).total_seconds() * 1000.0 if finished_at is not None else None
-        return DreamRunInfo(
-            run_id=_coerce_uuid(row.run_id),
-            namespace_id=_coerce_uuid(row.namespace_id),
-            mode=row.mode,
-            started_at=started_at,
-            finished_at=finished_at,
-            duration_ms=duration_ms,
-        )
+        return await store.status(run_id)
 
     async def history(self, namespace_id: UUID, *, limit: int = 20) -> list[DreamRunInfo]:
         """Return the most recent runs for ``namespace_id`` (newest first)."""
-        coordinator = self._kb.storage
-        try:
-            async with coordinator.transaction() as txn:
-                session = txn.session
-                rows = (
-                    await session.execute(
-                        text(
-                            "SELECT run_id, namespace_id, mode, started_at, finished_at "
-                            "FROM khora_dream_runs "
-                            "WHERE namespace_id = :ns "
-                            "ORDER BY started_at DESC LIMIT :lim"
-                        ),
-                        {"ns": _uuid_param(session, namespace_id), "lim": int(limit)},
-                    )
-                ).all()
-        except RuntimeError:
+        store = self._run_store()
+        if store is None:
             return []
-        out: list[DreamRunInfo] = []
-        for row in rows:
-            started_at = _coerce_dt(row.started_at)
-            finished_at = _coerce_dt(row.finished_at)
-            duration_ms = (finished_at - started_at).total_seconds() * 1000.0 if finished_at is not None else None
-            out.append(
-                DreamRunInfo(
-                    run_id=_coerce_uuid(row.run_id),
-                    namespace_id=_coerce_uuid(row.namespace_id),
-                    mode=row.mode,
-                    started_at=started_at,
-                    finished_at=finished_at,
-                    duration_ms=duration_ms,
-                )
-            )
-        return out
+        return await store.history(namespace_id, limit=limit)
 
     # ------------------------------------------------------------------
     # Phases
@@ -830,101 +793,54 @@ class DreamOrchestrator:
             yield
 
     # ------------------------------------------------------------------
-    # khora_dream_runs persistence (Postgres only; embedded path is no-op)
+    # Run-state persistence - delegated to the stack's DreamRunStore
+    # (PG / SQLite-sidecar / SurrealDB-relational, #1274). A ``None`` store
+    # (graph-only stub with no SQL / SurrealDB) makes every call a no-op.
     # ------------------------------------------------------------------
 
-    async def _init_run_row(self, run_id: UUID, namespace_id: UUID, mode: str) -> None:
-        coordinator = self._kb.storage
-        try:
-            async with coordinator.transaction() as txn:
-                session = txn.session
-                now = datetime.now(UTC)
-                await session.execute(
-                    text(
-                        "INSERT INTO khora_dream_runs "
-                        "(run_id, namespace_id, trigger, mode, state, started_at, "
-                        " heartbeat_at, total_ops, total_decisions, last_committed_op_seq) "
-                        "VALUES (:rid, :ns, :trg, :mode, :state, :ts, :ts, 0, 0, -1) "
-                        "ON CONFLICT (run_id) DO UPDATE SET heartbeat_at = :ts"
-                    ),
-                    {
-                        "rid": _uuid_param(session, run_id),
-                        "ns": _uuid_param(session, namespace_id),
-                        "trg": "manual",
-                        "mode": mode,
-                        "state": "planning",
-                        "ts": _ts_param(session, now),
-                    },
-                )
-        except RuntimeError:
+    async def _init_run_row(self, run_id: UUID, namespace_id: UUID, mode: str, *, is_resume: bool = False) -> None:
+        # On resume the run row already exists; re-running record_run would
+        # reset state/last_committed_op_seq on backends whose write is not
+        # conflict-preserving (the SurrealDB UPSERT), replaying committed ops.
+        # The SQL stores guard this with ON CONFLICT DO UPDATE heartbeat_at, but
+        # skipping on resume is correct and uniform across backends.
+        if is_resume:
             return
+        store = self._run_store()
+        if store is None:
+            return
+        await store.record_run(run_id, namespace_id, mode=mode, trigger="manual")
 
     async def _persist_plan_hash(self, run_id: UUID, plan: DreamPlan) -> None:
-        digest = plan_hash(plan)
-        coordinator = self._kb.storage
-        try:
-            async with coordinator.transaction() as txn:
-                session = txn.session
-                if not _is_postgres(session):
-                    return
-                await session.execute(
-                    text(
-                        "UPDATE khora_dream_runs "
-                        "SET plan_hash = :ph, total_ops = :tot, heartbeat_at = :ts, "
-                        "    state = CASE WHEN state = 'planning' THEN 'applying' ELSE state END "
-                        "WHERE run_id = :rid"
-                    ),
-                    {
-                        "ph": digest,
-                        "tot": len(plan.ops),
-                        "ts": datetime.now(UTC),
-                        "rid": run_id,
-                    },
-                )
-        except RuntimeError:
+        store = self._run_store()
+        if store is None:
             return
+        await store.persist_plan(run_id, plan_hash=plan_hash(plan), total_ops=len(plan.ops))
 
     async def _read_last_committed(self, run_id: UUID) -> int:
-        coordinator = self._kb.storage
-        try:
-            async with coordinator.transaction() as txn:
-                session = txn.session
-                if not _is_postgres(session):
-                    return -1
-                row = (
-                    await session.execute(
-                        text("SELECT last_committed_op_seq FROM khora_dream_runs WHERE run_id = :rid"),
-                        {"rid": run_id},
-                    )
-                ).first()
-        except RuntimeError:
+        store = self._run_store()
+        if store is None:
             return -1
-        if row is None or row.last_committed_op_seq is None:
-            return -1
-        return int(row.last_committed_op_seq)
+        return await store.read_last_committed(run_id)
 
     async def _record_committed(self, run_id: UUID, seq: int) -> None:
-        coordinator = self._kb.storage
-        try:
-            async with coordinator.transaction() as txn:
-                await self._record_committed_in_session(txn.session, run_id, seq)
-        except RuntimeError:
+        store = self._run_store()
+        if store is None:
             return
+        await store.advance_checkpoint(run_id, seq)
 
     async def _record_committed_in_session(self, session: Any, run_id: UUID, seq: int) -> None:
         """Persist ``last_committed_op_seq`` using an existing session.
 
         Phase 4 apply runs the checkpoint update inside the same
         transaction as the apply handler so a rollback unwinds both.
-        On non-postgres backends the call is a no-op (mirrors the
-        :meth:`_record_committed` shape).
+        The PG / SQLite stores honor the passed ``session``; the
+        SurrealDB store ignores it (no shared SQL session to enroll).
         """
-        if not _is_postgres(session):
+        store = self._run_store()
+        if store is None:
             return
-        await session.execute(
-            text("UPDATE khora_dream_runs SET last_committed_op_seq = :seq, heartbeat_at = :ts WHERE run_id = :rid"),
-            {"seq": seq, "ts": datetime.now(UTC), "rid": run_id},
-        )
+        await store.advance_checkpoint(run_id, seq, session=session)
 
     async def _finalize_run_row(
         self,
@@ -934,42 +850,15 @@ class DreamOrchestrator:
         state: str,
         error: str | None = None,
     ) -> None:
-        coordinator = self._kb.storage
-        try:
-            async with coordinator.transaction() as txn:
-                session = txn.session
-                if not _is_postgres(session):
-                    return
-                now = datetime.now(UTC)
-                params: dict[str, Any] = {
-                    "rid": run_id,
-                    "state": state,
-                    "ts": now,
-                    "total": len(plan.ops) if plan is not None else 0,
-                }
-                if error is not None:
-                    import json as _json
-
-                    params["err"] = _json.dumps({"message": error})
-                    await session.execute(
-                        text(
-                            "UPDATE khora_dream_runs "
-                            "SET state = :state, finished_at = :ts, total_ops = :total, "
-                            "    error = CAST(:err AS jsonb) WHERE run_id = :rid"
-                        ),
-                        params,
-                    )
-                else:
-                    await session.execute(
-                        text(
-                            "UPDATE khora_dream_runs "
-                            "SET state = :state, finished_at = :ts, total_ops = :total "
-                            "WHERE run_id = :rid"
-                        ),
-                        params,
-                    )
-        except RuntimeError:
+        store = self._run_store()
+        if store is None:
             return
+        await store.finalize_run(
+            run_id,
+            state=state,
+            total_ops=len(plan.ops) if plan is not None else 0,
+            error=error,
+        )
 
     # ------------------------------------------------------------------
     # Sink fan-out
@@ -1146,53 +1035,6 @@ def _build_result(
 
 def _elapsed_ms(start: datetime) -> float:
     return (datetime.now(UTC) - start).total_seconds() * 1000.0
-
-
-def _is_postgres(session: Any) -> bool:
-    return getattr(getattr(session, "bind", None), "dialect", None) is not None and (
-        session.bind.dialect.name == "postgresql"
-    )
-
-
-def _uuid_param(session: Any, value: UUID) -> Any:
-    """Bind a UUID for a raw ``text()`` query, per-dialect (#896).
-
-    Postgres binds ``uuid.UUID`` natively. SQLite's DBAPI raises
-    ``type 'UUID' is not supported`` for a raw bind (the column type's
-    converter isn't applied to ``text()`` params - same surface as #875),
-    so bind the string form. ``khora_dream_runs`` is written and read
-    exclusively through these helpers, so the stored form round-trips.
-    """
-    return value if _is_postgres(session) else str(value)
-
-
-def _ts_param(session: Any, value: datetime) -> Any:
-    """Bind a ``datetime`` for a raw ``text()`` query, per-dialect (#896).
-
-    Postgres binds ``datetime`` natively. Binding a bare ``datetime`` into
-    a SQLite ``text()`` param trips the deprecated default datetime adapter
-    (removed in a future Python), so bind the ISO-8601 string; ``_coerce_dt``
-    reads it back into a ``datetime``.
-    """
-    return value if _is_postgres(session) else value.isoformat()
-
-
-def _coerce_uuid(value: Any) -> UUID:
-    """Coerce a raw ``text()`` result column back to ``UUID`` (#896).
-
-    Postgres returns ``uuid.UUID``; SQLite returns the stored TEXT.
-    """
-    return value if isinstance(value, UUID) else UUID(str(value))
-
-
-def _coerce_dt(value: Any) -> datetime | None:
-    """Coerce a raw ``text()`` timestamp column back to ``datetime`` (#896).
-
-    Postgres returns ``datetime``; SQLite returns an ISO-8601 TEXT value.
-    """
-    if value is None or isinstance(value, datetime):
-        return value
-    return datetime.fromisoformat(str(value))
 
 
 def _session_dialect(session: Any) -> str | None:

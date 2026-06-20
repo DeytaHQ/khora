@@ -8,7 +8,7 @@ dialects (the DDL is dialect-portable) so ``dream_history`` /
 
 Tests pin:
 
-1. Fresh PG: ``alembic upgrade head`` creates the table, its 16 columns
+1. Fresh PG: ``alembic upgrade head`` creates the table, its 17 columns
    with correct types, and the ``(namespace_id, started_at DESC)``
    composite index.
 2. SQLite: upgrading head creates the table too (#896).
@@ -139,7 +139,7 @@ def sqlite_url(tmp_path: Path) -> str:
 
 class TestMigration032OnPostgres:
     def test_migration_032_creates_dream_runs_table(self, pg_url: str) -> None:
-        """Upgrade head on fresh PG creates the table with all 16 columns + index."""
+        """Upgrade head on fresh PG creates the table with all 17 columns + index."""
         cfg = _make_config(pg_url)
         command.upgrade(cfg, "head")
 
@@ -156,7 +156,7 @@ class TestMigration032OnPostgres:
                     )
                     assert result.scalar() is True
 
-                    # All 16 columns present, with the data types we promised.
+                    # All 17 columns present, with the data types we promised.
                     result = await conn.execute(
                         sa.text(
                             "SELECT column_name, data_type, is_nullable "
@@ -182,9 +182,10 @@ class TestMigration032OnPostgres:
                         "manifest_sha256",
                         "config_fingerprint",
                         "error",
+                        "graph_mirror_pending",
                     }
                     assert set(cols.keys()) == expected_cols
-                    assert len(cols) == 16
+                    assert len(cols) == 17
 
                     # Spot-check the load-bearing types.
                     assert cols["run_id"][0] == "uuid"
@@ -303,7 +304,7 @@ class TestMigration032OnSqlite:
                 async with engine.connect() as conn:
                     # Chain reached head (sanity).
                     result = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
-                    assert result.scalar() == "046_chunks_occurred_at"
+                    assert result.scalar() == "047_dream_runs_graph_mirror_pending"
 
                     # khora_dream_runs exists on SQLite (#896) so dream_history /
                     # dream_status work on the embedded sqlite_lance stack.
