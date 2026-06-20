@@ -3085,15 +3085,17 @@ RETURN count(newRel) AS renamed
             return 0
         ids = [str(e) for e in entity_ids]
 
+        # DETACH DELETE on the :EntityVersion snapshot also removes its
+        # [:SUPERSEDES] edge, so collecting/deleting the edge separately is
+        # unnecessary (and would double-delete it).
         _CYPHER = """\
 UNWIND $entity_ids AS eid
 MATCH (current:Entity {id: eid, namespace_id: $namespace_id})
-OPTIONAL MATCH (current)-[sup:SUPERSEDES]->(old:EntityVersion)
-WITH current, collect(old) AS olds, collect(sup) AS sups
+OPTIONAL MATCH (current)-[:SUPERSEDES]->(old:EntityVersion)
+WITH current, collect(old) AS olds
 SET current.valid_until = NULL,
     current.version_valid_to = NULL
 FOREACH (o IN olds | DETACH DELETE o)
-FOREACH (s IN sups | DELETE s)
 RETURN current.id AS id
 """
 
