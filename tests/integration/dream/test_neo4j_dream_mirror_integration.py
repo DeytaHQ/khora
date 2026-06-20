@@ -688,3 +688,170 @@ def _orchestrator(kb: Khora):
     from khora.dream.orchestrator import DreamOrchestrator
 
     return DreamOrchestrator(kb, kb._config.dream, sinks=[])
+
+
+# ---------------------------------------------------------------------------
+# Community materialization (#1276 - the GraphRAG payoff)
+# ---------------------------------------------------------------------------
+
+
+async def _apply_community_op(kb: Khora, ns_row_id: UUID, community_id: UUID, members: list[UUID]):
+    """Drive the community_summary apply handler with a mocked LLM, then return the undo.
+
+    The planner->apply path needs >=5 entities + an LLM call; here we invoke the
+    apply handler directly (as the dedupe test does for #1273's surface) with a
+    deterministic grounded summary so the assertion targets the #1276 mirror.
+    """
+    import json
+
+    import khora.dream.engines.vectorcypher.community_summary as mod
+    from khora.dream.engines.vectorcypher.community_summary import apply_vectorcypher_community_summary
+
+    summary_json = json.dumps(
+        {
+            "text": "Alice and Bob collaborate within the community.",
+            "claims": [{"text": "they collaborate", "cited_entity_ids": [str(members[0]), str(members[1])]}],
+        }
+    )
+
+    async def _fake_acompletion(prompt, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        return summary_json
+
+    original = mod.acompletion
+    mod.acompletion = _fake_acompletion
+    op = DreamOp(
+        op_id=uuid4(),
+        phase="apply",
+        op_type=OpKind.VECTORCYPHER_COMMUNITY_SUMMARY,
+        inputs=(
+            {
+                "community_id": str(community_id),
+                "member_ids": [str(m) for m in members],
+                "member_names": [f"e{i}" for i in range(len(members))],
+                "member_types": ["PERSON"] * len(members),
+                "relationship_modes": {"WORKS_WITH": 1},
+            },
+        ),
+        namespace_id=ns_row_id,
+    )
+    try:
+        async with kb.storage.transaction() as txn:
+            return op, await apply_vectorcypher_community_summary(op, coordinator=kb.storage, session=txn.session)
+    finally:
+        mod.acompletion = original
+
+
+@pytest.mark.asyncio
+async def test_community_materializes_to_graph_and_is_queryable(kb: Khora) -> None:
+    """A dream community is materialized as a :Community node + HAS_MEMBER edges, queryable at recall."""
+    from uuid import uuid5
+
+    ns = await kb.create_namespace()
+    ns_row_id = await kb.storage.resolve_namespace(ns.namespace_id)
+
+    members = [await _seed_entity_both(kb, ns_row_id, f"m{i}-{uuid4().hex[:8]}") for i in range(3)]
+    community_id = uuid5(ns_row_id, ",".join(sorted(str(m) for m in members)))
+
+    op, undo = await _apply_community_op(kb, ns_row_id, community_id, members)
+    assert undo.before.get("kept_claims", 0) >= 1, undo.before
+
+    orch = _orchestrator(kb)
+    degradation = await orch._mirror_dream_op(uuid4(), 0, ns_row_id, op, undo)
+    assert degradation is None
+
+    # The :Community node + HAS_MEMBER edges exist in the graph.
+    communities = await kb.storage.get_communities(ns_row_id, limit=100)
+    by_id = {c.id: c for c in communities}
+    assert community_id in by_id
+    com = by_id[community_id]
+    assert "collaborate" in com.summary
+    assert set(com.member_ids) == set(members)
+
+    # The entity-anchored recall reader returns the same community.
+    via_entity = await kb.storage.get_entity_communities([members[0]], namespace_id=ns_row_id)
+    assert community_id in {c.id for c in via_entity}
+
+    # The Khora-level recall accessor surfaces it via the stable namespace id.
+    via_khora = await kb.get_communities(namespace=ns.namespace_id)
+    assert community_id in {c.id for c in via_khora}
+
+
+@pytest.mark.asyncio
+async def test_community_materialization_idempotent_on_community_id(kb: Khora) -> None:
+    """A second mirror of the same community_id creates no duplicate :Community node."""
+    from uuid import uuid5
+
+    ns = await kb.create_namespace()
+    ns_row_id = await kb.storage.resolve_namespace(ns.namespace_id)
+
+    members = [await _seed_entity_both(kb, ns_row_id, f"d{i}-{uuid4().hex[:8]}") for i in range(3)]
+    community_id = uuid5(ns_row_id, ",".join(sorted(str(m) for m in members)))
+
+    op, undo = await _apply_community_op(kb, ns_row_id, community_id, members)
+    orch = _orchestrator(kb)
+
+    # Mirror twice (the second is a reconciler-shaped replay).
+    assert await orch._mirror_dream_op(uuid4(), 0, ns_row_id, op, undo) is None
+    assert await orch._mirror_dream_op(uuid4(), 1, ns_row_id, op, undo) is None
+
+    communities = await kb.storage.get_communities(ns_row_id, limit=100)
+    matching = [c for c in communities if c.id == community_id]
+    # MERGE on community_id -> exactly one node, no duplicate.
+    assert len(matching) == 1, matching
+
+
+@pytest.mark.asyncio
+async def test_community_materializes_node_even_with_unresolved_member(kb: Khora) -> None:
+    """A community whose member id has no graph node still materializes its :Community node."""
+    from uuid import uuid5
+
+    ns = await kb.create_namespace()
+    ns_row_id = await kb.storage.resolve_namespace(ns.namespace_id)
+
+    real = await _seed_entity_both(kb, ns_row_id, f"r-{uuid4().hex[:8]}")
+    ghost = uuid4()  # never seeded into the graph
+    members = [real, ghost]
+    community_id = uuid5(ns_row_id, ",".join(sorted(str(m) for m in members)))
+
+    op, undo = await _apply_community_op(kb, ns_row_id, community_id, members)
+    orch = _orchestrator(kb)
+    assert await orch._mirror_dream_op(uuid4(), 0, ns_row_id, op, undo) is None
+
+    communities = await kb.storage.get_communities(ns_row_id, limit=100)
+    by_id = {c.id: c for c in communities}
+    # The :Community node exists even though one member has no graph node.
+    assert community_id in by_id
+    # Only the real member resolves a HAS_MEMBER edge.
+    via_real = await kb.storage.get_entity_communities([real], namespace_id=ns_row_id)
+    assert community_id in {c.id for c in via_real}
+    via_ghost = await kb.storage.get_entity_communities([ghost], namespace_id=ns_row_id)
+    assert community_id not in {c.id for c in via_ghost}
+
+
+@pytest.mark.asyncio
+async def test_community_skip_when_backend_lacks_capability(kb: Khora) -> None:
+    """A backend that does not advertise the community op kind records a structured skip, not a divergence."""
+
+    class _NoCommunityGraph:
+        def supports_dream_mirror(self):  # noqa: ANN202
+            return frozenset()
+
+    ns = await kb.create_namespace()
+    ns_row_id = await kb.storage.resolve_namespace(ns.namespace_id)
+    members = [await _seed_entity_both(kb, ns_row_id, f"s{i}-{uuid4().hex[:8]}") for i in range(3)]
+    community_id = uuid4()
+    op, undo = await _apply_community_op(kb, ns_row_id, community_id, members)
+
+    orch = _orchestrator(kb)
+    real_graph = kb.storage._graph
+    kb.storage._graph = _NoCommunityGraph()  # type: ignore[assignment]
+    try:
+        # Skip is recorded (logged), no exception, no degradation, nothing materialized.
+        degradation = await orch._mirror_dream_op(uuid4(), 0, ns_row_id, op, undo)
+        assert degradation is None
+    finally:
+        kb.storage._graph = real_graph  # type: ignore[assignment]
+
+    # Nothing was materialized for this community.
+    communities = await kb.storage.get_communities(ns_row_id, limit=100)
+    assert community_id not in {c.id for c in communities}

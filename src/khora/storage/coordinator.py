@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from khora.core.models import (
     Chunk,
+    CommunityNode,
     Document,
     Entity,
     Episode,
@@ -1685,6 +1686,42 @@ class StorageCoordinator:
             return await self._vector.list_relationships(  # type: ignore[unresolved-attribute]
                 namespace_id, relationship_type=relationship_type, limit=limit, offset=offset
             )
+        return []
+
+    # =========================================================================
+    # Community summary operations (#1276 - GraphRAG payoff, delegated to graph)
+    # =========================================================================
+
+    async def get_communities(
+        self,
+        namespace_id: UUID,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[CommunityNode]:
+        """Return materialized dream :Community summary nodes for a namespace.
+
+        Read-only. Communities are materialized into the graph by the dream
+        community_summary mirror (#1276); a stack without a graph backend (or
+        without materialized communities) returns an empty list.
+        """
+        if self._graph and hasattr(self._graph, "get_communities"):
+            return await self._graph.get_communities(namespace_id, limit=limit, offset=offset)
+        return []
+
+    async def get_entity_communities(
+        self,
+        entity_ids: list[UUID],
+        *,
+        namespace_id: UUID,
+    ) -> list[CommunityNode]:
+        """Return the dream :Community nodes the given entities are members of.
+
+        The entity-anchored leg of the community recall reader (#1276): map a
+        recall hit's entity set to the community summaries they belong to.
+        """
+        if self._graph and hasattr(self._graph, "get_entity_communities"):
+            return await self._graph.get_entity_communities(entity_ids, namespace_id=namespace_id)
         return []
 
     # =========================================================================

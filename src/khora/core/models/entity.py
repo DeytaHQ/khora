@@ -190,3 +190,22 @@ class Episode:
 
             return self.occurred_at + timedelta(seconds=self.duration_seconds)
         return None
+
+
+@dataclass(slots=True)
+class CommunityNode:
+    """A materialized dream community summary node (#1276).
+
+    The dream ``community_summary`` op computes an LLM-grounded summary over a
+    detected entity community and persists it to ``khora_dream_communities``.
+    The post-commit mirror materializes that row into the graph as a
+    ``:Community`` node with ``[:HAS_MEMBER]`` edges to its member ``:Entity``
+    nodes; this is the shape the community-level recall reader returns.
+    """
+
+    id: UUID = field(default_factory=uuid4)
+    namespace_id: UUID = field(default_factory=uuid4)
+    summary: str = ""
+    member_ids: list[UUID] = field(default_factory=list)
+    summary_depth: int = 1
+    embedding: list[float] | None = None
