@@ -53,6 +53,7 @@ from khora.dream.config import DreamConfig
 from khora.dream.engines.vectorcypher.dedupe_entities import apply_vectorcypher_dedupe_entities
 from khora.dream.plan import DreamOp, DreamScope, OpKind
 from khora.khora import Khora
+from tests.test_helpers.diagnostics import assert_no_silent_degradation
 
 # --- Connection wiring (copied from test_neo4j_dream_mirror_integration.py) ---
 DATABASE_URL = os.environ.get(
@@ -324,7 +325,7 @@ async def test_prune_full_pipeline_converges_and_is_idempotent(kb: Khora) -> Non
         mode="apply",
         scope=DreamScope(op_kinds=(OpKind.VECTORCYPHER_PRUNE_EDGES,)),
     )
-    assert not result.metadata.get("degradations"), result.metadata.get("degradations")
+    assert_no_silent_degradation(result)
     assert sum(op.applied for op in result.ops) == 1, result.ops
 
     # Invariant: live sets byte-identical, and the pruned edge is gone from both.
@@ -337,7 +338,7 @@ async def test_prune_full_pipeline_converges_and_is_idempotent(kb: Khora) -> Non
         mode="apply",
         scope=DreamScope(op_kinds=(OpKind.VECTORCYPHER_PRUNE_EDGES,)),
     )
-    assert not result2.metadata.get("degradations"), result2.metadata.get("degradations")
+    assert_no_silent_degradation(result2)
     assert sum(op.applied for op in result2.ops) == 0, result2.ops
     # Still byte-identical and unchanged after the no-op second pass.
     _, post_rels2 = await _assert_live_sets_byte_identical(kb, ns_row_id)
