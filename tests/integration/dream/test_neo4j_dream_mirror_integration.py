@@ -148,6 +148,59 @@ async def _graph_entity_ids(kb: Khora, ns_row_id: UUID) -> set[str]:
     return {str(e.id) for e in ents}
 
 
+async def _pg_relationship_endpoints(kb: Khora, ns_row_id: UUID) -> dict[str, tuple[str, str]]:
+    """Map each live PG relationship id -> (source_entity_id, target_entity_id)."""
+    async with kb.storage.transaction() as txn:
+        rows = (
+            await txn.session.execute(
+                text(
+                    "SELECT id, source_entity_id, target_entity_id FROM relationships "
+                    "WHERE namespace_id = :ns AND valid_to IS NULL AND invalidated_at IS NULL "
+                    "AND (valid_until IS NULL OR valid_until > now())"
+                ),
+                {"ns": ns_row_id},
+            )
+        ).all()
+    return {str(r.id): (str(r.source_entity_id), str(r.target_entity_id)) for r in rows}
+
+
+async def _graph_relationship_endpoints(kb: Khora, ns_row_id: UUID) -> dict[str, tuple[str, str]]:
+    """Map each live graph relationship id -> (source_entity_id, target_entity_id)."""
+    rels = await kb.storage.list_relationships(ns_row_id, limit=1000)
+    return {str(r.id): (str(r.source_entity_id), str(r.target_entity_id)) for r in rels}
+
+
+async def _insert_pg_relationship(
+    kb: Khora, ns_row_id: UUID, rel_id: UUID, src: UUID, tgt: UUID, rel_type: str
+) -> None:
+    async with kb.storage.transaction() as txn:
+        await txn.session.execute(
+            text(
+                "INSERT INTO relationships (id, namespace_id, source_entity_id, target_entity_id, "
+                "relationship_type, description, properties, source_document_ids, source_chunk_ids, "
+                "confidence, weight, metadata, created_at, updated_at) "
+                "VALUES (:id, :ns, :src, :tgt, :rt, '', '{}'::jsonb, '{}', '{}', "
+                "0.9, 1.0, '{}'::jsonb, now(), now())"
+            ),
+            {"id": rel_id, "ns": ns_row_id, "src": src, "tgt": tgt, "rt": rel_type},
+        )
+
+
+async def _seed_edge_both(kb: Khora, ns_row_id: UUID, src: UUID, tgt: UUID, rel_type: str) -> UUID:
+    """Create one edge in both stores (graph via create_relationship, PG via SQL)."""
+    rel = Relationship(
+        namespace_id=ns_row_id,
+        source_entity_id=src,
+        target_entity_id=tgt,
+        relationship_type=rel_type,
+        description="incident",
+        confidence=0.9,
+    )
+    await kb.storage.create_relationship(rel)
+    await _insert_pg_relationship(kb, ns_row_id, rel.id, src, tgt, rel_type)
+    return rel.id
+
+
 @pytest.mark.asyncio
 async def test_prune_edge_converges_pg_and_neo4j(kb: Khora) -> None:
     """A pruned ASSOCIATED_WITH edge is invisible to both PG and graph recall."""
@@ -267,6 +320,199 @@ async def test_dedupe_self_loop_and_absorbed_entity_converge(kb: Khora) -> None:
     assert str(canonical) in pg_ent_live
     assert str(canonical) in graph_ent_live
     assert pg_ent_live == graph_ent_live
+
+
+@pytest.mark.asyncio
+async def test_dedupe_entity_merge_repoints_incident_edges(kb: Khora) -> None:
+    """Entity-merge re-points every incident edge from A and B onto the canonical
+    in BOTH stores (#1273): endpoint parity + cross-store live-set parity."""
+    ns = await kb.create_namespace()
+    ns_stable = ns.namespace_id
+    ns_row_id = await kb.storage.resolve_namespace(ns_stable)
+
+    canonical = await _seed_entity_both(kb, ns_row_id, f"acme-{uuid4().hex[:8]}")
+    absorbed = await _seed_entity_both(kb, ns_row_id, f"acme-corp-{uuid4().hex[:8]}")
+    neighbor1 = await _seed_entity_both(kb, ns_row_id, f"vendor-{uuid4().hex[:8]}")
+    neighbor2 = await _seed_entity_both(kb, ns_row_id, f"client-{uuid4().hex[:8]}")
+
+    # Edges incident to the absorbed entity, both directions.
+    out_edge = await _seed_edge_both(kb, ns_row_id, absorbed, neighbor1, "SUPPLIES")
+    in_edge = await _seed_edge_both(kb, ns_row_id, neighbor2, absorbed, "PAYS")
+    # An edge already on the canonical must be left untouched.
+    canon_edge = await _seed_edge_both(kb, ns_row_id, canonical, neighbor1, "SUPPLIES")
+
+    orch = _orchestrator(kb)
+    op = DreamOp(
+        op_id=uuid4(),
+        phase="apply",
+        op_type=OpKind.VECTORCYPHER_DEDUPE_ENTITIES,
+        outputs=({"merges": [{"canonical_id": str(canonical), "absorbed_id": str(absorbed)}]},),
+        namespace_id=ns_row_id,
+    )
+    async with kb.storage.transaction() as txn:
+        undo = await apply_vectorcypher_dedupe_entities(op, coordinator=kb.storage, session=txn.session)
+    degradation = await orch._mirror_dream_op(uuid4(), 0, ns_row_id, op, undo)
+    assert degradation is None
+
+    pg_eps = await _pg_relationship_endpoints(kb, ns_row_id)
+    graph_eps = await _graph_relationship_endpoints(kb, ns_row_id)
+
+    # Every incident edge re-points to the canonical, identically in both stores.
+    assert pg_eps[str(out_edge)] == (str(canonical), str(neighbor1))
+    assert graph_eps[str(out_edge)] == (str(canonical), str(neighbor1))
+    assert pg_eps[str(in_edge)] == (str(neighbor2), str(canonical))
+    assert graph_eps[str(in_edge)] == (str(neighbor2), str(canonical))
+    # The pre-existing canonical edge is untouched.
+    assert pg_eps[str(canon_edge)] == (str(canonical), str(neighbor1))
+    assert graph_eps[str(canon_edge)] == (str(canonical), str(neighbor1))
+    # No live edge points at the retired absorbed node, in either store.
+    assert all(str(absorbed) not in eps for eps in pg_eps.values())
+    assert all(str(absorbed) not in eps for eps in graph_eps.values())
+    # Endpoint maps are byte-identical across stores.
+    assert pg_eps == graph_eps
+
+    # The absorbed node is retired in both stores; the canonical survives.
+    pg_ent_live = await _live_pg_entity_ids(kb, ns_row_id)
+    graph_ent_live = await _graph_entity_ids(kb, ns_row_id)
+    assert str(absorbed) not in pg_ent_live
+    assert str(absorbed) not in graph_ent_live
+    assert str(canonical) in pg_ent_live
+    assert str(canonical) in graph_ent_live
+
+
+@pytest.mark.asyncio
+async def test_dedupe_transitive_merge_collapses_to_one_canonical(kb: Khora) -> None:
+    """A->B->C in one op collapses to a single canonical with no edge pointing at
+    a retired intermediate, in both stores (#806 id-remap)."""
+    ns = await kb.create_namespace()
+    ns_stable = ns.namespace_id
+    ns_row_id = await kb.storage.resolve_namespace(ns_stable)
+
+    canonical = await _seed_entity_both(kb, ns_row_id, f"a-{uuid4().hex[:8]}")
+    b = await _seed_entity_both(kb, ns_row_id, f"b-{uuid4().hex[:8]}")
+    c = await _seed_entity_both(kb, ns_row_id, f"c-{uuid4().hex[:8]}")
+    neighbor = await _seed_entity_both(kb, ns_row_id, f"n-{uuid4().hex[:8]}")
+
+    edge_to_b = await _seed_edge_both(kb, ns_row_id, neighbor, b, "KNOWS")
+    edge_b_to_c = await _seed_edge_both(kb, ns_row_id, b, c, "KNOWS")
+
+    orch = _orchestrator(kb)
+    # The Phase-1 planner emits one component with a single canonical absorbing
+    # both B and C (two merge entries sharing canonical_id).
+    op = DreamOp(
+        op_id=uuid4(),
+        phase="apply",
+        op_type=OpKind.VECTORCYPHER_DEDUPE_ENTITIES,
+        outputs=(
+            {
+                "merges": [
+                    {"canonical_id": str(canonical), "absorbed_id": str(b)},
+                    {"canonical_id": str(canonical), "absorbed_id": str(c)},
+                ]
+            },
+        ),
+        namespace_id=ns_row_id,
+    )
+    async with kb.storage.transaction() as txn:
+        undo = await apply_vectorcypher_dedupe_entities(op, coordinator=kb.storage, session=txn.session)
+    degradation = await orch._mirror_dream_op(uuid4(), 0, ns_row_id, op, undo)
+    assert degradation is None
+
+    pg_eps = await _pg_relationship_endpoints(kb, ns_row_id)
+    graph_eps = await _graph_relationship_endpoints(kb, ns_row_id)
+
+    # neighbor -> b re-points to neighbor -> canonical.
+    assert pg_eps[str(edge_to_b)] == (str(neighbor), str(canonical))
+    assert graph_eps[str(edge_to_b)] == (str(neighbor), str(canonical))
+    # b -> c becomes canonical -> canonical (self-loop) and is invalidated in both.
+    assert str(edge_b_to_c) not in pg_eps
+    assert str(edge_b_to_c) not in graph_eps
+    # No edge points at a retired intermediate (B or C).
+    for eps in list(pg_eps.values()) + list(graph_eps.values()):
+        assert str(b) not in eps
+        assert str(c) not in eps
+    assert pg_eps == graph_eps
+
+    pg_ent_live = await _live_pg_entity_ids(kb, ns_row_id)
+    graph_ent_live = await _graph_entity_ids(kb, ns_row_id)
+    assert str(b) not in pg_ent_live and str(c) not in pg_ent_live
+    assert str(b) not in graph_ent_live and str(c) not in graph_ent_live
+    assert str(canonical) in pg_ent_live and str(canonical) in graph_ent_live
+
+
+@pytest.mark.asyncio
+async def test_dedupe_duplicate_key_after_repoint_no_violation(kb: Khora) -> None:
+    """Two edges that collapse to the same (src, tgt, type) after re-pointing do
+    not raise a constraint violation; both re-point to the canonical in lockstep."""
+    ns = await kb.create_namespace()
+    ns_stable = ns.namespace_id
+    ns_row_id = await kb.storage.resolve_namespace(ns_stable)
+
+    canonical = await _seed_entity_both(kb, ns_row_id, f"acme-{uuid4().hex[:8]}")
+    absorbed = await _seed_entity_both(kb, ns_row_id, f"acme2-{uuid4().hex[:8]}")
+    neighbor = await _seed_entity_both(kb, ns_row_id, f"vendor-{uuid4().hex[:8]}")
+
+    # canonical -> neighbor AND absorbed -> neighbor, same type: after the merge
+    # both are canonical -> neighbor:SUPPLIES (duplicate key).
+    canon_edge = await _seed_edge_both(kb, ns_row_id, canonical, neighbor, "SUPPLIES")
+    absorbed_edge = await _seed_edge_both(kb, ns_row_id, absorbed, neighbor, "SUPPLIES")
+
+    orch = _orchestrator(kb)
+    op = DreamOp(
+        op_id=uuid4(),
+        phase="apply",
+        op_type=OpKind.VECTORCYPHER_DEDUPE_ENTITIES,
+        outputs=({"merges": [{"canonical_id": str(canonical), "absorbed_id": str(absorbed)}]},),
+        namespace_id=ns_row_id,
+    )
+    async with kb.storage.transaction() as txn:
+        undo = await apply_vectorcypher_dedupe_entities(op, coordinator=kb.storage, session=txn.session)
+    # No constraint violation on the graph mirror (Neo4j allows parallel edges;
+    # there is no relationships UNIQUE on PG).
+    degradation = await orch._mirror_dream_op(uuid4(), 0, ns_row_id, op, undo)
+    assert degradation is None
+
+    pg_eps = await _pg_relationship_endpoints(kb, ns_row_id)
+    graph_eps = await _graph_relationship_endpoints(kb, ns_row_id)
+    # Both edges now point canonical -> neighbor, in both stores, by id.
+    assert pg_eps[str(canon_edge)] == (str(canonical), str(neighbor))
+    assert pg_eps[str(absorbed_edge)] == (str(canonical), str(neighbor))
+    assert graph_eps[str(canon_edge)] == (str(canonical), str(neighbor))
+    assert graph_eps[str(absorbed_edge)] == (str(canonical), str(neighbor))
+    assert pg_eps == graph_eps
+
+
+@pytest.mark.asyncio
+async def test_dedupe_entity_merge_mirror_idempotent_replay(kb: Khora) -> None:
+    """Re-running the mirror from the same undo is a no-op (idempotent / convergent)."""
+    ns = await kb.create_namespace()
+    ns_stable = ns.namespace_id
+    ns_row_id = await kb.storage.resolve_namespace(ns_stable)
+
+    canonical = await _seed_entity_both(kb, ns_row_id, f"acme-{uuid4().hex[:8]}")
+    absorbed = await _seed_entity_both(kb, ns_row_id, f"acme2-{uuid4().hex[:8]}")
+    neighbor = await _seed_entity_both(kb, ns_row_id, f"vendor-{uuid4().hex[:8]}")
+    edge = await _seed_edge_both(kb, ns_row_id, absorbed, neighbor, "SUPPLIES")
+
+    orch = _orchestrator(kb)
+    op = DreamOp(
+        op_id=uuid4(),
+        phase="apply",
+        op_type=OpKind.VECTORCYPHER_DEDUPE_ENTITIES,
+        outputs=({"merges": [{"canonical_id": str(canonical), "absorbed_id": str(absorbed)}]},),
+        namespace_id=ns_row_id,
+    )
+    async with kb.storage.transaction() as txn:
+        undo = await apply_vectorcypher_dedupe_entities(op, coordinator=kb.storage, session=txn.session)
+
+    assert await orch._mirror_dream_op(uuid4(), 0, ns_row_id, op, undo) is None
+    graph_eps_first = await _graph_relationship_endpoints(kb, ns_row_id)
+    # Replay the mirror with the SAME undo: convergent, no duplicate, no shift.
+    assert await orch._mirror_dream_op(uuid4(), 1, ns_row_id, op, undo) is None
+    graph_eps_second = await _graph_relationship_endpoints(kb, ns_row_id)
+
+    assert graph_eps_first == graph_eps_second
+    assert graph_eps_second[str(edge)] == (str(canonical), str(neighbor))
 
 
 @pytest.mark.asyncio
