@@ -20,6 +20,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from khora.dream.runstore import (
     GraphMirrorPending,
@@ -138,6 +139,103 @@ async def test_sqlite_mark_pending_is_idempotent_per_op_seq() -> None:
     pending = await store.get_graph_mirror_pending(run_id)
     assert len(pending) == 1
     assert pending[0].payload == {"v": 2}
+
+
+async def test_sqlite_mark_pending_in_caller_session_atomic_with_checkpoint() -> None:
+    """#1292 gap 1: mark + checkpoint advance commit atomically in one session.
+
+    The reconciler can only heal a crash between the PG commit and the mirror
+    if the pending row is durable WITH the checkpoint. ``mark_graph_mirror_pending``
+    must accept a caller-supplied ``session`` (mirroring ``advance_checkpoint``)
+    and write into it without committing - the caller's transaction commits both.
+    """
+    tmp = tempfile.mkdtemp(prefix="khora-runstore-sess-")
+    db_path = str(Path(tmp) / "runstore.db")
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}", future=True)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    store = SqliteDreamRunStore(session_factory=factory)
+    await store.ensure_schema()
+
+    ns = uuid4()
+    run_id = uuid4()
+    await store.record_run(run_id, ns, mode="apply")
+
+    op = uuid4()
+    entry = GraphMirrorPending(op_seq=2, op_id=op, op_type="vectorcypher_prune_edges", payload={"ids": [1]})
+    # Advance the checkpoint AND mark pending in the same session, then commit
+    # once - the crash-durable shape the apply loop relies on.
+    async with factory() as session:
+        await store.advance_checkpoint(run_id, 2, session=session)
+        await store.mark_graph_mirror_pending(run_id, entry, session=session)
+        await session.commit()
+
+    assert await store.read_last_committed(run_id) == 2
+    pending = await store.get_graph_mirror_pending(run_id)
+    assert len(pending) == 1
+    assert pending[0].op_seq == 2
+    assert pending[0].op_id == op
+    await engine.dispose()
+
+
+async def test_sqlite_mark_pending_in_session_rolls_back_with_caller() -> None:
+    """A rolled-back caller session leaves NO pending row (atomic with the tx)."""
+    tmp = tempfile.mkdtemp(prefix="khora-runstore-rb-")
+    db_path = str(Path(tmp) / "runstore.db")
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}", future=True)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    store = SqliteDreamRunStore(session_factory=factory)
+    await store.ensure_schema()
+
+    ns = uuid4()
+    run_id = uuid4()
+    await store.record_run(run_id, ns, mode="apply")
+
+    async with factory() as session:
+        await store.mark_graph_mirror_pending(
+            run_id,
+            GraphMirrorPending(op_seq=0, op_id=uuid4(), op_type="t", payload={}),
+            session=session,
+        )
+        await session.rollback()
+
+    assert await store.get_graph_mirror_pending(run_id) == []
+
+
+async def test_sqlite_open_pending_by_namespace_spans_runs() -> None:
+    """#1292 gap 1: a later run (new run_id, same namespace) drains prior failures.
+
+    ``get_open_graph_mirror_pending`` returns every (run_id, entry) with a
+    non-empty pending list for the namespace - not just the current run.
+    """
+    store, _ = await _open_sqlite_store()
+    ns = uuid4()
+    other_ns = uuid4()
+
+    run_a = uuid4()
+    run_b = uuid4()
+    run_other = uuid4()
+    await store.record_run(run_a, ns, mode="apply")
+    await store.record_run(run_b, ns, mode="apply")
+    await store.record_run(run_other, other_ns, mode="apply")
+
+    await store.mark_graph_mirror_pending(
+        run_a, GraphMirrorPending(op_seq=0, op_id=uuid4(), op_type="vectorcypher_prune_edges", payload={"a": 1})
+    )
+    await store.mark_graph_mirror_pending(
+        run_b, GraphMirrorPending(op_seq=1, op_id=uuid4(), op_type="vectorcypher_dedupe_entities", payload={"b": 2})
+    )
+    # A different namespace must NOT show up.
+    await store.mark_graph_mirror_pending(
+        run_other, GraphMirrorPending(op_seq=0, op_id=uuid4(), op_type="vectorcypher_prune_edges", payload={"o": 9})
+    )
+
+    open_pending = await store.get_open_graph_mirror_pending(ns)
+    run_ids = {rid for rid, _ in open_pending}
+    assert run_ids == {run_a, run_b}
+    assert run_other not in run_ids
+    by_run = {rid: entry for rid, entry in open_pending}
+    assert by_run[run_a].payload == {"a": 1}
+    assert by_run[run_b].payload == {"b": 2}
 
 
 # ---------------------------------------------------------------------------

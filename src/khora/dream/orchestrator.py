@@ -703,6 +703,11 @@ class DreamOrchestrator:
                 _assert_backend_supported(session, op.op_type)
                 undo = await self._invoke_handler(handler, op, coordinator=coordinator, session=session)
                 await self._record_committed_in_session(session, run_id, seq)
+                # Queue the graph mirror durably WITH the checkpoint (#1292): a
+                # hard crash between this commit and the post-commit mirror then
+                # leaves a pending row the reconciler can drain. Cleared by
+                # ``_mirror_dream_op`` on a successful mirror.
+                await self._pre_mark_graph_mirror_pending(session, run_id, seq, op, undo)
                 return undo
         except RuntimeError as exc:
             if "No SQL backend" not in str(exc):
@@ -711,6 +716,7 @@ class DreamOrchestrator:
             # advance the in-memory checkpoint best-effort.
             undo = await self._invoke_handler(handler, op, coordinator=coordinator, session=None)
             await self._record_committed(run_id, seq)
+            await self._pre_mark_graph_mirror_pending(None, run_id, seq, op, undo)
             return undo
 
     async def _mirror_dream_op(
@@ -732,11 +738,13 @@ class DreamOrchestrator:
 
           - No graph backend -> nothing to mirror, returns ``None``.
           - The op kind is not in the backend's ``supports_dream_mirror()``
-            probe, or not a soft-delete shape this PR mirrors -> records a
-            structured ``SkipReason`` and returns ``None`` (no silent divergence).
-          - The mirror raises after the PG commit -> increments the
-            partial-failure counter, queues the op in ``graph_mirror_pending``
-            for the reconciler, and returns a ``Degradation`` dict.
+            probe, or not a soft-delete shape this PR mirrors -> returns a
+            structured ``SkipReason`` dict so the divergence surfaces on the
+            result (#1292), not just a log.
+          - The mirror raises after the PG commit (or the namespace resolve
+            fails) -> increments the partial-failure counter, queues the op in
+            ``graph_mirror_pending`` for the reconciler, and returns a
+            ``Degradation`` dict.
         """
         graph = _graph_backend(self._kb.storage)
         if graph is None:
@@ -745,10 +753,9 @@ class DreamOrchestrator:
         op_type = str(op.op_type)
         supported = _supported_mirror_kinds(graph)
         if op_type not in supported or op_type not in MIRRORABLE_OP_KINDS:
-            # The backend can't (or this PR doesn't) mirror this op kind. Record
-            # the skip so the divergence is accounted for, not silent.
-            self._record_mirror_skip(op, reason="unsupported_op_kind")
-            return None
+            # The backend can't (or this PR doesn't) mirror this op kind. Surface
+            # the skip on the result so the divergence is accounted for (ADR-001).
+            return self._record_mirror_skip(op, reason="unsupported_op_kind")
 
         targets = extract_mirror_targets(op_type, undo)
         if not targets["retire_entity_ids"] and not targets["invalidate_relationship_ids"]:
@@ -756,17 +763,22 @@ class DreamOrchestrator:
             # mirror, and nothing to queue. Clean convergence.
             return None
 
-        # The graph nodes/edges carry the row-level namespace id (ingest
-        # resolves the stable id before any write); resolve here so the #1271
-        # verbs' ``WHERE namespace_id = $namespace_id`` matches.
-        row_namespace_id = await self._resolve_namespace_for_mirror(namespace_id)
         stamp_at = undo.applied_at or datetime.now(UTC)
         try:
+            # The graph nodes/edges carry the row-level namespace id (ingest
+            # resolves the stable id before any write); resolve here, INSIDE the
+            # failure-handling path, so the #1271 verbs' ``WHERE namespace_id =
+            # $namespace_id`` matches. A resolver error must NOT fall back to the
+            # stable id (it would match zero graph rows yet report success) -
+            # let it queue + degrade like any other mirror failure (#1292).
+            row_namespace_id = await self._resolve_namespace_for_mirror(namespace_id)
             await apply_mirror_targets(graph, targets, namespace_id=row_namespace_id, stamp_at=stamp_at)
         except Exception as exc:
             GRAPH_MIRROR_PARTIAL_FAILURE_COUNTER.add(1)
             # Queue for the reconciler so a later run re-mirrors this exact
-            # committed-but-unmirrored op.
+            # committed-but-unmirrored op. The apply loop already wrote a durable
+            # pending row inside the PG commit (#1292); this re-mark is idempotent
+            # (keyed on op_seq) and covers direct callers that skip the pre-mark.
             await self._queue_graph_mirror_pending(run_id, seq, op, undo)
             from loguru import logger
 
@@ -782,22 +794,63 @@ class DreamOrchestrator:
                 "detail": f"op_type={op_type} op_id={op.op_id}",
                 "exception": type(exc).__name__,
             }
+        # Mirror succeeded: clear the durable pending row written before the
+        # mirror attempt (#1292) so the reconciler does not replay it.
+        await self._clear_graph_mirror_pending(run_id, seq)
         return None
 
     async def _resolve_namespace_for_mirror(self, namespace_id: UUID) -> UUID:
         """Resolve a stable namespace id to the row id the graph rows carry.
 
         ``resolve_namespace`` is idempotent (returns a row id unchanged), so a
-        coordinator stub that already passes a row id is unaffected. Falls back
-        to the input on any coordinator that does not expose the method.
+        coordinator stub that already passes a row id is unaffected. A coordinator
+        that does not expose the method returns the input unchanged.
+
+        A resolver *error* propagates (#1292): silently falling back to the stable
+        id makes the mirror match zero graph rows (they carry the row id) yet
+        report success - silent cross-store divergence. The caller runs this
+        inside the mirror failure-handling path so a resolver error queues +
+        degrades like any other mirror failure.
         """
         resolver = getattr(self._kb.storage, "resolve_namespace", None)
         if resolver is None:
             return namespace_id
-        try:
-            return await resolver(namespace_id)
-        except Exception:  # pragma: no cover - defensive; resolve is a cheap read
-            return namespace_id
+        return await resolver(namespace_id)
+
+    async def _pre_mark_graph_mirror_pending(
+        self, session: Any, run_id: UUID, seq: int, op: DreamOp, undo: UndoRecord
+    ) -> None:
+        """Durably queue a mirrorable op BEFORE the mirror runs (#1292).
+
+        Called inside the apply op's PG transaction (same ``session`` as the
+        checkpoint advance) so a hard crash between the PG commit and the graph
+        mirror still leaves a pending row the reconciler can drain. Only marks
+        ops the active graph backend can mirror AND that carry targets - a
+        no-op apply or an unmirrorable kind queues nothing. ``_mirror_dream_op``
+        clears the row on a successful mirror.
+        """
+        store = self._run_store()
+        if store is None:
+            return
+        graph = _graph_backend(self._kb.storage)
+        if graph is None:
+            return
+        op_type = str(op.op_type)
+        if op_type not in _supported_mirror_kinds(graph) or op_type not in MIRRORABLE_OP_KINDS:
+            return
+        targets = extract_mirror_targets(op_type, undo)
+        if not targets["retire_entity_ids"] and not targets["invalidate_relationship_ids"]:
+            return
+        await store.mark_graph_mirror_pending(
+            run_id,
+            GraphMirrorPending(
+                op_seq=seq,
+                op_id=op.op_id,
+                op_type=op_type,
+                payload=mirror_payload(op, undo),
+            ),
+            session=session,
+        )
 
     async def _queue_graph_mirror_pending(self, run_id: UUID, seq: int, op: DreamOp, undo: UndoRecord) -> None:
         """Persist a committed-but-unmirrored op for the reconciler to retry."""
@@ -814,8 +867,21 @@ class DreamOrchestrator:
             ),
         )
 
-    def _record_mirror_skip(self, op: DreamOp, *, reason: str) -> None:
-        """Log a structured skip when an op kind cannot be mirrored (ADR-001)."""
+    async def _clear_graph_mirror_pending(self, run_id: UUID, seq: int) -> None:
+        """Drop the durable pending row once its mirror succeeded (#1292)."""
+        store = self._run_store()
+        if store is None:
+            return
+        await store.clear_graph_mirror_pending(run_id, seq)
+
+    def _record_mirror_skip(self, op: DreamOp, *, reason: str) -> dict[str, Any]:
+        """Return a structured skip when an op kind cannot be mirrored (ADR-001).
+
+        Since #1272 made the PG read filter unconditional, a backend that does
+        not advertise an op kind has PG hiding rows while graph recall still
+        shows them - silent divergence. Surfacing the skip on the result lets
+        operators see it (#1292), not just a log line.
+        """
         from loguru import logger
 
         logger.info(
@@ -823,38 +889,68 @@ class DreamOrchestrator:
             op_type=str(op.op_type),
             reason=reason,
         )
+        return {
+            "component": "dream.graph_mirror",
+            "reason": f"graph_mirror_{reason}",
+            "detail": f"op_type={op.op_type!s} op_id={op.op_id}",
+        }
 
     async def _drain_graph_mirror_pending(self, run_id: UUID, namespace_id: UUID) -> list[dict[str, Any]]:
-        """Reconcile committed-but-unmirrored ops left by a prior crash (#1272).
+        """Reconcile committed-but-unmirrored ops left by a prior crash (#1272, #1292).
 
         The checkpoint advances inside the PG commit, BEFORE the mirror runs, so
         a crash in that window leaves a committed op the resume loop skips. This
         drain re-attempts each queued op (idempotent by-id) and clears it on
-        success. A still-failing op stays queued and surfaces a fresh
-        degradation. Returns the degradations for ops that could not be drained.
+        success. It reads ALL open pending ops for the NAMESPACE (not just the
+        current ``run_id``, #1292) so a later run with a fresh ``run_id`` heals a
+        prior run's failures. A still-failing op stays queued and surfaces a
+        fresh degradation. Returns the degradations for ops that could not be
+        drained (including a failed pending read, per ADR-001).
+
+        ``run_id`` is unused for the read now but kept in the signature so the
+        apply loop's call site is stable and the drain can log the draining run.
         """
+        del run_id  # the drain is namespace-scoped now (#1292)
         store = self._run_store()
         graph = _graph_backend(self._kb.storage)
         if store is None or graph is None:
             return []
 
+        from loguru import logger
+
         try:
-            pending = await store.get_graph_mirror_pending(run_id)
-        except Exception:  # pragma: no cover - defensive read
-            return []
+            pending = await store.get_open_graph_mirror_pending(namespace_id)
+        except Exception as exc:
+            # A failed pending read hides committed mirror lag - record it rather
+            # than silently returning empty (#1292, ADR-001).
+            GRAPH_MIRROR_PARTIAL_FAILURE_COUNTER.add(1)
+            logger.warning(
+                "dream graph mirror reconcile: pending read failed (mirror lag may be hidden): {exc}",
+                exc=exc,
+                exc_info=True,
+            )
+            return [
+                {
+                    "component": "dream.graph_mirror.reconcile",
+                    "reason": "graph_mirror_pending_read_failed",
+                    "detail": "get_open_graph_mirror_pending raised",
+                    "exception": type(exc).__name__,
+                }
+            ]
         if not pending:
             return []
 
-        row_namespace_id = await self._resolve_namespace_for_mirror(namespace_id)
         degradations: list[dict[str, Any]] = []
         now = datetime.now(UTC)
-        for entry in pending:
+        for pending_run_id, entry in pending:
             try:
+                # Resolve per-entry inside the try so a resolver error degrades
+                # the entry (stays queued) rather than aborting the apply run or
+                # silently matching zero graph rows (#1292).
+                row_namespace_id = await self._resolve_namespace_for_mirror(namespace_id)
                 await apply_mirror_payload(graph, entry.payload, namespace_id=row_namespace_id, fallback_stamp=now)
             except Exception as exc:
                 GRAPH_MIRROR_PARTIAL_FAILURE_COUNTER.add(1)
-                from loguru import logger
-
                 logger.warning(
                     "dream graph mirror reconcile failed for op {op_type} (still queued): {exc}",
                     op_type=entry.op_type,
@@ -870,7 +966,7 @@ class DreamOrchestrator:
                     }
                 )
                 continue
-            await store.clear_graph_mirror_pending(run_id, entry.op_seq)
+            await store.clear_graph_mirror_pending(pending_run_id, entry.op_seq)
         return degradations
 
     async def _invoke_handler(

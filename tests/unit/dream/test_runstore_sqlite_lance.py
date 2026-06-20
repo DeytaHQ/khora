@@ -89,6 +89,31 @@ async def test_graph_mirror_pending_on_sqlite_lance() -> None:
         assert await store.get_graph_mirror_pending(run_id) == []
 
 
+async def test_open_pending_by_namespace_on_sqlite_lance() -> None:
+    """#1292: the namespace-scoped drain query spans runs on the embedded stack."""
+    install_mock_llm(dim=8)
+    async with embedded_khora(embedding_dimension=8, engine="vectorcypher") as kb:
+        ns = await kb.create_namespace()
+        await _remember(kb, ns.namespace_id)
+
+        orch = DreamOrchestrator(kb, DreamConfig(enabled=True), sinks=[])
+        store = orch._run_store()
+
+        run_a = uuid4()
+        run_b = uuid4()
+        await store.record_run(run_a, ns.namespace_id, mode="apply")
+        await store.record_run(run_b, ns.namespace_id, mode="apply")
+        await store.mark_graph_mirror_pending(
+            run_a, GraphMirrorPending(op_seq=0, op_id=uuid4(), op_type="vectorcypher_prune_edges", payload={"a": 1})
+        )
+        await store.mark_graph_mirror_pending(
+            run_b, GraphMirrorPending(op_seq=1, op_id=uuid4(), op_type="vectorcypher_dedupe_entities", payload={"b": 2})
+        )
+
+        open_pending = await store.get_open_graph_mirror_pending(ns.namespace_id)
+        assert {rid for rid, _ in open_pending} == {run_a, run_b}
+
+
 async def test_dream_history_still_works_on_sqlite_lance() -> None:
     """Regression: the #896 history/status path is unchanged by the store."""
     install_mock_llm(dim=8)

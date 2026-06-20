@@ -123,12 +123,29 @@ class DreamRunStore(Protocol):
         """Return recent runs for ``namespace_id`` (newest first)."""
         ...
 
-    async def mark_graph_mirror_pending(self, run_id: UUID, entry: GraphMirrorPending) -> None:
-        """Record (or replace, keyed on ``op_seq``) a pending mirror op."""
+    async def mark_graph_mirror_pending(
+        self, run_id: UUID, entry: GraphMirrorPending, *, session: Any | None = None
+    ) -> None:
+        """Record (or replace, keyed on ``op_seq``) a pending mirror op.
+
+        ``session`` lets the PG impl write the pending row inside the same
+        transaction as the checkpoint advance so a hard crash between the PG
+        commit and the graph mirror still leaves a durable pending row the
+        reconciler can drain (#1292). Other impls ignore it.
+        """
         ...
 
     async def get_graph_mirror_pending(self, run_id: UUID) -> list[GraphMirrorPending]:
         """Return the pending mirror ops for ``run_id`` (empty when none)."""
+        ...
+
+    async def get_open_graph_mirror_pending(self, namespace_id: UUID) -> list[tuple[UUID, GraphMirrorPending]]:
+        """Return every open ``(run_id, entry)`` pair for ``namespace_id`` (#1292).
+
+        Spans ALL runs in the namespace, not just the current one, so a later
+        run with a fresh ``run_id`` drains a prior run's committed-but-unmirrored
+        ops left by a crash.
+        """
         ...
 
     async def clear_graph_mirror_pending(self, run_id: UUID, op_seq: int) -> None:
@@ -340,15 +357,45 @@ class _SqlDreamRunStore:
             ).all()
         return [_run_info_from_row(row) for row in rows]
 
-    async def mark_graph_mirror_pending(self, run_id: UUID, entry: GraphMirrorPending) -> None:
-        async with self._open() as session:
-            existing = await self._read_pending(session, run_id)
-            merged = _merge_pending(existing, entry)
-            await self._write_pending(session, run_id, merged)
+    async def mark_graph_mirror_pending(
+        self, run_id: UUID, entry: GraphMirrorPending, *, session: Any | None = None
+    ) -> None:
+        # An external session (the apply loop's checkpoint transaction) makes
+        # the pending row durable atomically with the PG commit (#1292); the
+        # caller commits it. Without one, own the session lifecycle.
+        if session is not None:
+            await self._mark_in_session(session, run_id, entry)
+            return
+        async with self._open() as own_session:
+            await self._mark_in_session(own_session, run_id, entry)
+
+    @classmethod
+    async def _mark_in_session(cls, session: Any, run_id: UUID, entry: GraphMirrorPending) -> None:
+        existing = await cls._read_pending(session, run_id)
+        merged = _merge_pending(existing, entry)
+        await cls._write_pending(session, run_id, merged)
 
     async def get_graph_mirror_pending(self, run_id: UUID) -> list[GraphMirrorPending]:
         async with self._open() as session:
             return await self._read_pending(session, run_id)
+
+    async def get_open_graph_mirror_pending(self, namespace_id: UUID) -> list[tuple[UUID, GraphMirrorPending]]:
+        async with self._open() as session:
+            rows = (
+                await session.execute(
+                    text(
+                        "SELECT run_id, graph_mirror_pending FROM khora_dream_runs "
+                        "WHERE namespace_id = :ns AND graph_mirror_pending IS NOT NULL"
+                    ),
+                    {"ns": _uuid_param(session, namespace_id)},
+                )
+            ).all()
+        out: list[tuple[UUID, GraphMirrorPending]] = []
+        for row in rows:
+            run_id = _coerce_uuid(row.run_id)
+            for entry in _load_pending(row.graph_mirror_pending):
+                out.append((run_id, entry))
+        return out
 
     async def clear_graph_mirror_pending(self, run_id: UUID, op_seq: int) -> None:
         async with self._open() as session:
@@ -583,7 +630,10 @@ class SurrealDreamRunStore:
         )
         return [self._row_to_info(row) for row in rows if row.get("run_id")]
 
-    async def mark_graph_mirror_pending(self, run_id: UUID, entry: GraphMirrorPending) -> None:
+    async def mark_graph_mirror_pending(
+        self, run_id: UUID, entry: GraphMirrorPending, *, session: Any | None = None
+    ) -> None:
+        del session  # SurrealDB has no shared SQL session to enroll.
         existing = await self.get_graph_mirror_pending(run_id)
         merged = _merge_pending(existing, entry)
         await self._write_pending(run_id, merged)
@@ -595,6 +645,21 @@ class SurrealDreamRunStore:
         if not row:
             return []
         return _load_pending(row.get("graph_mirror_pending"))
+
+    async def get_open_graph_mirror_pending(self, namespace_id: UUID) -> list[tuple[UUID, GraphMirrorPending]]:
+        rows = await self._conn.query(
+            "SELECT run_id, graph_mirror_pending FROM khora_dream_runs "
+            "WHERE namespace_id = $ns AND graph_mirror_pending != []",
+            {"ns": str(namespace_id)},
+        )
+        out: list[tuple[UUID, GraphMirrorPending]] = []
+        for row in rows:
+            run_id = row.get("run_id")
+            if not run_id:
+                continue
+            for entry in _load_pending(row.get("graph_mirror_pending")):
+                out.append((_coerce_uuid(run_id), entry))
+        return out
 
     async def clear_graph_mirror_pending(self, run_id: UUID, op_seq: int) -> None:
         existing = await self.get_graph_mirror_pending(run_id)
