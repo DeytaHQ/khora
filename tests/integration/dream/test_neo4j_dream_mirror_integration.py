@@ -598,6 +598,92 @@ async def test_crash_between_commit_and_mirror_reconciles(kb: Khora) -> None:
     assert pg_live == graph_live
 
 
+@pytest.mark.asyncio
+async def test_hard_crash_after_commit_heals_via_later_run(kb: Khora) -> None:
+    """#1292 gap 1: a hard crash after the PG commit (before the mirror even runs)
+    leaves a DURABLE pending row, and a LATER run with a fresh run_id - draining
+    by namespace - re-mirrors it.
+
+    On origin/main the pending row is only written inside ``_mirror_dream_op``'s
+    except handler, so a crash before that point leaves NO row; and the drain
+    reads only the current run_id, so a new run never retries it. This asserts
+    both halves of the fix: the durable pre-mark (inside the apply tx) and the
+    namespace-scoped drain (across run_ids).
+    """
+    ns = await kb.create_namespace()
+    ns_stable = ns.namespace_id
+    ns_row_id = await kb.storage.resolve_namespace(ns_stable)
+
+    a = await _seed_entity_both(kb, ns_row_id, f"e-{uuid4().hex[:8]}")
+    b = await _seed_entity_both(kb, ns_row_id, f"f-{uuid4().hex[:8]}")
+    rel = Relationship(
+        namespace_id=ns_row_id,
+        source_entity_id=a,
+        target_entity_id=b,
+        relationship_type="ASSOCIATED_WITH",
+        description="co-occurrence",
+        confidence=0.1,
+    )
+    await kb.storage.create_relationship(rel)
+    async with kb.storage.transaction() as txn:
+        await txn.session.execute(
+            text(
+                "INSERT INTO relationships (id, namespace_id, source_entity_id, target_entity_id, "
+                "relationship_type, description, properties, source_document_ids, source_chunk_ids, "
+                "confidence, weight, metadata, created_at, updated_at) "
+                "VALUES (:id, :ns, :src, :tgt, 'ASSOCIATED_WITH', '', '{}'::jsonb, '{}', "
+                "ARRAY[:dead]::uuid[], 0.1, 1.0, '{}'::jsonb, now(), now())"
+            ),
+            {"id": rel.id, "ns": ns_row_id, "src": a, "tgt": b, "dead": uuid4()},
+        )
+
+    from khora.dream.engines.registry import get_apply_handler
+
+    # --- Run A: commit the op + durable pre-mark, then "crash" (never mirror) ---
+    orch_a = _orchestrator(kb)
+    run_a = uuid4()
+    run_store = select_run_store(kb.storage)
+    assert run_store is not None
+    await run_store.record_run(run_a, ns_stable, mode="apply", trigger="manual")
+
+    op = DreamOp(
+        op_id=uuid4(),
+        phase="apply",
+        op_type=OpKind.VECTORCYPHER_PRUNE_EDGES,
+        inputs=({"relationship_id": str(rel.id)},),
+        namespace_id=ns_row_id,
+    )
+    handler = get_apply_handler(op.op_type)
+    assert handler is not None
+    # _apply_one_op commits the PG apply + checkpoint AND the durable pending
+    # pre-mark in one transaction. We stop here - simulating a process death
+    # before the post-commit mirror runs.
+    await orch_a._apply_one_op(run_id=run_a, seq=0, op=op, handler=handler)
+
+    # PG soft-deleted the edge; the graph still shows it (mirror never ran).
+    assert str(rel.id) not in await _live_pg_relationship_ids(kb, ns_row_id)
+    assert str(rel.id) in await _graph_relationship_ids(kb, ns_row_id)
+    # The crash-durable pending row exists under run A.
+    pending = await run_store.get_graph_mirror_pending(run_a)
+    assert any(p.op_seq == 0 for p in pending), "no durable pending row after the commit (crash window open)"
+
+    # --- Run B: a fresh run drains the prior run's pending op by namespace ---
+    orch_b = _orchestrator(kb)
+    run_b = uuid4()
+    await run_store.record_run(run_b, ns_stable, mode="apply", trigger="manual")
+    degradations = await orch_b._drain_graph_mirror_pending(run_b, ns_stable)
+    assert degradations == [], degradations
+
+    # Converged: invisible in both stores, byte-identical live sets.
+    pg_live = await _live_pg_relationship_ids(kb, ns_row_id)
+    graph_live = await _graph_relationship_ids(kb, ns_row_id)
+    assert str(rel.id) not in pg_live
+    assert str(rel.id) not in graph_live
+    assert pg_live == graph_live
+    # Run A's pending row is cleared (drained under its own run_id).
+    assert await run_store.get_graph_mirror_pending(run_a) == []
+
+
 def _orchestrator(kb: Khora):
     from khora.dream.orchestrator import DreamOrchestrator
 
@@ -760,9 +846,11 @@ async def test_community_skip_when_backend_lacks_capability(kb: Khora) -> None:
     real_graph = kb.storage._graph
     kb.storage._graph = _NoCommunityGraph()  # type: ignore[assignment]
     try:
-        # Skip is recorded (logged), no exception, no degradation, nothing materialized.
-        degradation = await orch._mirror_dream_op(uuid4(), 0, ns_row_id, op, undo)
-        assert degradation is None
+        # A structured skip is surfaced (ADR-001), no exception, nothing materialized.
+        record = await orch._mirror_dream_op(uuid4(), 0, ns_row_id, op, undo)
+        assert record is not None, "unsupported-mirror skip must surface on the result (ADR-001)"
+        assert record["reason"] == "graph_mirror_unsupported_op_kind"
+        assert record["component"] == "dream.graph_mirror"
     finally:
         kb.storage._graph = real_graph  # type: ignore[assignment]
 

@@ -73,17 +73,30 @@ class _Coordinator:
 
 
 class _RunStore:
-    def __init__(self) -> None:
-        self.pending: dict[int, GraphMirrorPending] = {}
+    """In-memory graph_mirror_pending store keyed by (run_id, op_seq)."""
 
-    async def mark_graph_mirror_pending(self, run_id: UUID, entry: GraphMirrorPending) -> None:
-        self.pending[entry.op_seq] = entry
+    def __init__(self) -> None:
+        # (run_id, op_seq) -> entry, plus the namespace each run belongs to.
+        self.pending: dict[tuple[UUID, int], GraphMirrorPending] = {}
+        self.namespaces: dict[UUID, UUID] = {}
+
+    def bind_run(self, run_id: UUID, namespace_id: UUID) -> None:
+        self.namespaces[run_id] = namespace_id
+
+    async def mark_graph_mirror_pending(
+        self, run_id: UUID, entry: GraphMirrorPending, *, session: Any | None = None
+    ) -> None:
+        del session  # the fake has no transaction to enroll
+        self.pending[(run_id, entry.op_seq)] = entry
 
     async def get_graph_mirror_pending(self, run_id: UUID) -> list[GraphMirrorPending]:
-        return list(self.pending.values())
+        return [entry for (rid, _seq), entry in self.pending.items() if rid == run_id]
+
+    async def get_open_graph_mirror_pending(self, namespace_id: UUID) -> list[tuple[UUID, GraphMirrorPending]]:
+        return [(rid, entry) for (rid, _seq), entry in self.pending.items() if self.namespaces.get(rid) == namespace_id]
 
     async def clear_graph_mirror_pending(self, run_id: UUID, op_seq: int) -> None:
-        self.pending.pop(op_seq, None)
+        self.pending.pop((run_id, op_seq), None)
 
 
 class _FakeKB:
@@ -220,7 +233,10 @@ async def test_mirror_community_skip_when_backend_unsupported() -> None:
     orch = _orch(graph)
     op = _community_op()
     undo = _persisted_undo(op, uuid4(), [uuid4()])
-    assert await orch._mirror_dream_op(uuid4(), 0, uuid4(), op, undo) is None
+    record = await orch._mirror_dream_op(uuid4(), 0, uuid4(), op, undo)
+    assert record is not None, "unsupported-mirror skip must surface on the result (ADR-001)"
+    assert record["reason"] == "graph_mirror_unsupported_op_kind"
+    assert record["component"] == "dream.graph_mirror"
 
 
 @pytest.mark.asyncio
@@ -235,9 +251,9 @@ async def test_mirror_community_failure_queues_pending_and_degrades() -> None:
     degradation = await orch._mirror_dream_op(run_id, 7, uuid4(), op, undo)
     assert degradation is not None
     assert degradation["reason"] == "graph_mirror_failed_after_pg_commit"
-    assert 7 in store.pending
-    assert store.pending[7].op_type == "vectorcypher_community_summary"
-    assert store.pending[7].payload["communities"][0]["id"] == str(community_id)
+    assert (run_id, 7) in store.pending
+    assert store.pending[(run_id, 7)].op_type == "vectorcypher_community_summary"
+    assert store.pending[(run_id, 7)].payload["communities"][0]["id"] == str(community_id)
 
 
 @pytest.mark.asyncio
@@ -247,7 +263,8 @@ async def test_reconciler_re_materializes_community_and_clears() -> None:
     run_id = uuid4()
     ns = uuid4()
     community_id = uuid4()
-    store.pending[7] = GraphMirrorPending(
+    store.bind_run(run_id, ns)
+    store.pending[(run_id, 7)] = GraphMirrorPending(
         op_seq=7,
         op_id=uuid4(),
         op_type="vectorcypher_community_summary",
@@ -264,4 +281,4 @@ async def test_reconciler_re_materializes_community_and_clears() -> None:
     degradations = await orch._drain_graph_mirror_pending(run_id, ns)
     assert degradations == []
     assert graph.materialized[0]["communities"][0].id == community_id
-    assert 7 not in store.pending
+    assert (run_id, 7) not in store.pending

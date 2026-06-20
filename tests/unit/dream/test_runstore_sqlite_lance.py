@@ -89,6 +89,47 @@ async def test_graph_mirror_pending_on_sqlite_lance() -> None:
         assert await store.get_graph_mirror_pending(run_id) == []
 
 
+async def test_open_pending_by_namespace_on_sqlite_lance() -> None:
+    """#1292: the namespace-scoped drain query spans runs on the embedded stack."""
+    install_mock_llm(dim=8)
+    async with embedded_khora(embedding_dimension=8, engine="vectorcypher") as kb:
+        ns = await kb.create_namespace()
+        # NOTE: _remember is pure setup (it just needs a populated namespace).
+        # The mock LLM returns non-JSON, so the extraction path legitimately
+        # records an ``extraction.llm`` degradation - asserting no-degradation
+        # here would fail on the mock setup, not on the run-store behavior under
+        # test. The sibling tests in this file omit the guard for the same
+        # reason; this test asserts the namespace-scoped pending query only.
+        await _remember(kb, ns.namespace_id)
+
+        orch = DreamOrchestrator(kb, DreamConfig(enabled=True), sinks=[])
+        store = orch._run_store()
+
+        other_ns = await kb.create_namespace()
+        run_a = uuid4()
+        run_b = uuid4()
+        run_other = uuid4()
+        await store.record_run(run_a, ns.namespace_id, mode="apply")
+        await store.record_run(run_b, ns.namespace_id, mode="apply")
+        await store.record_run(run_other, other_ns.namespace_id, mode="apply")
+        await store.mark_graph_mirror_pending(
+            run_a, GraphMirrorPending(op_seq=0, op_id=uuid4(), op_type="vectorcypher_prune_edges", payload={"a": 1})
+        )
+        await store.mark_graph_mirror_pending(
+            run_b, GraphMirrorPending(op_seq=1, op_id=uuid4(), op_type="vectorcypher_dedupe_entities", payload={"b": 2})
+        )
+        # A pending op in a different namespace must NOT leak into the scope.
+        await store.mark_graph_mirror_pending(
+            run_other,
+            GraphMirrorPending(op_seq=0, op_id=uuid4(), op_type="vectorcypher_prune_edges", payload={"o": 9}),
+        )
+
+        open_pending = await store.get_open_graph_mirror_pending(ns.namespace_id)
+        run_ids = {rid for rid, _ in open_pending}
+        assert run_ids == {run_a, run_b}
+        assert run_other not in run_ids
+
+
 async def test_dream_history_still_works_on_sqlite_lance() -> None:
     """Regression: the #896 history/status path is unchanged by the store."""
     install_mock_llm(dim=8)

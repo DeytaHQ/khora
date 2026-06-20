@@ -97,19 +97,30 @@ class _Coordinator:
 
 
 class _RunStore:
-    """In-memory graph_mirror_pending store keyed by op_seq."""
+    """In-memory graph_mirror_pending store keyed by (run_id, op_seq)."""
 
     def __init__(self) -> None:
-        self.pending: dict[int, GraphMirrorPending] = {}
+        # (run_id, op_seq) -> entry, plus the namespace each run belongs to.
+        self.pending: dict[tuple[UUID, int], GraphMirrorPending] = {}
+        self.namespaces: dict[UUID, UUID] = {}
 
-    async def mark_graph_mirror_pending(self, run_id: UUID, entry: GraphMirrorPending) -> None:
-        self.pending[entry.op_seq] = entry
+    def bind_run(self, run_id: UUID, namespace_id: UUID) -> None:
+        self.namespaces[run_id] = namespace_id
+
+    async def mark_graph_mirror_pending(
+        self, run_id: UUID, entry: GraphMirrorPending, *, session: Any | None = None
+    ) -> None:
+        del session  # the fake has no transaction to enroll
+        self.pending[(run_id, entry.op_seq)] = entry
 
     async def get_graph_mirror_pending(self, run_id: UUID) -> list[GraphMirrorPending]:
-        return list(self.pending.values())
+        return [entry for (rid, _seq), entry in self.pending.items() if rid == run_id]
+
+    async def get_open_graph_mirror_pending(self, namespace_id: UUID) -> list[tuple[UUID, GraphMirrorPending]]:
+        return [(rid, entry) for (rid, _seq), entry in self.pending.items() if self.namespaces.get(rid) == namespace_id]
 
     async def clear_graph_mirror_pending(self, run_id: UUID, op_seq: int) -> None:
-        self.pending.pop(op_seq, None)
+        self.pending.pop((run_id, op_seq), None)
 
 
 class _FakeKB:
@@ -536,12 +547,13 @@ async def test_mirror_rewrite_failure_queues_pending_and_degrades() -> None:
         },
         applied_at=datetime.now(UTC),
     )
-    degradation = await orch._mirror_dream_op(uuid4(), 7, uuid4(), op, undo)
+    run_id = uuid4()
+    degradation = await orch._mirror_dream_op(run_id, 7, uuid4(), op, undo)
     assert degradation is not None
     assert degradation["reason"] == "graph_mirror_failed_after_pg_commit"
     # The rewrite payload survives into the pending slot for the reconciler.
-    assert 7 in store.pending
-    rewrites = store.pending[7].payload["rewrite_relationships"]
+    assert (run_id, 7) in store.pending
+    rewrites = store.pending[(run_id, 7)].payload["rewrite_relationships"]
     assert rewrites[0]["relationship_id"] == str(incident)
     assert rewrites[0]["source_entity_id"] == str(canonical)
 
@@ -556,7 +568,7 @@ async def test_mirror_noop_when_no_graph() -> None:
 
 @pytest.mark.asyncio
 async def test_mirror_skip_when_backend_unsupported() -> None:
-    """A backend that advertises no mirror support records a skip, not a silent divergence."""
+    """A backend that advertises no mirror support surfaces a structured skip (#1292)."""
     graph = _NoMirrorGraph()
     orch = _orch(graph)
     op = _prune_op()
@@ -566,8 +578,11 @@ async def test_mirror_skip_when_backend_unsupported() -> None:
         before={"relationships": [{"relationship_id": str(uuid4())}]},
         applied_at=datetime.now(UTC),
     )
-    # No verb to call - returns None (skip recorded via log), no exception.
-    assert await orch._mirror_dream_op(uuid4(), 0, uuid4(), op, undo) is None
+    # The skip is returned (not silently swallowed) so the apply loop threads it
+    # onto DreamResult.metadata - no exception, but not None either.
+    record = await orch._mirror_dream_op(uuid4(), 0, uuid4(), op, undo)
+    assert record is not None
+    assert record["reason"] == "graph_mirror_unsupported_op_kind"
 
 
 @pytest.mark.asyncio
@@ -588,10 +603,10 @@ async def test_mirror_failure_queues_pending_and_degrades() -> None:
     assert degradation is not None
     assert degradation["reason"] == "graph_mirror_failed_after_pg_commit"
     assert degradation["exception"] == "RuntimeError"
-    # The op is queued for the reconciler under its op_seq.
-    assert 3 in store.pending
-    assert store.pending[3].op_type == "vectorcypher_prune_edges"
-    assert str(rel_id) in store.pending[3].payload["invalidate_relationship_ids"]
+    # The op is queued for the reconciler under its (run_id, op_seq) key.
+    assert (run_id, 3) in store.pending
+    assert store.pending[(run_id, 3)].op_type == "vectorcypher_prune_edges"
+    assert str(rel_id) in store.pending[(run_id, 3)].payload["invalidate_relationship_ids"]
 
 
 # ---------------------------------------------------------------------------
@@ -607,7 +622,8 @@ async def test_reconciler_re_mirrors_and_clears() -> None:
     rel_id = uuid4()
     run_id = uuid4()
     ns = uuid4()
-    store.pending[3] = GraphMirrorPending(
+    store.bind_run(run_id, ns)
+    store.pending[(run_id, 3)] = GraphMirrorPending(
         op_seq=3,
         op_id=uuid4(),
         op_type="vectorcypher_prune_edges",
@@ -618,7 +634,7 @@ async def test_reconciler_re_mirrors_and_clears() -> None:
     assert degradations == []
     assert graph.invalidated[0]["ids"] == [rel_id]
     # Cleared on success.
-    assert 3 not in store.pending
+    assert (run_id, 3) not in store.pending
 
 
 @pytest.mark.asyncio
@@ -626,15 +642,223 @@ async def test_reconciler_keeps_pending_on_repeated_failure() -> None:
     graph = _FakeGraph(fail_invalidate=True)
     store = _RunStore()
     run_id = uuid4()
-    store.pending[3] = GraphMirrorPending(
+    ns = uuid4()
+    store.bind_run(run_id, ns)
+    store.pending[(run_id, 3)] = GraphMirrorPending(
         op_seq=3,
         op_id=uuid4(),
         op_type="vectorcypher_prune_edges",
         payload={"retire_entity_ids": [], "invalidate_relationship_ids": [str(uuid4())], "applied_at": None},
     )
     orch = _orch(graph, run_store=store)
-    degradations = await orch._drain_graph_mirror_pending(run_id, uuid4())
+    degradations = await orch._drain_graph_mirror_pending(run_id, ns)
     assert len(degradations) == 1
     assert degradations[0]["reason"] == "graph_mirror_reconcile_failed"
     # Still queued for the next attempt.
-    assert 3 in store.pending
+    assert (run_id, 3) in store.pending
+
+
+# ---------------------------------------------------------------------------
+# #1292 gap 1: crash-durable pending + namespace-scoped drain
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pre_mark_persists_pending_before_mirror_attempt() -> None:
+    """The pending row is written INSIDE the apply tx, before any mirror runs.
+
+    Closes the hard-crash window: a process death between the PG commit and the
+    mirror leaves a durable pending row the reconciler can drain.
+    """
+    graph = _FakeGraph()
+    store = _RunStore()
+    orch = _orch(graph, run_store=store)
+    op = _prune_op()
+    rel_id = uuid4()
+    undo = UndoRecord(
+        op_id=op.op_id,
+        op_type=str(op.op_type),
+        before={"relationships": [{"relationship_id": str(rel_id)}]},
+        applied_at=datetime.now(UTC),
+    )
+    run_id = uuid4()
+    # The apply loop calls this inside the checkpoint transaction (session=None
+    # in the fake). It must persist the pending entry pre-emptively.
+    await orch._pre_mark_graph_mirror_pending(None, run_id, 5, op, undo)
+    assert (run_id, 5) in store.pending
+    assert store.pending[(run_id, 5)].op_type == "vectorcypher_prune_edges"
+    assert str(rel_id) in store.pending[(run_id, 5)].payload["invalidate_relationship_ids"]
+
+
+@pytest.mark.asyncio
+async def test_pre_mark_skips_when_no_targets() -> None:
+    """A no-op apply (no mirror targets) leaves nothing queued."""
+    graph = _FakeGraph()
+    store = _RunStore()
+    orch = _orch(graph, run_store=store)
+    op = _prune_op()
+    undo = UndoRecord(op_id=op.op_id, op_type=str(op.op_type), before={"noop": True}, applied_at=None)
+    run_id = uuid4()
+    await orch._pre_mark_graph_mirror_pending(None, run_id, 0, op, undo)
+    assert store.pending == {}
+
+
+@pytest.mark.asyncio
+async def test_mirror_clears_pending_on_success() -> None:
+    """A successful mirror clears the pre-emptively-marked pending row."""
+    graph = _FakeGraph()
+    store = _RunStore()
+    orch = _orch(graph, run_store=store)
+    op = _prune_op()
+    rel_id = uuid4()
+    undo = UndoRecord(
+        op_id=op.op_id,
+        op_type=str(op.op_type),
+        before={"relationships": [{"relationship_id": str(rel_id)}]},
+        applied_at=datetime.now(UTC),
+    )
+    run_id = uuid4()
+    ns = uuid4()
+    await orch._pre_mark_graph_mirror_pending(None, run_id, 1, op, undo)
+    assert (run_id, 1) in store.pending
+    degradation = await orch._mirror_dream_op(run_id, 1, ns, op, undo)
+    assert degradation is None
+    # Mirror succeeded -> pending cleared.
+    assert (run_id, 1) not in store.pending
+
+
+@pytest.mark.asyncio
+async def test_drain_heals_prior_run_in_same_namespace() -> None:
+    """#1292 gap 1: a NEW run (different run_id) drains a prior run's pending op.
+
+    On origin/main the drain reads only the current run_id, so a crash-left
+    pending op from run A is never retried by run B. This asserts the
+    namespace-scoped drain heals it.
+    """
+    graph = _FakeGraph()
+    store = _RunStore()
+    ns = uuid4()
+    prior_run = uuid4()
+    new_run = uuid4()
+    store.bind_run(prior_run, ns)
+    store.bind_run(new_run, ns)
+    rel_id = uuid4()
+    # A pending op left by the PRIOR run (e.g. crash before mirror).
+    store.pending[(prior_run, 0)] = GraphMirrorPending(
+        op_seq=0,
+        op_id=uuid4(),
+        op_type="vectorcypher_prune_edges",
+        payload={"retire_entity_ids": [], "invalidate_relationship_ids": [str(rel_id)], "applied_at": None},
+    )
+    orch = _orch(graph, run_store=store)
+    # The NEW run's drain heals the prior run's op.
+    degradations = await orch._drain_graph_mirror_pending(new_run, ns)
+    assert degradations == []
+    assert graph.invalidated[0]["ids"] == [rel_id]
+    # The prior run's pending entry is cleared under ITS run_id.
+    assert (prior_run, 0) not in store.pending
+
+
+# ---------------------------------------------------------------------------
+# #1292 gap 2: unsupported-mirror skip surfaces as a structured record
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mirror_skip_returns_structured_skip_reason() -> None:
+    """A backend that cannot mirror an op kind surfaces a SkipReason, not just a log."""
+    graph = _NoMirrorGraph()
+    orch = _orch(graph)
+    op = _prune_op()
+    undo = UndoRecord(
+        op_id=op.op_id,
+        op_type=str(op.op_type),
+        before={"relationships": [{"relationship_id": str(uuid4())}]},
+        applied_at=datetime.now(UTC),
+    )
+    record = await orch._mirror_dream_op(uuid4(), 0, uuid4(), op, undo)
+    assert record is not None, "unsupported-mirror skip must surface on the result (ADR-001)"
+    assert record["reason"] == "graph_mirror_unsupported_op_kind"
+    assert record["component"] == "dream.graph_mirror"
+    assert "vectorcypher_prune_edges" in record["detail"]
+
+
+# ---------------------------------------------------------------------------
+# #1292 gap 3: namespace-resolve failure degrades (no silent fallback)
+# ---------------------------------------------------------------------------
+
+
+class _ResolverErrorCoordinator(_Coordinator):
+    async def resolve_namespace(self, namespace_id: UUID) -> UUID:
+        raise RuntimeError("resolver boom")
+
+
+def _orch_with_coordinator(coordinator: _Coordinator, *, run_store: _RunStore | None = None) -> DreamOrchestrator:
+    kb = _FakeKB(coordinator)
+    orch = DreamOrchestrator(kb, DreamConfig(enabled=True), sinks=[])
+    if run_store is not None:
+        orch._run_store_cache = run_store  # type: ignore[attr-defined]
+        orch._run_store_resolved = True  # type: ignore[attr-defined]
+    return orch
+
+
+@pytest.mark.asyncio
+async def test_resolver_failure_degrades_and_queues() -> None:
+    """A resolver error in the mirror path degrades + queues; it does not silently fall back."""
+    graph = _FakeGraph()
+    store = _RunStore()
+    orch = _orch_with_coordinator(_ResolverErrorCoordinator(graph), run_store=store)
+    op = _prune_op()
+    rel_id = uuid4()
+    undo = UndoRecord(
+        op_id=op.op_id,
+        op_type=str(op.op_type),
+        before={"relationships": [{"relationship_id": str(rel_id)}]},
+        applied_at=datetime.now(UTC),
+    )
+    run_id = uuid4()
+    degradation = await orch._mirror_dream_op(run_id, 0, uuid4(), op, undo)
+    assert degradation is not None
+    assert degradation["reason"] == "graph_mirror_failed_after_pg_commit"
+    # No mirror verb was called (the resolve raised before the graph write).
+    assert graph.invalidated == []
+    # Queued for the reconciler.
+    assert (run_id, 0) in store.pending
+
+
+@pytest.mark.asyncio
+async def test_resolve_namespace_raises_on_resolver_error() -> None:
+    """_resolve_namespace_for_mirror propagates resolver errors (no silent fallback)."""
+    orch = _orch_with_coordinator(_ResolverErrorCoordinator(_FakeGraph()))
+    with pytest.raises(RuntimeError):
+        await orch._resolve_namespace_for_mirror(uuid4())
+
+
+@pytest.mark.asyncio
+async def test_resolve_namespace_idempotent_without_resolver() -> None:
+    """No resolver method -> the input is returned unchanged (idempotent)."""
+    orch = _orch(_FakeGraph())  # plain _Coordinator has no resolve_namespace
+    ns = uuid4()
+    assert await orch._resolve_namespace_for_mirror(ns) == ns
+
+
+# ---------------------------------------------------------------------------
+# #1292 gap 4: pending-read swallow records a degradation
+# ---------------------------------------------------------------------------
+
+
+class _PendingReadErrorStore(_RunStore):
+    async def get_open_graph_mirror_pending(self, namespace_id: UUID) -> list[tuple[UUID, GraphMirrorPending]]:
+        raise RuntimeError("pending read boom")
+
+
+@pytest.mark.asyncio
+async def test_drain_pending_read_error_degrades() -> None:
+    """A failing pending read records a Degradation instead of silently returning []."""
+    graph = _FakeGraph()
+    store = _PendingReadErrorStore()
+    orch = _orch(graph, run_store=store)
+    degradations = await orch._drain_graph_mirror_pending(uuid4(), uuid4())
+    assert len(degradations) == 1
+    assert degradations[0]["reason"] == "graph_mirror_pending_read_failed"
+    assert degradations[0]["component"] == "dream.graph_mirror.reconcile"
