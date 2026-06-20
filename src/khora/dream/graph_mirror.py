@@ -17,10 +17,18 @@ soft-delete columns onto the single graph ``valid_until`` the read path honors:
   - ``dedupe_entities`` -> ``soft_retire_entities_batch`` (PG ``entities.valid_until``)
                            + ``soft_invalidate_relationships_batch`` for the
                              self-loops (PG ``relationships.invalidated_at``)
+                           + ``rewrite_relationship_endpoints_batch`` for the
+                             incident-edge re-pointing (#1273)
 
-The endpoint-rewrite leg of dedupe (re-pointing incident edges, folding
-duplicate-key edges) is the #1273 entity-merge mirror and is intentionally NOT
-mirrored here - this PR ships the soft-delete shapes only.
+The entity-merge endpoint-rewrite leg of dedupe re-points every incident edge
+from each absorbed entity to the canonical (#1273), honoring the #806
+absorbed->canonical id-remap: the Phase-1 planner produces union-find merge
+components with a single transitive survivor, so a global absorbed->canonical map
+across all merges in the op resolves both endpoints of every snapshotted edge to
+that one canonical (A->B->C collapses to one survivor, no edge points at a
+retired intermediate). Edges that become self-loops after the remap are already
+carried in ``self_loops_invalidated`` and routed to the invalidate verb - they
+are excluded from the rewrite list so the two paths never double-apply.
 
 The step runs OUTSIDE the apply transaction (the checkpoint already advanced
 inside the PG commit), so it is eventually-consistent and idempotent by-id
@@ -43,8 +51,9 @@ if TYPE_CHECKING:
     from khora.storage.backends.base import GraphBackendProtocol
 
 # Op kinds this mirror translates. Subset of the graph backend's
-# ``supports_dream_mirror()`` probe - the entity-merge endpoint rewrite
-# (VECTORCYPHER_DEDUPE_ENTITIES also advertises the rewrite verb) is #1273.
+# ``supports_dream_mirror()`` probe. ``VECTORCYPHER_DEDUPE_ENTITIES`` now also
+# routes through ``rewrite_relationship_endpoints_batch`` for the entity-merge
+# incident-edge re-pointing (#1273).
 _PRUNE_EDGES = "vectorcypher_prune_edges"
 _DEDUPE_ENTITIES = "vectorcypher_dedupe_entities"
 
@@ -78,24 +87,38 @@ def _coerce_uuid(value: Any) -> UUID | None:
         return None
 
 
-def extract_mirror_targets(op_type: str, undo: UndoRecord) -> dict[str, list[UUID]]:
+def extract_mirror_targets(op_type: str, undo: UndoRecord) -> dict[str, list[Any]]:
     """Translate a just-committed ``UndoRecord`` into graph mirror targets.
 
-    Returns a dict with two keys:
+    Returns a dict with three keys:
 
-      - ``retire_entity_ids``: entity ids to soft-retire (absorbed nodes).
-      - ``invalidate_relationship_ids``: relationship ids to soft-invalidate
-        (pruned edges + dedupe self-loops).
+      - ``retire_entity_ids``: entity ids (``UUID``) to soft-retire (absorbed
+        nodes).
+      - ``invalidate_relationship_ids``: relationship ids (``UUID``) to
+        soft-invalidate (pruned edges + post-rewrite dedupe self-loops).
+      - ``rewrite_relationships``: dedupe incident-edge re-pointings (#1273),
+        each a dict ``{"relationship_id", "source_entity_id",
+        "target_entity_id", "relationship_type"}`` carrying the POST-rewrite
+        endpoints the graph verb expects.
 
     The ``UndoRecord.before`` snapshot is the source of truth: it records
     exactly the rows the PG handler committed. A no-op apply (already-pruned,
     vanished, verifier-rejected merge) yields empty lists, so the mirror is a
-    no-op too. Endpoint rewrites in ``before["merges"][*]["previous_relationships"]``
-    are deliberately ignored here - they are the #1273 entity-merge mirror.
+    no-op too.
+
+    The dedupe ``previous_relationships`` snapshot carries each incident edge's
+    PRE-rewrite endpoints; this function applies the #806 absorbed->canonical
+    id-remap (built globally across every applied merge in the op so a
+    cross-component endpoint that is itself absorbed resolves to its canonical)
+    to compute the post-rewrite endpoints. An edge that becomes a self-loop
+    after the remap is already in ``self_loops_invalidated`` and is excluded
+    from ``rewrite_relationships`` so the invalidate and rewrite paths never
+    double-apply.
     """
     before = undo.before or {}
     retire_entity_ids: list[UUID] = []
     invalidate_relationship_ids: list[UUID] = []
+    rewrite_relationships: list[dict[str, str]] = []
 
     if op_type == _PRUNE_EDGES:
         # prune_edges: before == {"noop": True} or {"relationships": [{...}]}.
@@ -105,22 +128,65 @@ def extract_mirror_targets(op_type: str, undo: UndoRecord) -> dict[str, list[UUI
                 invalidate_relationship_ids.append(rel_id)
     elif op_type == _DEDUPE_ENTITIES:
         # dedupe_entities: before == {"merges": [{...}]}. Each applied merge
-        # soft-deletes the absorbed entity (entities.valid_until) and may
-        # invalidate self-loop relationships (relationships.invalidated_at).
-        for merge in before.get("merges") or []:
-            if not merge.get("applied"):
-                continue
+        # soft-deletes the absorbed entity (entities.valid_until), may invalidate
+        # post-rewrite self-loops (relationships.invalidated_at), and re-points
+        # incident edges from absorbed -> canonical (#1273).
+        applied_merges = [m for m in (before.get("merges") or []) if m.get("applied")]
+
+        # #806 id-remap: a single global absorbed -> canonical map across every
+        # applied merge in the op. The planner produces union-find components
+        # with one transitive survivor each, so chaining (canonical itself being
+        # absorbed by another merge) does not occur within one op; the global map
+        # still resolves a cross-component endpoint that happens to be absorbed.
+        absorbed_to_canonical: dict[UUID, UUID] = {}
+        for merge in applied_merges:
+            absorbed_id = _coerce_uuid(merge.get("absorbed_id"))
+            canonical_id = _coerce_uuid(merge.get("canonical_id"))
+            if absorbed_id is not None and canonical_id is not None:
+                absorbed_to_canonical[absorbed_id] = canonical_id
+
+        for merge in applied_merges:
             absorbed_id = _coerce_uuid(merge.get("absorbed_id"))
             if absorbed_id is not None:
                 retire_entity_ids.append(absorbed_id)
-            for rid in merge.get("self_loops_invalidated") or []:
-                rel_id = _coerce_uuid(rid)
-                if rel_id is not None:
+            self_loop_ids = {
+                rel_id for rid in merge.get("self_loops_invalidated") or [] if (rel_id := _coerce_uuid(rid))
+            }
+            invalidate_relationship_ids.extend(self_loop_ids)
+
+            for prev in merge.get("previous_relationships") or []:
+                rel_id = _coerce_uuid(prev.get("id"))
+                src = _coerce_uuid(prev.get("source_entity_id"))
+                tgt = _coerce_uuid(prev.get("target_entity_id"))
+                if rel_id is None or src is None or tgt is None:
+                    continue
+                # The self-loop path already owns this edge - don't also rewrite.
+                if rel_id in self_loop_ids:
+                    continue
+                new_src = absorbed_to_canonical.get(src, src)
+                new_tgt = absorbed_to_canonical.get(tgt, tgt)
+                if new_src == new_tgt:
+                    # Became a self-loop under the global remap but the PG handler
+                    # did not list it as one (cross-component). Mirror it as an
+                    # invalidate, not a rewrite, to match recall semantics.
                     invalidate_relationship_ids.append(rel_id)
+                    continue
+                if new_src == src and new_tgt == tgt:
+                    # No endpoint moved (idempotent replay / unrelated edge).
+                    continue
+                rewrite_relationships.append(
+                    {
+                        "relationship_id": str(rel_id),
+                        "source_entity_id": str(new_src),
+                        "target_entity_id": str(new_tgt),
+                        "relationship_type": str(prev.get("relationship_type") or ""),
+                    }
+                )
 
     return {
         "retire_entity_ids": retire_entity_ids,
         "invalidate_relationship_ids": invalidate_relationship_ids,
+        "rewrite_relationships": rewrite_relationships,
     }
 
 
@@ -135,17 +201,35 @@ def mirror_payload(op: DreamOp, undo: UndoRecord) -> dict[str, Any]:
     return {
         "retire_entity_ids": [str(eid) for eid in targets["retire_entity_ids"]],
         "invalidate_relationship_ids": [str(rid) for rid in targets["invalidate_relationship_ids"]],
+        # Already JSON-safe (all str) - persisted verbatim for the reconciler.
+        "rewrite_relationships": list(targets["rewrite_relationships"]),
         "applied_at": undo.applied_at.isoformat() if undo.applied_at else None,
     }
 
 
-def targets_from_payload(payload: dict[str, Any]) -> dict[str, list[UUID]]:
+def targets_from_payload(payload: dict[str, Any]) -> dict[str, list[Any]]:
     """Inverse of :func:`mirror_payload` for the reconciler replay path."""
+    rewrites: list[dict[str, str]] = []
+    for rw in payload.get("rewrite_relationships") or []:
+        rel_id = _coerce_uuid(rw.get("relationship_id"))
+        src = _coerce_uuid(rw.get("source_entity_id"))
+        tgt = _coerce_uuid(rw.get("target_entity_id"))
+        if rel_id is None or src is None or tgt is None:
+            continue
+        rewrites.append(
+            {
+                "relationship_id": str(rel_id),
+                "source_entity_id": str(src),
+                "target_entity_id": str(tgt),
+                "relationship_type": str(rw.get("relationship_type") or ""),
+            }
+        )
     return {
         "retire_entity_ids": [u for u in (_coerce_uuid(x) for x in payload.get("retire_entity_ids") or []) if u],
         "invalidate_relationship_ids": [
             u for u in (_coerce_uuid(x) for x in payload.get("invalidate_relationship_ids") or []) if u
         ],
+        "rewrite_relationships": rewrites,
     }
 
 
@@ -161,25 +245,31 @@ def _parse_applied_at(payload: dict[str, Any], fallback: datetime) -> datetime:
 
 async def apply_mirror_targets(
     graph: GraphBackendProtocol,
-    targets: dict[str, list[UUID]],
+    targets: dict[str, list[Any]],
     *,
     namespace_id: UUID,
     stamp_at: datetime,
 ) -> dict[str, int]:
-    """Push the soft-deletes to the graph via the #1271 verbs.
+    """Push the soft-deletes + entity-merge re-pointings to the graph via the #1271 verbs.
 
-    Idempotent by-id (the verbs only touch rows with ``valid_until IS NULL``).
-    Empty target lists short-circuit inside the verbs (return 0), so a no-op
-    apply costs zero Cypher round-trips. Returns the per-verb affected counts.
+    Idempotent by-id (the verbs only touch rows with ``valid_until IS NULL`` /
+    edges still on the old endpoints). Empty target lists short-circuit inside
+    the verbs (return 0), so a no-op apply costs zero Cypher round-trips.
+
+    Ordering: re-point incident edges onto the canonical FIRST, then invalidate
+    self-loops and retire the absorbed node. The rewrite verb matches the
+    canonical node by id (the canonical is never retired), so the soft-retire of
+    the absorbed node afterwards cannot strand a still-to-be-moved edge. Returns
+    the per-verb affected counts.
     """
+    rewritten = 0
     retired = 0
     invalidated = 0
-    if targets["retire_entity_ids"]:
-        retired = await graph.soft_retire_entities_batch(
-            targets["retire_entity_ids"],
+    if targets["rewrite_relationships"]:
+        rewritten = await graph.rewrite_relationship_endpoints_batch(
+            targets["rewrite_relationships"],
             namespace_id=namespace_id,
-            retired_at=stamp_at,
-            reason="dream_consolidated",
+            rewritten_at=stamp_at,
         )
     if targets["invalidate_relationship_ids"]:
         invalidated = await graph.soft_invalidate_relationships_batch(
@@ -187,7 +277,18 @@ async def apply_mirror_targets(
             namespace_id=namespace_id,
             invalidated_at=stamp_at,
         )
-    return {"entities_retired": retired, "relationships_invalidated": invalidated}
+    if targets["retire_entity_ids"]:
+        retired = await graph.soft_retire_entities_batch(
+            targets["retire_entity_ids"],
+            namespace_id=namespace_id,
+            retired_at=stamp_at,
+            reason="dream_consolidated",
+        )
+    return {
+        "entities_retired": retired,
+        "relationships_invalidated": invalidated,
+        "relationships_rewritten": rewritten,
+    }
 
 
 async def apply_mirror_payload(
