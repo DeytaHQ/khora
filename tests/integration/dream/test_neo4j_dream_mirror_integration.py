@@ -846,9 +846,11 @@ async def test_community_skip_when_backend_lacks_capability(kb: Khora) -> None:
     real_graph = kb.storage._graph
     kb.storage._graph = _NoCommunityGraph()  # type: ignore[assignment]
     try:
-        # Skip is recorded (logged), no exception, no degradation, nothing materialized.
-        degradation = await orch._mirror_dream_op(uuid4(), 0, ns_row_id, op, undo)
-        assert degradation is None
+        # A structured skip is surfaced (ADR-001), no exception, nothing materialized.
+        record = await orch._mirror_dream_op(uuid4(), 0, ns_row_id, op, undo)
+        assert record is not None, "unsupported-mirror skip must surface on the result (ADR-001)"
+        assert record["reason"] == "graph_mirror_unsupported_op_kind"
+        assert record["component"] == "dream.graph_mirror"
     finally:
         kb.storage._graph = real_graph  # type: ignore[assignment]
 
