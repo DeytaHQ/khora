@@ -751,7 +751,11 @@ class DreamOrchestrator:
             return None
 
         targets = extract_mirror_targets(op_type, undo)
-        if not targets["retire_entity_ids"] and not targets["invalidate_relationship_ids"]:
+        if (
+            not targets["retire_entity_ids"]
+            and not targets["invalidate_relationship_ids"]
+            and not targets["rewrite_relationships"]
+        ):
             # No-op apply (already pruned / verifier-rejected merge): nothing to
             # mirror, and nothing to queue. Clean convergence.
             return None
