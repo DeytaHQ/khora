@@ -44,6 +44,36 @@ except ImportError:
 
 _DEADLOCK_MAX_RETRIES = 3
 
+
+# Bi-temporal soft-delete read filters (#888 / #970 / #1272). Now that dream
+# apply mirrors its PG tombstones to the graph backend (Neo4j), the read path
+# filters on the soft-delete columns so pruned / merged rows are hidden in
+# lockstep across both stores. The three PG columns fold onto the graph's single
+# ``valid_until`` on the mirror side; here we honor each column on its own table:
+#
+#   - entities:      ``valid_until`` (dedupe stamps the absorbed node here)
+#   - relationships: ``valid_to`` (prune) AND ``invalidated_at`` (dedupe self-loop)
+#   - facts/events:  ``invalidated_at`` (chronicle dream tombstones)
+#
+# ``valid_until`` is a temporal-validity window, so a future ``valid_until`` is
+# still live; ``valid_to`` / ``invalidated_at`` are pure tombstones (non-NULL =
+# dead). See ``docs/architecture/storage-backends.md`` and #888.
+
+
+def _entity_live_filter() -> Any:
+    """Entity rows still live: ``valid_until`` window open (or unset)."""
+    return sa.or_(EntityModel.valid_until.is_(None), EntityModel.valid_until > func.now())
+
+
+def _relationship_live_filter() -> Any:
+    """Relationship rows still live: not pruned, not invalidated, window open."""
+    return sa.and_(
+        RelationshipModel.valid_to.is_(None),
+        RelationshipModel.invalidated_at.is_(None),
+        sa.or_(RelationshipModel.valid_until.is_(None), RelationshipModel.valid_until > func.now()),
+    )
+
+
 # Caps on retained source-id provenance per entity, per column. Mirror Neo4j's
 # defaults (see neo4j.py): documents capped at 100
 # (``entity_source_document_ids_max``) and chunks capped at 250
@@ -1382,7 +1412,10 @@ class PgVectorBackend(AsyncSessionMixin):
         graph backend is wired up.
         """
         async with self._get_session() as session:
-            stmt = select(EntityModel).where(EntityModel.namespace_id == namespace_id)
+            stmt = select(EntityModel).where(
+                EntityModel.namespace_id == namespace_id,
+                _entity_live_filter(),
+            )
             if entity_type:
                 stmt = stmt.where(EntityModel.entity_type == entity_type)
             stmt = stmt.order_by(EntityModel.name).limit(limit).offset(offset)
@@ -1407,7 +1440,10 @@ class PgVectorBackend(AsyncSessionMixin):
         from khora.core.models import Relationship
 
         async with self._get_session() as session:
-            stmt = select(RelationshipModel).where(RelationshipModel.namespace_id == namespace_id)
+            stmt = select(RelationshipModel).where(
+                RelationshipModel.namespace_id == namespace_id,
+                _relationship_live_filter(),
+            )
             if relationship_type:
                 stmt = stmt.where(RelationshipModel.relationship_type == relationship_type)
             stmt = stmt.order_by(RelationshipModel.created_at.desc()).limit(limit).offset(offset)
