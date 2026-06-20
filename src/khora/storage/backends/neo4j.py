@@ -21,7 +21,7 @@ from loguru import logger
 from neo4j import AsyncDriver, AsyncGraphDatabase, AsyncManagedTransaction, unit_of_work
 from neo4j.exceptions import ClientError, ConnectionAcquisitionTimeoutError
 
-from khora.core.models import Entity, Episode, Relationship
+from khora.core.models import CommunityNode, Entity, Episode, Relationship
 from khora.dream.plan import OpKind
 from khora.storage.backends.mixins import (
     GraphBackendBase,
@@ -868,6 +868,13 @@ class Neo4jBackend(GraphBackendBase):
             "CREATE INDEX episode_id IF NOT EXISTS FOR (ep:Episode) ON (ep.id)",
             "CREATE INDEX episode_namespace IF NOT EXISTS FOR (ep:Episode) ON (ep.namespace_id)",
             "CREATE INDEX episode_occurred_at IF NOT EXISTS FOR (ep:Episode) ON (ep.occurred_at)",
+            # Community indexes (#1276 GraphRAG materialization)
+            "CREATE INDEX community_namespace IF NOT EXISTS FOR (com:Community) ON (com.namespace_id)",
+            # Unique constraint on the MERGE key (id, namespace_id) backs the
+            # idempotent :Community upsert so concurrent mirror/reconciler writes
+            # cannot create duplicate nodes, and implicitly creates the composite index.
+            "CREATE CONSTRAINT community_id_ns_unique IF NOT EXISTS "
+            "FOR (com:Community) REQUIRE (com.id, com.namespace_id) IS UNIQUE",
         ]
 
         # Relationship property indexes require Neo4j ≥5.7 or Enterprise Edition
@@ -2788,18 +2795,20 @@ RETURN count(r) AS updated
     # already invalidated). The mirror wiring itself is NOT in this PR.
 
     def supports_dream_mirror(self) -> frozenset[OpKind]:
-        """Neo4j natively mirrors prune / dedupe / normalize-schema to the graph.
+        """Neo4j natively mirrors prune / dedupe / normalize-schema / community.
 
         - ``VECTORCYPHER_PRUNE_EDGES`` -> :meth:`soft_invalidate_relationships_batch`
         - ``VECTORCYPHER_DEDUPE_ENTITIES`` -> :meth:`soft_retire_entities_batch`
           + :meth:`rewrite_relationship_endpoints_batch`
         - ``VECTORCYPHER_NORMALIZE_SCHEMA`` -> :meth:`rename_types_batch`
+        - ``VECTORCYPHER_COMMUNITY_SUMMARY`` -> :meth:`materialize_communities_batch`
         """
         return frozenset(
             {
                 OpKind.VECTORCYPHER_PRUNE_EDGES,
                 OpKind.VECTORCYPHER_DEDUPE_ENTITIES,
                 OpKind.VECTORCYPHER_NORMALIZE_SCHEMA,
+                OpKind.VECTORCYPHER_COMMUNITY_SUMMARY,
             }
         )
 
@@ -3052,6 +3061,143 @@ RETURN count(newRel) AS renamed
                 total += await session.execute_write(_rename)
         logger.debug(f"Dream-renamed {total} relationship-type edges in namespace {namespace_id}")
         return total
+
+    # -- Dream community materialization (#1276) ----------------------------
+    # The GraphRAG payoff: materialize the PG ``khora_dream_communities`` rows
+    # into the graph as :Community nodes + [:HAS_MEMBER] edges so the LLM
+    # summaries are queryable at recall. Idempotent on community id (MERGE), so
+    # a re-run / reconciler replay never duplicates. Namespace-scoped.
+
+    async def materialize_communities_batch(
+        self,
+        communities: list[CommunityNode],
+        *,
+        namespace_id: UUID,
+        materialized_at: datetime,
+    ) -> int:
+        """MERGE :Community nodes + [:HAS_MEMBER] edges to member :Entity nodes.
+
+        Mirrors ``community_summary``. MERGE keys on (id, namespace_id) so a
+        replay re-points the same node (idempotent - no duplicate :Community
+        nodes on a second dream run). HAS_MEMBER edges are MERGE-ed only to
+        member entities that exist in the namespace, so a member id with no
+        graph node simply yields no edge rather than a dangling one.
+
+        Returns the number of :Community nodes upserted.
+        """
+        if not communities:
+            return 0
+        ts = materialized_at.isoformat()
+        rows = [
+            {
+                "id": str(c.id),
+                "summary": c.summary,
+                "summary_depth": int(c.summary_depth),
+                "embedding": c.embedding,
+                "member_ids": [str(m) for m in c.member_ids],
+            }
+            for c in communities
+        ]
+
+        # OPTIONAL MATCH + WHERE-guarded edge MERGE so a community whose members
+        # are not (yet) in the graph still materializes its :Community node and
+        # is counted (the soft-delete legs key off ids that always exist; a
+        # community member id may legitimately have no graph node).
+        _CYPHER = """\
+UNWIND $rows AS row
+MERGE (com:Community {id: row.id, namespace_id: $namespace_id})
+SET com.summary = row.summary,
+    com.summary_depth = row.summary_depth,
+    com.embedding = row.embedding,
+    com.member_ids = row.member_ids,
+    com.updated_at = $materialized_at,
+    com.created_at = coalesce(com.created_at, $materialized_at)
+WITH com, row
+UNWIND (CASE WHEN size(row.member_ids) = 0 THEN [null] ELSE row.member_ids END) AS member_id
+OPTIONAL MATCH (e:Entity {id: member_id, namespace_id: $namespace_id})
+FOREACH (_ IN CASE WHEN e IS NULL THEN [] ELSE [1] END | MERGE (com)-[:HAS_MEMBER]->(e))
+RETURN count(DISTINCT com.id) AS materialized
+"""
+
+        async def _materialize(tx: AsyncManagedTransaction) -> int:
+            result = await tx.run(
+                _CYPHER,
+                rows=rows,
+                namespace_id=str(namespace_id),
+                materialized_at=ts,
+            )
+            record = await result.single()
+            return record["materialized"] if record else 0
+
+        async with self._session() as session:
+            count = await session.execute_write(_materialize)
+        logger.debug(f"Dream-materialized {count} communities in namespace {namespace_id}")
+        return count
+
+    async def get_communities(
+        self,
+        namespace_id: UUID,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[CommunityNode]:
+        """Return materialized :Community summary nodes for a namespace (#1276)."""
+        _CYPHER = """\
+MATCH (com:Community {namespace_id: $namespace_id})
+RETURN com ORDER BY com.id SKIP $offset LIMIT $limit
+"""
+        async with self._session() as session:
+            result = await session.run(
+                _CYPHER,
+                namespace_id=str(namespace_id),
+                offset=offset,
+                limit=limit,
+            )
+            records = await result.data()
+        return [self._record_to_community(r["com"], namespace_id) for r in records]
+
+    async def get_entity_communities(
+        self,
+        entity_ids: list[UUID],
+        *,
+        namespace_id: UUID,
+    ) -> list[CommunityNode]:
+        """Return the :Community nodes the given entities are HAS_MEMBER of (#1276)."""
+        if not entity_ids:
+            return []
+        ids = [str(e) for e in entity_ids]
+        _CYPHER = """\
+MATCH (com:Community {namespace_id: $namespace_id})-[:HAS_MEMBER]->(e:Entity {namespace_id: $namespace_id})
+WHERE e.id IN $entity_ids
+RETURN DISTINCT com ORDER BY com.id
+"""
+        async with self._session() as session:
+            result = await session.run(
+                _CYPHER,
+                namespace_id=str(namespace_id),
+                entity_ids=ids,
+            )
+            records = await result.data()
+        return [self._record_to_community(r["com"], namespace_id) for r in records]
+
+    @staticmethod
+    def _record_to_community(node: dict[str, Any], namespace_id: UUID) -> CommunityNode:
+        """Map a Neo4j :Community node dict to a :class:`CommunityNode`."""
+        member_ids = []
+        for raw in node.get("member_ids") or []:
+            try:
+                member_ids.append(UUID(str(raw)))
+            except (ValueError, TypeError):
+                continue
+        embedding = node.get("embedding")
+        return CommunityNode(
+            id=UUID(str(node["id"])),
+            namespace_id=namespace_id,
+            summary=str(node.get("summary") or ""),
+            member_ids=member_ids,
+            summary_depth=int(node.get("summary_depth") or 1),
+            embedding=list(embedding) if embedding else None,
+        )
 
     @trace(
         "khora.neo4j.get_entity_relationships",

@@ -520,6 +520,14 @@ async def apply_vectorcypher_community_summary(
                 "community_id": str(community_id),
                 "kept_claims": len(kept),
                 "dropped_claims": len(dropped),
+                # Carried for the #1276 graph-materialization mirror: the
+                # post-commit step reads these to MERGE the :Community node +
+                # [:HAS_MEMBER] edges. The PG row is the durable copy; the undo
+                # snapshot is the mirror's source of truth (same pattern as the
+                # prune / dedupe legs).
+                "summary_text": summary.text,
+                "member_ids": [str(m) for m in member_ids],
+                "summary_depth": 1,
             },
             applied_at=now,
         )

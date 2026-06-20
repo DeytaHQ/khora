@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
     from khora.core.models import (
         Chunk,
+        CommunityNode,
         Document,
         Entity,
         Episode,
@@ -901,6 +902,58 @@ class GraphBackendProtocol(Protocol):
         be ``$``-parameterized, so backends MUST route both ends through the
         shared ``sanitize_cypher_label`` hard-validation. Namespace-scoped.
         Returns the number of edges relabeled.
+        """
+        ...
+
+    # Dream community materialization (#1276) - the GraphRAG payoff. The dream
+    # ``community_summary`` op persists LLM-grounded summaries to PG; this verb
+    # materializes them into the graph as :Community nodes + [:HAS_MEMBER] edges
+    # so they are queryable at recall. Capability-gated through
+    # ``supports_dream_mirror()`` (advertises ``VECTORCYPHER_COMMUNITY_SUMMARY``).
+
+    async def materialize_communities_batch(
+        self,
+        communities: list[CommunityNode],
+        *,
+        namespace_id: UUID,
+        materialized_at: datetime,
+    ) -> int:
+        """MERGE :Community nodes + [:HAS_MEMBER] edges to member :Entity nodes.
+
+        Mirrors ``community_summary``. Each :class:`CommunityNode` carries the
+        community id, summary text, member entity ids, summary depth, and an
+        optional embedding. Idempotent on community id (MERGE on the id keeps a
+        re-run / reconciler replay from creating duplicates); namespace-scoped.
+        HAS_MEMBER edges are only created to member entities that exist in the
+        graph within the namespace. Returns the number of communities upserted.
+        """
+        ...
+
+    async def get_communities(
+        self,
+        namespace_id: UUID,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[CommunityNode]:
+        """Return materialized :Community summary nodes for a namespace.
+
+        The community-level recall reader (#1276). Read-only; returns the
+        summary text + member ids so callers can surface community context.
+        """
+        ...
+
+    async def get_entity_communities(
+        self,
+        entity_ids: list[UUID],
+        *,
+        namespace_id: UUID,
+    ) -> list[CommunityNode]:
+        """Return the :Community nodes the given entities are HAS_MEMBER of.
+
+        The entity-anchored leg of the community recall reader (#1276): given a
+        recall hit's entity set, fetch the community summaries they belong to.
+        Namespace-scoped; deduplicated by community id.
         """
         ...
 

@@ -24,7 +24,7 @@ from loguru import logger
 
 from khora.config import KhoraConfig, load_config
 from khora.core.diagnostics import SkipReason
-from khora.core.models import Chunk, Document, Entity, MemoryNamespace
+from khora.core.models import Chunk, CommunityNode, Document, Entity, MemoryNamespace
 from khora.query import SearchMode
 from khora.telemetry import bounded_text_hash, trace_span
 from khora.telemetry.metrics import metric_counter
@@ -2518,6 +2518,54 @@ class Khora:
         if include_sources:
             await self._populate_sources([], results, [], namespace_id=namespace_id)
         return results
+
+    async def get_communities(
+        self,
+        *,
+        namespace: str | UUID,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[CommunityNode]:
+        """Return materialized dream community summaries for a namespace (#1276).
+
+        The GraphRAG payoff: the dream ``community_summary`` op computes
+        LLM-grounded community summaries and the post-commit mirror materializes
+        them into the graph as :Community nodes. This read surfaces them at
+        recall. Read-only; returns an empty list on a stack without a graph
+        backend or without materialized communities.
+
+        Args:
+            namespace: Namespace UUID (as UUID or string)
+            limit: Maximum communities to return
+            offset: Pagination offset
+
+        Returns:
+            List of CommunityNode objects (summary text + member ids)
+        """
+        namespace_id = await self._resolve_namespace(namespace)
+        return await self.storage.get_communities(namespace_id, limit=limit, offset=offset)
+
+    async def get_entity_communities(
+        self,
+        entity_ids: list[UUID],
+        *,
+        namespace: str | UUID,
+    ) -> list[CommunityNode]:
+        """Return the dream community summaries the given entities belong to (#1276).
+
+        The entity-anchored leg of the community recall reader: given a recall
+        hit's entity set, fetch the community summaries they are members of so a
+        caller can surface community context alongside the entity hits.
+
+        Args:
+            entity_ids: Entity UUIDs to look up community membership for
+            namespace: Namespace UUID (as UUID or string)
+
+        Returns:
+            List of CommunityNode objects, deduplicated by community id
+        """
+        namespace_id = await self._resolve_namespace(namespace)
+        return await self.storage.get_entity_communities(entity_ids, namespace_id=namespace_id)
 
     # =========================================================================
     # Document Operations (Convenience Methods)

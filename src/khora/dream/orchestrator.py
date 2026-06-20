@@ -67,6 +67,7 @@ from khora.dream.graph_mirror import (
     MIRRORABLE_OP_KINDS,
     apply_mirror_payload,
     apply_mirror_targets,
+    extract_community_targets,
     extract_mirror_targets,
     mirror_payload,
 )
@@ -751,13 +752,16 @@ class DreamOrchestrator:
             return None
 
         targets = extract_mirror_targets(op_type, undo)
+        communities = extract_community_targets(op_type, undo)
         if (
             not targets["retire_entity_ids"]
             and not targets["invalidate_relationship_ids"]
             and not targets["rewrite_relationships"]
+            and not communities
         ):
-            # No-op apply (already pruned / verifier-rejected merge): nothing to
-            # mirror, and nothing to queue. Clean convergence.
+            # No-op apply (already pruned / verifier-rejected merge / replayed
+            # community): nothing to mirror, and nothing to queue. Clean
+            # convergence.
             return None
 
         # The graph nodes/edges carry the row-level namespace id (ingest
@@ -766,7 +770,9 @@ class DreamOrchestrator:
         row_namespace_id = await self._resolve_namespace_for_mirror(namespace_id)
         stamp_at = undo.applied_at or datetime.now(UTC)
         try:
-            await apply_mirror_targets(graph, targets, namespace_id=row_namespace_id, stamp_at=stamp_at)
+            await apply_mirror_targets(
+                graph, targets, namespace_id=row_namespace_id, stamp_at=stamp_at, communities=communities
+            )
         except Exception as exc:
             GRAPH_MIRROR_PARTIAL_FAILURE_COUNTER.add(1)
             # Queue for the reconciler so a later run re-mirrors this exact

@@ -19,6 +19,7 @@ from uuid import uuid4
 
 import pytest
 
+from khora.core.models import CommunityNode
 from khora.dream.exceptions import DreamBackendUnsupported
 from khora.dream.plan import OpKind
 from khora.storage.backends.mixins import GraphBackendBase
@@ -74,6 +75,8 @@ class TestSupportsDreamMirror:
         assert OpKind.VECTORCYPHER_PRUNE_EDGES in caps
         assert OpKind.VECTORCYPHER_DEDUPE_ENTITIES in caps
         assert OpKind.VECTORCYPHER_NORMALIZE_SCHEMA in caps
+        # #1276: community materialization is also natively mirrored.
+        assert OpKind.VECTORCYPHER_COMMUNITY_SUMMARY in caps
 
     def test_base_backend_advertises_nothing(self) -> None:
         base = GraphBackendBase()
@@ -337,3 +340,141 @@ class TestNeo4jRenameTypes:
         cypher = tx.run.await_args.args[0]
         assert "AT_RISK" in cypher
         assert "BLOCKED_BY" in cypher
+
+
+# ---------------------------------------------------------------------------
+# Neo4j: community materialization (#1276) — MERGE :Community + [:HAS_MEMBER]
+# ---------------------------------------------------------------------------
+
+
+def _backend_with_read_capture(records: list[dict[str, Any]]) -> tuple[Neo4jBackend, MagicMock]:
+    """Build a backend whose ``_session().run(...)`` returns ``records``.
+
+    Returns ``(backend, session)`` so callers can assert the Cypher / params
+    passed to ``session.run`` (the read path uses ``session.run`` directly, not
+    ``execute_write``).
+    """
+    result = MagicMock()
+    result.data = AsyncMock(return_value=records)
+    session = AsyncMock()
+    session.run = AsyncMock(return_value=result)
+
+    driver = MagicMock()
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=session)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    driver.session.return_value = ctx
+    backend = Neo4jBackend.from_driver(driver, query_timeout=1.0)
+    return backend, session
+
+
+@pytest.mark.unit
+class TestGraphBackendBaseCommunityDefault:
+    @pytest.mark.asyncio
+    async def test_materialize_raises_when_unsupported(self) -> None:
+        base = GraphBackendBase()
+        with pytest.raises(DreamBackendUnsupported):
+            await base.materialize_communities_batch(
+                [CommunityNode(summary="s")], namespace_id=uuid4(), materialized_at=datetime.now(UTC)
+            )
+
+    @pytest.mark.asyncio
+    async def test_materialize_empty_short_circuits(self) -> None:
+        base = GraphBackendBase()
+        assert (
+            await base.materialize_communities_batch([], namespace_id=uuid4(), materialized_at=datetime.now(UTC)) == 0
+        )
+
+    @pytest.mark.asyncio
+    async def test_read_defaults_return_empty(self) -> None:
+        base = GraphBackendBase()
+        assert await base.get_communities(uuid4()) == []
+        assert await base.get_entity_communities([uuid4()], namespace_id=uuid4()) == []
+
+
+@pytest.mark.unit
+class TestNeo4jMaterializeCommunities:
+    @pytest.mark.asyncio
+    async def test_empty_short_circuits(self) -> None:
+        backend, _tx = _backend_with_write_capture(single={"materialized": 0})
+        out = await backend.materialize_communities_batch([], namespace_id=uuid4(), materialized_at=datetime.now(UTC))
+        assert out == 0
+
+    @pytest.mark.asyncio
+    async def test_merges_community_node_and_member_edges(self) -> None:
+        ns = uuid4()
+        cid = uuid4()
+        m1, m2 = uuid4(), uuid4()
+        ts = datetime(2026, 6, 20, 12, 0, 0, tzinfo=UTC)
+        backend, tx = _backend_with_write_capture(single={"materialized": 1})
+
+        out = await backend.materialize_communities_batch(
+            [CommunityNode(id=cid, summary="Alice + Bob", member_ids=[m1, m2])],
+            namespace_id=ns,
+            materialized_at=ts,
+        )
+        assert out == 1
+
+        cypher = tx.run.await_args.args[0]
+        kwargs = tx.run.await_args.kwargs
+        # Idempotent: MERGE the :Community node (not CREATE) so a re-run is a no-op.
+        assert "MERGE (com:Community" in cypher
+        assert "CREATE (com:Community" not in cypher
+        # HAS_MEMBER edges to member :Entity nodes (also MERGE for idempotence).
+        assert "HAS_MEMBER" in cypher
+        assert "MATCH (e:Entity" in cypher
+        # Never a hard delete.
+        assert "DELETE" not in cypher.upper()
+        # Namespace-scoped + threaded as params (not interpolated).
+        assert kwargs["namespace_id"] == str(ns)
+        assert kwargs["materialized_at"] == ts.isoformat()
+        flat = str(kwargs)
+        assert str(cid) in flat
+        assert str(m1) in flat
+        assert str(m2) in flat
+
+
+@pytest.mark.unit
+class TestNeo4jReadCommunities:
+    @pytest.mark.asyncio
+    async def test_get_communities_maps_records(self) -> None:
+        ns = uuid4()
+        cid = uuid4()
+        m1 = uuid4()
+        backend, session = _backend_with_read_capture(
+            [{"com": {"id": str(cid), "summary": "s", "summary_depth": 1, "member_ids": [str(m1)]}}]
+        )
+        out = await backend.get_communities(ns, limit=10)
+        assert len(out) == 1
+        assert out[0].id == cid
+        assert out[0].summary == "s"
+        assert out[0].member_ids == [m1]
+        cypher = session.run.await_args.args[0]
+        kwargs = session.run.await_args.kwargs
+        assert "MATCH (com:Community" in cypher
+        assert kwargs["namespace_id"] == str(ns)
+
+    @pytest.mark.asyncio
+    async def test_get_entity_communities_empty_input_short_circuits(self) -> None:
+        backend, session = _backend_with_read_capture([])
+        out = await backend.get_entity_communities([], namespace_id=uuid4())
+        assert out == []
+        session.run.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_get_entity_communities_filters_by_member(self) -> None:
+        ns = uuid4()
+        cid = uuid4()
+        e1 = uuid4()
+        backend, session = _backend_with_read_capture(
+            [{"com": {"id": str(cid), "summary": "s", "summary_depth": 1, "member_ids": [str(e1)]}}]
+        )
+        out = await backend.get_entity_communities([e1], namespace_id=ns)
+        assert len(out) == 1
+        assert out[0].id == cid
+        cypher = session.run.await_args.args[0]
+        kwargs = session.run.await_args.kwargs
+        assert "HAS_MEMBER" in cypher
+        assert "e.id IN $entity_ids" in cypher
+        assert kwargs["entity_ids"] == [str(e1)]
+        assert kwargs["namespace_id"] == str(ns)
