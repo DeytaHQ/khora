@@ -923,11 +923,15 @@ class GraphBackendProtocol(Protocol):
 
         Reverses the absorbed-entity soft-retire in ``dedupe_entities``: clears
         the node's ``valid_until`` / ``version_valid_to`` tombstone AND deletes
-        the :EntityVersion snapshot + [:SUPERSEDES] edge the forward mirror
-        created, so the node returns to the live set with no stale version
-        history. Matched by entity id within ``namespace_id`` (IDOR family);
-        idempotent (a node already live with no snapshot matches nothing).
-        Returns the number of entities actually restored.
+        ONLY the :EntityVersion snapshot + [:SUPERSEDES] edge the forward mirror
+        created for this retire, so the node returns to the live set without
+        losing any pre-existing version chain. The forward mirror stamps the
+        snapshot's ``version_valid_to`` with the same retire timestamp it writes
+        to the node's ``valid_until``, so the reverse targets the snapshot by
+        ``version_valid_to == valid_until`` (no separate snapshot-id plumbing
+        needed). Matched by entity id within ``namespace_id`` (IDOR family);
+        idempotent (a node already live transitions nothing). Returns the number
+        of entities actually restored.
         """
         ...
 

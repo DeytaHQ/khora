@@ -870,22 +870,26 @@ async def test_drain_pending_read_error_degrades() -> None:
 
 
 class _RestoreFakeGraph:
-    """Records the #1275 reverse verb calls."""
+    """Records the #1275 reverse verb calls (and their call order)."""
 
     def __init__(self) -> None:
         self.restored_entities: list[dict[str, Any]] = []
         self.restored_relationships: list[dict[str, Any]] = []
         self.restored_endpoints: list[dict[str, Any]] = []
+        self.call_order: list[str] = []
 
     async def restore_entities_batch(self, entity_ids: list[UUID], *, namespace_id: UUID) -> int:
+        self.call_order.append("restore_entities_batch")
         self.restored_entities.append({"ids": list(entity_ids), "namespace_id": namespace_id})
         return len(entity_ids)
 
     async def restore_relationships_batch(self, relationship_ids: list[UUID], *, namespace_id: UUID) -> int:
+        self.call_order.append("restore_relationships_batch")
         self.restored_relationships.append({"ids": list(relationship_ids), "namespace_id": namespace_id})
         return len(relationship_ids)
 
     async def restore_relationship_endpoints_batch(self, rewrites: list[dict[str, Any]], *, namespace_id: UUID) -> int:
+        self.call_order.append("restore_relationship_endpoints_batch")
         self.restored_endpoints.append({"rewrites": list(rewrites), "namespace_id": namespace_id})
         return len(rewrites)
 
@@ -983,8 +987,13 @@ async def test_unmirror_targets_calls_reverse_verbs() -> None:
     assert graph.restored_relationships[0]["ids"] == [self_loop]
     assert graph.restored_endpoints[0]["rewrites"][0]["relationship_id"] == str(incident)
     # Entity restore happens before the endpoint restore (so the absorbed node
-    # exists as an endpoint when the edges are re-pointed back onto it).
-    assert graph.restored_entities and graph.restored_endpoints
+    # exists as an endpoint when the edges are re-pointed back onto it), then the
+    # self-loop un-invalidation runs last.
+    assert graph.call_order == [
+        "restore_entities_batch",
+        "restore_relationship_endpoints_batch",
+        "restore_relationships_batch",
+    ]
 
 
 @pytest.mark.asyncio

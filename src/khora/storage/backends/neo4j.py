@@ -3080,6 +3080,14 @@ RETURN count(newRel) AS renamed
         ``version_valid_to`` on the live node and detach-deletes the snapshot the
         forward mirror created. Matched by entity id within ``namespace_id``
         (IDOR family). Returns the number of entities actually restored.
+
+        Idempotent: only entities that are still retired (a non-null
+        ``valid_until`` / ``version_valid_to``) transition, so a replay reports
+        zero. Only the :EntityVersion snapshot the dream forward mirror created
+        is deleted - matched by ``version_valid_to == current.valid_until`` (the
+        forward mirror stamps both with the same retire timestamp), so a prior
+        version chain (e.g. a document-replace snapshot) on a re-lived node is
+        left intact.
         """
         if not entity_ids:
             return 0
@@ -3087,16 +3095,20 @@ RETURN count(newRel) AS renamed
 
         # DETACH DELETE on the :EntityVersion snapshot also removes its
         # [:SUPERSEDES] edge, so collecting/deleting the edge separately is
-        # unnecessary (and would double-delete it).
+        # unnecessary (and would double-delete it). The snapshot match is keyed
+        # on version_valid_to == the node's retire stamp so only THIS op's
+        # snapshot is removed, never a pre-existing version chain.
         _CYPHER = """\
 UNWIND $entity_ids AS eid
 MATCH (current:Entity {id: eid, namespace_id: $namespace_id})
+WHERE current.valid_until IS NOT NULL OR current.version_valid_to IS NOT NULL
 OPTIONAL MATCH (current)-[:SUPERSEDES]->(old:EntityVersion)
+    WHERE old.version_valid_to = current.valid_until
 WITH current, collect(old) AS olds
 SET current.valid_until = NULL,
     current.version_valid_to = NULL
 FOREACH (o IN olds | DETACH DELETE o)
-RETURN current.id AS id
+RETURN count(DISTINCT current) AS restored
 """
 
         async def _restore(tx: AsyncManagedTransaction) -> int:
@@ -3105,8 +3117,8 @@ RETURN current.id AS id
                 entity_ids=ids,
                 namespace_id=str(namespace_id),
             )
-            records = await result.data()
-            return len(records)
+            record = await result.single()
+            return record["restored"] if record else 0
 
         async with self._session() as session:
             count = await session.execute_write(_restore)

@@ -523,16 +523,20 @@ class TestNeo4jRestoreVerbs:
     async def test_restore_entities_clears_valid_until_and_deletes_snapshot(self) -> None:
         ns = uuid4()
         eid = uuid4()
-        backend, tx = _backend_with_write_capture(single={"id": str(eid)})
+        backend, tx = _backend_with_write_capture(single={"restored": 1})
         out = await backend.restore_entities_batch([eid], namespace_id=ns)
         assert out == 1
         cypher = tx.run.await_args.args[0]
         kwargs = tx.run.await_args.kwargs
         assert "current.valid_until = NULL" in cypher
         assert "current.version_valid_to = NULL" in cypher
-        # The :EntityVersion snapshot + [:SUPERSEDES] edge are removed.
+        # Idempotent-by-count: only still-retired nodes transition.
+        assert "current.valid_until IS NOT NULL OR current.version_valid_to IS NOT NULL" in cypher
+        # The :EntityVersion snapshot + [:SUPERSEDES] edge are removed, scoped to
+        # THIS op's snapshot (version_valid_to == the node's retire stamp).
         assert "DETACH DELETE o" in cypher
         assert "EntityVersion" in cypher
+        assert "old.version_valid_to = current.valid_until" in cypher
         assert kwargs["entity_ids"] == [str(eid)]
         assert kwargs["namespace_id"] == str(ns)
 

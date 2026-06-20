@@ -553,5 +553,16 @@ async def test_dream_undo_graph_failure_does_not_break_pg_revert(tmp_path: Path)
     kb = _GraphKB(_FakeSession(), graph)
     # The graph reverse raises, but dream_undo returns the PG-revert result and
     # does not propagate the exception (ADR-001: degrade, never half-fail-loudly).
-    ok = await dream_undo(kb, op.op_id, base_dir=tmp_path)
+    # Lock in the anti-silent-divergence contract: the partial-failure counter
+    # increments and the failure is logged at WARNING with exc_info.
+    from unittest.mock import patch
+
+    with (
+        patch("khora.dream.graph_mirror.GRAPH_UNMIRROR_PARTIAL_FAILURE_COUNTER.add") as add_mock,
+        patch("loguru.logger.warning") as warn_mock,
+    ):
+        ok = await dream_undo(kb, op.op_id, base_dir=tmp_path)
     assert ok is True
+    add_mock.assert_called_once_with(1)
+    warn_mock.assert_called_once()
+    assert warn_mock.call_args.kwargs.get("exc_info") is True

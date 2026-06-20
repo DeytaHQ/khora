@@ -195,22 +195,49 @@ async def _graph_relationship_endpoints(kb: Khora, ns_row_id: UUID) -> dict[str,
     return {str(r.id): (str(r.source_entity_id), str(r.target_entity_id)) for r in rels}
 
 
-async def _entity_version_count(kb: Khora, ns_row_id: UUID, absorbed: UUID) -> int:
-    """Count :EntityVersion snapshots referencing the absorbed node (graph)."""
+async def _entity_version_ids(kb: Khora, ns_row_id: UUID, absorbed: UUID) -> set[str]:
+    """Return the :EntityVersion snapshot ids superseded by the absorbed node (graph)."""
     graph = getattr(kb.storage.graph, "_backend", kb.storage.graph)
     async with graph._session() as session:  # noqa: SLF001 - test introspection
 
-        async def _count(tx):  # noqa: ANN001, ANN202
+        async def _ids(tx):  # noqa: ANN001, ANN202
             result = await tx.run(
                 "MATCH (current:Entity {id: $aid, namespace_id: $ns})-[:SUPERSEDES]->(old:EntityVersion) "
-                "RETURN count(old) AS n",
+                "RETURN old.id AS id",
                 aid=str(absorbed),
                 ns=str(ns_row_id),
             )
-            record = await result.single()
-            return record["n"] if record else 0
+            return [r["id"] async for r in result]
 
-        return await session.execute_read(_count)
+        return set(await session.execute_read(_ids))
+
+
+async def _entity_version_count(kb: Khora, ns_row_id: UUID, absorbed: UUID) -> int:
+    """Count :EntityVersion snapshots referencing the absorbed node (graph)."""
+    return len(await _entity_version_ids(kb, ns_row_id, absorbed))
+
+
+async def _seed_prior_entity_version(kb: Khora, ns_row_id: UUID, entity_id: UUID) -> str:
+    """Attach a pre-existing :EntityVersion snapshot to a live node (e.g. a prior
+    document-replace version), stamped with a DIFFERENT version_valid_to than the
+    dream retire will use. Returns the snapshot id."""
+    snapshot_id = str(uuid4())
+    graph = getattr(kb.storage.graph, "_backend", kb.storage.graph)
+    async with graph._session() as session:  # noqa: SLF001 - test introspection
+
+        async def _seed(tx):  # noqa: ANN001, ANN202
+            await tx.run(
+                "MATCH (current:Entity {id: $eid, namespace_id: $ns}) "
+                "CREATE (old:EntityVersion {id: $sid, namespace_id: $ns, "
+                "version_valid_to: '2000-01-01T00:00:00+00:00'}) "
+                "CREATE (current)-[:SUPERSEDES {superseded_at: '2000-01-01T00:00:00+00:00'}]->(old)",
+                eid=str(entity_id),
+                ns=str(ns_row_id),
+                sid=snapshot_id,
+            )
+
+        await session.execute_write(_seed)
+    return snapshot_id
 
 
 def _write_undo_file(
@@ -383,3 +410,48 @@ async def test_dedupe_undo_is_idempotent_on_graph(kb: Khora, tmp_path: Path) -> 
     assert graph_eps_first == graph_eps_second
     assert graph_ent_first == graph_ent_second
     assert graph_eps_second[str(incident)] == (str(absorbed), str(neighbor))
+
+
+@pytest.mark.asyncio
+async def test_undo_preserves_prior_entity_version_chain(kb: Khora, tmp_path: Path) -> None:
+    """Un-retiring the absorbed entity deletes ONLY the dream snapshot, not a
+    pre-existing :EntityVersion chain (e.g. from an earlier document replace)."""
+    ns = await kb.create_namespace()
+    ns_stable = ns.namespace_id
+    ns_row_id = await kb.storage.resolve_namespace(ns_stable)
+
+    canonical = await _seed_entity_both(kb, ns_row_id, f"acme-{uuid4().hex[:8]}")
+    absorbed = await _seed_entity_both(kb, ns_row_id, f"acme2-{uuid4().hex[:8]}")
+
+    # The absorbed entity already carries a prior version snapshot (still live).
+    prior_snapshot = await _seed_prior_entity_version(kb, ns_row_id, absorbed)
+    assert prior_snapshot in await _entity_version_ids(kb, ns_row_id, absorbed)
+
+    orch = _orchestrator(kb)
+    op = DreamOp(
+        op_id=uuid4(),
+        phase="apply",
+        op_type=OpKind.VECTORCYPHER_DEDUPE_ENTITIES,
+        outputs=({"merges": [{"canonical_id": str(canonical), "absorbed_id": str(absorbed)}]},),
+        namespace_id=ns_row_id,
+    )
+    async with kb.storage.transaction() as txn:
+        undo = await apply_vectorcypher_dedupe_entities(op, coordinator=kb.storage, session=txn.session)
+    assert await orch._mirror_dream_op(uuid4(), 0, ns_row_id, op, undo) is None
+    # Now there are two snapshots: the prior one + the dream one.
+    assert len(await _entity_version_ids(kb, ns_row_id, absorbed)) == 2
+
+    _write_undo_file(
+        base_dir=tmp_path,
+        namespace_id=ns_stable,
+        run_id=uuid4(),
+        op_id=op.op_id,
+        op_type=str(op.op_type),
+        before=undo.before,
+    )
+    assert await dream_undo(kb, op.op_id, base_dir=tmp_path) is True
+
+    # The absorbed entity is live again, and ONLY the prior snapshot remains.
+    assert str(absorbed) in await _graph_entity_ids(kb, ns_row_id)
+    remaining = await _entity_version_ids(kb, ns_row_id, absorbed)
+    assert remaining == {prior_snapshot}
