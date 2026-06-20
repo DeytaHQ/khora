@@ -27,6 +27,7 @@ it. Each entry is a :class:`GraphMirrorPending`.
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -389,8 +390,14 @@ class PostgresDreamRunStore(_SqlDreamRunStore):
     def __init__(self, coordinator: StorageCoordinator) -> None:
         self._coordinator = coordinator
 
-    def _open(self) -> Any:
-        return self._coordinator.transaction()
+    @asynccontextmanager
+    async def _open(self) -> Any:
+        # coordinator.transaction() yields a TransactionContext, not the
+        # AsyncSession the shared _SqlDreamRunStore SQL runs against - unwrap
+        # it. The coordinator commits on clean exit and rolls back on
+        # exception, mirroring the SQLite store's _CommittingSession.
+        async with self._coordinator.transaction() as txn:
+            yield txn.session
 
 
 class SqliteDreamRunStore(_SqlDreamRunStore):

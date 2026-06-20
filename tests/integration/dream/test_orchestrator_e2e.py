@@ -123,12 +123,24 @@ class _RealStorage:
 
     def __init__(self, factory: async_sessionmaker[AsyncSession]) -> None:
         self._factory = factory
+        # Mirror a real StorageCoordinator: select_run_store() locates the SQL
+        # session factory via ``_relational._session_factory`` (the same
+        # attribute ``coordinator.transaction()`` reads internally), so the
+        # PostgresDreamRunStore is selected instead of no-opping run-state.
+        self._relational = _RelationalShim(factory)
 
     def transaction(self) -> _TxnCtx:
         return _TxnCtx(self._factory)
 
     async def resolve_namespace(self, ns: UUID) -> UUID:
         return ns
+
+
+class _RelationalShim:
+    """Exposes ``_session_factory`` like the real relational backend."""
+
+    def __init__(self, factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = factory
 
 
 class _TxnCtx:
