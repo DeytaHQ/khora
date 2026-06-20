@@ -547,12 +547,13 @@ async def test_mirror_rewrite_failure_queues_pending_and_degrades() -> None:
         },
         applied_at=datetime.now(UTC),
     )
-    degradation = await orch._mirror_dream_op(uuid4(), 7, uuid4(), op, undo)
+    run_id = uuid4()
+    degradation = await orch._mirror_dream_op(run_id, 7, uuid4(), op, undo)
     assert degradation is not None
     assert degradation["reason"] == "graph_mirror_failed_after_pg_commit"
     # The rewrite payload survives into the pending slot for the reconciler.
-    assert 7 in store.pending
-    rewrites = store.pending[7].payload["rewrite_relationships"]
+    assert (run_id, 7) in store.pending
+    rewrites = store.pending[(run_id, 7)].payload["rewrite_relationships"]
     assert rewrites[0]["relationship_id"] == str(incident)
     assert rewrites[0]["source_entity_id"] == str(canonical)
 
