@@ -527,14 +527,14 @@ class SurrealDreamRunStore:
         await self._conn.execute(
             f"UPSERT {self._record(run_id)} SET "  # noqa: S608 - record id is a UUID, not user input
             "run_id = $rid, namespace_id = $ns, trigger = $trg, mode = $mode, "
-            "state = 'planning', started_at = time::now(), last_committed_op_seq = -1, "
-            "total_ops = 0, graph_mirror_pending = []",
+            "state = 'planning', started_at = time::now(), heartbeat_at = time::now(), "
+            "last_committed_op_seq = -1, total_ops = 0, graph_mirror_pending = []",
             {"rid": str(run_id), "ns": str(namespace_id), "trg": trigger, "mode": mode},
         )
 
     async def persist_plan(self, run_id: UUID, *, plan_hash: str, total_ops: int) -> None:
         await self._conn.execute(
-            f"UPDATE {self._record(run_id)} SET plan_hash = $ph, total_ops = $tot, "  # noqa: S608 - record id is a UUID, not user input
+            f"UPDATE {self._record(run_id)} SET plan_hash = $ph, total_ops = $tot, heartbeat_at = time::now(), "  # noqa: S608 - record id is a UUID, not user input
             "state = IF state = 'planning' THEN 'applying' ELSE state END",
             {"ph": plan_hash, "tot": total_ops},
         )
@@ -550,7 +550,7 @@ class SurrealDreamRunStore:
     async def advance_checkpoint(self, run_id: UUID, op_seq: int, *, session: Any | None = None) -> None:
         del session  # SurrealDB has no shared SQL session to enroll.
         await self._conn.execute(
-            f"UPDATE {self._record(run_id)} SET last_committed_op_seq = $seq",  # noqa: S608 - record id is a UUID, not user input
+            f"UPDATE {self._record(run_id)} SET last_committed_op_seq = $seq, heartbeat_at = time::now()",  # noqa: S608 - record id is a UUID, not user input
             {"seq": op_seq},
         )
 

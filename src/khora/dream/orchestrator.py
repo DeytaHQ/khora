@@ -304,7 +304,7 @@ class DreamOrchestrator:
         # in-process lock (see acquire_namespace_dream_lock).
         try:
             async with self._lock(namespace_id):
-                await self._init_run_row(run_id, namespace_id, mode)
+                await self._init_run_row(run_id, namespace_id, mode, is_resume=resume_from is not None)
                 await self._emit_all(
                     DreamRunStarted(
                         run_id=run_id,
@@ -798,7 +798,14 @@ class DreamOrchestrator:
     # (graph-only stub with no SQL / SurrealDB) makes every call a no-op.
     # ------------------------------------------------------------------
 
-    async def _init_run_row(self, run_id: UUID, namespace_id: UUID, mode: str) -> None:
+    async def _init_run_row(self, run_id: UUID, namespace_id: UUID, mode: str, *, is_resume: bool = False) -> None:
+        # On resume the run row already exists; re-running record_run would
+        # reset state/last_committed_op_seq on backends whose write is not
+        # conflict-preserving (the SurrealDB UPSERT), replaying committed ops.
+        # The SQL stores guard this with ON CONFLICT DO UPDATE heartbeat_at, but
+        # skipping on resume is correct and uniform across backends.
+        if is_resume:
+            return
         store = self._run_store()
         if store is None:
             return

@@ -178,6 +178,11 @@ async def test_surreal_record_status_history_and_mirror_pending() -> None:
         await store.advance_checkpoint(run_id, 1)
         assert await store.read_last_committed(run_id) == 1
 
+        # heartbeat_at must persist (SCHEMAFULL strips fields not DEFINEd in
+        # the schema, so the SurrealQL write alone is not enough).
+        hb = await conn.query_one(f"SELECT heartbeat_at FROM {store._record(run_id)}")  # noqa: S608 - record id is a UUID
+        assert hb is not None and hb.get("heartbeat_at") is not None, "heartbeat_at not persisted on SurrealDB"
+
         # graph_mirror_pending per op.
         op = uuid4()
         await store.mark_graph_mirror_pending(

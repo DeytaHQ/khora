@@ -340,6 +340,7 @@ DEFINE FIELD IF NOT EXISTS mode ON khora_dream_runs TYPE string;
 DEFINE FIELD IF NOT EXISTS state ON khora_dream_runs TYPE string DEFAULT 'planning';
 DEFINE FIELD IF NOT EXISTS plan_hash ON khora_dream_runs TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS started_at ON khora_dream_runs TYPE datetime DEFAULT time::now();
+DEFINE FIELD IF NOT EXISTS heartbeat_at ON khora_dream_runs TYPE datetime DEFAULT time::now();
 DEFINE FIELD IF NOT EXISTS finished_at ON khora_dream_runs TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS last_committed_op_seq ON khora_dream_runs TYPE int DEFAULT -1;
 DEFINE FIELD IF NOT EXISTS total_ops ON khora_dream_runs TYPE int DEFAULT 0;
