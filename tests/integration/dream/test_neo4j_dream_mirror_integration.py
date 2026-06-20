@@ -469,6 +469,34 @@ async def test_community_materialization_idempotent_on_community_id(kb: Khora) -
 
 
 @pytest.mark.asyncio
+async def test_community_materializes_node_even_with_unresolved_member(kb: Khora) -> None:
+    """A community whose member id has no graph node still materializes its :Community node."""
+    from uuid import uuid5
+
+    ns = await kb.create_namespace()
+    ns_row_id = await kb.storage.resolve_namespace(ns.namespace_id)
+
+    real = await _seed_entity_both(kb, ns_row_id, f"r-{uuid4().hex[:8]}")
+    ghost = uuid4()  # never seeded into the graph
+    members = [real, ghost]
+    community_id = uuid5(ns_row_id, ",".join(sorted(str(m) for m in members)))
+
+    op, undo = await _apply_community_op(kb, ns_row_id, community_id, members)
+    orch = _orchestrator(kb)
+    assert await orch._mirror_dream_op(uuid4(), 0, ns_row_id, op, undo) is None
+
+    communities = await kb.storage.get_communities(ns_row_id, limit=100)
+    by_id = {c.id: c for c in communities}
+    # The :Community node exists even though one member has no graph node.
+    assert community_id in by_id
+    # Only the real member resolves a HAS_MEMBER edge.
+    via_real = await kb.storage.get_entity_communities([real], namespace_id=ns_row_id)
+    assert community_id in {c.id for c in via_real}
+    via_ghost = await kb.storage.get_entity_communities([ghost], namespace_id=ns_row_id)
+    assert community_id not in {c.id for c in via_ghost}
+
+
+@pytest.mark.asyncio
 async def test_community_skip_when_backend_lacks_capability(kb: Khora) -> None:
     """A backend that does not advertise the community op kind records a structured skip, not a divergence."""
 

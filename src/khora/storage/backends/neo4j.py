@@ -3092,6 +3092,10 @@ RETURN count(newRel) AS renamed
             for c in communities
         ]
 
+        # OPTIONAL MATCH + WHERE-guarded edge MERGE so a community whose members
+        # are not (yet) in the graph still materializes its :Community node and
+        # is counted (the soft-delete legs key off ids that always exist; a
+        # community member id may legitimately have no graph node).
         _CYPHER = """\
 UNWIND $rows AS row
 MERGE (com:Community {id: row.id, namespace_id: $namespace_id})
@@ -3102,9 +3106,9 @@ SET com.summary = row.summary,
     com.updated_at = $materialized_at,
     com.created_at = coalesce(com.created_at, $materialized_at)
 WITH com, row
-UNWIND row.member_ids AS member_id
-MATCH (e:Entity {id: member_id, namespace_id: $namespace_id})
-MERGE (com)-[:HAS_MEMBER]->(e)
+UNWIND (CASE WHEN size(row.member_ids) = 0 THEN [null] ELSE row.member_ids END) AS member_id
+OPTIONAL MATCH (e:Entity {id: member_id, namespace_id: $namespace_id})
+FOREACH (_ IN CASE WHEN e IS NULL THEN [] ELSE [1] END | MERGE (com)-[:HAS_MEMBER]->(e))
 RETURN count(DISTINCT com.id) AS materialized
 """
 
@@ -3120,8 +3124,8 @@ RETURN count(DISTINCT com.id) AS materialized
 
         async with self._session() as session:
             count = await session.execute_write(_materialize)
-        logger.debug(f"Dream-materialized {len(communities)} communities in namespace {namespace_id}")
-        return count if count else len(communities)
+        logger.debug(f"Dream-materialized {count} communities in namespace {namespace_id}")
+        return count
 
     async def get_communities(
         self,
