@@ -868,6 +868,13 @@ class Neo4jBackend(GraphBackendBase):
             "CREATE INDEX episode_id IF NOT EXISTS FOR (ep:Episode) ON (ep.id)",
             "CREATE INDEX episode_namespace IF NOT EXISTS FOR (ep:Episode) ON (ep.namespace_id)",
             "CREATE INDEX episode_occurred_at IF NOT EXISTS FOR (ep:Episode) ON (ep.occurred_at)",
+            # Community indexes (#1276 GraphRAG materialization)
+            "CREATE INDEX community_namespace IF NOT EXISTS FOR (com:Community) ON (com.namespace_id)",
+            # Unique constraint on the MERGE key (id, namespace_id) backs the
+            # idempotent :Community upsert so concurrent mirror/reconciler writes
+            # cannot create duplicate nodes, and implicitly creates the composite index.
+            "CREATE CONSTRAINT community_id_ns_unique IF NOT EXISTS "
+            "FOR (com:Community) REQUIRE (com.id, com.namespace_id) IS UNIQUE",
         ]
 
         # Relationship property indexes require Neo4j ≥5.7 or Enterprise Edition

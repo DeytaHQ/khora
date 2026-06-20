@@ -685,7 +685,7 @@ The Neo4j tombstone-mirror landed in **#1272 (the #970 definition-of-done)**, so
 
 The cross-store live-set invariant is guarded by `tests/integration/dream/test_neo4j_dream_mirror_integration.py` (a real pg+Neo4j stack); the old reserved-columns tripwire (`tests/unit/test_bitemporal_columns_reserved.py`) was widened to cover `valid_to` + the Neo4j filter, then inverted to assert the filters are now present.
 
-#### Community materialization - the GraphRAG payoff (#1276)
+### Community materialization - the GraphRAG payoff (#1276)
 
 The same post-commit mirror path also materializes dream **community summaries** into the graph. The `community_summary` op computes LLM-grounded per-community summaries and persists them to the PG `khora_dream_communities` table; before #1276 that table had **zero readers** (the summaries were computed and discarded for retrieval on every backend). On apply, `DreamOrchestrator._mirror_dream_op` now also dispatches the `vectorcypher_community_summary` op kind through the #1271 capability seam (`supports_dream_mirror()` advertises it) to a new graph verb `materialize_communities_batch`, which MERGEs `:Community` nodes (carrying `summary` + `member_ids` + optional `embedding`) and `[:HAS_MEMBER]` edges from each `:Community` to its member `:Entity` nodes. MERGE keys on `(id, namespace_id)`, so a re-run / reconciler replay never duplicates (idempotent on community id). This leg is **additive** (no soft-deletes), so a mirror failure follows the same `graph_mirror_pending` + `khora.dream.graph_mirror.partial_failure` reconciler path as the soft-delete legs.
 
