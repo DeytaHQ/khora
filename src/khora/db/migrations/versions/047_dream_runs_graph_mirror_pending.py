@@ -47,9 +47,20 @@ def _json_type() -> sa.types.TypeEngine:
     return JSONB() if _is_postgres() else sa.JSON()
 
 
+def _has_column() -> bool:
+    return COLUMN_NAME in {c["name"] for c in sa.inspect(op.get_bind()).get_columns(TABLE_NAME)}
+
+
 def upgrade() -> None:
-    op.add_column(TABLE_NAME, sa.Column(COLUMN_NAME, _json_type(), nullable=True))
+    # Idempotent on the live schema: the integration migration harness shares
+    # one PostgreSQL instance across parallel test files (each resets via
+    # ``DROP SCHEMA public CASCADE``), so a plain ADD COLUMN can re-run against
+    # an already-migrated table. Guard on the actual columns, not the version
+    # table, so replay/contention is a no-op instead of a DuplicateColumnError.
+    if not _has_column():
+        op.add_column(TABLE_NAME, sa.Column(COLUMN_NAME, _json_type(), nullable=True))
 
 
 def downgrade() -> None:
-    op.drop_column(TABLE_NAME, COLUMN_NAME)
+    if _has_column():
+        op.drop_column(TABLE_NAME, COLUMN_NAME)
