@@ -1402,6 +1402,15 @@
       "_comment": "Issue #1272 (#970 DoD). NO namespace_id label - cardinality rule. Incremented on the post-commit mirror failure AND on each reconcile re-attempt that still fails. See docs/architecture/failure-observability-contract.md."
     },
     {
+      "name": "khora.dream.graph_unmirror.partial_failure",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "description": "dream_undo reverted the PostgreSQL soft-deletes but the post-commit graph-side reverse mirror (un-retire entities / un-invalidate relationships / restore endpoints) raised or the namespace resolve failed. PG is undone while the graph keeps the merged shape - a half-revert. Operators monitor this to detect cross-store divergence introduced by an undo.",
+      "labels": [],
+      "_comment": "Issue #1275 (dream-on-graph Phase 3). NO namespace_id label - cardinality rule. Incremented when the reverse graph verbs raise after the PG reverse committed, or when the namespace cannot be resolved for the reverse. See docs/architecture/failure-observability-contract.md."
+    },
+    {
       "name": "khora.dream.undo_invocations_total",
       "type": "counter",
       "stability": "public",

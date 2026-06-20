@@ -124,6 +124,27 @@ class TestGraphBackendBaseDefaultUnsupported:
             )
 
     @pytest.mark.asyncio
+    async def test_restore_entities_raises(self) -> None:
+        base = GraphBackendBase()
+        with pytest.raises(DreamBackendUnsupported):
+            await base.restore_entities_batch([uuid4()], namespace_id=uuid4())
+
+    @pytest.mark.asyncio
+    async def test_restore_relationships_raises(self) -> None:
+        base = GraphBackendBase()
+        with pytest.raises(DreamBackendUnsupported):
+            await base.restore_relationships_batch([uuid4()], namespace_id=uuid4())
+
+    @pytest.mark.asyncio
+    async def test_restore_relationship_endpoints_raises(self) -> None:
+        base = GraphBackendBase()
+        with pytest.raises(DreamBackendUnsupported):
+            await base.restore_relationship_endpoints_batch(
+                [{"relationship_id": uuid4(), "source_entity_id": uuid4(), "target_entity_id": uuid4()}],
+                namespace_id=uuid4(),
+            )
+
+    @pytest.mark.asyncio
     async def test_empty_input_short_circuits_without_raising(self) -> None:
         """Empty batches are a no-op, not an unsupported error — callers can
         feed an empty plan op to any backend without tripping the gate."""
@@ -138,6 +159,10 @@ class TestGraphBackendBaseDefaultUnsupported:
             == 0
         )
         assert await base.rename_types_batch([], namespace_id=uuid4()) == 0
+        # Reverse verbs (#1275) share the same empty-short-circuit contract.
+        assert await base.restore_entities_batch([], namespace_id=uuid4()) == 0
+        assert await base.restore_relationships_batch([], namespace_id=uuid4()) == 0
+        assert await base.restore_relationship_endpoints_batch([], namespace_id=uuid4()) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -477,4 +502,91 @@ class TestNeo4jReadCommunities:
         assert "HAS_MEMBER" in cypher
         assert "e.id IN $entity_ids" in cypher
         assert kwargs["entity_ids"] == [str(e1)]
+        assert kwargs["namespace_id"] == str(ns)
+
+
+# ---------------------------------------------------------------------------
+# Neo4j reverse verbs (#1275) — graph-side undo
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestNeo4jRestoreVerbs:
+    @pytest.mark.asyncio
+    async def test_restore_entities_empty_short_circuits(self) -> None:
+        backend, tx = _backend_with_write_capture(single=None)
+        out = await backend.restore_entities_batch([], namespace_id=uuid4())
+        assert out == 0
+        tx.run.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_restore_entities_clears_valid_until_and_deletes_snapshot(self) -> None:
+        ns = uuid4()
+        eid = uuid4()
+        backend, tx = _backend_with_write_capture(single={"id": str(eid)})
+        out = await backend.restore_entities_batch([eid], namespace_id=ns)
+        assert out == 1
+        cypher = tx.run.await_args.args[0]
+        kwargs = tx.run.await_args.kwargs
+        assert "current.valid_until = NULL" in cypher
+        assert "current.version_valid_to = NULL" in cypher
+        # The :EntityVersion snapshot + [:SUPERSEDES] edge are removed.
+        assert "DETACH DELETE o" in cypher
+        assert "EntityVersion" in cypher
+        assert kwargs["entity_ids"] == [str(eid)]
+        assert kwargs["namespace_id"] == str(ns)
+
+    @pytest.mark.asyncio
+    async def test_restore_relationships_empty_short_circuits(self) -> None:
+        backend, tx = _backend_with_write_capture(single={"restored": 0})
+        out = await backend.restore_relationships_batch([], namespace_id=uuid4())
+        assert out == 0
+        tx.run.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_restore_relationships_clears_valid_until(self) -> None:
+        ns = uuid4()
+        rel = uuid4()
+        backend, tx = _backend_with_write_capture(single={"restored": 1})
+        out = await backend.restore_relationships_batch([rel], namespace_id=ns)
+        assert out == 1
+        cypher = tx.run.await_args.args[0]
+        kwargs = tx.run.await_args.kwargs
+        assert "rel.valid_until = NULL" in cypher
+        assert "rel.valid_until IS NOT NULL" in cypher
+        assert kwargs["relationship_ids"] == [str(rel)]
+        assert kwargs["namespace_id"] == str(ns)
+
+    @pytest.mark.asyncio
+    async def test_restore_relationship_endpoints_empty_short_circuits(self) -> None:
+        backend, tx = _backend_with_write_capture(single={"rewritten": 0})
+        out = await backend.restore_relationship_endpoints_batch([], namespace_id=uuid4())
+        assert out == 0
+        tx.run.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_restore_relationship_endpoints_repoints_by_id(self) -> None:
+        ns = uuid4()
+        rel = uuid4()
+        absorbed = uuid4()
+        neighbor = uuid4()
+        backend, tx = _backend_with_write_capture(single={"rewritten": 1})
+        out = await backend.restore_relationship_endpoints_batch(
+            [
+                {
+                    "relationship_id": str(rel),
+                    "source_entity_id": str(absorbed),
+                    "target_entity_id": str(neighbor),
+                    "relationship_type": "SUPPLIES",
+                }
+            ],
+            namespace_id=ns,
+        )
+        assert out == 1
+        cypher = tx.run.await_args.args[0]
+        kwargs = tx.run.await_args.kwargs
+        # Sanitized label is a static literal; endpoints bind as params.
+        assert ":SUPPLIES" in cypher
+        assert kwargs["rows"][0]["relationship_id"] == str(rel)
+        assert kwargs["rows"][0]["source_entity_id"] == str(absorbed)
         assert kwargs["namespace_id"] == str(ns)
