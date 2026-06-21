@@ -11,11 +11,13 @@ matter for cross-store convergence (the P1-4 invariant, #1268):
 
 * ``vectorcypher_prune_edges`` - stamp ``valid_until = time::now()`` on the
   ``relates_to`` edge (flat soft-delete; the read filter then hides it).
-* ``vectorcypher_dedupe_entities`` - rewrite incident edges off the absorbed
-  entity onto the canonical, flat-soft-delete the post-rewrite self-loops, and
-  flat-soft-delete the absorbed entity. **Flat soft-delete only** - no
-  ``:EntityVersion`` snapshot (the embedded backend has no version columns,
-  per CLAUDE.md).
+* ``vectorcypher_dedupe_entities`` - re-point each incident edge off the
+  absorbed entity onto the canonical (soft-delete the old edge + create an
+  equivalent live edge to/from the canonical, #1303), flat-soft-delete the
+  post-merge self-loops (canonical<->absorbed collapses to a self-loop and is
+  retired, not re-pointed), and flat-soft-delete the absorbed entity. **Flat
+  soft-delete only** - no ``:EntityVersion`` snapshot (the embedded backend has
+  no version columns, per CLAUDE.md).
 
 Because SurrealDB is unified (graph == vector == relational, one store), the
 apply IS the mutation - there is no separate graph to mirror to afterwards, so
@@ -38,7 +40,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from loguru import logger
 
@@ -150,25 +152,31 @@ async def _apply_prune_edges(op: DreamOp, *, conn: SurrealDBConnection) -> UndoR
 
 
 async def _apply_dedupe_entities(op: DreamOp, *, conn: SurrealDBConnection) -> UndoRecord:
-    """Flat soft-delete dedupe on the unified SurrealDB store (#1280).
+    """Dedupe with incident-edge re-pointing on the unified SurrealDB store (#1303).
 
-    Per merge entry: flat-soft-delete (``valid_until``) every live edge
-    incident to the absorbed entity, then flat-soft-delete the absorbed entity
-    row itself. No ``:EntityVersion`` snapshot - flat soft-delete only.
+    Per merge entry, for every live edge incident to the absorbed entity:
 
-    **Endpoint re-pointing is intentionally NOT done here.** SurrealDB
-    RELATION ``in`` / ``out`` record links are not rewritable in place, and the
-    incident-edge re-point leg of dedupe is tracked separately (#1273, the
-    Neo4j path defers it too). The flat model therefore retires the absorbed
-    entity together with its incident edges - keeping the live set internally
-    consistent (no live edge points at a retired node) - which is the
-    convergence the P1-4 invariant checks. The self-loop case (the issue's
-    acceptance target) is a strict subset of this: a canonical->absorbed edge
-    becomes a self-loop on merge and is soft-deleted along with the others.
+    * a **self-loop** (canonical<->absorbed collapses to a self-loop on merge,
+      or an existing absorbed self-loop) is flat-soft-deleted only - it is NOT
+      re-pointed (a self-loop on the canonical adds no information).
+    * any other edge is **re-pointed** onto the canonical: the old edge is
+      flat-soft-deleted (``valid_until = time::now()``) and an equivalent live
+      edge is created to/from the canonical with the same type + properties.
+      SurrealDB RELATION ``in`` / ``out`` are not rewritable in place, so
+      re-pointing = soft-delete-old + create-new (the SurrealDB analog of the
+      Neo4j #1273 endpoint rewrite). The new edge gets a deterministic
+      ``rel_id`` (``uuid5(NAMESPACE_URL, f"{old_rel_id}->{canonical_id}")``) so
+      a replay produces the same id rather than a duplicate.
 
-    The verifier two-LLM judge is NOT run here. Idempotent on replay: an
-    already-retired entity has no live incident edges left, and the guarded
-    soft-delete UPDATE is a no-op on an already-soft-deleted row.
+    Finally the absorbed entity row is flat-soft-deleted. No ``:EntityVersion``
+    snapshot - flat soft-delete only.
+
+    Idempotent on replay: the live-incident-edge SELECT is guarded by
+    ``valid_until IS NONE``, so once the old edges are soft-deleted the absorbed
+    entity has no live incident edges left and a second apply re-points nothing.
+    The re-pointed edges point at the canonical (never the absorbed entity), so
+    they never resurface in that SELECT. The verifier two-LLM judge is NOT run
+    here.
     """
     outputs = op.outputs[0] if op.outputs else {}
     merges_input = list(outputs.get("merges") or [])
@@ -182,20 +190,24 @@ async def _apply_dedupe_entities(op: DreamOp, *, conn: SurrealDBConnection) -> U
         canonical_id = UUID(str(entry["canonical_id"]))
         absorbed_id = UUID(str(entry["absorbed_id"]))
         absorbed_rid = _rid("entity", absorbed_id)
+        canonical_rid = _rid("entity", canonical_id)
 
-        # Snapshot every live edge touching the absorbed entity (in OR out).
+        # Snapshot every live edge touching the absorbed entity (in OR out),
+        # including the columns we must carry onto a re-pointed edge.
         rows = await conn.query(
-            "SELECT rel_id, in, out, relationship_type FROM relates_to "
-            "WHERE (in = $aid OR out = $aid) AND valid_until IS NONE",
+            "SELECT rel_id, in, out, namespace_id, relationship_type, description, properties, "
+            "source_document_ids, source_chunk_ids, valid_from, confidence, weight, metadata_ "
+            "FROM relates_to WHERE (in = $aid OR out = $aid) AND valid_until IS NONE",
             {"aid": absorbed_rid},
         )
 
         previous_serialized: list[dict[str, Any]] = []
         self_loops: list[str] = []
         edges_retired: list[str] = []
-        # Collect every soft-delete for this merge entry into ONE batch so the
-        # whole merge is a single round-trip (N+1 -> 1). ``execute_batch`` rejects
-        # parameter-name collisions, so each edge gets an indexed bind name.
+        edges_repointed: list[dict[str, Any]] = []
+        # Collect every write for this merge entry into ONE batch so the whole
+        # merge is a single round-trip. ``execute_batch`` rejects parameter-name
+        # collisions, so each statement gets indexed bind names.
         batch_stmts: list[tuple[str, dict[str, Any]]] = []
         for row in rows:
             rel_id = row.get("rel_id")
@@ -215,10 +227,11 @@ async def _apply_dedupe_entities(op: DreamOp, *, conn: SurrealDBConnection) -> U
             )
 
             # Flat soft-delete the incident edge (self-loop or not).
-            # ``param`` is an internally-generated bind name (rid_<n>), never user
-            # input; the rel_id value still binds as a parameter. S608 noqa per
-            # the repo SurrealQL convention.
-            param = f"rid_{len(batch_stmts)}"
+            # ``param`` is an internally-generated bind name, never user input;
+            # the rel_id value still binds as a parameter. S608 noqa per the
+            # repo SurrealQL convention.
+            n = len(batch_stmts)
+            param = f"rid_{n}"
             batch_stmts.append(
                 (
                     "UPDATE relates_to SET valid_until = time::now(), updated_at = time::now() "  # noqa: S608
@@ -227,9 +240,65 @@ async def _apply_dedupe_entities(op: DreamOp, *, conn: SurrealDBConnection) -> U
                 )
             )
             edges_retired.append(str(rel_id))
-            # A canonical<->absorbed edge collapses to a self-loop on merge.
-            if {src, tgt} == {canonical_id, absorbed_id} or src == tgt:
+
+            # Map the absorbed endpoint onto the canonical.
+            new_src = canonical_id if src == absorbed_id else src
+            new_tgt = canonical_id if tgt == absorbed_id else tgt
+            # A canonical<->absorbed edge collapses to a self-loop on merge, as
+            # does an absorbed self-loop. Soft-delete only - never re-pointed.
+            if new_src == new_tgt:
                 self_loops.append(str(rel_id))
+                continue
+
+            # Re-point: create an equivalent live edge to/from the canonical
+            # with the same type + properties. Deterministic rel_id keeps replay
+            # a no-op (a second apply finds the old edge already soft-deleted,
+            # so it re-points nothing).
+            new_rel_id = uuid5(NAMESPACE_URL, f"{rel_id}->{canonical_id}")
+            src_rid = canonical_rid if src == absorbed_id else _rid("entity", src)
+            tgt_rid = canonical_rid if tgt == absorbed_id else _rid("entity", tgt)
+            batch_stmts.append(
+                (
+                    f"RELATE $rp_src_{n}->relates_to->$rp_tgt_{n} SET "  # noqa: S608
+                    f"rel_id = $rp_id_{n}, "
+                    f"namespace_id = $rp_ns_{n}, "
+                    f"relationship_type = $rp_type_{n}, "
+                    f"description = $rp_desc_{n}, "
+                    f"properties = $rp_props_{n}, "
+                    f"source_document_ids = $rp_docs_{n}, "
+                    f"source_chunk_ids = $rp_chunks_{n}, "
+                    f"valid_from = $rp_from_{n}, "
+                    "valid_until = NONE, "
+                    f"confidence = $rp_conf_{n}, "
+                    f"weight = $rp_weight_{n}, "
+                    f"metadata_ = $rp_meta_{n}, "
+                    "created_at = time::now(), "
+                    "updated_at = time::now()",
+                    {
+                        f"rp_src_{n}": src_rid,
+                        f"rp_tgt_{n}": tgt_rid,
+                        f"rp_id_{n}": str(new_rel_id),
+                        f"rp_ns_{n}": row.get("namespace_id"),
+                        f"rp_type_{n}": row.get("relationship_type"),
+                        f"rp_desc_{n}": row.get("description"),
+                        f"rp_props_{n}": row.get("properties") or {},
+                        f"rp_docs_{n}": row.get("source_document_ids") or [],
+                        f"rp_chunks_{n}": row.get("source_chunk_ids") or [],
+                        f"rp_from_{n}": row.get("valid_from"),
+                        f"rp_conf_{n}": _as_float(row.get("confidence")),
+                        f"rp_weight_{n}": _as_float(row.get("weight")),
+                        f"rp_meta_{n}": row.get("metadata_") or {},
+                    },
+                )
+            )
+            edges_repointed.append(
+                {
+                    "old_rel_id": str(rel_id),
+                    "new_rel_id": str(new_rel_id),
+                    "source_entity_id": str(new_src),
+                    "target_entity_id": str(new_tgt),
+                }
+            )
 
         # Flat soft-delete the absorbed entity row (guarded - idempotent).
         batch_stmts.append(
@@ -247,6 +316,7 @@ async def _apply_dedupe_entities(op: DreamOp, *, conn: SurrealDBConnection) -> U
                 "previous_relationships": previous_serialized,
                 "self_loops_invalidated": self_loops,
                 "edges_retired": edges_retired,
+                "edges_repointed": edges_repointed,
                 "applied": True,
             }
         )
