@@ -1463,24 +1463,47 @@ TEMPORAL_DICTIONARY: dict[int, list[str]] = {
 }
 
 
+def _compile_temporal_term(term: str) -> re.Pattern[str]:
+    """Compile a dictionary term into a word-boundary-aware regex.
+
+    The dictionary historically used leading/trailing spaces as crude word
+    boundary anchors ("when ", " active ", " does she still"). Plain
+    substring matching let keywords match inside other words ("changed"
+    inside "unchanged", "march" inside "marched"), producing false-positive
+    temporal categories (#981). We strip those padding spaces and anchor with
+    ``\\b`` only on the side where the term begins/ends with a word character,
+    so internal-space phrases and hyphenated terms ("up-to-date", "ex-") keep
+    matching while substrings of larger words no longer do.
+    """
+    core = term.strip()
+    left = r"\b" if core[:1].isalnum() else ""
+    right = r"\b" if core[-1:].isalnum() else ""
+    return re.compile(left + re.escape(core) + right, re.IGNORECASE)
+
+
+_TEMPORAL_REGEXES: dict[int, list[re.Pattern[str]]] = {
+    cat: [_compile_temporal_term(term) for term in terms] for cat, terms in TEMPORAL_DICTIONARY.items()
+}
+
+
 def detect_temporal_category(query: str) -> int:
     """Detect temporal category of a query.
 
     Returns category ID: 0=NONE, 1=EXPLICIT, 2=STATE_QUERY, 3=ORDINAL,
     4=AGGREGATE, 5=RECENCY, 6=CHANGE.
 
-    Uses Rust Aho-Corasick when available, otherwise Python substring matching.
+    Uses Rust Aho-Corasick when available, otherwise Python word-boundary
+    regex matching (parity with the Rust kernel).
     """
     if _HAS_RUST:
         return _rust_detect_temporal_category(query)
 
-    # Python fallback: simple substring matching
-    # Pad with leading space so patterns like " does she still" match at query start
-    query_lower = " " + query.lower()
+    # Python fallback: word-boundary regex matching (keywords match only as
+    # whole words/phrases, not as substrings of larger words).
     best_cat = 0
-    for cat, terms in TEMPORAL_DICTIONARY.items():
-        for term in terms:
-            if term in query_lower:
+    for cat, regexes in _TEMPORAL_REGEXES.items():
+        for rx in regexes:
+            if rx.search(query):
                 best_cat = max(best_cat, cat)
                 break
     return best_cat
@@ -1499,21 +1522,21 @@ def detect_temporal_category_with_confidence(
     - ``confidence``: 0.0–1.0 based on match count and strength
     - ``matched_terms``: list of matched keyword strings
 
-    Uses Rust Aho-Corasick when available, otherwise Python substring matching.
+    Uses Rust Aho-Corasick when available, otherwise Python word-boundary
+    regex matching (parity with the Rust kernel).
     """
     if _HAS_RUST:
         return _rust_detect_temporal_category_with_confidence(query)
 
-    # Python fallback
-    # Pad with leading space so patterns with leading-space anchors match at query start
-    query_lower = " " + query.lower()
+    # Python fallback: word-boundary regex matching (parity with the Rust
+    # kernel and with detect_temporal_category above).
     best_cat = 0
     matched_terms: list[str] = []
     matched_cats: set[int] = set()
 
     for cat, terms in TEMPORAL_DICTIONARY.items():
-        for term in terms:
-            if term in query_lower:
+        for term, rx in zip(terms, _TEMPORAL_REGEXES[cat], strict=True):
+            if rx.search(query):
                 if cat > best_cat:
                     best_cat = cat
                 matched_cats.add(cat)
