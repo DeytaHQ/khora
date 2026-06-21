@@ -643,7 +643,9 @@ class DreamOrchestrator:
             # the apply handler's writes commit/rollback together with
             # the checkpoint update.
             try:
-                undo = await self._apply_one_op(run_id=run_id, seq=seq, op=op, handler=handler)
+                undo = await self._apply_one_op(
+                    run_id=run_id, seq=seq, op=op, handler=handler, namespace_id=plan.namespace_id
+                )
             except DreamBackendUnsupported as exc:
                 # Dialect gate (#875): handler requires Postgres but the
                 # active session speaks SQLite (sqlite_lance) or another
@@ -669,9 +671,13 @@ class DreamOrchestrator:
             # OUTSIDE the tx. A failure here leaves PG ahead of the graph - it
             # is queued in graph_mirror_pending and re-attempted by the
             # reconciler on the next run, never rolling back the PG commit.
-            degradation = await self._mirror_dream_op(run_id, seq, plan.namespace_id, op, undo)
-            if degradation is not None:
-                mirror_degradations.append(degradation)
+            # AGE (#1307) already mirrored INSIDE the apply transaction, so it
+            # skips this post-commit leg entirely - no double-apply, no pending
+            # row, the soft-delete is already durable with the PG commit.
+            if not self._mirrors_in_transaction():
+                degradation = await self._mirror_dream_op(run_id, seq, plan.namespace_id, op, undo)
+                if degradation is not None:
+                    mirror_degradations.append(degradation)
 
             # Roll the LLM token spend this op just incurred into both
             # budget buckets (#1270). Non-LLM ops record nothing, so the
@@ -727,6 +733,7 @@ class DreamOrchestrator:
         seq: int,
         op: DreamOp,
         handler: Any,
+        namespace_id: UUID,
     ) -> UndoRecord:
         """Run one apply handler inside a coordinator transaction.
 
@@ -736,6 +743,9 @@ class DreamOrchestrator:
         backends without a SQL transaction the orchestrator falls back
         to invoking the handler with ``session=None`` — handlers that
         need a session must guard against this themselves.
+
+        ``namespace_id`` is the plan's namespace (resolved to the row-level
+        graph id before the AGE in-tx mirror runs, #1307).
 
         The orchestrator's :class:`DreamConfig` is forwarded as a
         ``dream_config`` kwarg for handlers that consume it (the dedupe
@@ -750,9 +760,18 @@ class DreamOrchestrator:
                 _assert_backend_supported(session, op.op_type)
                 undo = await self._invoke_handler(handler, op, coordinator=coordinator, session=session)
                 await self._record_committed_in_session(session, run_id, seq)
-                # Queue the graph mirror durably WITH the checkpoint (#1292): a
-                # hard crash between this commit and the post-commit mirror then
-                # leaves a pending row the reconciler can drain. Cleared by
+                # AGE atomic same-transaction mirror (#1307): AGE lives in the
+                # same Postgres DB, so fold its soft-delete onto the graph
+                # ``valid_until`` INSIDE this transaction - it commits (or rolls
+                # back) atomically with the PG apply, needing no
+                # ``graph_mirror_pending`` reconcile. A mirror error here
+                # propagates and rolls back the whole apply op.
+                if await self._mirror_dream_op_in_tx(session, namespace_id, op, undo):
+                    return undo
+                # Genuinely-remote backend (Neo4j / Memgraph / Neptune): queue
+                # the graph mirror durably WITH the checkpoint (#1292) so a hard
+                # crash between this commit and the post-commit mirror leaves a
+                # pending row the reconciler can drain. Cleared by
                 # ``_mirror_dream_op`` on a successful mirror.
                 await self._pre_mark_graph_mirror_pending(session, run_id, seq, op, undo)
                 return undo
@@ -814,6 +833,65 @@ class DreamOrchestrator:
         undo = await apply_surrealdb_op(op, conn=conn)
         await self._record_committed(run_id, seq)
         return undo
+
+    def _mirrors_in_transaction(self) -> bool:
+        """True when the stack's graph backend folds its mirror into the apply tx (#1307)."""
+        graph = _graph_backend(self._kb.storage)
+        return graph is not None and _graph_mirrors_in_transaction(graph)
+
+    async def _mirror_dream_op_in_tx(
+        self,
+        session: Any,
+        namespace_id: UUID,
+        op: DreamOp,
+        undo: UndoRecord,
+    ) -> bool:
+        """Fold an AGE soft-delete mirror into the apply transaction (#1307).
+
+        Returns ``True`` when the active graph backend mirrors in-transaction
+        (AGE) - the caller then SKIPS both the post-commit ``_mirror_dream_op``
+        and the ``graph_mirror_pending`` pre-mark, because the graph SET ran on
+        ``session`` and commits atomically with the PG apply. Returns ``False``
+        for every other shape (no graph, remote backend), leaving the caller on
+        the existing post-commit eventual-consistency path.
+
+        AGE advertises only the flat-soft-delete kinds
+        (``prune_edges`` / ``contradiction_reconcile``), so the only verb reached
+        here is :meth:`soft_invalidate_relationships_batch`, called with
+        ``session=`` so it runs in THIS transaction (no own ``begin()``). A mirror
+        error propagates and rolls the whole apply op back - the atomicity the
+        eventual-consistency path deliberately does not have, and the whole point
+        of #1307.
+        """
+        graph = _graph_backend(self._kb.storage)
+        if graph is None or not _graph_mirrors_in_transaction(graph):
+            return False
+
+        op_type = str(op.op_type)
+        if op_type not in _supported_mirror_kinds(graph) or op_type not in MIRRORABLE_OP_KINDS:
+            # An in-tx backend that can't carry this op kind still owns the
+            # in-tx routing, so the caller must NOT also queue a pending row.
+            return True
+
+        targets = extract_mirror_targets(op_type, undo)
+        invalidate_ids = targets["invalidate_relationship_ids"]
+        if not invalidate_ids:
+            # No-op apply (already pruned / vanished edge): nothing to mirror.
+            return True
+
+        # The graph rows carry the row-level namespace id (ingest resolves the
+        # stable id before any write), so resolve here so the verb's
+        # ``namespace_id`` filter matches. A resolver error propagates and rolls
+        # back the apply - consistent with the atomic contract.
+        row_namespace_id = await self._resolve_namespace_for_mirror(namespace_id)
+        stamp_at = undo.applied_at or datetime.now(UTC)
+        await graph.soft_invalidate_relationships_batch(
+            invalidate_ids,
+            namespace_id=row_namespace_id,
+            invalidated_at=stamp_at,
+            session=session,
+        )
+        return True
 
     async def _mirror_dream_op(
         self,
@@ -1523,6 +1601,25 @@ def _supported_mirror_kinds(graph: Any) -> frozenset[str]:
         return frozenset(str(k) for k in probe())
     except Exception:  # pragma: no cover - defensive; probe is pure
         return frozenset()
+
+
+def _graph_mirrors_in_transaction(graph: Any) -> bool:
+    """True when the graph backend folds its mirror into the apply transaction (#1307).
+
+    AGE is an extension in the SAME Postgres DB as the dream-apply SQL, so it
+    advertises ``mirror_in_transaction() -> True``: the orchestrator runs its
+    soft-delete verb on the ``coordinator.transaction()`` session so the graph
+    SET commits atomically with the PG apply (no post-commit mirror, no
+    ``graph_mirror_pending`` reconcile). The genuinely-remote backends lack the
+    probe (or return ``False``), so they keep the eventual-consistency mirror.
+    """
+    probe = getattr(graph, "mirror_in_transaction", None)
+    if probe is None:
+        return False
+    try:
+        return bool(probe())
+    except Exception:  # pragma: no cover - defensive; probe is pure
+        return False
 
 
 def _default_file_sink_dir() -> str:

@@ -1096,6 +1096,57 @@ class AGEBackend(GraphBackendBase):
         """
         return frozenset({OpKind.VECTORCYPHER_PRUNE_EDGES, OpKind.VECTORCYPHER_CONTRADICTION_RECONCILE})
 
+    def mirror_in_transaction(self) -> bool:
+        """AGE folds the dream soft-delete into the apply transaction (#1307).
+
+        AGE is an extension in the SAME PostgreSQL database as the dream-apply
+        SQL, so its ``cypher()`` SET-by-id can run on the orchestrator's
+        ``coordinator.transaction()`` session and commit atomically with the
+        PG dream-apply - no eventual-consistency lag, no ``graph_mirror_pending``
+        reconcile. The genuinely-remote backends (Neo4j / Memgraph / Neptune /
+        SurrealDB) return ``False`` (the default) and keep the post-commit
+        eventual-consistency mirror.
+
+        The orchestrator probes this and, when ``True``, calls the soft-delete
+        verbs with ``session=txn.session`` (see :meth:`soft_invalidate_relationships_batch`)
+        instead of running the post-commit mirror.
+        """
+        return True
+
+    async def _soft_invalidate_on_session(
+        self,
+        session: AsyncSession,
+        relationship_ids: list[UUID],
+        *,
+        ns_lit_val: str,
+        ts_lit: str,
+    ) -> int:
+        """Run the per-id ``valid_until`` SET loop on a caller-supplied session.
+
+        Issues the ``SET search_path`` preamble + one Cypher SET per id on
+        ``session`` WITHOUT opening its own transaction - the caller owns the
+        commit / rollback. Shared by the self-session path (one
+        ``session.begin()`` auto-commit unit) and the orchestrator's in-tx path
+        (#1307, the apply transaction's session).
+        """
+        await session.execute(text('SET search_path = ag_catalog, "$user", public'))
+        count = 0
+        for rid in relationship_ids:
+            rid_lit = self._uuid_lit(rid)
+            cypher = f"""
+                MATCH ()-[r]-()
+                WHERE r.id = '{rid_lit}'
+                  AND r.namespace_id = '{ns_lit_val}'
+                  AND r.valid_until IS NULL
+                SET r.valid_until = '{ts_lit}',
+                    r.updated_at = '{ts_lit}'
+                RETURN count(r) AS invalidated
+            """
+            rows = await self._cypher(session, cypher, columns=["invalidated agtype"])
+            if rows:
+                count += rows[0].get("invalidated") or 0
+        return count
+
     @trace("khora.age.soft_invalidate_relationships_batch")
     async def soft_invalidate_relationships_batch(
         self,
@@ -1103,6 +1154,7 @@ class AGEBackend(GraphBackendBase):
         *,
         namespace_id: UUID,
         invalidated_at: datetime,
+        session: AsyncSession | None = None,
     ) -> int:
         """Soft-delete edges by stamping ``valid_until`` (flat SET by id, #1279).
 
@@ -1110,8 +1162,14 @@ class AGEBackend(GraphBackendBase):
         ``namespace_id`` (IDOR family); idempotent — only edges with a null
         ``valid_until`` are touched, so a reconciler replay is a no-op. Never
         deletes. ``valid_until`` is stored as an ISO string literal to match the
-        shape :meth:`create_relationship` writes. The whole batch is one
+        shape :meth:`create_relationship` writes.
+
+        When ``session`` is ``None`` the whole batch runs inside a single
         ``session.begin()`` auto-commit unit so a partial batch retries cleanly.
+        When the orchestrator passes its ``coordinator.transaction()`` session
+        (#1307), the SET runs in THAT transaction - no own ``begin()`` / commit -
+        so the AGE soft-delete commits atomically with the PG dream-apply (AGE is
+        an extension in the same Postgres DB).
 
         AGE rejects ``$param`` placeholders, so ids / namespace / timestamp are
         interpolated through :meth:`_uuid_lit` (UUID validation — the IDOR /
@@ -1125,24 +1183,16 @@ class AGEBackend(GraphBackendBase):
         ns_lit_val = self._uuid_lit(namespace_id)
         ts_lit = self._escape(invalidated_at.isoformat())
 
-        count = 0
-        async with self._get_session_factory()() as session:
-            async with session.begin():
-                await session.execute(text('SET search_path = ag_catalog, "$user", public'))
-                for rid in relationship_ids:
-                    rid_lit = self._uuid_lit(rid)
-                    cypher = f"""
-                        MATCH ()-[r]-()
-                        WHERE r.id = '{rid_lit}'
-                          AND r.namespace_id = '{ns_lit_val}'
-                          AND r.valid_until IS NULL
-                        SET r.valid_until = '{ts_lit}',
-                            r.updated_at = '{ts_lit}'
-                        RETURN count(r) AS invalidated
-                    """
-                    rows = await self._cypher(session, cypher, columns=["invalidated agtype"])
-                    if rows:
-                        count += rows[0].get("invalidated") or 0
+        if session is not None:
+            count = await self._soft_invalidate_on_session(
+                session, relationship_ids, ns_lit_val=ns_lit_val, ts_lit=ts_lit
+            )
+        else:
+            async with self._get_session_factory()() as own_session:
+                async with own_session.begin():
+                    count = await self._soft_invalidate_on_session(
+                        own_session, relationship_ids, ns_lit_val=ns_lit_val, ts_lit=ts_lit
+                    )
         logger.debug(f"Dream-invalidated {count} relationships in namespace {namespace_id}")
         return count
 
