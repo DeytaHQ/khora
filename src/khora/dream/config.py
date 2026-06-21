@@ -556,6 +556,58 @@ class DreamConfig(BaseSettings):
         ),
     )
 
+    # Phase 5 (#1281) — vectorcypher contradiction reconciliation. A two-LLM
+    # judge promotes the report-only detector to an opt-in mutating op that
+    # soft-deletes the losing edge of a judge-agreed contradiction. Default
+    # OFF — the judge is expensive (two LLM calls per flagged pair) and the
+    # op mutates the graph, so operators must opt in.
+    contradiction_reconcile_enabled: bool = Field(
+        default=False,
+        description=(
+            "Master switch for the vectorcypher contradiction-reconciliation "
+            "op (OpKind.VECTORCYPHER_CONTRADICTION_RECONCILE, #1281). Default "
+            "OFF. When True, the planner emits a reconcile op (instead of the "
+            "report-only detect op) that runs a two-LLM judge on each flagged "
+            "pair; only judge-AGREED contradictions soft-delete the losing "
+            "edge (mirrored to the graph), and defer/keep outcomes write a "
+            "triage row to dream_conflicts. The two-LLM judge is budget-gated "
+            "via the dream LLM token budgets. Postgres-only on apply."
+        ),
+    )
+    contradiction_reconcile_model: str = Field(
+        default="gpt-4o-mini",
+        description=(
+            "LiteLLM model id for the first judge (verifier) on a borderline "
+            "contradiction. Mirrors dedupe_verifier_model."
+        ),
+    )
+    contradiction_reconcile_auditor_model: str = Field(
+        default="claude-haiku-4.5",
+        description=(
+            "LiteLLM model id for the second judge (auditor, distinct model "
+            "family from contradiction_reconcile_model). Both judges must "
+            "agree before the losing edge is invalidated."
+        ),
+    )
+    contradiction_reconcile_timeout_seconds: int = Field(
+        default=10,
+        gt=0,
+        description=(
+            "Per-judge LLM timeout in seconds. A timeout / transport error "
+            "degrades the joint verdict to 'defer' (no mutation)."
+        ),
+    )
+    contradiction_reconcile_min_confidence: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Confidence floor each judge must report when voting 'invalidate' "
+            "before the dispatcher returns 'invalidate'. Below-floor "
+            "confidence degrades to defer."
+        ),
+    )
+
     # Phase 2.5 — chronicle event near-duplicate clustering (#665).
     event_clustering_cosine_threshold: float = Field(
         default=0.95,

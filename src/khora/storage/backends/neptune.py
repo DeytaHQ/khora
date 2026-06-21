@@ -945,15 +945,17 @@ class NeptuneBackend(GraphBackendBase):
     # on this backend.
 
     def supports_dream_mirror(self) -> frozenset[OpKind]:
-        """Neptune mirrors only the flat-soft-delete ``prune_edges`` op (#1279).
+        """Neptune mirrors the flat-soft-delete prune / reconcile ops (#1279 / #1281).
 
         - ``VECTORCYPHER_PRUNE_EDGES`` -> :meth:`soft_invalidate_relationships_batch`
+        - ``VECTORCYPHER_CONTRADICTION_RECONCILE`` -> :meth:`soft_invalidate_relationships_batch`
+          (the judge-invalidated losing edge, #1281)
 
         Entity-version (``dedupe_entities``) and relabel (``normalize_schema``)
         are deliberately absent: Neptune has no versioning primitive, so those
         op kinds are recorded as a structured skip by the orchestrator.
         """
-        return frozenset({OpKind.VECTORCYPHER_PRUNE_EDGES})
+        return frozenset({OpKind.VECTORCYPHER_PRUNE_EDGES, OpKind.VECTORCYPHER_CONTRADICTION_RECONCILE})
 
     async def soft_invalidate_relationships_batch(
         self,

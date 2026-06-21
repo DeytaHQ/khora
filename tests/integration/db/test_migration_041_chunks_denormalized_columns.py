@@ -322,7 +322,7 @@ class TestMigration041OnPostgres:
                 async with engine.connect() as conn:
                     # Chain reached head.
                     result = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
-                    assert result.scalar() == "047_dream_runs_graph_mirror_pending"
+                    assert result.scalar() == "048_dream_conflicts_reconcile"
 
                     # The migration did not create the table.
                     result = await conn.execute(
@@ -353,7 +353,7 @@ class TestMigration041OnSqlite:
             try:
                 async with engine.connect() as conn:
                     result = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
-                    assert result.scalar() == "047_dream_runs_graph_mirror_pending"
+                    assert result.scalar() == "048_dream_conflicts_reconcile"
             finally:
                 await engine.dispose()
 

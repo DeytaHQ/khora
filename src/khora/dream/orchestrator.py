@@ -121,6 +121,9 @@ _APPLY_DISABLED_FALSEY: frozenset[str] = frozenset({"", "0", "false", "False", "
 #   lives in LanceDB (not SQLite) on the embedded stack, so a SQL UPDATE is a
 #   no-op there; the session-aware SQLite path is deferred to a later phase.
 # - ``vectorcypher_source_chunk_ids_gc`` relies on Postgres array operators.
+# - ``vectorcypher_contradiction_reconcile`` (#1281) UPSERTs into the
+#   ``dream_conflicts`` table, which is never created on SQLite (migration 036 /
+#   048 are Postgres-only), so apply-mode reconciliation is Postgres-only.
 #
 # On any non-Postgres dialect the orchestrator catches the gate below and skips
 # the op instead of crashing the run. See #875 / #1277.
@@ -128,17 +131,20 @@ _POSTGRES_ONLY_OP_KINDS: frozenset[str] = frozenset(
     {
         "vectorcypher_centroid_recompute",
         "vectorcypher_source_chunk_ids_gc",
+        "vectorcypher_contradiction_reconcile",
     }
 )
 
 
 # Op kinds that issue LLM calls during apply. The dream LLM token budget
 # (#1270) is checked before dispatching any of these; non-LLM mutation
-# ops are never gated. ``community_summary`` is the only reachable
-# LLM-using op today; future LLM ops add their kind here.
+# ops are never gated. ``community_summary`` and the #1281 two-LLM
+# contradiction-reconcile judge are the LLM-using apply ops today; future
+# LLM ops add their kind here.
 _LLM_OP_KINDS: frozenset[str] = frozenset(
     {
         "vectorcypher_community_summary",
+        "vectorcypher_contradiction_reconcile",
     }
 )
 

@@ -2795,9 +2795,11 @@ RETURN count(r) AS updated
     # already invalidated). The mirror wiring itself is NOT in this PR.
 
     def supports_dream_mirror(self) -> frozenset[OpKind]:
-        """Neo4j natively mirrors prune / dedupe / normalize-schema / community.
+        """Neo4j natively mirrors prune / reconcile / dedupe / normalize-schema / community.
 
         - ``VECTORCYPHER_PRUNE_EDGES`` -> :meth:`soft_invalidate_relationships_batch`
+        - ``VECTORCYPHER_CONTRADICTION_RECONCILE`` -> :meth:`soft_invalidate_relationships_batch`
+          (the judge-invalidated losing edge, #1281)
         - ``VECTORCYPHER_DEDUPE_ENTITIES`` -> :meth:`soft_retire_entities_batch`
           + :meth:`rewrite_relationship_endpoints_batch`
         - ``VECTORCYPHER_NORMALIZE_SCHEMA`` -> :meth:`rename_types_batch`
@@ -2806,6 +2808,7 @@ RETURN count(r) AS updated
         return frozenset(
             {
                 OpKind.VECTORCYPHER_PRUNE_EDGES,
+                OpKind.VECTORCYPHER_CONTRADICTION_RECONCILE,
                 OpKind.VECTORCYPHER_DEDUPE_ENTITIES,
                 OpKind.VECTORCYPHER_NORMALIZE_SCHEMA,
                 OpKind.VECTORCYPHER_COMMUNITY_SUMMARY,
