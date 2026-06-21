@@ -937,6 +937,8 @@ class TestPreferCurrentSoftDeleteTombstones:
         ``invalidated_at``) with a past UTC timestamp, mirroring the dream
         prune_edges / dedupe-self-loop apply handlers. ``column`` is a fixed
         literal from the test, never user input."""
+        if column not in {"valid_to", "invalidated_at"}:
+            raise ValueError(f"unsupported tombstone column: {column}")
         stamped = (datetime.now(UTC) - timedelta(days=1)).isoformat()
         await adapter._conn.execute(
             f"UPDATE relationships SET {column} = ? WHERE id = ?",  # noqa: S608
@@ -985,6 +987,28 @@ class TestPreferCurrentSoftDeleteTombstones:
 
         nb = await adapter.get_neighborhood(a.id, namespace_id=ns, depth=1, limit=10)
         assert r.id in {rel.id for rel in nb["relationships"]}
+
+    async def test_get_neighborhood_node_filter_uses_caller_now(self, adapter: SQLiteLanceGraphAdapter):
+        """The node ``valid_until`` filter binds the caller-provided ``now`` (not
+        wall-clock), so a point-in-time traversal gates nodes and edges at the
+        same instant. A -[live edge]-> B where B retires before a future ``now``:
+        the edge survives but B must drop because it is expired AT ``now``."""
+        ns = uuid4()
+        a = _make_entity(ns, name="A")
+        b = _make_entity(ns, name="B")
+        # B is live at wall-clock but retires before the future ``now`` we pass.
+        b.valid_until = datetime.now(UTC) + timedelta(hours=1)
+        for ent in (a, b):
+            await adapter.create_entity(ent)
+        await adapter.create_relationship(_make_relationship(ns, a.id, b.id, rel_type="LINKS"))
+
+        future_now = datetime.now(UTC) + timedelta(hours=2)
+        nb = await adapter.get_neighborhood(
+            a.id, namespace_id=ns, depth=1, limit=10, prefer_current=True, now=future_now
+        )
+        # Node B is expired at future_now → dropped (would be wrongly kept if the
+        # filter compared against wall-clock instead of the caller's ``now``).
+        assert "B" not in {ent.name for ent in nb["entities"]}
 
 
 # ---------------------------------------------------------------------------

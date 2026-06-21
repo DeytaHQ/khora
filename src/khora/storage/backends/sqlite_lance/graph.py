@@ -254,6 +254,11 @@ _RELATIONSHIP_CTE_LIVE_FILTER = (
     "r.valid_to IS NULL AND r.invalidated_at IS NULL "
     "AND (r.valid_until IS NULL OR datetime(r.valid_until) > datetime(?))"
 )
+# ``now``-parameterized variant of ``_ENTITY_LIVE_FILTER`` for the traversal's
+# final node fetch (#1302). Binds the caller-provided ``now`` (same value the
+# edge filter uses) so a fixed point-in-time traversal evaluates nodes and edges
+# at the same instant instead of mixing ``now`` against wall-clock.
+_ENTITY_LIVE_FILTER_AT = "(valid_until IS NULL OR datetime(valid_until) > datetime(?))"
 
 
 def _relationship_insert_params(rel: Relationship) -> tuple:
@@ -982,10 +987,13 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
             placeholders = ", ".join("?" for _ in needed_entity_ids)
             ent_params: list[Any] = [*needed_entity_ids, ns_text]
             # When prefer_current, drop retired nodes from the path the same way
-            # ``list_entities`` does (#1302) — entity ``valid_until`` window.
+            # ``list_entities`` does (#1302) — entity ``valid_until`` window,
+            # bound to the SAME ``now`` the edge filter uses (``valid_params``) so
+            # a fixed point-in-time traversal gates nodes and edges consistently.
             entity_live = ""
             if prefer_current:
-                entity_live = f" AND {_ENTITY_LIVE_FILTER}"
+                entity_live = f" AND {_ENTITY_LIVE_FILTER_AT}"
+                ent_params.extend(valid_params)
             sql_e = (
                 f"SELECT {_ENTITY_COLUMNS} FROM entities "  # noqa: S608
                 f"WHERE id IN ({placeholders}) AND namespace_id = ?{entity_live}"
