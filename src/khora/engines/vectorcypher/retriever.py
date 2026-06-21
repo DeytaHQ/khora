@@ -1762,20 +1762,38 @@ class VectorCypherRetriever:
         #   1. Pool-augmentation only — never replaces cosine candidates.
         #   2. Relevance gate prevents today's HR-all-hands from muscling
         #      into the top-K for a niche query (Devil's-Advocate demand #3).
-        #   3. Skipped when the floor synthesis was vetoed — historical /
-        #      counterfactual queries by definition don't benefit from
-        #      injecting recent chunks. Heuristic: when the floor flag is
-        #      on AND the signal is temporal AND the category has a
-        #      default_window AND temporal_filter is still None, synthesis
-        #      was vetoed (by anti-recency token or LLM disambiguation).
-        #      PR #571 LoCoMo --small showed running the channel anyway
-        #      cost ~16.7pp counterfactual_accuracy on a 6-q subset.
+        #   3. Skipped for historical / counterfactual queries — they by
+        #      definition don't benefit from injecting recent chunks. PR #571
+        #      LoCoMo --small showed running the channel anyway cost ~16.7pp
+        #      counterfactual_accuracy on a 6-q subset.
+        #
+        #      Issue #1227: the veto must depend on the recency-CHANNEL flag,
+        #      not the unrelated recency-FLOOR flag. Channel-on / floor-off is
+        #      a reachable combo of two independent user settings; gating the
+        #      veto on the floor flag left it dead in that combo, re-injecting
+        #      today's chunks into the exact counterfactual queries it skips.
+        #
+        #      Veto signal:
+        #        * anti-recency token in the query ("ever", "all-time", "history
+        #          of …") — detected directly so the veto works regardless of
+        #          the floor flag.
+        #        * floor-on + ``temporal_filter is None`` — preserves the
+        #          original proxy that also caught the LLM-disambiguation veto:
+        #          when floor synthesis ran but was vetoed (anti-recency OR a
+        #          non-RECENT LLM intent), the filter stays None. A legit
+        #          floor-on recency query synthesizes a filter (non-None) and
+        #          is NOT vetoed.
+        from khora.query.temporal_detection import has_anti_recency_token
+
         synthesis_vetoed = (
-            self._config.temporal_recency_floor_enabled
+            self._config.temporal_recency_channel_enabled
             and temporal_signal is not None
             and temporal_signal.is_temporal
             and _tp.default_window_days is not None
-            and temporal_filter is None
+            and (
+                has_anti_recency_token(query)
+                or (self._config.temporal_recency_floor_enabled and temporal_filter is None)
+            )
         )
         if (
             self._config.temporal_recency_channel_enabled
@@ -4262,7 +4280,12 @@ class VectorCypherRetriever:
                 # Guard against pathological decay=0 (would div-by-zero).
                 if decay_days <= 0:
                     decay_days = float(self._config.recency_decay_days)
-                days_old = (now - parsed_times[r.item_id]).total_seconds() / 86400.0
+                # Issue #1230: clamp at 0 so a future-dated chunk (occurred_at
+                # ahead of the wall-clock reference) is treated as maximally
+                # recent (factor 1.0) rather than producing a negative days_old
+                # that pushes the recency factor above 1.0 and inflates the
+                # multiplicative boost above the original fused score.
+                days_old = max(0.0, (now - parsed_times[r.item_id]).total_seconds() / 86400.0)
                 if self._config.recency_decay_type == "exponential":
                     half_life_lambda = math.log(2) / decay_days
                     recency = math.exp(-half_life_lambda * days_old)
