@@ -1165,6 +1165,7 @@ class AGEBackend(GraphBackendBase):
         if not relationship_ids:
             return 0
         ns_lit_val = self._uuid_lit(namespace_id)
+        ts_lit = self._escape(datetime.now(UTC).isoformat())
 
         count = 0
         async with self._get_session_factory()() as session:
@@ -1177,7 +1178,8 @@ class AGEBackend(GraphBackendBase):
                         WHERE r.id = '{rid_lit}'
                           AND r.namespace_id = '{ns_lit_val}'
                           AND r.valid_until IS NOT NULL
-                        SET r.valid_until = null
+                        SET r.valid_until = null,
+                            r.updated_at = '{ts_lit}'
                         RETURN count(r) AS restored
                     """
                     rows = await self._cypher(session, cypher, columns=["restored agtype"])

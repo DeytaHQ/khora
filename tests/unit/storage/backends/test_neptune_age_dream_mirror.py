@@ -270,6 +270,9 @@ class TestNeptuneRestoreRelationships:
         cypher = session.run.await_args.args[0]
         kwargs = session.run.await_args.kwargs
         assert "valid_until = null" in cypher
+        # updated_at is bumped on restore too (matches the Neo4j reference verb).
+        assert "rel.updated_at = $restored_at" in cypher
+        assert "restored_at" in kwargs
         # Idempotent: only edges still invalidated transition.
         assert "valid_until IS NOT NULL" in cypher
         assert "DELETE" not in cypher.upper()
@@ -360,6 +363,8 @@ class TestAGERestoreRelationships:
         assert out == 1
         cypher = captured[0]
         assert "SET r.valid_until = null" in cypher
+        # updated_at is bumped on restore too (matches the Neo4j reference verb).
+        assert "r.updated_at =" in cypher
         assert "r.valid_until IS NOT NULL" in cypher
         assert "DELETE" not in cypher.upper()
         assert str(rel_id) in cypher

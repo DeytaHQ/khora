@@ -12,7 +12,7 @@ Key differences from Neo4j:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -1020,12 +1020,14 @@ class NeptuneBackend(GraphBackendBase):
         if not relationship_ids:
             return 0
         ids = [str(r) for r in relationship_ids]
+        ts = datetime.now(UTC).isoformat()
 
         query = """
         UNWIND $relationship_ids AS rid
         MATCH ()-[rel {id: rid, namespace_id: $namespace_id}]-()
         WHERE rel.valid_until IS NOT NULL
-        SET rel.valid_until = null
+        SET rel.valid_until = null,
+            rel.updated_at = $restored_at
         RETURN count(DISTINCT rel) AS restored
         """
 
@@ -1035,6 +1037,7 @@ class NeptuneBackend(GraphBackendBase):
                 query,
                 relationship_ids=ids,
                 namespace_id=str(namespace_id),
+                restored_at=ts,
             )
             record = await result.single()
             count = record["restored"] if record else 0
