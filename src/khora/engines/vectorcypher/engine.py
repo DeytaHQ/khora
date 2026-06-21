@@ -2151,6 +2151,9 @@ class VectorCypherEngine:
         # filter_ast on the channels; the version-filter block no-ops on None).
         from khora.filter.execute import filter_constrains_date_key
 
+        # Tier-2 (#981) degradations: appended to engine_info['degradations'].
+        temporal_degradations: list[Degradation] = []
+
         explicit_from_date = temporal_filter is not None or (
             filter_ast is not None and filter_constrains_date_key(filter_ast)
         )
@@ -2173,8 +2176,20 @@ class VectorCypherEngine:
                 td_span.set_attribute("source", temporal_signal.source)
         else:
             with trace_span("khora.vectorcypher.temporal_detect") as td_span:
-                detector = TemporalDetector()
-                temporal_signal = detector.detect(query)
+                query_cfg = getattr(self._config, "query", None)
+                # Strict identity check (`is True`, not truthiness): the flag is a
+                # real bool on KhoraConfig; a MagicMock config in tests yields a
+                # truthy MagicMock for any attribute, which must NOT silently
+                # enable the LLM fallback.
+                semantic_fallback_enabled = getattr(query_cfg, "temporal_semantic_fallback_enabled", False) is True
+                detector = TemporalDetector(
+                    llm_enabled=semantic_fallback_enabled,
+                    llm_model=getattr(query_cfg, "temporal_semantic_fallback_model", None),
+                )
+                # detect_async runs the keyword tier first and only consults the
+                # opt-in LLM Tier-2 fallback when the keyword tier returns NONE
+                # (zero LLM cost when the flag is off or the keyword tier fires).
+                temporal_signal = await detector.detect_async(query, degradations=temporal_degradations)
                 td_span.set_attribute("category", temporal_signal.category.value)
                 td_span.set_attribute("confidence", temporal_signal.confidence)
                 td_span.set_attribute("source", temporal_signal.source)
@@ -2388,6 +2403,11 @@ class VectorCypherEngine:
             namespace_id=namespace_id,
             degradations=result.metadata.setdefault("degradations", []),
         )
+
+        # Fold in any Tier-2 temporal-fallback degradation (#981) so it rides
+        # the same engine_info['degradations'] channel as the rest (ADR-001).
+        if temporal_degradations:
+            result.metadata.setdefault("degradations", []).extend(temporal_degradations)
 
         return RecallResult(
             query=query,

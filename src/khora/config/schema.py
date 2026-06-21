@@ -1387,6 +1387,25 @@ class QuerySettings(BaseSettings):
             "gpt-4o-mini (small + fast). Pass any LiteLLM-supported model."
         ),
     )
+    temporal_semantic_fallback_enabled: bool = Field(
+        default=False,
+        description=(
+            "When True, queries that the English Aho-Corasick keyword tier "
+            "classifies as NONE are routed to a small LLM classifier that "
+            "resolves German / multilingual and paraphrased temporal intent "
+            "into the correct TemporalCategory (#981). Default OFF: keyword-only "
+            "and zero LLM cost. Cost is bounded by distinct keyword-missed "
+            "queries (results cached per-query); any LLM failure/timeout "
+            "degrades back to the keyword (NONE) result."
+        ),
+    )
+    temporal_semantic_fallback_model: str | None = Field(
+        default=None,
+        description=(
+            "Override model for the Tier-2 temporal-category classifier. None "
+            "uses gpt-4o-mini (small + fast). Pass any LiteLLM-supported model."
+        ),
+    )
     temporal_default_decay_by_source: dict[str, int] = Field(
         default_factory=lambda: {
             "slack": 3,

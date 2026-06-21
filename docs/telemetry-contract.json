@@ -1080,6 +1080,17 @@
       "description": "VectorCypher graph-expansion normalization fallback - incremented per neighborhood entry returned by get_neighborhoods_batch whose shape is unrecognized (neither an Entity domain object nor a dict) and is therefore dropped from the expansion. The same event is also appended to RecallResult.engine_info['degradations']. No namespace_id label."
     },
     {
+      "name": "khora.vectorcypher.temporal_semantic_fallback.degraded_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "owner": "vectorcypher",
+      "labels": [
+        {"name": "reason", "values": ["llm_failed"], "_comment": "Low-cardinality enum; extend when adding new Tier-2 temporal-fallback failure modes."}
+      ],
+      "description": "Issue #981 (ADR-001). Tier-2 LLM temporal-category fallback failure - incremented when the opt-in semantic fallback (KHORA_QUERY_TEMPORAL_SEMANTIC_FALLBACK_ENABLED) is consulted for a query the English keyword tier classified as NONE and the LLM call raises or times out. The detector keeps the keyword (NONE) result and the same event is appended to RecallResult.engine_info['degradations']. Default OFF - zero cost when disabled. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
+    },
+    {
       "name": "khora.vectorcypher.community_projection.degraded_total",
       "type": "counter",
       "stability": "internal",

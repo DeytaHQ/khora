@@ -17,10 +17,13 @@ from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from loguru import logger
+
 from khora._accel import detect_temporal_category
+from khora.telemetry.metrics import metric_counter as _metric_counter
 
 if TYPE_CHECKING:
-    pass
+    from khora.core.diagnostics import Degradation
 
 
 class TemporalCategory(str, Enum):
@@ -241,12 +244,42 @@ _DATE_EXTRACT_RE = re.compile(
 SEMANTIC_THRESHOLD = 0.20
 
 
-class TemporalDetector:
-    """Three-tier cascade temporal query detector."""
+# Tier-2 semantic-fallback degradation counter (ADR-001, #981). When the
+# opt-in LLM temporal classifier fails or times out, the detector keeps the
+# keyword result (NONE) and bumps this counter. NO namespace_id label -
+# cardinality rule. The same event is appended to
+# RecallResult.engine_info['degradations'].
+_TEMPORAL_SEMANTIC_DEGRADED_COUNTER = _metric_counter(
+    "khora.vectorcypher.temporal_semantic_fallback.degraded_total",
+    unit="1",
+    description="Tier-2 LLM temporal-category fallback failures (degraded to keyword tier), by reason.",
+)
 
-    def __init__(self, *, semantic_enabled: bool = False, centroid: Any | None = None):
+
+class TemporalDetector:
+    """Three-tier cascade temporal query detector.
+
+    ``detect`` runs the keyword tier only (sync, zero LLM cost). The opt-in
+    Tier-2 LLM fallback (#981) - which classifies German / paraphrased queries
+    the English keyword dictionary misses - is reached via the async
+    :meth:`detect_async` and only when the detector is built with
+    ``llm_enabled=True``.
+    """
+
+    def __init__(
+        self,
+        *,
+        semantic_enabled: bool = False,
+        centroid: Any | None = None,
+        llm_enabled: bool = False,
+        llm_model: str | None = None,
+        llm_timeout: float = 3.0,
+    ):
         self._semantic_enabled = semantic_enabled
         self._centroid = centroid  # Pre-normalized Model2Vec centroid (ndarray)
+        self._llm_enabled = llm_enabled
+        self._llm_model = llm_model
+        self._llm_timeout = llm_timeout
 
     def detect(self, query: str, *, query_embedding: list[float] | None = None) -> TemporalSignal:
         """Detect temporal intent in a query.
@@ -298,6 +331,69 @@ class TemporalDetector:
             confidence=1.0 - similarity,
             source="none",
             temporal_filter=None,
+        )
+
+    async def detect_async(
+        self,
+        query: str,
+        *,
+        query_embedding: list[float] | None = None,
+        degradations: list[Degradation] | None = None,
+    ) -> TemporalSignal:
+        """Detect temporal intent, consulting the Tier-2 LLM fallback (#981).
+
+        Runs the keyword tier first (via :meth:`detect`). When that returns
+        NONE *and* the detector was built with ``llm_enabled=True``, route the
+        query to an LLM classifier that resolves German / paraphrased temporal
+        intent the English keyword dictionary cannot match. On any LLM failure
+        or timeout the result degrades back to the keyword signal (NONE) and a
+        structured :class:`~khora.core.diagnostics.Degradation` is appended to
+        ``degradations`` if a list was supplied (ADR-001).
+
+        Zero LLM cost when ``llm_enabled`` is False or the keyword tier already
+        fired - the call is skipped entirely.
+        """
+        keyword_signal = self.detect(query, query_embedding=query_embedding)
+        if keyword_signal.category is not TemporalCategory.NONE:
+            return keyword_signal
+
+        if not self._llm_enabled or not query.strip():
+            return keyword_signal
+
+        try:
+            category, confidence = await classify_temporal_category_llm(
+                query, model=self._llm_model, timeout=self._llm_timeout
+            )
+        except Exception as exc:
+            logger.warning(
+                "Tier-2 temporal semantic fallback failed; degrading to keyword tier: {}",
+                exc,
+                exc_info=True,
+            )
+            _TEMPORAL_SEMANTIC_DEGRADED_COUNTER.add(1, {"reason": "llm_failed"})
+            if degradations is not None:
+                degradations.append(
+                    {
+                        "component": "vectorcypher.temporal_semantic_fallback",
+                        "reason": "llm_failed",
+                        "detail": "Tier-2 LLM temporal classifier raised; kept keyword (NONE) result.",
+                        "exception": repr(exc),
+                    }
+                )
+            return keyword_signal
+
+        if category is TemporalCategory.NONE:
+            return keyword_signal
+
+        temporal_filter = None
+        if category == TemporalCategory.EXPLICIT:
+            temporal_filter = self._extract_date_filter(query)
+        return TemporalSignal(
+            is_temporal=True,
+            category=category,
+            confidence=confidence,
+            source="semantic",
+            temporal_filter=temporal_filter,
         )
 
     def _extract_date_filter(self, query: str) -> Any | None:
@@ -522,6 +618,126 @@ async def classify_temporal_intent_llm(
     return intent, confidence
 
 
+# ---------------------------------------------------------------------------
+# Tier-2 LLM temporal-category classifier (#981)
+# ---------------------------------------------------------------------------
+#
+# The Aho-Corasick keyword tier is an English-only, phrase-literal dictionary.
+# German queries ("Was ist der letzte Deploy?") and paraphrased-English queries
+# ("evolved over time", "timeline of milestones") that carry real temporal
+# intent collapse to NONE because no dictionary phrase matches. This classifier
+# resolves them into the correct six-way TemporalCategory via one short LLM
+# call. It is the opt-in Tier-2 fallback reached from
+# ``TemporalDetector.detect_async`` and only fires when the keyword tier
+# returned NONE - so the cost is bounded by the count of distinct
+# keyword-missed queries, not by query rate (results are cached per-query).
+#
+# Distinct from ``classify_temporal_intent_llm`` (RECENT/HISTORICAL/...): that
+# one disambiguates the recency *floor* for queries the keyword tier already
+# classified; this one *classifies* queries the keyword tier missed entirely.
+
+
+_TEMPORAL_CATEGORY_PROMPT = """Classify the temporal-retrieval intent of this query.
+The query may be in any language.
+
+Categories:
+- EXPLICIT: names a specific date, month, year, or bounded period.
+  Examples: "What did Acme ship in March 2024?", "events since last week".
+- STATE_QUERY: asks for the CURRENT state of something.
+  Examples: "Who is currently leading the project?", "who is the account manager?".
+- ORDINAL: asks about order, sequence, or which came first/earliest.
+  Examples: "Which version came first?", "give me a timeline of the milestones".
+- AGGREGATE: asks for a count or total over time.
+  Examples: "How many releases did we ship in total?".
+- RECENCY: asks for the most recent / latest thing.
+  Examples: "What's the most recent deploy?", "latest news".
+- CHANGE: asks how something changed, evolved, or what it used to be.
+  Examples: "What did Bob's role used to be?", "how did Alice's role evolve over time?".
+- NONE: no temporal-retrieval intent - the query is about content, not time.
+
+Query: {query}
+
+Respond with EXACTLY one word: EXPLICIT, STATE_QUERY, ORDINAL, AGGREGATE,
+RECENCY, CHANGE, or NONE.
+"""
+
+
+# Process-level cache: query string -> (category, confidence). Bounded FIFO.
+# Tests clear it via ``_TEMPORAL_CATEGORY_CACHE.clear()``.
+_TEMPORAL_CATEGORY_CACHE: dict[str, tuple[TemporalCategory, float]] = {}
+_TEMPORAL_CATEGORY_CACHE_MAX_SIZE = 1024
+
+_CATEGORY_WORD_MAP: dict[str, TemporalCategory] = {
+    "EXPLICIT": TemporalCategory.EXPLICIT,
+    "STATE_QUERY": TemporalCategory.STATE_QUERY,
+    "ORDINAL": TemporalCategory.ORDINAL,
+    "AGGREGATE": TemporalCategory.AGGREGATE,
+    "RECENCY": TemporalCategory.RECENCY,
+    "CHANGE": TemporalCategory.CHANGE,
+    "NONE": TemporalCategory.NONE,
+}
+
+
+async def classify_temporal_category_llm(
+    query: str,
+    *,
+    model: str | None = None,
+    timeout: float = 3.0,
+) -> tuple[TemporalCategory, float]:
+    """Classify ``query`` into a :class:`TemporalCategory` via a small LLM call.
+
+    Caches results per-query (process-local) so repeated identical queries
+    cost zero. Returns ``(category, confidence)`` - confidence is 1.0 on
+    cache hits and parsable responses, 0.0 (and ``NONE``) when the response
+    can't be parsed.
+
+    Cost: one short completion (~20 tokens out, fast model). Uses
+    ``khora.config.llm.acompletion`` so it inherits the same retry, timeout,
+    and telemetry behavior as other LLM calls.
+
+    Raises rather than swallowing transport errors - the caller
+    (``TemporalDetector.detect_async``) owns the degrade-to-keyword decision
+    so it can record the ADR-001 Degradation. ``ImportError`` (litellm absent)
+    is the one exception treated as a clean NONE.
+    """
+    cache_key = query.strip().lower()
+    if cache_key in _TEMPORAL_CATEGORY_CACHE:
+        return _TEMPORAL_CATEGORY_CACHE[cache_key]
+
+    try:
+        from khora.config.llm import LiteLLMConfig, acompletion
+    except ImportError:
+        return TemporalCategory.NONE, 0.0
+
+    llm_config = LiteLLMConfig(
+        model=model or "gpt-4o-mini",
+        temperature=0.0,
+        max_tokens=20,
+        timeout=timeout,
+    )
+
+    response = await acompletion(
+        prompt=_TEMPORAL_CATEGORY_PROMPT.format(query=query[:500]),
+        config=llm_config,
+        _telemetry_op="temporal_category_classification",
+    )
+
+    response_text = (response or "").strip().upper()
+    first_word = response_text.split()[0].rstrip(".,;:!?") if response_text else ""
+    category = _CATEGORY_WORD_MAP.get(first_word, TemporalCategory.NONE)
+    confidence = 1.0 if first_word in _CATEGORY_WORD_MAP else 0.0
+
+    if len(_TEMPORAL_CATEGORY_CACHE) >= _TEMPORAL_CATEGORY_CACHE_MAX_SIZE:
+        try:
+            oldest_key = next(iter(_TEMPORAL_CATEGORY_CACHE))
+            del _TEMPORAL_CATEGORY_CACHE[oldest_key]
+        except StopIteration:
+            pass
+    _TEMPORAL_CATEGORY_CACHE[cache_key] = (category, confidence)
+
+    return category, confidence
+
+
 __all__ = [
     "ANTI_RECENCY_TOKENS",
     "CATEGORY_MAP",
@@ -531,6 +747,7 @@ __all__ = [
     "TemporalDetector",
     "TemporalIntent",
     "TemporalSignal",
+    "classify_temporal_category_llm",
     "classify_temporal_intent_llm",
     "get_retrieval_params",
     "has_ambiguity_trigger",
