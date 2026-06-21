@@ -21,6 +21,7 @@ from khora.core.models import Entity, Episode, Relationship
 pytestmark = pytest.mark.skipif(not _HAS_LANCEDB, reason="lancedb not installed")
 
 if _HAS_LANCEDB:
+    from khora.storage.backends.sqlite_lance._helpers import uuid_to_text
     from khora.storage.backends.sqlite_lance.connection import (
         EmbeddedStorageHandle,
         EmbeddedStorageHandleConfig,
@@ -904,6 +905,110 @@ class TestPreferCurrentEveryEdge:
 
         paths = await adapter.find_paths(a.id, b.id, namespace_id=ns, max_depth=2, prefer_current=True)
         assert paths == []
+
+
+# ---------------------------------------------------------------------------
+# prefer_current — soft-delete tombstones (#1302)
+#
+# After #1277 ``list_relationships`` honors the bi-temporal soft-delete columns
+# (``valid_to`` from prune_edges, ``invalidated_at`` from dedupe self-loop
+# invalidation), but the recursive-CTE traversal gated only on ``valid_until``.
+# A dream-pruned / invalidated edge could therefore still appear in a traversal
+# path even though it is excluded from ``list_relationships``. These tests pin
+# the parity: such an edge is excluded from BOTH ``list_relationships`` AND
+# ``find_paths`` / ``get_neighborhoods_batch`` when ``prefer_current`` — and the
+# historical path (``prefer_current=False``) is unchanged.
+# ---------------------------------------------------------------------------
+
+
+class TestPreferCurrentSoftDeleteTombstones:
+    async def _seed_edge(self, adapter: SQLiteLanceGraphAdapter, ns: UUID):
+        """A -[r, LINKS]-> B, plus the entity rows."""
+        a = _make_entity(ns, name="A")
+        b = _make_entity(ns, name="B")
+        for ent in (a, b):
+            await adapter.create_entity(ent)
+        r = _make_relationship(ns, a.id, b.id, rel_type="LINKS")
+        await adapter.create_relationship(r)
+        return a, b, r
+
+    async def _stamp(self, adapter: SQLiteLanceGraphAdapter, rel_id: UUID, column: str) -> None:
+        """Soft-delete ``rel_id`` by stamping ``column`` (``valid_to`` /
+        ``invalidated_at``) with a past UTC timestamp, mirroring the dream
+        prune_edges / dedupe-self-loop apply handlers. ``column`` is a fixed
+        literal from the test, never user input."""
+        if column not in {"valid_to", "invalidated_at"}:
+            raise ValueError(f"unsupported tombstone column: {column}")
+        stamped = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+        await adapter._conn.execute(
+            f"UPDATE relationships SET {column} = ? WHERE id = ?",  # noqa: S608
+            (stamped, uuid_to_text(rel_id)),
+        )
+        await adapter._conn.commit()
+
+    @pytest.mark.parametrize("column", ["valid_to", "invalidated_at"])
+    async def test_soft_deleted_edge_excluded_from_list_and_traversal(
+        self, adapter: SQLiteLanceGraphAdapter, column: str
+    ):
+        """A ``valid_to`` (prune) or ``invalidated_at`` (dedupe) edge must drop
+        from ``list_relationships`` AND ``find_paths`` / ``get_neighborhoods_batch``
+        once ``prefer_current``."""
+        ns = uuid4()
+        a, b, r = await self._seed_edge(adapter, ns)
+
+        # Baseline: edge is live everywhere before the soft-delete.
+        assert {rel.id for rel in await adapter.list_relationships(ns)} == {r.id}
+        assert await adapter.find_paths(a.id, b.id, namespace_id=ns, max_depth=2, prefer_current=True)
+
+        await self._stamp(adapter, r.id, column)
+
+        # list_relationships drops it (the #1277 behavior we mirror).
+        assert {rel.id for rel in await adapter.list_relationships(ns)} == set()
+
+        # find_paths with prefer_current must drop it too (the #1302 fix).
+        assert await adapter.find_paths(a.id, b.id, namespace_id=ns, max_depth=2, prefer_current=True) == []
+
+        # get_neighborhoods_batch / get_neighborhood likewise.
+        nb = await adapter.get_neighborhood(a.id, namespace_id=ns, depth=1, limit=10, prefer_current=True)
+        assert r.id not in {rel.id for rel in nb["relationships"]}
+        assert "B" not in {ent.name for ent in nb["entities"]}
+
+    @pytest.mark.parametrize("column", ["valid_to", "invalidated_at"])
+    async def test_soft_deleted_edge_kept_in_historical_traversal(self, adapter: SQLiteLanceGraphAdapter, column: str):
+        """Without ``prefer_current`` (historical traversal) the soft-deleted edge
+        is still returned — behavior is unchanged."""
+        ns = uuid4()
+        a, b, r = await self._seed_edge(adapter, ns)
+        await self._stamp(adapter, r.id, column)
+
+        paths = await adapter.find_paths(a.id, b.id, namespace_id=ns, max_depth=2)
+        assert len(paths) == 1
+        assert len(paths[0]) == 1
+
+        nb = await adapter.get_neighborhood(a.id, namespace_id=ns, depth=1, limit=10)
+        assert r.id in {rel.id for rel in nb["relationships"]}
+
+    async def test_get_neighborhood_node_filter_uses_caller_now(self, adapter: SQLiteLanceGraphAdapter):
+        """The node ``valid_until`` filter binds the caller-provided ``now`` (not
+        wall-clock), so a point-in-time traversal gates nodes and edges at the
+        same instant. A -[live edge]-> B where B retires before a future ``now``:
+        the edge survives but B must drop because it is expired AT ``now``."""
+        ns = uuid4()
+        a = _make_entity(ns, name="A")
+        b = _make_entity(ns, name="B")
+        # B is live at wall-clock but retires before the future ``now`` we pass.
+        b.valid_until = datetime.now(UTC) + timedelta(hours=1)
+        for ent in (a, b):
+            await adapter.create_entity(ent)
+        await adapter.create_relationship(_make_relationship(ns, a.id, b.id, rel_type="LINKS"))
+
+        future_now = datetime.now(UTC) + timedelta(hours=2)
+        nb = await adapter.get_neighborhood(
+            a.id, namespace_id=ns, depth=1, limit=10, prefer_current=True, now=future_now
+        )
+        # Node B is expired at future_now → dropped (would be wrongly kept if the
+        # filter compared against wall-clock instead of the caller's ``now``).
+        assert "B" not in {ent.name for ent in nb["entities"]}
 
 
 # ---------------------------------------------------------------------------
