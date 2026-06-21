@@ -16,6 +16,7 @@ from khora.engines.vectorcypher.retriever import (
     VectorCypherRetriever,
 )
 from khora.engines.vectorcypher.router import QueryComplexity, RoutingDecision
+from tests.test_helpers.diagnostics import assert_no_silent_degradation
 
 
 class TestRetrieverConfig:
@@ -678,6 +679,7 @@ class TestSimpleRetrieveScoreNormalization:
         """
         namespace_id = uuid4()
         result = await multi_result_retriever.retrieve("test query", namespace_id)
+        assert_no_silent_degradation(result)
 
         scores = [score for _, score in result.chunks]
 
@@ -728,6 +730,7 @@ class TestSimpleRetrieveScoreNormalization:
         )
 
         result = await retriever.retrieve("test", uuid4())
+        assert_no_silent_degradation(result)
 
         assert len(result.chunks) == 1
         # The single-result min-max path forced score to 1.0 (the bug); now the
