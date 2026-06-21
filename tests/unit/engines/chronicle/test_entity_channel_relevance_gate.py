@@ -246,6 +246,56 @@ async def test_relevance_gate_attenuates_score_by_cosine() -> None:
 
 
 # ---------------------------------------------------------------------------
+# #1226 - an un-verifiable (embedding-less) chunk must not outrank a verified one
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_unverifiable_chunk_does_not_outrank_verified_relevant() -> None:
+    """A chunk with no embedding must not outrank a cosine-verified-relevant one.
+
+    Both chunks enter at the same base entity score. The verified chunk has a
+    real cosine (~0.9, below 1.0) so the gate attenuates it; the embedding-less
+    chunk cannot be cosine-checked. Pre-fix the un-verifiable chunk kept its
+    full base score and ranked above the verified one (#1226). The gate must
+    never rank an unchecked chunk above a checked one.
+    """
+    ns_id = uuid4()
+
+    query_embedding = _unit([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    # ~0.9 cosine to the query -> genuinely relevant, but < 1.0 so it is attenuated.
+    relevant = _make_chunk(
+        namespace_id=ns_id,
+        embedding=_unit([0.9, 0.4358898943540674, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+    )
+    unverifiable = _make_chunk(namespace_id=ns_id, embedding=None)
+
+    ent_relevant = _make_entity(namespace_id=ns_id, name="Relevant", chunk_ids=[relevant.id])
+    ent_unverifiable = _make_entity(namespace_id=ns_id, name="Unverifiable", chunk_ids=[unverifiable.id])
+
+    # Both entities tie on similarity -> both source chunks inherit base score 0.8.
+    coord = _EntityCoord(
+        entity_search_results=[(ent_relevant.id, 0.8), (ent_unverifiable.id, 0.8)],
+        entities={ent_relevant.id: ent_relevant, ent_unverifiable.id: ent_unverifiable},
+        chunks={relevant.id: relevant, unverifiable.id: unverifiable},
+    )
+    engine = _bare_engine(router_enabled=False)
+    _wire(engine, coord)
+
+    results = await engine._entity_channel(ns_id, "q", query_embedding, limit=10)
+
+    score_by_id = {chunk.id: score for chunk, score in results}
+    assert relevant.id in score_by_id
+    assert unverifiable.id in score_by_id
+    assert score_by_id[relevant.id] >= score_by_id[unverifiable.id], (
+        "A cosine-verified-relevant chunk must rank at or above an un-verifiable "
+        f"(embedding-less) one; got verified={score_by_id[relevant.id]:.4f} "
+        f"unverifiable={score_by_id[unverifiable.id]:.4f} (#1226)"
+    )
+
+
+# ---------------------------------------------------------------------------
 # #1157 - storage failures inside the entity channel must record a degradation
 # ---------------------------------------------------------------------------
 

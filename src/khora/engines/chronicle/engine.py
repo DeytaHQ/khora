@@ -2898,7 +2898,12 @@ class ChronicleEngine:
                         continue  # Below relevance threshold
                     results.append((chunk, chunk_scores[cid] * sim))
                 else:
-                    results.append((chunk, chunk_scores[cid]))
+                    # No embedding -> can't be cosine-checked. Penalize at the
+                    # 0.3 relevance floor instead of passing through at full
+                    # base score, so an un-verifiable chunk never outranks one
+                    # the gate verified as relevant (cosine >= 0.3) at the same
+                    # base score (#1226).
+                    results.append((chunk, chunk_scores[cid] * 0.3))
         else:
             results = [(chunk, chunk_scores[cid]) for chunk, cid in ordered_chunks]
 
