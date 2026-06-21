@@ -771,6 +771,12 @@
       "stability": "internal",
       "owner": "hermes",
       "_comment": "Issue #628. Traces the enqueue step of sync_turn(); the actual remember I/O happens after the span closes."
+    },
+    {
+      "name": "khora.hooks.subscription.load",
+      "stability": "internal",
+      "owner": "khora",
+      "_comment": "Issue #599 Phase 3. Wraps the startup read of persistent hook subscriptions from khora_hook_subscriptions."
     }
   ],
   "pipeline_stages": [
@@ -1636,6 +1642,31 @@
       "unit": "1",
       "owner": "filter",
       "description": "Filtered recalls whose graph channel returned no candidates because the deterministic recall filter narrowed the graph side to empty. NO namespace_id label - cardinality rule."
+    },
+    {
+      "name": "khora.hooks.subscription.persistent_count",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "owner": "khora",
+      "description": "Persistent hook subscriptions loaded from storage on startup. Incremented by the count loaded in HookDispatcher.load_persistent(). NO namespace_id label - cardinality rule.",
+      "_comment": "Issue #599 Phase 3."
+    },
+    {
+      "name": "khora.hooks.subscription.persist_degraded_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "owner": "khora",
+      "labels": [
+        {
+          "name": "reason",
+          "values": ["persist_failed"],
+          "_comment": "persist_failed = the store INSERT raised; the subscription is kept in memory per ADR-001 but loses durability."
+        }
+      ],
+      "description": "Persistent-subscription writes that fell back to in-memory after a store failure. ADR-001 degrade signal. NO namespace_id label - cardinality rule.",
+      "_comment": "Issue #599 Phase 3."
     }
   ]
 }
