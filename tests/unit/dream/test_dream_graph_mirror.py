@@ -862,3 +862,151 @@ async def test_drain_pending_read_error_degrades() -> None:
     assert len(degradations) == 1
     assert degradations[0]["reason"] == "graph_mirror_pending_read_failed"
     assert degradations[0]["component"] == "dream.graph_mirror.reconcile"
+
+
+# ---------------------------------------------------------------------------
+# Reverse path (#1275): graph-side undo
+# ---------------------------------------------------------------------------
+
+
+class _RestoreFakeGraph:
+    """Records the #1275 reverse verb calls (and their call order)."""
+
+    def __init__(self) -> None:
+        self.restored_entities: list[dict[str, Any]] = []
+        self.restored_relationships: list[dict[str, Any]] = []
+        self.restored_endpoints: list[dict[str, Any]] = []
+        self.call_order: list[str] = []
+
+    async def restore_entities_batch(self, entity_ids: list[UUID], *, namespace_id: UUID) -> int:
+        self.call_order.append("restore_entities_batch")
+        self.restored_entities.append({"ids": list(entity_ids), "namespace_id": namespace_id})
+        return len(entity_ids)
+
+    async def restore_relationships_batch(self, relationship_ids: list[UUID], *, namespace_id: UUID) -> int:
+        self.call_order.append("restore_relationships_batch")
+        self.restored_relationships.append({"ids": list(relationship_ids), "namespace_id": namespace_id})
+        return len(relationship_ids)
+
+    async def restore_relationship_endpoints_batch(self, rewrites: list[dict[str, Any]], *, namespace_id: UUID) -> int:
+        self.call_order.append("restore_relationship_endpoints_batch")
+        self.restored_endpoints.append({"rewrites": list(rewrites), "namespace_id": namespace_id})
+        return len(rewrites)
+
+
+def test_extract_unmirror_targets_dedupe_restores_absorbed_self_loop_and_endpoints() -> None:
+    """The reverse extraction inverts retire->restore, invalidate->restore, and
+    rewrite->restore-to-pre-endpoints, in lockstep with the forward extraction."""
+    from khora.dream.graph_mirror import extract_unmirror_targets
+
+    canonical = uuid4()
+    absorbed = uuid4()
+    neighbor = uuid4()
+    incident = uuid4()  # absorbed -> neighbor (rewritten forward)
+    self_loop = uuid4()  # canonical -> absorbed (self-loop forward)
+    before = {
+        "merges": [
+            {
+                "canonical_id": str(canonical),
+                "absorbed_id": str(absorbed),
+                "self_loops_invalidated": [str(self_loop)],
+                "previous_relationships": [
+                    {
+                        "id": str(incident),
+                        "source_entity_id": str(absorbed),
+                        "target_entity_id": str(neighbor),
+                        "relationship_type": "SUPPLIES",
+                    },
+                    {
+                        "id": str(self_loop),
+                        "source_entity_id": str(canonical),
+                        "target_entity_id": str(absorbed),
+                        "relationship_type": "RELATES_TO",
+                    },
+                ],
+                "applied": True,
+            }
+        ]
+    }
+    targets = extract_unmirror_targets("vectorcypher_dedupe_entities", before)
+    assert targets["restore_entity_ids"] == [absorbed]
+    assert targets["restore_relationship_ids"] == [self_loop]
+    # The self-loop is NOT a rewrite-restore target (it was invalidated, not rewritten).
+    eps = {rw["relationship_id"]: rw for rw in targets["restore_endpoints"]}
+    assert set(eps) == {str(incident)}
+    assert eps[str(incident)]["source_entity_id"] == str(absorbed)
+    assert eps[str(incident)]["target_entity_id"] == str(neighbor)
+
+
+def test_extract_unmirror_targets_prune_restores_invalidated_edges() -> None:
+    from khora.dream.graph_mirror import extract_unmirror_targets
+
+    rel_id = uuid4()
+    before = {"relationships": [{"relationship_id": str(rel_id)}]}
+    targets = extract_unmirror_targets("vectorcypher_prune_edges", before)
+    assert targets["restore_relationship_ids"] == [rel_id]
+    assert targets["restore_entity_ids"] == []
+    assert targets["restore_endpoints"] == []
+
+
+def test_extract_unmirror_targets_skips_unapplied_merge() -> None:
+    from khora.dream.graph_mirror import extract_unmirror_targets
+
+    before = {"merges": [{"absorbed_id": str(uuid4()), "self_loops_invalidated": [], "applied": False}]}
+    targets = extract_unmirror_targets("vectorcypher_dedupe_entities", before)
+    assert targets["restore_entity_ids"] == []
+    assert targets["restore_relationship_ids"] == []
+    assert targets["restore_endpoints"] == []
+
+
+@pytest.mark.asyncio
+async def test_unmirror_targets_calls_reverse_verbs() -> None:
+    from khora.dream.graph_mirror import unmirror_targets
+
+    graph = _RestoreFakeGraph()
+    ns = uuid4()
+    absorbed = uuid4()
+    self_loop = uuid4()
+    incident = uuid4()
+    neighbor = uuid4()
+    targets = {
+        "restore_entity_ids": [absorbed],
+        "restore_relationship_ids": [self_loop],
+        "restore_endpoints": [
+            {
+                "relationship_id": str(incident),
+                "source_entity_id": str(absorbed),
+                "target_entity_id": str(neighbor),
+                "relationship_type": "SUPPLIES",
+            }
+        ],
+    }
+    counts = await unmirror_targets(graph, targets, namespace_id=ns)
+    assert counts == {"entities_restored": 1, "relationships_restored": 1, "endpoints_restored": 1}
+    assert graph.restored_entities[0]["ids"] == [absorbed]
+    assert graph.restored_relationships[0]["ids"] == [self_loop]
+    assert graph.restored_endpoints[0]["rewrites"][0]["relationship_id"] == str(incident)
+    # Entity restore happens before the endpoint restore (so the absorbed node
+    # exists as an endpoint when the edges are re-pointed back onto it), then the
+    # self-loop un-invalidation runs last.
+    assert graph.call_order == [
+        "restore_entities_batch",
+        "restore_relationship_endpoints_batch",
+        "restore_relationships_batch",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_unmirror_targets_empty_short_circuits() -> None:
+    from khora.dream.graph_mirror import unmirror_targets
+
+    graph = _RestoreFakeGraph()
+    counts = await unmirror_targets(
+        graph,
+        {"restore_entity_ids": [], "restore_relationship_ids": [], "restore_endpoints": []},
+        namespace_id=uuid4(),
+    )
+    assert counts == {"entities_restored": 0, "relationships_restored": 0, "endpoints_restored": 0}
+    assert graph.restored_entities == []
+    assert graph.restored_relationships == []
+    assert graph.restored_endpoints == []

@@ -441,3 +441,128 @@ async def test_reverse_handler_skips_missing_session_rows() -> None:
     }
     ok = await reverse_vectorcypher_dedupe_entities(undo_op, session=session)
     assert ok is False
+
+
+# ---------------------------------------------------------------------------
+# Graph reverse mirror (#1275)
+# ---------------------------------------------------------------------------
+
+
+class _FakeRestoreGraph:
+    """Records the #1275 reverse verb calls; advertises the dedupe op kind."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.restored_entities: list[Any] = []
+        self.restored_relationships: list[Any] = []
+        self.restored_endpoints: list[Any] = []
+        self._fail = fail
+
+    def supports_dream_mirror(self):  # noqa: ANN202
+        return frozenset({OpKind.VECTORCYPHER_DEDUPE_ENTITIES})
+
+    async def restore_entities_batch(self, entity_ids, *, namespace_id):  # noqa: ANN001, ANN202
+        if self._fail:
+            raise RuntimeError("neo4j restore boom")
+        self.restored_entities.append(list(entity_ids))
+        return len(entity_ids)
+
+    async def restore_relationships_batch(self, relationship_ids, *, namespace_id):  # noqa: ANN001, ANN202
+        self.restored_relationships.append(list(relationship_ids))
+        return len(relationship_ids)
+
+    async def restore_relationship_endpoints_batch(self, rewrites, *, namespace_id):  # noqa: ANN001, ANN202
+        self.restored_endpoints.append(list(rewrites))
+        return len(rewrites)
+
+
+class _GraphCoordinator(_FakeCoordinator):
+    def __init__(self, session: _FakeSession, graph: Any) -> None:
+        super().__init__(session)
+        self._graph = graph
+
+    async def resolve_namespace(self, namespace_id: UUID) -> UUID:
+        return namespace_id
+
+
+class _GraphKB:
+    def __init__(self, session: _FakeSession, graph: Any) -> None:
+        self.storage = _GraphCoordinator(session, graph)
+
+
+@pytest.mark.asyncio
+async def test_dream_undo_reverses_graph_mirror(tmp_path: Path) -> None:
+    """When a graph backend is present, dream_undo also fires the reverse verbs."""
+    canonical = uuid4()
+    absorbed = uuid4()
+    neighbor = uuid4()
+    rel_id = uuid4()
+
+    apply_session = _FakeSession()
+    apply_session.relationship_rows[absorbed] = [
+        _FakeRow(id=rel_id, source_entity_id=absorbed, target_entity_id=neighbor, relationship_type="SUPPLIES"),
+    ]
+    op = _build_dedupe_op(canonical=canonical, absorbed=absorbed)
+    undo = await apply_vectorcypher_dedupe_entities(op, coordinator=None, session=apply_session)
+
+    namespace_id = uuid4()
+    _write_undo_file(
+        base_dir=tmp_path,
+        namespace_id=namespace_id,
+        run_id=uuid4(),
+        op_id=op.op_id,
+        op_type=str(op.op_type),
+        before=undo.before,
+    )
+
+    graph = _FakeRestoreGraph()
+    kb = _GraphKB(_FakeSession(), graph)
+    ok = await dream_undo(kb, op.op_id, base_dir=tmp_path)
+    assert ok is True
+    # The absorbed entity is un-retired and the incident edge re-pointed back.
+    assert graph.restored_entities == [[absorbed]]
+    assert graph.restored_endpoints
+    assert graph.restored_endpoints[0][0]["relationship_id"] == str(rel_id)
+    assert graph.restored_endpoints[0][0]["source_entity_id"] == str(absorbed)
+
+
+@pytest.mark.asyncio
+async def test_dream_undo_graph_failure_does_not_break_pg_revert(tmp_path: Path) -> None:
+    """A reverse-mirror failure records a degradation but the PG revert (True) stands."""
+    canonical = uuid4()
+    absorbed = uuid4()
+    neighbor = uuid4()
+    rel_id = uuid4()
+
+    apply_session = _FakeSession()
+    apply_session.relationship_rows[absorbed] = [
+        _FakeRow(id=rel_id, source_entity_id=absorbed, target_entity_id=neighbor, relationship_type="SUPPLIES"),
+    ]
+    op = _build_dedupe_op(canonical=canonical, absorbed=absorbed)
+    undo = await apply_vectorcypher_dedupe_entities(op, coordinator=None, session=apply_session)
+
+    _write_undo_file(
+        base_dir=tmp_path,
+        namespace_id=uuid4(),
+        run_id=uuid4(),
+        op_id=op.op_id,
+        op_type=str(op.op_type),
+        before=undo.before,
+    )
+
+    graph = _FakeRestoreGraph(fail=True)
+    kb = _GraphKB(_FakeSession(), graph)
+    # The graph reverse raises, but dream_undo returns the PG-revert result and
+    # does not propagate the exception (ADR-001: degrade, never half-fail-loudly).
+    # Lock in the anti-silent-divergence contract: the partial-failure counter
+    # increments and the failure is logged at WARNING with exc_info.
+    from unittest.mock import patch
+
+    with (
+        patch("khora.dream.graph_mirror.GRAPH_UNMIRROR_PARTIAL_FAILURE_COUNTER.add") as add_mock,
+        patch("loguru.logger.warning") as warn_mock,
+    ):
+        ok = await dream_undo(kb, op.op_id, base_dir=tmp_path)
+    assert ok is True
+    add_mock.assert_called_once_with(1)
+    warn_mock.assert_called_once()
+    assert warn_mock.call_args.kwargs.get("exc_info") is True

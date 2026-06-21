@@ -905,6 +905,68 @@ class GraphBackendProtocol(Protocol):
         """
         ...
 
+    # Dream graph-mirror REVERSE verbs (#1275) — optional. ``dream_undo``
+    # reverses the PG soft-deletes; these reverse the matching forward graph
+    # mirror so undo restores PG and graph to identical pre-apply live sets
+    # rather than a half-revert. Same capability-gated default contract as the
+    # forward verbs above (``GraphBackendBase`` raises ``DreamBackendUnsupported``
+    # so a backend without a native reverse degrades to a structured skip rather
+    # than diverging). Idempotent by id; empty input short-circuits to 0.
+
+    async def restore_entities_batch(
+        self,
+        entity_ids: list[UUID],
+        *,
+        namespace_id: UUID,
+    ) -> int:
+        """Un-retire entities soft-retired by :meth:`soft_retire_entities_batch`.
+
+        Reverses the absorbed-entity soft-retire in ``dedupe_entities``: clears
+        the node's ``valid_until`` / ``version_valid_to`` tombstone AND deletes
+        ONLY the :EntityVersion snapshot + [:SUPERSEDES] edge the forward mirror
+        created for this retire, so the node returns to the live set without
+        losing any pre-existing version chain. The forward mirror stamps the
+        snapshot's ``version_valid_to`` with the same retire timestamp it writes
+        to the node's ``valid_until``, so the reverse targets the snapshot by
+        ``version_valid_to == valid_until`` (no separate snapshot-id plumbing
+        needed). Matched by entity id within ``namespace_id`` (IDOR family);
+        idempotent (a node already live transitions nothing). Returns the number
+        of entities actually restored.
+        """
+        ...
+
+    async def restore_relationships_batch(
+        self,
+        relationship_ids: list[UUID],
+        *,
+        namespace_id: UUID,
+    ) -> int:
+        """Un-invalidate relationships invalidated by :meth:`soft_invalidate_relationships_batch`.
+
+        Reverses the prune / self-loop invalidation by clearing the edge's
+        ``valid_until``. Matched by relationship id within ``namespace_id``
+        (IDOR family); idempotent (an edge already live matches nothing).
+        Returns the number of edges actually restored.
+        """
+        ...
+
+    async def restore_relationship_endpoints_batch(
+        self,
+        rewrites: list[dict[str, Any]],
+        *,
+        namespace_id: UUID,
+    ) -> int:
+        """Re-point relationship endpoints back to their pre-rewrite endpoints.
+
+        Reverses :meth:`rewrite_relationship_endpoints_batch`. Each dict carries
+        ``relationship_id``, ``source_entity_id``, ``target_entity_id`` (the
+        PRE-rewrite endpoints to restore), and ``relationship_type`` (the Cypher
+        edge label — sanitized by backends that store types as labels).
+        Idempotent by id, namespace-scoped. Returns the number of edges
+        actually re-pointed.
+        """
+        ...
+
     # Dream community materialization (#1276) - the GraphRAG payoff. The dream
     # ``community_summary`` op persists LLM-grounded summaries to PG; this verb
     # materializes them into the graph as :Community nodes + [:HAS_MEMBER] edges

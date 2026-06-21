@@ -3062,6 +3062,177 @@ RETURN count(newRel) AS renamed
         logger.debug(f"Dream-renamed {total} relationship-type edges in namespace {namespace_id}")
         return total
 
+    # -- Dream graph-mirror REVERSE verbs (#1275) ---------------------------
+    # ``dream_undo`` reverses the PG soft-deletes; these reverse the matching
+    # forward graph mirror (soft_retire / soft_invalidate / rewrite) so undo
+    # restores PG and graph to identical pre-apply live sets. All are
+    # namespace-scoped and idempotent by id (replay finds nothing to restore).
+
+    async def restore_entities_batch(
+        self,
+        entity_ids: list[UUID],
+        *,
+        namespace_id: UUID,
+    ) -> int:
+        """Un-retire entities + delete their :EntityVersion / [:SUPERSEDES] snapshot.
+
+        Reverses :meth:`soft_retire_entities_batch`: clears ``valid_until`` /
+        ``version_valid_to`` on the live node and detach-deletes the snapshot the
+        forward mirror created. Matched by entity id within ``namespace_id``
+        (IDOR family). Returns the number of entities actually restored.
+
+        Idempotent: only entities that are still retired (a non-null
+        ``valid_until`` / ``version_valid_to``) transition, so a replay reports
+        zero. Only the :EntityVersion snapshot the dream forward mirror created
+        is deleted - matched by ``version_valid_to == current.valid_until`` (the
+        forward mirror stamps both with the same retire timestamp), so a prior
+        version chain (e.g. a document-replace snapshot) on a re-lived node is
+        left intact.
+        """
+        if not entity_ids:
+            return 0
+        ids = [str(e) for e in entity_ids]
+
+        # DETACH DELETE on the :EntityVersion snapshot also removes its
+        # [:SUPERSEDES] edge, so collecting/deleting the edge separately is
+        # unnecessary (and would double-delete it). The snapshot match is keyed
+        # on version_valid_to == the node's retire stamp so only THIS op's
+        # snapshot is removed, never a pre-existing version chain.
+        _CYPHER = """\
+UNWIND $entity_ids AS eid
+MATCH (current:Entity {id: eid, namespace_id: $namespace_id})
+WHERE current.valid_until IS NOT NULL OR current.version_valid_to IS NOT NULL
+OPTIONAL MATCH (current)-[:SUPERSEDES]->(old:EntityVersion)
+    WHERE old.version_valid_to = current.valid_until
+WITH current, collect(old) AS olds
+SET current.valid_until = NULL,
+    current.version_valid_to = NULL
+FOREACH (o IN olds | DETACH DELETE o)
+RETURN count(DISTINCT current) AS restored
+"""
+
+        async def _restore(tx: AsyncManagedTransaction) -> int:
+            result = await tx.run(
+                _CYPHER,
+                entity_ids=ids,
+                namespace_id=str(namespace_id),
+            )
+            record = await result.single()
+            return record["restored"] if record else 0
+
+        async with self._session() as session:
+            count = await session.execute_write(_restore)
+        logger.debug(f"Dream-restored {count} entities in namespace {namespace_id}")
+        return count
+
+    async def restore_relationships_batch(
+        self,
+        relationship_ids: list[UUID],
+        *,
+        namespace_id: UUID,
+    ) -> int:
+        """Un-invalidate relationships by clearing ``valid_until``.
+
+        Reverses :meth:`soft_invalidate_relationships_batch`. Matched by
+        relationship id within ``namespace_id`` (IDOR family); idempotent — only
+        edges with a non-null ``valid_until`` are touched. Returns the number of
+        edges actually restored.
+        """
+        if not relationship_ids:
+            return 0
+        ids = [str(r) for r in relationship_ids]
+        ts = datetime.now(UTC).isoformat()
+
+        _CYPHER = """\
+UNWIND $relationship_ids AS rid
+MATCH ()-[rel {id: rid, namespace_id: $namespace_id}]-()
+WHERE rel.valid_until IS NOT NULL
+SET rel.valid_until = NULL,
+    rel.updated_at = $updated_at
+RETURN count(DISTINCT rel) AS restored
+"""
+
+        async def _restore(tx: AsyncManagedTransaction) -> int:
+            result = await tx.run(
+                _CYPHER,
+                relationship_ids=ids,
+                namespace_id=str(namespace_id),
+                updated_at=ts,
+            )
+            record = await result.single()
+            return record["restored"] if record else 0
+
+        async with self._session() as session:
+            count = await session.execute_write(_restore)
+        logger.debug(f"Dream-restored {count} relationships in namespace {namespace_id}")
+        return count
+
+    async def restore_relationship_endpoints_batch(
+        self,
+        rewrites: list[dict[str, Any]],
+        *,
+        namespace_id: UUID,
+    ) -> int:
+        """Re-point relationship endpoints back to their pre-rewrite endpoints.
+
+        Reverses :meth:`rewrite_relationship_endpoints_batch`. Same re-create +
+        delete shape (Neo4j cannot move endpoints in place), keyed by
+        relationship id within ``namespace_id`` (IDOR family). Each dict carries
+        ``relationship_id``, ``source_entity_id``, ``target_entity_id`` (the
+        PRE-rewrite endpoints to restore), and ``relationship_type`` (the Cypher
+        edge label, routed through ``_sanitize_neo4j_label`` and grouped so each
+        CREATE uses a static literal). Idempotent: an edge already on the old
+        endpoints matches nothing to move. Returns the number of edges re-pointed.
+        """
+        if not rewrites:
+            return 0
+        ts = datetime.now(UTC).isoformat()
+
+        by_label: dict[str, list[dict[str, str]]] = {}
+        for rw in rewrites:
+            label = _sanitize_neo4j_label(str(rw["relationship_type"]))
+            by_label.setdefault(label, []).append(
+                {
+                    "relationship_id": str(rw["relationship_id"]),
+                    "source_entity_id": str(rw["source_entity_id"]),
+                    "target_entity_id": str(rw["target_entity_id"]),
+                }
+            )
+
+        total = 0
+        async with self._session() as session:
+            for label in sorted(by_label):
+                rows = by_label[label]
+                cypher = f"""\
+UNWIND $rows AS r
+MATCH (oldSrc)-[rel:{label} {{id: r.relationship_id, namespace_id: $namespace_id}}]->(oldTgt)
+MATCH (newSrc:Entity {{id: r.source_entity_id, namespace_id: $namespace_id}})
+MATCH (newTgt:Entity {{id: r.target_entity_id, namespace_id: $namespace_id}})
+WHERE elementId(oldSrc) <> elementId(newSrc) OR elementId(oldTgt) <> elementId(newTgt)
+WITH rel, newSrc, newTgt, properties(rel) AS relProps
+CREATE (newSrc)-[newRel:{label}]->(newTgt)
+SET newRel = relProps,
+    newRel.updated_at = $rewritten_at
+DELETE rel
+RETURN count(newRel) AS rewritten
+"""
+
+                async def _restore(
+                    tx: AsyncManagedTransaction, _cypher: str = cypher, _rows: list[dict[str, str]] = rows
+                ) -> int:
+                    result = await tx.run(
+                        _cypher,
+                        rows=_rows,
+                        namespace_id=str(namespace_id),
+                        rewritten_at=ts,
+                    )
+                    record = await result.single()
+                    return record["rewritten"] if record else 0
+
+                total += await session.execute_write(_restore)
+        logger.debug(f"Dream-restored endpoints on {total} relationships in namespace {namespace_id}")
+        return total
+
     # -- Dream community materialization (#1276) ----------------------------
     # The GraphRAG payoff: materialize the PG ``khora_dream_communities`` rows
     # into the graph as :Community nodes + [:HAS_MEMBER] edges so the LLM

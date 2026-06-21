@@ -157,6 +157,18 @@ async def dream_undo(
         clears the bi-temporal invalidation on any post-rewrite
         self-loops the apply created.
 
+    Graph reverse mirror (#1275): after the PG reverse commits, the
+    matching forward graph mirror (#1272/#1273) is reversed too — the
+    absorbed entity is un-retired (its ``:EntityVersion`` /
+    ``[:SUPERSEDES]`` snapshot deleted), self-loops are un-invalidated,
+    and incident edges re-pointed back onto the absorbed entity — so undo
+    restores PG and graph to identical pre-apply live sets rather than a
+    half-revert. A reverse-mirror failure does NOT roll back the committed
+    PG reverse; it records a structured degradation (ADR-001) and
+    increments ``khora.dream.graph_unmirror.partial_failure`` so the
+    divergence is observable. Backends without a native reverse (or with
+    no graph configured) record a skip and leave the graph untouched.
+
     Other op types fall through with a ``False`` return — they don't
     have a reverse implementation yet (separate tickets).
 
@@ -188,17 +200,95 @@ async def dream_undo(
 
         try:
             async with coordinator.transaction() as txn:
-                return await reverse_vectorcypher_dedupe_entities(op_entry, session=txn.session)
+                reverted = await reverse_vectorcypher_dedupe_entities(op_entry, session=txn.session)
         except RuntimeError as exc:
             # No SQL backend — embedded paths don't carry the
             # bi-temporal rows the reverse handler needs.
             if "No SQL backend" in str(exc):
                 return False
             raise
+        # PG reverse committed. Reverse the forward graph mirror too so undo
+        # converges both stores (#1275). A failure here never rolls back the
+        # committed PG reverse - it records a degradation (ADR-001).
+        if reverted:
+            await _unmirror_dream_op(kb, op_entry, op_type)
+        return reverted
 
     # Unknown op type — Phase 5+ apply handlers can wire their own
     # reverse paths here as they land.
     return False
+
+
+async def _unmirror_dream_op(kb: Khora, op_entry: dict[str, Any], op_type: str) -> None:
+    """Reverse the forward graph mirror for one undone op (#1275).
+
+    Runs AFTER the PG reverse committed (eventual consistency), reading the same
+    ``before`` snapshot the PG reverse used as the source of truth. Translates
+    the reverse onto the graph via the #1275 capability-gated restore verbs.
+    Idempotent by-id.
+
+    Gating (ADR-001):
+
+      - No graph backend, or the backend cannot reverse this op kind -> records
+        a skip (logged) and returns; the graph was never mirrored forward (or
+        cannot be reversed), so there is nothing to diverge.
+      - The reverse raises after the PG commit (or the namespace resolve fails)
+        -> increments ``khora.dream.graph_unmirror.partial_failure``, logs a
+        WARNING degradation, and returns. The committed PG reverse is NOT rolled
+        back; the divergence is observable via the counter.
+    """
+    from khora.dream.graph_mirror import extract_unmirror_targets, unmirror_targets
+    from khora.dream.orchestrator import _graph_backend, _supported_mirror_kinds
+
+    graph = _graph_backend(kb.storage)
+    if graph is None:
+        return
+    if op_type not in _supported_mirror_kinds(graph):
+        # The forward mirror never touched the graph for this op kind, so the
+        # PG-only reverse already converges. Nothing to undo on the graph.
+        return
+
+    before = op_entry.get("before") or {}
+    targets = extract_unmirror_targets(op_type, before)
+    if (
+        not targets["restore_entity_ids"]
+        and not targets["restore_relationship_ids"]
+        and not targets["restore_endpoints"]
+    ):
+        return
+
+    ns_raw = op_entry.get("_namespace_id")
+    namespace_id = _coerce_namespace(str(ns_raw)) if ns_raw else None
+    try:
+        if namespace_id is None:
+            raise ValueError("undo file carries no namespace_id; cannot resolve graph rows for the reverse mirror")
+        row_namespace_id = await _resolve_namespace_for_unmirror(kb, namespace_id)
+        await unmirror_targets(graph, targets, namespace_id=row_namespace_id)
+    except Exception as exc:
+        from loguru import logger
+
+        from khora.dream.graph_mirror import GRAPH_UNMIRROR_PARTIAL_FAILURE_COUNTER
+
+        GRAPH_UNMIRROR_PARTIAL_FAILURE_COUNTER.add(1)
+        logger.warning(
+            "dream graph un-mirror failed for op {op_type} (PG reverted, graph left diverged): {exc}",
+            op_type=op_type,
+            exc=exc,
+            exc_info=True,
+        )
+
+
+async def _resolve_namespace_for_unmirror(kb: Khora, namespace_id: UUID) -> UUID:
+    """Resolve a stable namespace id to the row id the graph rows carry (#1275).
+
+    Mirrors :meth:`DreamOrchestrator._resolve_namespace_for_mirror`. A resolver
+    error propagates so the caller queues a degradation rather than matching zero
+    graph rows yet reporting success (silent divergence).
+    """
+    resolver = getattr(kb.storage, "resolve_namespace", None)
+    if resolver is None:
+        return namespace_id
+    return await resolver(namespace_id)
 
 
 def _default_file_sink_dir() -> Path:
@@ -214,8 +304,11 @@ def _locate_undo_op(op_id: UUID, *, base_dir: str | Path | None) -> dict[str, An
     The dream file sink lays out runs as
     ``{base_dir}/{namespace_id}/{date}/{run_id}.undo.json``. We scan
     every undo file (small N: one per dream run) and return the first
-    op record whose ``op_id`` matches. Returns ``None`` when no match
-    exists — including when the base_dir doesn't exist at all.
+    op record whose ``op_id`` matches. The payload-level ``namespace_id``
+    is injected onto the returned entry under ``_namespace_id`` so the
+    graph reverse mirror (#1275) can resolve the graph rows' row id.
+    Returns ``None`` when no match exists — including when the base_dir
+    doesn't exist at all.
     """
     root = Path(base_dir) if base_dir is not None else _default_file_sink_dir()
     if not root.exists() or not root.is_dir():
@@ -230,6 +323,7 @@ def _locate_undo_op(op_id: UUID, *, base_dir: str | Path | None) -> dict[str, An
             continue
         for op_entry in payload.get("ops") or []:
             if str(op_entry.get("op_id") or "") == target:
+                op_entry["_namespace_id"] = payload.get("namespace_id")
                 return op_entry
     return None
 

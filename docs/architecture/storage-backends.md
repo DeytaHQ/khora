@@ -691,6 +691,18 @@ The same post-commit mirror path also materializes dream **community summaries**
 
 The summaries are then queryable at recall via the read-only readers `get_communities` (per namespace) and `get_entity_communities` (anchored to a recall hit's entity set), exposed on `GraphBackendProtocol`, the `StorageCoordinator`, and the top-level `Khora.get_communities` / `Khora.get_entity_communities` accessors. Backends without native support advertise nothing and record a structured skip (no silent divergence); the readers default to an empty list (read-only, never raise). Guarded by `tests/unit/dream/test_dream_community_mirror.py`, `tests/unit/storage/backends/test_graph_dream_verbs.py`, and the live pg+Neo4j cases in `test_neo4j_dream_mirror_integration.py`.
 
+### Graph-side undo - no silent half-revert (#1275)
+
+`dream_undo` reverses an applied dream op from its `undo.json` snapshot. Before #1275 it reversed only the PG soft-deletes; the forward graph mirror (#1272/#1273) was never undone, so undo was a **half-revert** that re-diverged the two stores - PG returned to live, the graph kept the merged shape. #1275 adds a graph-side reverse so undo restores PG and graph to **identical pre-apply live sets**.
+
+Each forward mirror verb has a matching reverse on `GraphBackendProtocol` (Neo4j native impl; other backends inherit the same capability-gated `DreamBackendUnsupported` default as the forward verbs, so a backend without a native reverse records a skip rather than diverging):
+
+- `soft_invalidate_relationships_batch` → `restore_relationships_batch` (clears graph `valid_until` on pruned edges / dedupe self-loops)
+- `soft_retire_entities_batch` → `restore_entities_batch` (clears the absorbed node's `valid_until` / `version_valid_to` **and** detach-deletes the `:EntityVersion` / `[:SUPERSEDES]` snapshot the forward mirror created)
+- `rewrite_relationship_endpoints_batch` → `restore_relationship_endpoints_batch` (re-points incident edges back from canonical → absorbed, using the PRE-rewrite endpoints recorded in `previous_relationships`)
+
+After the PG reverse commits, `dream_undo` runs `_unmirror_dream_op` (post-commit, eventual-consistency, the same shape as the forward `_mirror_dream_op`): it reuses `extract_mirror_targets` to know exactly which entities / self-loops / edges the forward mirror touched, then inverts each leg via `unmirror_targets`. The reverse verbs are idempotent by id (a second undo matches nothing and does not re-diverge the graph). A reverse-mirror failure does **not** roll back the committed PG reverse; it increments `khora.dream.graph_unmirror.partial_failure` and logs an ADR-001 degradation so the divergence is observable. Guarded by `tests/integration/dream/test_neo4j_dream_undo_integration.py` (live pg+Neo4j) plus the reverse-extraction / verb unit cases in `tests/unit/dream/test_dream_graph_mirror.py` and `tests/unit/dream/test_dream_undo.py`.
+
 ### When to Use SurrealDB
 
 | Scenario | Recommendation |

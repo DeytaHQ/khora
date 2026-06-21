@@ -445,6 +445,52 @@ class GraphBackendBase:
             f"{type(self).__name__} does not support dream-mirror rename_types_batch; the op will be skipped"
         )
 
+    # -- Dream graph-mirror REVERSE verbs (#1275) ---------------------------
+    # Same capability-gated default contract as the forward verbs: a backend
+    # without a native reverse advertises nothing and raises so dream_undo
+    # records a structured skip rather than silently leaving the graph diverged.
+    # Empty input is a no-op (return 0) on every backend.
+
+    async def restore_entities_batch(
+        self,
+        entity_ids: list[UUID],
+        *,
+        namespace_id: UUID,
+    ) -> int:
+        """Default: unsupported (raises). See :class:`GraphBackendProtocol`."""
+        if not entity_ids:
+            return 0
+        raise DreamBackendUnsupported(
+            f"{type(self).__name__} does not support dream-mirror restore_entities_batch; the undo will be skipped"
+        )
+
+    async def restore_relationships_batch(
+        self,
+        relationship_ids: list[UUID],
+        *,
+        namespace_id: UUID,
+    ) -> int:
+        """Default: unsupported (raises). See :class:`GraphBackendProtocol`."""
+        if not relationship_ids:
+            return 0
+        raise DreamBackendUnsupported(
+            f"{type(self).__name__} does not support dream-mirror restore_relationships_batch; the undo will be skipped"
+        )
+
+    async def restore_relationship_endpoints_batch(
+        self,
+        rewrites: list[dict[str, Any]],
+        *,
+        namespace_id: UUID,
+    ) -> int:
+        """Default: unsupported (raises). See :class:`GraphBackendProtocol`."""
+        if not rewrites:
+            return 0
+        raise DreamBackendUnsupported(
+            f"{type(self).__name__} does not support dream-mirror "
+            "restore_relationship_endpoints_batch; the undo will be skipped"
+        )
+
     # -- Dream community materialization (#1276) ----------------------------
     # The GraphRAG payoff: materialize the dream community_summary rows into
     # :Community nodes + [:HAS_MEMBER] edges, queryable at recall. Same

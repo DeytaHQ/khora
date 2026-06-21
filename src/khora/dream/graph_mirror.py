@@ -82,6 +82,19 @@ GRAPH_MIRROR_PARTIAL_FAILURE_COUNTER = metric_counter(
 )
 
 
+# Emitted once per undone op whose PG reverse committed but whose graph reverse
+# mirror raised (#1275). No labels - the namespace_id cardinality rule applies.
+GRAPH_UNMIRROR_PARTIAL_FAILURE_COUNTER = metric_counter(
+    "khora.dream.graph_unmirror.partial_failure",
+    description=(
+        "dream_undo reverted the PostgreSQL soft-deletes but the post-commit "
+        "graph-side reverse mirror raised (or the namespace resolve failed). PG "
+        "is undone while the graph keeps the merged shape - a half-revert. NO "
+        "namespace_id label - cardinality rule."
+    ),
+)
+
+
 def _coerce_uuid(value: Any) -> UUID | None:
     if value is None:
         return None
@@ -378,3 +391,131 @@ async def apply_mirror_payload(
     return await apply_mirror_targets(
         graph, targets, namespace_id=namespace_id, stamp_at=stamp_at, communities=communities
     )
+
+
+# ---------------------------------------------------------------------------
+# Reverse path (#1275) — graph-side undo
+# ---------------------------------------------------------------------------
+#
+# ``dream_undo`` reverses the PG soft-deletes; these translate the same
+# ``UndoRecord.before`` snapshot into the REVERSE graph verbs so undo restores
+# PG and graph to identical pre-apply live sets rather than a half-revert.
+# Each forward leg has a matching reverse:
+#
+#   - ``soft_invalidate_relationships_batch``     -> ``restore_relationships_batch``
+#   - ``soft_retire_entities_batch``              -> ``restore_entities_batch``
+#   - ``rewrite_relationship_endpoints_batch``    -> ``restore_relationship_endpoints_batch``
+#
+# Reusing :func:`extract_mirror_targets` keeps the two sides in lockstep: the
+# set of entities / self-loops / edges the forward mirror touched is exactly
+# what undo reverts. The only difference is the endpoint rewrite, which must
+# restore the PRE-rewrite endpoints (from ``previous_relationships``) instead of
+# the post-rewrite ones.
+
+
+def extract_unmirror_targets(op_type: str, before: dict[str, Any]) -> dict[str, list[Any]]:
+    """Translate an ``UndoRecord.before`` snapshot into REVERSE graph targets.
+
+    Returns a dict with three keys mirroring :func:`extract_mirror_targets`:
+
+      - ``restore_entity_ids``: entity ids (``UUID``) to un-retire (the absorbed
+        nodes the forward mirror soft-retired).
+      - ``restore_relationship_ids``: relationship ids (``UUID``) to
+        un-invalidate (the pruned edges + post-rewrite dedupe self-loops the
+        forward mirror soft-invalidated).
+      - ``restore_endpoints``: dedupe incident-edge re-pointings to reverse, each
+        a dict ``{"relationship_id", "source_entity_id", "target_entity_id",
+        "relationship_type"}`` carrying the PRE-rewrite endpoints to restore.
+
+    The set of touched entities / self-loops / rewritten edges is computed via
+    :func:`extract_mirror_targets` so undo reverts exactly what the forward
+    mirror applied. The endpoint targets are then re-keyed to the PRE-rewrite
+    endpoints recorded in the dedupe ``previous_relationships`` snapshot.
+    """
+    forward = extract_mirror_targets(op_type, _BeforeOnly(before))
+    restore_entity_ids = list(forward["retire_entity_ids"])
+    restore_relationship_ids = list(forward["invalidate_relationship_ids"])
+
+    # Which rel ids did the forward mirror rewrite? Restore those to their
+    # pre-rewrite endpoints from the per-merge snapshot.
+    rewritten_ids = {_coerce_uuid(rw["relationship_id"]) for rw in forward["rewrite_relationships"]}
+    pre_endpoints: dict[UUID, dict[str, str]] = {}
+    if op_type == _DEDUPE_ENTITIES:
+        for merge in before.get("merges") or []:
+            if not merge.get("applied", True):
+                continue
+            for prev in merge.get("previous_relationships") or []:
+                rel_id = _coerce_uuid(prev.get("id"))
+                src = _coerce_uuid(prev.get("source_entity_id"))
+                tgt = _coerce_uuid(prev.get("target_entity_id"))
+                if rel_id is None or src is None or tgt is None:
+                    continue
+                pre_endpoints[rel_id] = {
+                    "relationship_id": str(rel_id),
+                    "source_entity_id": str(src),
+                    "target_entity_id": str(tgt),
+                    "relationship_type": str(prev.get("relationship_type") or ""),
+                }
+
+    restore_endpoints = [pre_endpoints[rid] for rid in rewritten_ids if rid is not None and rid in pre_endpoints]
+
+    return {
+        "restore_entity_ids": restore_entity_ids,
+        "restore_relationship_ids": restore_relationship_ids,
+        "restore_endpoints": restore_endpoints,
+    }
+
+
+class _BeforeOnly:
+    """Adapter so :func:`extract_mirror_targets` can read a raw ``before`` dict.
+
+    ``extract_mirror_targets`` only touches ``undo.before``; the undo-file op
+    entry carries the same snapshot as a plain dict. This thin wrapper exposes
+    it as the ``.before`` attribute the function reads, avoiding a duplicate
+    re-implementation of the #806 remap / self-loop exclusion logic.
+    """
+
+    __slots__ = ("before",)
+
+    def __init__(self, before: dict[str, Any]) -> None:
+        self.before = before
+
+
+async def unmirror_targets(
+    graph: GraphBackendProtocol,
+    targets: dict[str, list[Any]],
+    *,
+    namespace_id: UUID,
+) -> dict[str, int]:
+    """Push the reverse soft-deletes + endpoint restores to the graph (#1275).
+
+    Idempotent by-id (the restore verbs only touch rows that are still in the
+    retired / invalidated / rewritten state; empty inputs short-circuit inside
+    the verbs). Reverse ordering of :func:`apply_mirror_targets`: restore the
+    absorbed entity FIRST (so it exists as an endpoint), then re-point the
+    incident edges back onto it, then un-invalidate the self-loops. Returns the
+    per-verb affected counts.
+    """
+    restored_entities = 0
+    restored_endpoints = 0
+    restored_relationships = 0
+    if targets["restore_entity_ids"]:
+        restored_entities = await graph.restore_entities_batch(
+            targets["restore_entity_ids"],
+            namespace_id=namespace_id,
+        )
+    if targets["restore_endpoints"]:
+        restored_endpoints = await graph.restore_relationship_endpoints_batch(
+            targets["restore_endpoints"],
+            namespace_id=namespace_id,
+        )
+    if targets["restore_relationship_ids"]:
+        restored_relationships = await graph.restore_relationships_batch(
+            targets["restore_relationship_ids"],
+            namespace_id=namespace_id,
+        )
+    return {
+        "entities_restored": restored_entities,
+        "relationships_restored": restored_relationships,
+        "endpoints_restored": restored_endpoints,
+    }
