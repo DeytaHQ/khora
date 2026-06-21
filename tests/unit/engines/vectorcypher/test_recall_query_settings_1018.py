@@ -17,6 +17,7 @@ from khora.config.schema import KhoraConfig
 from khora.engines.vectorcypher.engine import VectorCypherEngine
 from khora.engines.vectorcypher.retriever import RetrieverConfig, VectorCypherRetriever
 from khora.engines.vectorcypher.router import QueryComplexity, RoutingDecision
+from tests.test_helpers.diagnostics import assert_no_silent_degradation
 
 # --------------------------------------------------------------------------- #
 # #1018 — QuerySettings tier flows onto the VectorCypher retriever config.
@@ -227,7 +228,10 @@ async def test_hyde_always_fires_through_recall_stack(monkeypatch) -> None:
                 relationship_types=["MET"],
             )
             before = len(mock.completion_calls)
-            await kb.recall("what did Alice and Bob discuss in detail", namespace=ns.namespace_id)
+            result = await kb.recall("what did Alice and Bob discuss in detail", namespace=ns.namespace_id)
+            # Happy path: the HyDE wiring must not introduce a silent
+            # degradation onto the RecallResult (ADR-001).
+            assert_no_silent_degradation(result)
             return len(mock.completion_calls) - before
 
     never_calls = await _recall_completion_count("never")
