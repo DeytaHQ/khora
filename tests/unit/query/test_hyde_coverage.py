@@ -148,6 +148,21 @@ class TestHyDEExpanderExpandEmbedding:
         # Failure path → original embedding unchanged
         assert out == original
 
+    async def test_failure_logs_warning_with_exc_info(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def fake_acomp(query, config, **kwargs) -> str:
+            raise RuntimeError("llm down")
+
+        monkeypatch.setattr("khora.config.llm.acompletion", fake_acomp)
+        warn = MagicMock()
+        monkeypatch.setattr("khora.query.hyde.logger.warning", warn)
+        expander = HyDEExpander(embedder=_stub_embedder([1.0]))
+
+        await expander.expand_query_embedding("q", query_embedding=[1.0, 2.0], temporal_category=TemporalCategory.NONE)
+
+        # ADR-001: caught-exception degradation logs at WARNING with exc_info.
+        warn.assert_called_once()
+        assert warn.call_args.kwargs.get("exc_info") is True
+
     async def test_multiple_hypotheticals_averaged(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def fake_acomp(query, config, **kwargs) -> str:
             return "doc"

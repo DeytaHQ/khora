@@ -155,5 +155,5 @@ class HyDEExpander:
                 return avg.tolist()
 
         except Exception as e:
-            logger.warning(f"HyDE expansion failed, using original embedding: {e}")
+            logger.warning("HyDE expansion failed, using original embedding: {}", e, exc_info=True)
             return query_embedding
