@@ -175,6 +175,36 @@ def normalize_scores(results: list[FusedResult]) -> list[FusedResult]:
     return results
 
 
+def attach_relevance_scores(results: list[FusedResult]) -> list[FusedResult]:
+    """Replace each result's score with an absolute relevance measure.
+
+    The final ranking is decided by ``rrf_score`` (after fusion + all boosts +
+    reranking), so this preserves the existing order. It only rewrites the score
+    VALUE reported to callers, swapping the per-result-set min-max normalized RRF
+    score (which forces the top to 1.0 and the bottom to 0.0 regardless of how
+    relevant they are) for the raw vector cosine similarity captured pre-fusion.
+
+    Cosine similarity is absolute and comparable across queries, so an off-topic
+    top result reads as low (e.g. ~0.1) instead of 1.0 and callers can threshold
+    on it. Graph-only chunks (no vector hit) fall back to the graph score; if
+    neither is present the existing ``rrf_score`` is kept unchanged.
+
+    The list is NOT re-sorted - callers rely on the boost/rerank-determined order.
+
+    Args:
+        results: List of FusedResult, already sorted by final ``rrf_score``
+
+    Returns:
+        Same list, in the same order, with ``rrf_score`` set to absolute relevance
+    """
+    for r in results:
+        if r.vector_score is not None:
+            r.rrf_score = r.vector_score
+        elif r.graph_score is not None:
+            r.rrf_score = r.graph_score
+    return results
+
+
 def _min_max_normalize(scores: list[float]) -> list[float]:
     """Min-max normalize a list of scores to [0, 1] range.
 
@@ -441,6 +471,7 @@ __all__ = [
     "FusedResult",
     "apply_coherence_boost",
     "apply_recency_boost",
+    "attach_relevance_scores",
     "bigram_coherence_score",
     "normalize_scores",
     "reciprocal_rank_fusion",

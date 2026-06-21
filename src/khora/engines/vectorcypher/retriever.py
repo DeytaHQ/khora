@@ -50,6 +50,7 @@ from .fusion import (
     FusedResult,
     apply_coherence_boost,
     apply_recency_boost,
+    attach_relevance_scores,
     normalize_scores,
     weighted_rrf,
     weighted_rrf_normalized,
@@ -1983,8 +1984,9 @@ class VectorCypherRetriever:
                 # coherence_weight behaves as the documented ~w nudge. Without
                 # this, the raw weighted-RRF scale (top ~0.02 at k=60) makes the
                 # w*coherence term (up to w) dominate ranking and demote the
-                # relevance winner (#1056). The trailing normalize_scores after
-                # rerank/version (below) still runs.
+                # relevance winner (#1056). This is an internal-only normalization
+                # feeding the blend; the reported score is set absolutely at the
+                # exit via attach_relevance_scores (#811).
                 fused_results = normalize_scores(fused_results)
                 fused_results = apply_coherence_boost(
                     fused_results,
@@ -2057,11 +2059,14 @@ class VectorCypherRetriever:
                                     r.rrf_score *= 1.0 - _VERSION_DECAY * (1.0 - ratio)
                                     break
 
-        # Normalize scores to [0,1] — ensures consistent score scale for
-        # downstream consumers (abstention detection, adapter score reporting).
-        # This is a single normalization of the final fused+boosted scores,
-        # matching what _simple_retrieve does at its exit.
-        fused_results = normalize_scores(fused_results)
+        # Surface an ABSOLUTE relevance score (raw vector cosine) on each chunk
+        # instead of the per-result-set min-max normalized RRF score (#811).
+        # Min-max forced the top chunk to 1.0 and the bottom to 0.0 regardless
+        # of actual relevance, so off-topic queries still reported score=1.0 and
+        # no threshold was meaningful. Ranking is unchanged - order is decided by
+        # rrf_score (after fusion + boosts + reranking); this only rewrites the
+        # reported VALUE to the raw cosine captured pre-fusion.
+        fused_results = attach_relevance_scores(fused_results)
 
         # Build result
         chunk_results = [(r.item, r.rrf_score) for r in fused_results[:limit]]
@@ -2765,7 +2770,12 @@ class VectorCypherRetriever:
 
             chunk_results: list[tuple[Chunk, float]] = []
             _max_raw_cosine = max((r.similarity for r in results), default=0.0)
+            # Per-chunk raw vector cosine, captured pre-fusion. Used at exit to
+            # report an ABSOLUTE relevance score instead of a per-result-set
+            # min-max normalized one (#811); boosts/reranking only decide ORDER.
+            _raw_cosine_by_id: dict[UUID, float] = {}
             for r in results:
+                _raw_cosine_by_id[r.chunk.id] = r.similarity
                 chunk = Chunk(
                     id=r.chunk.id,
                     namespace_id=r.chunk.namespace_id,
@@ -2945,11 +2955,13 @@ class VectorCypherRetriever:
 
                 chunk_results.sort(key=_ts, reverse=sort_descending)
 
-            # Normalize scores to [0,1] — matches complex path behavior
+            # Report an ABSOLUTE relevance score (raw vector cosine) per chunk
+            # instead of a per-result-set min-max normalized one (#811). Order is
+            # unchanged - it was already decided by the boost/rerank-adjusted
+            # score above. BM25-only chunks have no cosine; keep their current
+            # score rather than rescaling the set.
             if chunk_results:
-                fused = [FusedResult(item=c, rrf_score=s, item_id=c.id) for c, s in chunk_results]
-                fused = normalize_scores(fused)
-                chunk_results = [(r.item, r.rrf_score) for r in fused]
+                chunk_results = [(c, _raw_cosine_by_id.get(c.id, s)) for c, s in chunk_results]
 
             span.set_attribute("chunk_count", len(chunk_results))
 

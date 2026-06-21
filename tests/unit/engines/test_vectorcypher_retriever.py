@@ -553,11 +553,12 @@ class TestRetrieverRecencyScores:
 
 @pytest.mark.unit
 class TestSimpleRetrieveScoreNormalization:
-    """Regression tests for: simple path score normalization.
+    """Tests for simple-path scoring.
 
-    Before the fix, _simple_retrieve() returned raw RRF scores (~0.009-0.016)
-    while the complex path returned normalized [0,1] scores. This caused
-    downstream consumers to see artificially low confidence for simple queries.
+    The ``normalize_scores`` helper is still exercised in isolation (it remains
+    the internal pre-coherence-blend normalizer), but the simple path no longer
+    uses it as the FINAL step: it now reports absolute raw cosine (#811). See the
+    ``*_absolute`` end-to-end tests below.
     """
 
     def test_normalize_scores_with_rrf_like_inputs(self) -> None:
@@ -625,10 +626,9 @@ class TestSimpleRetrieveScoreNormalization:
         ns_id = uuid4()
         doc_id = uuid4()
 
-        # Simulate 5 results with small raw scores typical of RRF (the bug scenario)
-        # RRF scores with k=60: rank 1 = 1/61 ≈ 0.016, rank 5 ≈ 0.009.
-        # These reproduce the bug where all scores cluster below 0.05.
-        raw_scores = [0.016, 0.014, 0.012, 0.010, 0.009]
+        # Five distinct raw cosine similarities (descending). The fix surfaces
+        # these verbatim instead of per-result-set min-max rescaling (#811).
+        raw_scores = [0.85, 0.71, 0.55, 0.40, 0.22]
         mock_results = []
         for score in raw_scores:
             chunk_id = uuid4()
@@ -670,25 +670,27 @@ class TestSimpleRetrieveScoreNormalization:
         return retriever
 
     @pytest.mark.asyncio
-    async def test_simple_retrieve_scores_normalized(self, multi_result_retriever: VectorCypherRetriever) -> None:
-        """_simple_retrieve() must return scores in [0,1], not raw RRF values."""
+    async def test_simple_retrieve_scores_absolute(self, multi_result_retriever: VectorCypherRetriever) -> None:
+        """_simple_retrieve() reports ABSOLUTE raw cosine, not per-set min-max (#811).
+
+        The mock returns five low cosines (the off-topic noise band). The fix must
+        surface those values verbatim, NOT rescale the top to 1.0 / bottom to 0.0.
+        """
         namespace_id = uuid4()
         result = await multi_result_retriever.retrieve("test query", namespace_id)
 
         scores = [score for _, score in result.chunks]
 
-        # Scores must be in [0, 1] range
-        assert all(0.0 <= s <= 1.0 for s in scores), f"Scores out of range: {scores}"
-        # Max score must be 1.0 (min-max normalization guarantees this)
-        assert max(scores) == 1.0, f"Max score should be 1.0, got {max(scores)}"
-        # Min score must be 0.0
-        assert min(scores) == 0.0, f"Min score should be 0.0, got {min(scores)}"
-        # Scores must NOT all be clustered below 0.05 (the original bug)
-        assert any(s > 0.05 for s in scores), f"All scores below 0.05: {scores}"
+        # Absolute cosine values are reported as-is (the mock's similarity values).
+        assert scores == [0.85, 0.71, 0.55, 0.40, 0.22], f"Expected absolute cosines, got {scores}"
+        # The per-result-set min-max bug is gone: top is NOT forced to 1.0,
+        # bottom is NOT forced to 0.0.
+        assert max(scores) != 1.0
+        assert min(scores) != 0.0
 
     @pytest.mark.asyncio
-    async def test_simple_retrieve_single_result_normalized(self) -> None:
-        """A single result should get score 1.0 after normalization."""
+    async def test_simple_retrieve_single_result_absolute(self) -> None:
+        """A single low-cosine result keeps its absolute score, not forced to 1.0 (#811)."""
         vector_store = AsyncMock()
         embedder = AsyncMock()
         embedder.embed = AsyncMock(return_value=[0.1] * 1536)
@@ -728,8 +730,9 @@ class TestSimpleRetrieveScoreNormalization:
         result = await retriever.retrieve("test", uuid4())
 
         assert len(result.chunks) == 1
-        # Single result: normalize_scores sets all-equal scores to 1.0
-        assert result.chunks[0][1] == 1.0
+        # The single-result min-max path forced score to 1.0 (the bug); now the
+        # absolute cosine is reported, so an off-topic lone hit reads as low.
+        assert result.chunks[0][1] == 0.013
 
 
 @pytest.mark.unit
