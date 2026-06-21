@@ -1532,6 +1532,8 @@ class TestVectorCypherEngineRecall:
         result = await connected_engine.recall("test query", namespace_id)
 
         assert result.communities == []
+        # Zero round-trip: no matched entities means the reader is never called.
+        connected_engine._storage.get_entity_communities.assert_not_awaited()
         assert_no_silent_degradation(result)
 
     @pytest.mark.asyncio
