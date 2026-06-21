@@ -35,6 +35,7 @@ from khora.engines.vectorcypher.temporal_detection import (
     TemporalCategory,
     TemporalSignal,
 )
+from tests.test_helpers.diagnostics import assert_no_silent_degradation
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1556,9 +1557,10 @@ class TestRecencyChannelEnabledFlow:
         # At least one chunk surfaced
         assert result is not None
 
-    async def _run_with_channel_on_floor_off(self, query: str) -> AsyncMock:
+    async def _run_with_channel_on_floor_off(self, query: str) -> tuple[AsyncMock, Any]:
         """Drive ``_vectorcypher_retrieve`` with the recency CHANNEL on and the
-        recency FLOOR off, returning the (spied) ``_recency_channel_chunks`` mock.
+        recency FLOOR off, returning the (spied) ``_recency_channel_chunks`` mock
+        and the ``VectorCypherResult``.
 
         GitHub issue #1227: channel-on / floor-off is a reachable combo of two
         independent user settings. The counterfactual veto must depend on the
@@ -1598,7 +1600,7 @@ class TestRecencyChannelEnabledFlow:
         signal = TemporalSignal(
             is_temporal=True, category=TemporalCategory.RECENCY, confidence=0.9, source="dictionary"
         )
-        await retriever._vectorcypher_retrieve(
+        result = await retriever._vectorcypher_retrieve(
             query=query,
             query_embedding=[0.1] * 4,
             namespace_id=ns,
@@ -1609,7 +1611,7 @@ class TestRecencyChannelEnabledFlow:
             temporal_params=RETRIEVAL_PARAMS[TemporalCategory.RECENCY],
             temporal_signal=signal,
         )
-        return retriever._recency_channel_chunks
+        return retriever._recency_channel_chunks, result
 
     @pytest.mark.asyncio
     async def test_counterfactual_query_skips_channel_with_floor_off(self) -> None:
@@ -1617,9 +1619,10 @@ class TestRecencyChannelEnabledFlow:
         ("... ever ...") must NOT fire the recency channel when the channel is
         on and the floor is off. The veto is dead pre-fix because it was gated
         on ``temporal_recency_floor_enabled``."""
-        spy = await self._run_with_channel_on_floor_off(
+        spy, result = await self._run_with_channel_on_floor_off(
             "what would revenue have been if we had ever launched in EU",
         )
+        assert_no_silent_degradation(result)
         spy.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -1627,7 +1630,8 @@ class TestRecencyChannelEnabledFlow:
         """No-regression guard for the #1227 fix: a legitimate RECENCY query
         (no anti-recency token) must STILL fire the channel with channel-on /
         floor-off — the configuration the integration test relies on."""
-        spy = await self._run_with_channel_on_floor_off("what's the latest status")
+        spy, result = await self._run_with_channel_on_floor_off("what's the latest status")
+        assert_no_silent_degradation(result)
         spy.assert_awaited_once()
 
 

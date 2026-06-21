@@ -129,7 +129,9 @@ class TestRecencyReferenceMode:
 
         scores = retriever._calculate_recency_scores(results, decay_days_override=7)
 
-        assert scores[results[0].item_id] <= 1.0, f"Got {scores}"
+        # A future-dated chunk is treated as maximally recent (factor 1.0) —
+        # not above 1.0 (the bug) and not under-scored either.
+        assert scores[results[0].item_id] == pytest.approx(1.0, abs=1e-6), f"Got {scores}"
 
     def test_future_dated_chunk_capped_at_one_wall_clock_linear(self) -> None:
         """Same #1230 invariant on the linear decay path. ``1 - days_old/decay``
@@ -146,7 +148,7 @@ class TestRecencyReferenceMode:
 
         scores = retriever._calculate_recency_scores(results, decay_days_override=7)
 
-        assert scores[results[0].item_id] <= 1.0, f"Got {scores}"
+        assert scores[results[0].item_id] == pytest.approx(1.0, abs=1e-6), f"Got {scores}"
 
 
 # ─────────────────────────── A4: per-source decay ───────────────────────────
