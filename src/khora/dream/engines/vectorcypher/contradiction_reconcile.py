@@ -48,6 +48,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
+from loguru import logger
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import text
 
@@ -258,10 +259,22 @@ async def _ask_one_judge(
         except TimeoutError as exc:
             span.set_attribute("outcome", "timeout")
             span.set_attribute("error_type", type(exc).__name__)
+            logger.warning(
+                "contradiction reconcile {direction} judge ({model}) timed out; degrading to defer",
+                direction=direction,
+                model=model,
+                exc_info=True,
+            )
             return None
         except Exception as exc:  # noqa: BLE001 - never crash the dream run on a flaky API
             span.set_attribute("outcome", "error")
             span.set_attribute("error_type", type(exc).__name__)
+            logger.warning(
+                "contradiction reconcile {direction} judge ({model}) raised; degrading to defer",
+                direction=direction,
+                model=model,
+                exc_info=True,
+            )
             return None
 
         verdict = _parse_verdict(raw)
@@ -460,6 +473,11 @@ async def _list_relationships_for_detection(coordinator: Any, namespace_id: UUID
             try:
                 row_ns = await resolver(namespace_id)
             except Exception:  # noqa: BLE001 - resolve is a cheap read; fall back to input
+                logger.warning(
+                    "namespace resolve failed during contradiction reconcile planning; "
+                    "falling back to the input namespace_id",
+                    exc_info=True,
+                )
                 row_ns = namespace_id
         return await vector.list_relationships(row_ns, limit=1_000_000)
     return await coordinator.list_relationships(namespace_id, limit=1_000_000)
@@ -606,7 +624,7 @@ async def apply_vectorcypher_contradiction_reconcile(
 
         loser_id, winner_id = _resolve_loser_winner(finding, outcome)
         resolution = _resolution_label(outcome.decision)
-        rationale_hash = bounded_text_hash(outcome.rationale or "")
+        rationale_hash = bounded_text_hash(_rationale_material(outcome))
 
         if outcome.decision == "invalidate" and loser_id is not None:
             result = await session.execute(_SOFT_DELETE_SQL, {"ts": applied_at, "rid": loser_id})
@@ -702,6 +720,22 @@ def _resolution_label(decision: str) -> str:
     if decision == "keep":
         return "kept"
     return "deferred"
+
+
+def _rationale_material(outcome: JudgeOutcome) -> str:
+    """Text hashed into ``judge_rationale_hash`` for triage audit value.
+
+    Prefer the two judges' own rationales (distinct per pair) over the
+    dispatcher's generic summary string, so the persisted hash distinguishes
+    materially different verdicts. Falls back to the dispatcher summary when
+    neither judge returned a parseable rationale (e.g. both timed out).
+    """
+    parts = [
+        outcome.verifier_verdict.rationale if outcome.verifier_verdict else "",
+        outcome.auditor_verdict.rationale if outcome.auditor_verdict else "",
+    ]
+    material = "\n".join(p for p in parts if p)
+    return material or (outcome.rationale or "")
 
 
 def _coerce_uuid(value: Any) -> UUID | None:

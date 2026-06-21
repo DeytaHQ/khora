@@ -39,6 +39,7 @@ from khora.core.models.entity import Entity, Relationship
 from khora.dream.config import DreamConfig
 from khora.dream.plan import DreamScope, OpKind
 from khora.khora import Khora
+from tests.test_helpers.diagnostics import assert_no_silent_degradation
 
 DATABASE_URL = os.environ.get(
     "KHORA_DATABASE_URL",
@@ -297,7 +298,7 @@ async def test_reconcile_agree_soft_deletes_loser_in_both_stores(kb: Khora, monk
         mode="apply",
         scope=DreamScope(op_kinds=(OpKind.VECTORCYPHER_CONTRADICTION_RECONCILE,)),
     )
-    assert not result.metadata.get("degradations"), result.metadata.get("degradations")
+    assert_no_silent_degradation(result)
 
     pg_live = await _live_pg_relationship_ids(kb, ns_row_id)
     graph_live = await _graph_relationship_ids(kb, ns_row_id)
@@ -377,7 +378,7 @@ async def test_reconcile_defer_mutates_nothing_but_writes_triage(kb: Khora, monk
         mode="apply",
         scope=DreamScope(op_kinds=(OpKind.VECTORCYPHER_CONTRADICTION_RECONCILE,)),
     )
-    assert not result.metadata.get("degradations"), result.metadata.get("degradations")
+    assert_no_silent_degradation(result)
 
     pg_live = await _live_pg_relationship_ids(kb, ns_row_id)
     graph_live = await _graph_relationship_ids(kb, ns_row_id)
