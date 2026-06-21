@@ -141,10 +141,7 @@ async def kb() -> AsyncIterator[Khora]:
     try:
         yield instance
     finally:
-        try:
-            await instance.disconnect()
-        except Exception:
-            pass
+        await instance.disconnect()
 
 
 def _graph_backend(kb: Khora):
