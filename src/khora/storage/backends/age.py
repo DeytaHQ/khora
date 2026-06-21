@@ -1069,15 +1069,15 @@ class AGEBackend(GraphBackendBase):
     # version/relabel verbs keep the ``GraphBackendBase`` default, which raises
     # ``DreamBackendUnsupported``.
     #
-    # AGE commits each ``cypher()`` write out-of-band (it cannot join the dream
-    # orchestrator transaction even though it lives in Postgres). The mirror
-    # runs OUTSIDE the apply transaction by design (eventual consistency,
-    # reconciler-backed), so this is the expected execution model. The whole
-    # id batch is wrapped in a SINGLE ``session.begin()`` so it is one
-    # auto-commit unit: a mid-batch failure rolls the whole batch back and the
-    # reconciler retries it cleanly. An AGE-atomic SAME-transaction mirror
-    # (folding the graph SET into the orchestrator's PG commit) is a possible
-    # FUTURE follow-up since AGE lives in Postgres — out of scope for #1279.
+    # AGE lives in Postgres, so since #1307 the orchestrator folds the
+    # soft-delete into the dream-apply transaction: ``mirror_in_transaction()``
+    # advertises this, and ``soft_invalidate_relationships_batch`` accepts the
+    # caller's ``session`` to run the SET atomically with the PG commit (no
+    # ``graph_mirror_pending`` reconcile). The standalone path below
+    # (``session=None``, used by the reconciler / undo / direct callers) still
+    # wraps the whole id batch in a SINGLE ``session.begin()`` auto-commit unit:
+    # a mid-batch failure rolls the whole batch back and the reconciler retries
+    # it cleanly.
     #
     # Convergence is verified by id-set / live-set (``valid_until IS NULL``),
     # NEVER by edge counts: ``count_relationships`` raises NotImplementedError
