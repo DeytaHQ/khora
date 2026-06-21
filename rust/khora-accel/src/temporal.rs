@@ -747,22 +747,20 @@ mod tests {
         assert_eq!(detect_temporal_category("How has the current deal stage changed?"), 6);
     }
 
-    // Verify compound patterns don't over-trigger on recency lookups
+    // Possessive "X's current ..." reads as a state query ("what is the
+    // current state of X's quota"), so STATE_QUERY (2) is the intended
+    // category here (#1285, decision (b) — the old assert-0 expectation was
+    // stale, not the implementation). The possessive "'s current " pattern is
+    // deliberately kept.
     #[test]
-    #[ignore = "pre-existing #234/#323 conflict, see #1269 - the possessive \
-                \"'s current \" STATE_QUERY pattern (synced from Python in #234) \
-                matches \"Sarah's current quota\", so this returns 2 not 0. This \
-                test was born failing in #323 and never ran because cargo test did \
-                not compile. Resolving the over-broad possessive pattern requires a \
-                Rust + Python _accel.py parity change and is out of scope for the \
-                test-compile-gap fix; tracked as a follow-up."]
-    fn test_current_quota_not_state_query() {
-        // "current quota" should NOT match - it's a simple recency lookup
-        assert_eq!(detect_temporal_category("What is Sarah's current quota attainment?"), 0);
+    fn test_current_quota_is_state_query() {
+        assert_eq!(detect_temporal_category("What is Sarah's current quota attainment?"), 2);
     }
 
     #[test]
     fn test_current_pipeline_not_state_query() {
+        // No possessive and no compound " current <noun>" pattern matches, so
+        // this stays a plain recency lookup (category 0).
         assert_eq!(detect_temporal_category("What is the current pipeline value?"), 0);
     }
 }
