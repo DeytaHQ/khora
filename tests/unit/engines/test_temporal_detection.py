@@ -151,6 +151,48 @@ class TestPythonFallbackDetection:
 
 
 # ---------------------------------------------------------------------------
+# Word-boundary matching (#981 / #1285)
+# ---------------------------------------------------------------------------
+#
+# Keywords must only fire as whole words/phrases, not as substrings of larger
+# words. Each case is checked on BOTH the Rust kernel (default) and the Python
+# fallback so the two stay in lockstep parity.
+
+
+# (query, expected_category_id, reason)
+_WORD_BOUNDARY_CASES = [
+    # #981 substring false-positives — now correctly NONE.
+    ("The contract terms remain unchanged.", 0, "'changed' inside 'unchanged'"),
+    ("The exchanged emails were archived.", 0, "'changed' inside 'exchanged'"),
+    ("The team marched on with their plan.", 0, "'march' inside 'marched'"),
+    # Whole-word matches must still fire (no over-correction).
+    ("What happened in March 2024?", 1, "'March' as a whole word -> EXPLICIT"),
+    ("The contract terms changed last week.", 6, "'changed' as a whole word -> CHANGE"),
+    ("Does the wiki have the more up-to-date status?", 2, "hyphenated 'up-to-date' -> STATE_QUERY"),
+    ("Who is the account manager?", 2, "'who is the ' phrase -> STATE_QUERY"),
+    # #1285 decision (b): possessive "X's current ..." is a STATE_QUERY.
+    ("What is Sarah's current quota attainment?", 2, 'possessive "\'s current " -> STATE_QUERY'),
+    # No possessive / compound pattern: plain recency lookup stays NONE.
+    ("What is the current pipeline value?", 0, "bare 'current' without a compound pattern"),
+]
+
+
+@pytest.mark.parametrize(("query", "expected", "reason"), _WORD_BOUNDARY_CASES)
+def test_word_boundary_rust_path(query: str, expected: int, reason: str) -> None:
+    from khora._accel import detect_temporal_category
+
+    assert detect_temporal_category(query) == expected, reason
+
+
+@pytest.mark.parametrize(("query", "expected", "reason"), _WORD_BOUNDARY_CASES)
+def test_word_boundary_python_fallback(query: str, expected: int, reason: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("khora._accel._HAS_RUST", False)
+    from khora._accel import detect_temporal_category
+
+    assert detect_temporal_category(query) == expected, reason
+
+
+# ---------------------------------------------------------------------------
 # Retrieval params mapping tests
 # ---------------------------------------------------------------------------
 
