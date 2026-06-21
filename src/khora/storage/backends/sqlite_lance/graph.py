@@ -242,6 +242,19 @@ _RELATIONSHIP_LIVE_FILTER = (
     "valid_to IS NULL AND invalidated_at IS NULL AND (valid_until IS NULL OR datetime(valid_until) > datetime('now'))"
 )
 
+# Aliased, ``now``-parameterized variant of ``_RELATIONSHIP_LIVE_FILTER`` for the
+# recursive-CTE traversal (#1302). The CTE references the ``relationships`` row
+# through the ``r`` alias and binds ``now`` itself (so a caller may pass a fixed
+# ``now`` for deterministic point-in-time traversal), so ``datetime('now')``
+# becomes ``datetime(?)`` here. The predicate is otherwise byte-identical to
+# ``list_relationships`` (same tombstone gates, same ``datetime(...)``
+# normalization) - a dream-pruned / invalidated edge excluded from the
+# ``list_relationships`` live set is now excluded from the traversal too.
+_RELATIONSHIP_CTE_LIVE_FILTER = (
+    "r.valid_to IS NULL AND r.invalidated_at IS NULL "
+    "AND (r.valid_until IS NULL OR datetime(r.valid_until) > datetime(?))"
+)
+
 
 def _relationship_insert_params(rel: Relationship) -> tuple:
     rel_type = sanitize_cypher_label(rel.relationship_type or "RELATES_TO")
@@ -679,7 +692,12 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         valid_filter = ""
         now_iso: str | None = None
         if prefer_current:
-            valid_filter = " AND (r.valid_until IS NULL OR r.valid_until > ?)"
+            # Same live-set predicate ``list_relationships`` applies (#1302):
+            # the bi-temporal tombstones (``valid_to`` / ``invalidated_at``)
+            # plus the ``datetime(...)``-normalized ``valid_until`` window. A
+            # dream-pruned / invalidated edge dropped from ``list_relationships``
+            # is now also dropped from the traversal path.
+            valid_filter = f" AND {_RELATIONSHIP_CTE_LIVE_FILTER}"
             now_iso = iso8601(now or datetime.now(UTC))
 
         # Anchor params: src, ns, [rel_types...], [now]
@@ -861,7 +879,8 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         valid_filter = ""
         valid_params: list[Any] = []
         if prefer_current:
-            valid_filter = " AND (r.valid_until IS NULL OR r.valid_until > ?)"
+            # Same live-set predicate ``list_relationships`` applies (#1302).
+            valid_filter = f" AND {_RELATIONSHIP_CTE_LIVE_FILTER}"
             valid_params = [iso8601(now or datetime.now(UTC))]
 
         # Every clause (2 anchor arms + 2 recursive arms) gets a
@@ -961,11 +980,17 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         ent_by_id: dict[str, Entity] = {}
         if needed_entity_ids:
             placeholders = ", ".join("?" for _ in needed_entity_ids)
+            ent_params: list[Any] = [*needed_entity_ids, ns_text]
+            # When prefer_current, drop retired nodes from the path the same way
+            # ``list_entities`` does (#1302) — entity ``valid_until`` window.
+            entity_live = ""
+            if prefer_current:
+                entity_live = f" AND {_ENTITY_LIVE_FILTER}"
             sql_e = (
                 f"SELECT {_ENTITY_COLUMNS} FROM entities "  # noqa: S608
-                f"WHERE id IN ({placeholders}) AND namespace_id = ?"
+                f"WHERE id IN ({placeholders}) AND namespace_id = ?{entity_live}"
             )
-            async with self._conn.execute(sql_e, [*needed_entity_ids, ns_text]) as cur_e:
+            async with self._conn.execute(sql_e, ent_params) as cur_e:
                 rows_e = await cur_e.fetchall()
             ent_by_id = {str(r["id"]): _row_to_entity(r) for r in rows_e}
 
