@@ -838,14 +838,20 @@ class VectorCypherRetriever:
                 not force_simple
                 and not force_graph
                 and routing.complexity == QueryComplexity.TYPED_ENTITY_RECENT
-                and filter_ast is None
+                and (filter_ast is None or not filter_ast.children)
             ):
-                # Gate (filter_ast is None): the fast-path Cypher cannot
+                # Gate (no CONSTRAINING filter): the fast-path Cypher cannot
                 # enforce caller filters — chunk metadata is a serialized
                 # JSON property on the graph node, not queryable columns — so
                 # a filtered recall would silently return unfiltered chunks.
-                # Filtered recalls take the full _vectorcypher_retrieve path
-                # below, which enforces + reports the filter per channel.
+                # A constraint-free filter (``filter={}`` / ``RecallFilter()``)
+                # parses to a non-null match-everything ``AND`` with no
+                # children: there is nothing to enforce, so it keeps the fast
+                # path (#1232). The constraint-free test mirrors
+                # ``build_filter_report`` (``filter_ast is None or not
+                # filter_ast.children``). Genuinely-constraining filtered
+                # recalls take the full _vectorcypher_retrieve path below,
+                # which enforces + reports the filter per channel.
                 #
                 # Phase C fast path (#569): a single Cypher query that
                 # finds typed entities (ACTION_ITEM, DECISION, BLOCKER,
