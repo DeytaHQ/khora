@@ -1080,6 +1080,17 @@
       "description": "VectorCypher graph-expansion normalization fallback - incremented per neighborhood entry returned by get_neighborhoods_batch whose shape is unrecognized (neither an Entity domain object nor a dict) and is therefore dropped from the expansion. The same event is also appended to RecallResult.engine_info['degradations']. No namespace_id label."
     },
     {
+      "name": "khora.vectorcypher.community_projection.degraded_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "owner": "vectorcypher",
+      "labels": [
+        {"name": "reason", "values": ["fetch_failed"], "_comment": "Low-cardinality enum; extend when adding new community-projection fallback paths."}
+      ],
+      "description": "Issue #1308 (ADR-001). VectorCypher community-projection fallback - incremented when the get_entity_communities reader raises while projecting materialized dream communities (#1276) onto a recall result, so recall continues with no community context (RecallResult.communities stays empty). The same event is also appended to RecallResult.engine_info['degradations']. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
+    },
+    {
       "name": "khora.vectorcypher.entity_vector_search.degraded_total",
       "type": "counter",
       "stability": "public",

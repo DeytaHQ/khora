@@ -7,6 +7,8 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from khora.core.models.entity import CommunityNode
+
 if TYPE_CHECKING:
     from khora.khora import LLMUsage
 
@@ -117,6 +119,12 @@ class RecallResult:
     ``relationships`` is always present (possibly empty) — engines without
     a graph backend return ``[]``.
 
+    ``communities`` is the deduplicated set of materialized dream community
+    summaries (#1276) the result's matched entities belong to (the GraphRAG
+    query-time payoff, #1308). Always present (possibly empty) — empty on a
+    stack without materialized communities or a backend lacking the
+    community reader. Deduplicated by community id and capped.
+
     ``engine_info`` is a free-form dict of engine-specific telemetry.
     Every engine MUST emit the key ``"engine": <strategy-name>`` so
     consumers can route on producer identity.
@@ -130,9 +138,11 @@ class RecallResult:
     relationships: list[RecallRelationship]
     usage: list[LLMUsage] = field(default_factory=list)
     engine_info: dict[str, Any] = field(default_factory=dict)
+    communities: list[CommunityNode] = field(default_factory=list)
 
 
 __all__ = [
+    "CommunityNode",
     "DocumentProjection",
     "RecallChunk",
     "RecallEntity",
