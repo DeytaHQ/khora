@@ -27,6 +27,7 @@ from khora.core.models import Chunk, Entity
 from khora.engines.chronicle.engine import ChronicleEngine
 from khora.query import SearchMode
 from khora.query.router import QueryComplexity, RoutingDecision
+from tests.test_helpers.diagnostics import assert_no_silent_degradation
 
 
 class _RecordingCoordinator:
@@ -122,7 +123,8 @@ async def test_year_token_does_not_apply_date_filter(query: str) -> None:
     _wire(engine, coord)
 
     with patch.object(engine._router, "route", new=AsyncMock(return_value=_routing(QueryComplexity.MODERATE))):
-        await engine.recall(query, ns_id, limit=5, mode=SearchMode.HYBRID)
+        result = await engine.recall(query, ns_id, limit=5, mode=SearchMode.HYBRID)
+    assert_no_silent_degradation(result)
 
     bad = _bounded(coord.search_similar_chunks_calls) + _bounded(coord.search_fulltext_chunks_calls)
     assert not bad, (
@@ -140,7 +142,8 @@ async def test_real_temporal_query_still_resolves() -> None:
     _wire(engine, coord)
 
     with patch.object(engine._router, "route", new=AsyncMock(return_value=_routing(QueryComplexity.MODERATE))):
-        await engine.recall("meetings last week", ns_id, limit=5, mode=SearchMode.HYBRID)
+        result = await engine.recall("meetings last week", ns_id, limit=5, mode=SearchMode.HYBRID)
+    assert_no_silent_degradation(result)
 
     bounded = _bounded(coord.search_similar_chunks_calls) + _bounded(coord.search_fulltext_chunks_calls)
     assert bounded, "A 'last week' query should still resolve and push a recency window into the channels"
