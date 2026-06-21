@@ -346,6 +346,66 @@ class TestAGESoftInvalidate:
 
 
 @pytest.mark.unit
+class TestAGEMirrorInTransaction:
+    """AGE folds the soft-delete into the apply transaction (#1307)."""
+
+    def test_advertises_in_transaction_mirror(self) -> None:
+        assert AGEBackend("postgresql://x/y").mirror_in_transaction() is True
+
+    @pytest.mark.asyncio
+    async def test_caller_session_runs_without_own_transaction(self) -> None:
+        """When given a caller session, the verb runs the SET search_path +
+        Cypher on THAT session and opens NO own transaction (no session_factory
+        call, no session.begin) - so the AGE soft-delete commits atomically with
+        the caller's transaction (#1307)."""
+        rel_id = uuid4()
+        backend, captured, own_session = _age_with_cypher_capture(per_call_return=1)
+
+        caller_session = AsyncMock()
+        caller_session.execute = AsyncMock()
+
+        out = await backend.soft_invalidate_relationships_batch(
+            [rel_id],
+            namespace_id=_NS,
+            invalidated_at=_TS,
+            session=caller_session,
+        )
+        assert out == 1
+        # The Cypher SET ran on the CALLER session, not a self-opened one.
+        assert len(captured) == 1
+        assert backend._cypher.await_args.args[0] is caller_session
+        # The SET search_path preamble ran on the caller session too.
+        assert caller_session.execute.await_count == 1
+        # NO own transaction: the self session_factory was never called and the
+        # self session.begin() (own-transaction marker) never entered.
+        backend._session_factory.assert_not_called()
+        own_session.begin.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_caller_session_empty_short_circuits(self) -> None:
+        backend, captured, _own = _age_with_cypher_capture(per_call_return=1)
+        caller_session = AsyncMock()
+        out = await backend.soft_invalidate_relationships_batch(
+            [], namespace_id=_NS, invalidated_at=_TS, session=caller_session
+        )
+        assert out == 0
+        assert captured == []
+        caller_session.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_session_keeps_self_transaction(self) -> None:
+        """Without a caller session the verb still opens its own auto-commit unit
+        (the reconciler / standalone path is unchanged)."""
+        rel_id = uuid4()
+        backend, captured, own_session = _age_with_cypher_capture(per_call_return=1)
+        out = await backend.soft_invalidate_relationships_batch([rel_id], namespace_id=_NS, invalidated_at=_TS)
+        assert out == 1
+        assert len(captured) == 1
+        assert backend._session_factory.call_count == 1
+        assert own_session.begin.call_count == 1
+
+
+@pytest.mark.unit
 class TestAGERestoreRelationships:
     @pytest.mark.asyncio
     async def test_empty_short_circuits(self) -> None:

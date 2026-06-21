@@ -658,7 +658,7 @@ async def test_hard_crash_after_commit_heals_via_later_run(kb: Khora) -> None:
     # _apply_one_op commits the PG apply + checkpoint AND the durable pending
     # pre-mark in one transaction. We stop here - simulating a process death
     # before the post-commit mirror runs.
-    await orch_a._apply_one_op(run_id=run_a, seq=0, op=op, handler=handler)
+    await orch_a._apply_one_op(run_id=run_a, seq=0, op=op, handler=handler, namespace_id=ns_stable)
 
     # PG soft-deleted the edge; the graph still shows it (mirror never ran).
     assert str(rel.id) not in await _live_pg_relationship_ids(kb, ns_row_id)
