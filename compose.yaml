@@ -21,6 +21,7 @@
 #   PostgreSQL:     5434  (not 5432/5433)
 #   Neo4j HTTP:     7475  (not 7474)
 #   Neo4j Bolt:     7688  (not 7687)
+#   Memgraph Bolt:  7689  (not 7687/7688 — opt-in `memgraph` profile)
 #   Weaviate HTTP:  8090  (not 8080 — too commonly taken)
 #   Weaviate gRPC: 50061  (not 50051)
 #
@@ -77,6 +78,38 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
+    networks:
+      - khora-network
+
+  # ============================================================================
+  # Memgraph Graph Database (opt-in via `memgraph` profile)
+  # ============================================================================
+  # Bolt-compatible in-memory graph DB. No APOC, no versioning primitives - the
+  # dream graph mirror is flat soft-delete only (#1278). Opt-in so it does not
+  # autostart with the default `docker compose up -d`; start it with
+  # `docker compose up -d memgraph` or `--profile memgraph up -d`.
+  memgraph:
+    image: memgraph/memgraph:3.11.0
+    container_name: khora-memgraph
+    profiles:
+      - memgraph
+    command: ["--bolt-port=7687", "--log-level=WARNING"]
+    ports:
+      # 7689 on the host to avoid colliding with Neo4j's 7688 (compose) / 7687.
+      - "${MEMGRAPH_BOLT_PORT:-7689}:7687"
+    # No persistent volume: Memgraph is in-memory and this is a dev/test side-car.
+    # A named volume gets created root-owned, and the 3.x image (runs as user
+    # `memgraph`) refuses to start when /var/lib/memgraph is owned by another
+    # user, so an ephemeral data dir is both simpler and crash-free.
+    healthcheck:
+      # Memgraph ships no curl/wget and /bin/sh is dash (no /dev/tcp), so probe
+      # Bolt with the bundled mgconsole client instead.
+      test: ["CMD-SHELL", "echo 'RETURN 1;' | mgconsole --host 127.0.0.1 --port 7687 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
     restart: unless-stopped
     networks:
       - khora-network

@@ -18,6 +18,7 @@ from pydantic import SecretStr
 
 from khora.config.schema import MemgraphConfig
 from khora.core.models import Entity, Episode, Relationship
+from khora.dream.plan import OpKind
 from khora.storage.backends.memgraph import MemgraphBackend
 
 # the IDOR family/223: read-side methods now require a kwarg-only ``namespace_id`` so
@@ -468,13 +469,16 @@ async def test_delete_entity_returns_false_when_no_record() -> None:
 
 
 @pytest.mark.unit
-async def test_list_entities_no_filter_builds_query_without_where() -> None:
+async def test_list_entities_no_filter_applies_live_filter() -> None:
     session = _make_session_with_records(records=[])
     b = _connected_backend(session)
     out = await b.list_entities(uuid4(), limit=5, offset=2)
     assert out == []
     cypher = session.run.await_args.args[0]
-    assert "WHERE" not in cypher  # entity_type=None → no filter
+    # #1278: the dream soft-delete live filter is applied unconditionally so a
+    # retired node is hidden in lockstep with the PG read path.
+    assert "e.valid_until IS NULL OR e.valid_until > $now" in cypher
+    assert "e.entity_type" not in cypher  # entity_type=None → only the live filter
     assert "SKIP" in cypher
 
 
@@ -486,7 +490,9 @@ async def test_list_entities_with_entity_type_filter() -> None:
     out = await b.list_entities(uuid4(), entity_type="PERSON")
     assert len(out) == 1
     cypher = session.run.await_args.args[0]
-    assert "WHERE e.entity_type" in cypher
+    # The entity_type predicate is ANDed onto the unconditional live filter (#1278).
+    assert "e.entity_type = $entity_type" in cypher
+    assert "e.valid_until IS NULL OR e.valid_until > $now" in cypher
 
 
 @pytest.mark.unit
@@ -1072,3 +1078,133 @@ class TestMemgraphListRelationshipsScoping:
         await b.list_relationships(_NS, relationship_type="KNOWS")
         query = session.run.await_args.args[0]
         assert ":KNOWS]" in query
+
+    @pytest.mark.asyncio
+    async def test_list_relationships_applies_live_filter(self) -> None:
+        """#1278: the soft-delete live filter is applied unconditionally on read."""
+        session = _make_session_with_records(records=[])
+        b = _connected_backend(session)
+        await b.list_relationships(_NS)
+        query = session.run.await_args.args[0]
+        assert "r.valid_until IS NULL OR r.valid_until > $now" in query
+        assert session.run.await_args.kwargs["now"]  # an ISO timestamp is bound
+
+
+# ---------------------------------------------------------------------------
+# Dream flat soft-delete mirror verbs (#1278)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestDreamFlatMirror:
+    def test_supports_dream_mirror_advertises_flat_kinds(self) -> None:
+        b = MemgraphBackend("bolt://h:7687")
+        supported = b.supports_dream_mirror()
+        assert supported == frozenset(
+            {
+                OpKind.VECTORCYPHER_PRUNE_EDGES,
+                OpKind.VECTORCYPHER_DEDUPE_ENTITIES,
+                OpKind.VECTORCYPHER_NORMALIZE_SCHEMA,
+            }
+        )
+        # Community materialization is the GraphRAG payoff, NOT advertised here.
+        assert OpKind.VECTORCYPHER_COMMUNITY_SUMMARY not in supported
+
+    @pytest.mark.asyncio
+    async def test_soft_invalidate_relationships_empty_is_noop(self) -> None:
+        session = _make_session_with_records()
+        b = _connected_backend(session)
+        assert await b.soft_invalidate_relationships_batch([], namespace_id=_NS, invalidated_at=datetime.now(UTC)) == 0
+        session.run.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_soft_invalidate_relationships_stamps_valid_until(self) -> None:
+        session = _make_session_with_records(single={"invalidated": 2})
+        b = _connected_backend(session)
+        ts = datetime.now(UTC)
+        n = await b.soft_invalidate_relationships_batch([uuid4(), uuid4()], namespace_id=_NS, invalidated_at=ts)
+        assert n == 2
+        cypher = session.run.await_args.args[0]
+        assert "rel.valid_until IS NULL" in cypher  # idempotent guard
+        assert "SET rel.valid_until = $invalidated_at" in cypher
+        assert session.run.await_args.kwargs["invalidated_at"] == ts.isoformat()
+
+    @pytest.mark.asyncio
+    async def test_soft_retire_entities_is_flat_no_entity_version(self) -> None:
+        session = _make_session_with_records(single={"retired": 1})
+        b = _connected_backend(session)
+        n = await b.soft_retire_entities_batch([uuid4()], namespace_id=_NS, retired_at=datetime.now(UTC))
+        assert n == 1
+        cypher = session.run.await_args.args[0]
+        # Flat soft-delete: SET valid_until by id, NO :EntityVersion snapshot.
+        assert "SET current.valid_until = $retired_at" in cypher
+        assert "current.valid_until IS NULL" in cypher  # idempotent guard
+        assert "EntityVersion" not in cypher
+        assert "SUPERSEDES" not in cypher
+
+    @pytest.mark.asyncio
+    async def test_rewrite_endpoints_groups_by_sanitized_label(self) -> None:
+        session = _make_session_with_records(single={"rewritten": 1})
+        b = _connected_backend(session)
+        n = await b.rewrite_relationship_endpoints_batch(
+            [
+                {
+                    "relationship_id": str(uuid4()),
+                    "source_entity_id": str(uuid4()),
+                    "target_entity_id": str(uuid4()),
+                    "relationship_type": "SUPPLIES",
+                }
+            ],
+            namespace_id=_NS,
+            rewritten_at=datetime.now(UTC),
+        )
+        assert n == 1
+        cypher = session.run.await_args.args[0]
+        # Re-create + delete with a static, sanitized label; Memgraph has no
+        # elementId() so the same-endpoint guard compares the id property.
+        assert "CREATE (newSrc)-[newRel:SUPPLIES]->(newTgt)" in cypher
+        assert "DELETE rel" in cypher
+        assert "elementId" not in cypher
+        assert "oldSrc.id <> newSrc.id OR oldTgt.id <> newTgt.id" in cypher
+
+    @pytest.mark.asyncio
+    async def test_rename_types_skips_identity_rename(self) -> None:
+        session = _make_session_with_records(single={"renamed": 0})
+        b = _connected_backend(session)
+        # old == new (after sanitize) is a no-op: no Cypher issued.
+        n = await b.rename_types_batch([{"old_type": "KNOWS", "new_type": "KNOWS"}], namespace_id=_NS)
+        assert n == 0
+        session.run.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rename_types_relabels_via_recreate_delete(self) -> None:
+        session = _make_session_with_records(single={"renamed": 3})
+        b = _connected_backend(session)
+        n = await b.rename_types_batch([{"old_type": "WORKS_AT", "new_type": "EMPLOYED_BY"}], namespace_id=_NS)
+        assert n == 3
+        cypher = session.run.await_args.args[0]
+        assert "[rel:WORKS_AT" in cypher
+        assert "CREATE (s)-[newRel:EMPLOYED_BY]->(t)" in cypher
+        assert "DELETE rel" in cypher
+
+    @pytest.mark.asyncio
+    async def test_restore_entities_flat_clears_valid_until(self) -> None:
+        session = _make_session_with_records(single={"restored": 1})
+        b = _connected_backend(session)
+        n = await b.restore_entities_batch([uuid4()], namespace_id=_NS)
+        assert n == 1
+        cypher = session.run.await_args.args[0]
+        # Flat restore: clear valid_until, no :EntityVersion snapshot to delete.
+        assert "SET current.valid_until = NULL" in cypher
+        assert "EntityVersion" not in cypher
+        assert "DETACH DELETE" not in cypher
+
+    @pytest.mark.asyncio
+    async def test_restore_relationships_clears_valid_until(self) -> None:
+        session = _make_session_with_records(single={"restored": 1})
+        b = _connected_backend(session)
+        n = await b.restore_relationships_batch([uuid4()], namespace_id=_NS)
+        assert n == 1
+        cypher = session.run.await_args.args[0]
+        assert "SET rel.valid_until = NULL" in cypher
+        assert "rel.valid_until IS NOT NULL" in cypher  # idempotent guard
