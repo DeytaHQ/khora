@@ -38,6 +38,7 @@ from khora.core.models import (
     Relationship,
 )
 from khora.core.models.recall import (
+    CommunityNode,
     DocumentProjection,
     RecallChunk,
     RecallEntity,
@@ -85,6 +86,31 @@ _VC_ABSTENTION_COMBINED_SCORE_HISTOGRAM = metric_histogram(
     unit="1",
     description="VectorCypher abstention combined-score (0.0=confident, 1.0=should-abstain).",
 )
+
+# Community-projection degradation counter (ADR-001, #1308). After the result
+# entities are assembled we fetch the dream communities they belong to via
+# get_entity_communities (the GraphRAG query-time payoff, #1276). A reader
+# failure must not abort recall: the catch site records a Degradation, bumps
+# this counter, and returns no communities. The same event is also appended to
+# RecallResult.engine_info['degradations']. NO namespace_id label - cardinality
+# rule.
+_VC_COMMUNITY_PROJECTION_DEGRADED_COUNTER = metric_counter(
+    "khora.vectorcypher.community_projection.degraded_total",
+    unit="1",
+    description=(
+        "VectorCypher community-projection fallback - incremented when the "
+        "get_entity_communities reader raises while projecting dream "
+        "communities onto a recall result, so recall continues with no "
+        "community context. Labels: reason (fetch_failed). NO namespace_id "
+        "label - cardinality rule."
+    ),
+)
+
+# Max communities surfaced on a single RecallResult. Communities are a
+# coarse-grained, summary-level payload; a recall hit touching many entities can
+# span more communities than a caller wants to render, so we cap and keep the
+# shallowest (most specific) first.
+_VC_MAX_COMMUNITIES = 10
 
 # Chunk graph-mirror degradation counter (ADR-001). The create path mirrors
 # pgvector-stored chunks into Neo4j Chunk nodes; a Neo4j write failure must not
@@ -2350,6 +2376,19 @@ class VectorCypherEngine:
 
         filter_channel_plans = result.metadata.pop("_filter_channel_plans", {})
 
+        # Project materialized dream communities (#1276) onto the result (#1308):
+        # the GraphRAG query-time payoff. Backend-capability-gated and zero-cost
+        # when no entities matched, no communities are materialized, or the
+        # backend lacks the reader (the coordinator returns [] without a DB
+        # round-trip on backends inheriting the no-op default). A reader failure
+        # degrades to no communities + a Degradation on engine_info, never
+        # aborting recall (ADR-001).
+        communities = await self._project_communities(
+            recall_entities,
+            namespace_id=namespace_id,
+            degradations=result.metadata.setdefault("degradations", []),
+        )
+
         return RecallResult(
             query=query,
             namespace_id=namespace_id,
@@ -2357,6 +2396,7 @@ class VectorCypherEngine:
             chunks=recall_chunks,
             entities=recall_entities,
             relationships=recall_relationships,
+            communities=communities,
             engine_info={
                 "engine": "vectorcypher",
                 "mode": mode.name.lower(),
@@ -2385,6 +2425,56 @@ class VectorCypherEngine:
                 **result.metadata,
             },
         )
+
+    async def _project_communities(
+        self,
+        recall_entities: list[RecallEntity],
+        *,
+        namespace_id: UUID,
+        degradations: list[Degradation],
+    ) -> list[CommunityNode]:
+        """Project materialized dream communities onto a recall result (#1308).
+
+        Given the result's matched entities, fetch the :Community summaries they
+        belong to via the backend-capability-gated ``get_entity_communities``
+        reader (#1276), deduplicate by community id, and cap to
+        ``_VC_MAX_COMMUNITIES`` (shallowest summary_depth first, then by id for a
+        stable order). Zero-cost when no entities matched: the reader is not
+        called. Zero added DB cost on a backend without the reader: the
+        coordinator returns ``[]`` without a round-trip. A reader failure
+        degrades to no communities + a structured ``Degradation`` (ADR-001),
+        never aborting recall.
+        """
+        if not recall_entities:
+            return []
+
+        entity_ids = [e.id for e in recall_entities]
+        try:
+            communities = await self._get_storage().get_entity_communities(entity_ids, namespace_id=namespace_id)
+        except Exception as exc:  # noqa: BLE001 - degrade, never abort recall (ADR-001)
+            _VC_COMMUNITY_PROJECTION_DEGRADED_COUNTER.add(1, attributes={"reason": "fetch_failed"})
+            logger.warning(
+                "VectorCypher community projection failed; recall continues without community context",
+                exc_info=True,
+            )
+            degradations.append(
+                Degradation(
+                    component="vectorcypher.community_projection",
+                    reason="fetch_failed",
+                    detail=None,
+                    exception=repr(exc),
+                )
+            )
+            return []
+
+        if not communities:
+            return []
+
+        deduped: dict[UUID, CommunityNode] = {}
+        for community in communities:
+            deduped.setdefault(community.id, community)
+        ordered = sorted(deduped.values(), key=lambda c: (c.summary_depth, str(c.id)))
+        return ordered[:_VC_MAX_COMMUNITIES]
 
     async def forget(self, document_id: UUID, namespace_id: UUID | None) -> bool:
         """Remove a memory from the engine."""
