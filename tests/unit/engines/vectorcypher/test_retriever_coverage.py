@@ -35,6 +35,7 @@ from khora.engines.vectorcypher.temporal_detection import (
     TemporalCategory,
     TemporalSignal,
 )
+from tests.test_helpers.diagnostics import assert_no_silent_degradation
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1555,6 +1556,83 @@ class TestRecencyChannelEnabledFlow:
         retriever._recency_channel_chunks.assert_awaited_once()
         # At least one chunk surfaced
         assert result is not None
+
+    async def _run_with_channel_on_floor_off(self, query: str) -> tuple[AsyncMock, Any]:
+        """Drive ``_vectorcypher_retrieve`` with the recency CHANNEL on and the
+        recency FLOOR off, returning the (spied) ``_recency_channel_chunks`` mock
+        and the ``VectorCypherResult``.
+
+        GitHub issue #1227: channel-on / floor-off is a reachable combo of two
+        independent user settings. The counterfactual veto must depend on the
+        CHANNEL flag (or be flag-independent), not on the unrelated FLOOR flag.
+        """
+        ns = uuid4()
+        e_id = uuid4()
+        storage = MagicMock()
+        storage.search_similar_entities = AsyncMock(return_value=[(e_id, 0.9)])
+        storage.get_entities_batch = AsyncMock(return_value={e_id: Entity(id=e_id, name="A", entity_type="P")})
+        storage.graph = MagicMock()
+
+        retriever = _make_retriever(
+            storage=storage,
+            config=RetrieverConfig(
+                enable_session_aware_search=False,
+                temporal_recency_channel_enabled=True,
+                temporal_recency_floor_enabled=False,  # floor OFF — the bug trigger
+            ),
+        )
+
+        retriever._dual_nodes.get_entity_neighborhoods = AsyncMock(return_value={})
+        retriever._dual_nodes.get_chunks_by_entities = AsyncMock(return_value=[])
+        retriever._dual_nodes.get_relationships_between = AsyncMock(return_value=[])
+        retriever._vector_store.search = AsyncMock(return_value=[])
+
+        recent_chunk = _make_chunk("recent")
+        retriever._recency_channel_chunks = AsyncMock(  # type: ignore[method-assign]
+            return_value=[(recent_chunk.id, 0.95, recent_chunk)]
+        )
+
+        routing = RoutingDecision(
+            complexity=QueryComplexity.COMPLEX, use_graph=True, graph_depth=1, confidence=0.9, reasoning=""
+        )
+        from khora.engines.vectorcypher.temporal_detection import RETRIEVAL_PARAMS
+
+        signal = TemporalSignal(
+            is_temporal=True, category=TemporalCategory.RECENCY, confidence=0.9, source="dictionary"
+        )
+        result = await retriever._vectorcypher_retrieve(
+            query=query,
+            query_embedding=[0.1] * 4,
+            namespace_id=ns,
+            temporal_filter=None,
+            graph_depth=1,
+            limit=10,
+            routing=routing,
+            temporal_params=RETRIEVAL_PARAMS[TemporalCategory.RECENCY],
+            temporal_signal=signal,
+        )
+        return retriever._recency_channel_chunks, result
+
+    @pytest.mark.asyncio
+    async def test_counterfactual_query_skips_channel_with_floor_off(self) -> None:
+        """GitHub issue #1227: a counterfactual / anti-recency RECENCY query
+        ("... ever ...") must NOT fire the recency channel when the channel is
+        on and the floor is off. The veto is dead pre-fix because it was gated
+        on ``temporal_recency_floor_enabled``."""
+        spy, result = await self._run_with_channel_on_floor_off(
+            "what would revenue have been if we had ever launched in EU",
+        )
+        assert_no_silent_degradation(result)
+        spy.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_legit_recency_query_still_fires_channel_with_floor_off(self) -> None:
+        """No-regression guard for the #1227 fix: a legitimate RECENCY query
+        (no anti-recency token) must STILL fire the channel with channel-on /
+        floor-off — the configuration the integration test relies on."""
+        spy, result = await self._run_with_channel_on_floor_off("what's the latest status")
+        assert_no_silent_degradation(result)
+        spy.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

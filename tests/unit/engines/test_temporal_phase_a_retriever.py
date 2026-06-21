@@ -119,6 +119,37 @@ class TestRecencyReferenceMode:
         scores = retriever._calculate_recency_scores(results, decay_days_override=7)
         assert scores[results[0].item_id] == pytest.approx(1.0, abs=1e-6)
 
+    def test_future_dated_chunk_capped_at_one_wall_clock_exponential(self) -> None:
+        """GitHub issue #1230: a future-dated chunk in wall-clock mode must not
+        get a recency factor > 1.0. days_old goes negative for a future ts, so
+        ``exp(-lambda * days_old) > 1.0`` without a clamp — inflating the boost."""
+        retriever = self._retriever(wall_clock=True)
+        future = datetime.now(UTC) + timedelta(days=30)
+        results = [_fused(_chunk(future))]
+
+        scores = retriever._calculate_recency_scores(results, decay_days_override=7)
+
+        # A future-dated chunk is treated as maximally recent (factor 1.0) —
+        # not above 1.0 (the bug) and not under-scored either.
+        assert scores[results[0].item_id] == pytest.approx(1.0, abs=1e-6), f"Got {scores}"
+
+    def test_future_dated_chunk_capped_at_one_wall_clock_linear(self) -> None:
+        """Same #1230 invariant on the linear decay path. ``1 - days_old/decay``
+        also exceeds 1.0 when days_old is negative."""
+        cfg = RetrieverConfig(temporal_reference_wall_clock=True, recency_decay_type="linear")
+        retriever = VectorCypherRetriever(
+            vector_store=AsyncMock(),
+            neo4j_driver=AsyncMock(),
+            embedder=AsyncMock(),
+            config=cfg,
+        )
+        future = datetime.now(UTC) + timedelta(days=30)
+        results = [_fused(_chunk(future))]
+
+        scores = retriever._calculate_recency_scores(results, decay_days_override=7)
+
+        assert scores[results[0].item_id] == pytest.approx(1.0, abs=1e-6), f"Got {scores}"
+
 
 # ─────────────────────────── A4: per-source decay ───────────────────────────
 
