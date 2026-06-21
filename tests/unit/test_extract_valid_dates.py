@@ -123,6 +123,85 @@ class TestEntityTemporal:
 
 
 @pytest.mark.unit
+class TestEntityMergeTemporal:
+    """The dedup-merge branch must not clobber real-world ``valid_from`` (#1225).
+
+    The create branch resolves ``valid_from`` same-axis (LLM temporal ->
+    ``chunk.source_timestamp`` floor -> None). When the SAME entity is seen
+    again (a later chunk / re-ingested doc), the merge branch used to lower
+    ``existing.valid_from`` toward ``chunk.created_at`` - a khora-ops
+    (ingest-time) value - silently replacing a future-dated real-world fact
+    with "now". These tests pin the merge branch to the same real-world axis.
+    """
+
+    @pytest.mark.asyncio
+    async def test_merge_preserves_real_world_valid_from(self) -> None:
+        """Re-mentioning an entity keeps the LLM real-world date, not created_at."""
+        extracted = ExtractedEntity(
+            name="Project Helios",
+            entity_type="PROJECT",
+            confidence=0.95,
+            temporal=TemporalInfo(valid_from="2030-01-01"),
+        )
+        result = ExtractionResult(entities=[extracted], relationships=[], events=[])
+        # Two chunks both mention the same entity; the merge fires on the 2nd.
+        # Neither chunk carries a source_timestamp, so the only competing value
+        # is the ingest clock (chunk.created_at == "now"), which is < 2030.
+        chunks = [_chunk("Project Helios launches in 2030."), _chunk("Helios is on schedule.")]
+
+        entities, _ = await extract_entities(
+            chunks,
+            shared_extractor=_StubExtractor(result),
+            entity_types=["PROJECT"],
+            relationship_types=[],
+            selective_extraction=False,
+        )
+
+        assert len(entities) == 1, f"expected 1 merged entity, got {len(entities)}"
+        e = entities[0]
+        assert e.valid_from == datetime(2030, 1, 1, tzinfo=UTC)
+        # Must NOT have been lowered toward the ingest clock.
+        assert e.valid_from != chunks[1].created_at
+
+    @pytest.mark.asyncio
+    async def test_merge_lowers_to_earlier_real_world_date(self) -> None:
+        """A later mention with an earlier real-world date lowers valid_from."""
+        early = ExtractedEntity(
+            name="Acme",
+            entity_type="ORGANIZATION",
+            confidence=0.95,
+            temporal=TemporalInfo(valid_from="2018-01-01"),
+        )
+        late = ExtractedEntity(
+            name="Acme",
+            entity_type="ORGANIZATION",
+            confidence=0.95,
+            temporal=TemporalInfo(valid_from="2020-01-01"),
+        )
+        r_late = ExtractionResult(entities=[late], relationships=[], events=[])
+        r_early = ExtractionResult(entities=[early], relationships=[], events=[])
+
+        class _SeqExtractor:
+            def __init__(self, results: list[ExtractionResult]) -> None:
+                self.results = results
+
+            async def extract_multi(self, texts: list[str], **_kw: Any) -> list[ExtractionResult]:
+                return list(self.results)
+
+        # First chunk -> 2020, second chunk -> 2018; merge should pick 2018.
+        entities, _ = await extract_entities(
+            [_chunk("Acme in 2020."), _chunk("Acme since 2018.")],
+            shared_extractor=_SeqExtractor([r_late, r_early]),
+            entity_types=["ORGANIZATION"],
+            relationship_types=[],
+            selective_extraction=False,
+        )
+
+        assert len(entities) == 1
+        assert entities[0].valid_from == datetime(2018, 1, 1, tzinfo=UTC)
+
+
+@pytest.mark.unit
 class TestEventOccurredAt:
     """``ExtractedEvent.occurred_at`` must reach the EVENT ``Entity.valid_from``."""
 

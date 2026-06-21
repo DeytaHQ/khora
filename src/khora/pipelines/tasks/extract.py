@@ -271,9 +271,18 @@ async def extract_entities(
                     existing.source_document_ids.append(chunk.document_id)
                 if chunk.id not in existing.source_chunk_ids:
                     existing.source_chunk_ids.append(chunk.id)
-                # Update valid_from to earliest timestamp
-                if existing.valid_from and chunk.created_at < existing.valid_from:
-                    existing.valid_from = chunk.created_at
+                # Lower valid_from to the earliest real-world date (#1225).
+                # Resolve the candidate from the same-axis signals the
+                # create branch uses (LLM temporal, then the
+                # chunk.source_timestamp floor), never chunk.created_at - a
+                # khora-ops value that would replace a real-world date with
+                # ingest time.
+                merge_temporal = extracted.temporal
+                merge_valid_from = _parse_valid_date(merge_temporal.valid_from) if merge_temporal else None
+                if merge_valid_from is None:
+                    merge_valid_from = chunk.source_timestamp
+                if existing.valid_from and merge_valid_from is not None and merge_valid_from < existing.valid_from:
+                    existing.valid_from = merge_valid_from
             else:
                 # Create new entity — preserve original type string from LLM
                 entity_type = extracted.entity_type or "CONCEPT"
