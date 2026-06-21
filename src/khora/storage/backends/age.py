@@ -19,6 +19,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from khora.core.models.entity import Entity, Episode, Relationship
+from khora.dream.plan import OpKind
 from khora.telemetry import trace
 
 from .mixins import GraphBackendBase, deserialize_dict, sanitize_cypher_label, serialize_dict
@@ -1053,3 +1054,134 @@ class AGEBackend(GraphBackendBase):
                     if entity is not None:
                         entities.append(entity)
                 return entities
+
+    # ------------------------------------------------------------------
+    # Dream bi-temporal mirror verbs (#1279) — soft-delete-ONLY subset
+    # ------------------------------------------------------------------
+    # AGE lacks entity-versioning primitives (no :EntityVersion snapshot, no
+    # in-place endpoint rewrite), so it mirrors ONLY the flat ``valid_until``
+    # SET-by-id used by ``prune_edges``. ``dedupe_entities`` (entity-version
+    # snapshot + endpoint rewrite) and ``normalize_schema`` (relabel) are NOT
+    # advertised: the orchestrator records a structured
+    # ``graph_mirror_unsupported_op_kind`` skip for those op kinds BEFORE any
+    # PG-committed verb runs, so the unsupported ops degrade to a clean
+    # pre-commit skip rather than a post-commit partial failure (ADR-001). The
+    # version/relabel verbs keep the ``GraphBackendBase`` default, which raises
+    # ``DreamBackendUnsupported``.
+    #
+    # AGE commits each ``cypher()`` write out-of-band (it cannot join the dream
+    # orchestrator transaction even though it lives in Postgres). The mirror
+    # runs OUTSIDE the apply transaction by design (eventual consistency,
+    # reconciler-backed), so this is the expected execution model. The whole
+    # id batch is wrapped in a SINGLE ``session.begin()`` so it is one
+    # auto-commit unit: a mid-batch failure rolls the whole batch back and the
+    # reconciler retries it cleanly. An AGE-atomic SAME-transaction mirror
+    # (folding the graph SET into the orchestrator's PG commit) is a possible
+    # FUTURE follow-up since AGE lives in Postgres — out of scope for #1279.
+    #
+    # Convergence is verified by id-set / live-set (``valid_until IS NULL``),
+    # NEVER by edge counts: ``count_relationships`` raises NotImplementedError
+    # on this backend.
+
+    def supports_dream_mirror(self) -> frozenset[OpKind]:
+        """AGE mirrors only the flat-soft-delete ``prune_edges`` op (#1279).
+
+        - ``VECTORCYPHER_PRUNE_EDGES`` -> :meth:`soft_invalidate_relationships_batch`
+
+        Entity-version (``dedupe_entities``) and relabel (``normalize_schema``)
+        are deliberately absent: AGE has no versioning primitive, so those op
+        kinds are recorded as a structured skip by the orchestrator.
+        """
+        return frozenset({OpKind.VECTORCYPHER_PRUNE_EDGES})
+
+    @trace("khora.age.soft_invalidate_relationships_batch")
+    async def soft_invalidate_relationships_batch(
+        self,
+        relationship_ids: list[UUID],
+        *,
+        namespace_id: UUID,
+        invalidated_at: datetime,
+    ) -> int:
+        """Soft-delete edges by stamping ``valid_until`` (flat SET by id, #1279).
+
+        Mirrors ``prune_edges``. Matched by relationship id within
+        ``namespace_id`` (IDOR family); idempotent — only edges with a null
+        ``valid_until`` are touched, so a reconciler replay is a no-op. Never
+        deletes. ``valid_until`` is stored as an ISO string literal to match the
+        shape :meth:`create_relationship` writes. The whole batch is one
+        ``session.begin()`` auto-commit unit so a partial batch retries cleanly.
+
+        AGE rejects ``$param`` placeholders, so ids / namespace / timestamp are
+        interpolated through :meth:`_uuid_lit` (UUID validation — the IDOR /
+        injection boundary) and :meth:`_escape`.
+
+        Returns the number of edges actually invalidated (an id-set / live-set
+        count, NOT a total edge count — AGE cannot count edges).
+        """
+        if not relationship_ids:
+            return 0
+        ns_lit_val = self._uuid_lit(namespace_id)
+        ts_lit = self._escape(invalidated_at.isoformat())
+
+        count = 0
+        async with self._get_session_factory()() as session:
+            async with session.begin():
+                await session.execute(text('SET search_path = ag_catalog, "$user", public'))
+                for rid in relationship_ids:
+                    rid_lit = self._uuid_lit(rid)
+                    cypher = f"""
+                        MATCH ()-[r]-()
+                        WHERE r.id = '{rid_lit}'
+                          AND r.namespace_id = '{ns_lit_val}'
+                          AND r.valid_until IS NULL
+                        SET r.valid_until = '{ts_lit}',
+                            r.updated_at = '{ts_lit}'
+                        RETURN count(r) AS invalidated
+                    """
+                    rows = await self._cypher(session, cypher, columns=["invalidated agtype"])
+                    if rows:
+                        count += rows[0].get("invalidated") or 0
+        logger.debug(f"Dream-invalidated {count} relationships in namespace {namespace_id}")
+        return count
+
+    @trace("khora.age.restore_relationships_batch")
+    async def restore_relationships_batch(
+        self,
+        relationship_ids: list[UUID],
+        *,
+        namespace_id: UUID,
+    ) -> int:
+        """Un-invalidate edges by clearing ``valid_until`` (reverse of prune, #1279).
+
+        Reverses :meth:`soft_invalidate_relationships_batch` so ``dream_undo``
+        restores PG and the graph to identical pre-apply live sets. Matched by
+        relationship id within ``namespace_id`` (IDOR family); idempotent — only
+        edges with a non-null ``valid_until`` transition, so a replay reports
+        zero. The dedupe-only reverse verbs keep the raising default. One
+        ``session.begin()`` auto-commit unit for the whole batch.
+
+        Returns the number of edges actually restored.
+        """
+        if not relationship_ids:
+            return 0
+        ns_lit_val = self._uuid_lit(namespace_id)
+
+        count = 0
+        async with self._get_session_factory()() as session:
+            async with session.begin():
+                await session.execute(text('SET search_path = ag_catalog, "$user", public'))
+                for rid in relationship_ids:
+                    rid_lit = self._uuid_lit(rid)
+                    cypher = f"""
+                        MATCH ()-[r]-()
+                        WHERE r.id = '{rid_lit}'
+                          AND r.namespace_id = '{ns_lit_val}'
+                          AND r.valid_until IS NOT NULL
+                        SET r.valid_until = null
+                        RETURN count(r) AS restored
+                    """
+                    rows = await self._cypher(session, cypher, columns=["restored agtype"])
+                    if rows:
+                        count += rows[0].get("restored") or 0
+        logger.debug(f"Dream-restored {count} relationships in namespace {namespace_id}")
+        return count
