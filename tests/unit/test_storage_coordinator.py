@@ -500,10 +500,10 @@ class TestRelationshipOps:
 
     @pytest.mark.asyncio
     async def test_create_relationships_batch_empty(self) -> None:
-        """Empty relationships list returns 0."""
+        """Empty relationships list returns an empty result list (#1320)."""
         coord = StorageCoordinator()
-        count = await coord.create_relationships_batch([])
-        assert count == 0
+        results = await coord.create_relationships_batch([])
+        assert results == []
 
     @pytest.mark.asyncio
     async def test_get_entity_relationships(self) -> None:
@@ -823,7 +823,9 @@ class TestReplaceDocumentExtraction:
         graph_backend.remap_source_document_ids_batch = AsyncMock(return_value=None)
         # upsert_entities_batch returns (entity, is_new) tuples
         graph_backend.upsert_entities_batch = AsyncMock(return_value=[(new_entity_net_new, True)])
-        graph_backend.create_relationships_batch = AsyncMock(return_value=1)
+        # #1320: returns (relationship, is_new) per persisted edge; the
+        # coordinator counts via len(). Echo the net-new rel it is handed.
+        graph_backend.create_relationships_batch = AsyncMock(side_effect=lambda rels, **kw: [(r, True) for r in rels])
 
         coord, session = _make_coordinator_with_fake_txn(
             relational=rel_backend, vector=vec_backend, graph=graph_backend

@@ -27,7 +27,7 @@ def _make_storage_mock() -> MagicMock:
     storage.create_chunks_batch = AsyncMock()
     storage.upsert_entities_batch = AsyncMock(return_value=[])
     storage.update_entity_embeddings_batch = AsyncMock()
-    storage.create_relationships_batch = AsyncMock(return_value=0)
+    storage.create_relationships_batch = AsyncMock(return_value=[])
     storage.list_entities = AsyncMock(return_value=[])
     storage.list_relationships = AsyncMock(return_value=[])
     return storage

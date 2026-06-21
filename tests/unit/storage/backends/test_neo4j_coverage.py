@@ -1104,7 +1104,14 @@ class TestCreateRelationshipsBatchTruncationWiring:
             relationship_type="KNOWS",
         )
 
-        record = {"created": 1, "doc_dropped": 15, "chunk_dropped": 30, "doc_rows": 1, "chunk_rows": 1}
+        record = {
+            "created": 1,
+            "doc_dropped": 15,
+            "chunk_dropped": 30,
+            "doc_rows": 1,
+            "chunk_rows": 1,
+            "edge_rows": [{"input_id": str(rel.id), "stored_id": str(rel.id), "is_new": True}],
+        }
 
         result = MagicMock()
         result.single = AsyncMock(return_value=record)
@@ -1124,7 +1131,8 @@ class TestCreateRelationshipsBatchTruncationWiring:
         b._source_id_truncated_counter = MagicMock()
 
         out = await b.create_relationships_batch([rel])
-        assert out == 1
+        # #1320: returns (relationship, is_new) per persisted edge.
+        assert out == [(rel, True)]
         # Both fields fired with matching label sets.
         b._source_id_truncated_counter.add.assert_any_call(
             15, attributes={"field": "source_document_ids", "kind": "batch"}
@@ -1143,7 +1151,14 @@ class TestCreateRelationshipsBatchTruncationWiring:
             relationship_type="KNOWS",
         )
 
-        record = {"created": 1, "doc_dropped": 0, "chunk_dropped": 0, "doc_rows": 0, "chunk_rows": 0}
+        record = {
+            "created": 1,
+            "doc_dropped": 0,
+            "chunk_dropped": 0,
+            "doc_rows": 0,
+            "chunk_rows": 0,
+            "edge_rows": [{"input_id": str(rel.id), "stored_id": str(rel.id), "is_new": True}],
+        }
         result = MagicMock()
         result.single = AsyncMock(return_value=record)
 
@@ -1172,7 +1187,14 @@ class TestCreateRelationshipsBatchTruncationWiring:
             relationship_type="KNOWS",
         )
 
-        record = {"created": 1, "doc_dropped": 0, "chunk_dropped": 0, "doc_rows": 0, "chunk_rows": 0}
+        record = {
+            "created": 1,
+            "doc_dropped": 0,
+            "chunk_dropped": 0,
+            "doc_rows": 0,
+            "chunk_rows": 0,
+            "edge_rows": [{"input_id": str(rel.id), "stored_id": str(rel.id), "is_new": True}],
+        }
         result = MagicMock()
         result.single = AsyncMock(return_value=record)
 

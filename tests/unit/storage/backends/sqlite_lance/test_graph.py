@@ -382,8 +382,11 @@ class TestRelationships:
         await adapter.create_entity(b)
 
         rels = [_make_relationship(ns, a.id, b.id) for _ in range(50)]
-        created = await adapter.create_relationships_batch(rels)
-        assert created == 50
+        results = await adapter.create_relationships_batch(rels)
+        # #1320: returns (relationship, is_new) per row; all genuinely new here.
+        assert len(results) == 50
+        assert all(is_new for _, is_new in results)
+        assert {r.id for r, _ in results} == {r.id for r in rels}
         assert await adapter.count_relationships(ns) == 50
 
     async def test_relationship_type_is_sanitized(self, adapter: SQLiteLanceGraphAdapter):
@@ -434,14 +437,16 @@ class TestRelationships:
         await adapter.create_entity(b)
 
         rel = _make_relationship(ns, a.id, b.id, rel_type="STUDIES")
-        await adapter.create_relationships_batch([rel])
+        first = await adapter.create_relationships_batch([rel])
+        assert first == [(rel, True)]
         assert await adapter.count_relationships(ns) == 1
 
         expired = datetime.now(UTC) - timedelta(days=1)
         rel.valid_until = expired
         # Re-save the same id — pre-fix this raised IntegrityError (UNIQUE).
-        count = await adapter.create_relationships_batch([rel])
-        assert count == 1
+        results = await adapter.create_relationships_batch([rel])
+        # #1320: the id already existed, so this is a merge (is_new=False).
+        assert results == [(rel, False)]
         # No duplicate row inserted.
         assert await adapter.count_relationships(ns) == 1
 

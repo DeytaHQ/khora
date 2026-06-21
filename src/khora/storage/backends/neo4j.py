@@ -2226,16 +2226,24 @@ RETURN count(r) AS updated
         relationships: list[Relationship],
         *,
         batch_size: int = 200,
-    ) -> int:
+    ) -> list[tuple[Relationship, bool]]:
         """Batch create relationships using UNWIND with sequential type processing.
 
         Relationships (including inverse/bidirectional) are grouped by type
         and each type group is processed sequentially in sorted order to
         ensure deterministic lock ordering and prevent Neo4j deadlocks.
         Uses MERGE to prevent duplicate edges (matched on source/target + namespace).
+
+        Returns one ``(relationship, is_new)`` tuple per persisted caller-supplied
+        edge (#1320). The ``OPTIONAL MATCH`` of the pre-MERGE edge gives an
+        *exact* created/merged split (``pre_r IS NULL`` => created); each input
+        ``rel.id`` is synced in place to the persisted ``r.id`` (the pre-existing
+        edge's id on a merge), so the semantic-hook dispatch carries the
+        canonical stored id. Inverse/bidirectional mirror edges are persisted but
+        not reported (they are an internal detail, not caller-supplied).
         """
         if not relationships:
-            return 0
+            return []
 
         _method_t0 = _time.perf_counter()
 
@@ -2279,8 +2287,17 @@ RETURN count(r) AS updated
             rel_type = rel.relationship_type
             type_groups.setdefault(rel_type, []).append(rel)
 
-        async def _create_type_group(rel_type: str, rels: list[Relationship]) -> int:
-            """Create all batches for a single relationship type sequentially."""
+        async def _create_type_group(
+            rel_type: str, rels: list[Relationship]
+        ) -> tuple[int, dict[str, tuple[str, bool]]]:
+            """Create all batches for a single relationship type sequentially.
+
+            Returns ``(created_count, edge_map)`` where ``edge_map`` maps each
+            input ``str(rel.id)`` to its persisted ``(stored_id, is_new)`` -
+            the canonical id the MERGE keeps (the pre-existing edge's id on a
+            merge, ``row.id`` on a create) and whether it was newly created
+            (#1320).
+            """
             # Sort by (source_entity_id, target_entity_id, relationship_type) to ensure
             # deterministic lock ordering across concurrent transactions.
             sorted_rels = sorted(
@@ -2289,6 +2306,7 @@ RETURN count(r) AS updated
             )
             _type_t0 = _time.perf_counter()
             type_total = 0
+            edge_map: dict[str, tuple[str, bool]] = {}
             src_doc_max = self._relationship_source_document_ids_max
             src_chunk_max = self._relationship_source_chunk_ids_max
             for start in range(0, len(sorted_rels), batch_size):
@@ -2304,6 +2322,7 @@ RETURN count(r) AS updated
                 MATCH (target:Entity {{id: row.target_id}})
                 OPTIONAL MATCH (source)-[pre_r:{rel_type} {{namespace_id: row.namespace_id}}]->(target)
                 WITH row, source, target,
+                     pre_r IS NULL AS is_new,
                      CASE WHEN pre_r IS NULL
                           THEN 0
                           ELSE size(coalesce(pre_r.source_document_ids, []) + row.source_document_ids)
@@ -2339,10 +2358,11 @@ RETURN count(r) AS updated
                     sum(CASE WHEN pre_union_doc_size > $src_doc_max THEN pre_union_doc_size - $src_doc_max ELSE 0 END) AS doc_dropped,
                     sum(CASE WHEN pre_union_chunk_size > $src_chunk_max THEN pre_union_chunk_size - $src_chunk_max ELSE 0 END) AS chunk_dropped,
                     sum(CASE WHEN pre_union_doc_size > $src_doc_max THEN 1 ELSE 0 END) AS doc_rows,
-                    sum(CASE WHEN pre_union_chunk_size > $src_chunk_max THEN 1 ELSE 0 END) AS chunk_rows
+                    sum(CASE WHEN pre_union_chunk_size > $src_chunk_max THEN 1 ELSE 0 END) AS chunk_rows,
+                    collect({{input_id: row.id, stored_id: r.id, is_new: is_new}}) AS edge_rows
                 """
 
-                async def _tx(tx: AsyncManagedTransaction) -> dict[str, int]:
+                async def _tx(tx: AsyncManagedTransaction) -> dict[str, Any]:
                     result = await tx.run(
                         query,
                         rows=rows,
@@ -2351,18 +2371,32 @@ RETURN count(r) AS updated
                     )
                     record = await result.single()
                     if not record:
-                        return {"created": 0, "doc_dropped": 0, "chunk_dropped": 0, "doc_rows": 0, "chunk_rows": 0}
+                        return {
+                            "created": 0,
+                            "doc_dropped": 0,
+                            "chunk_dropped": 0,
+                            "doc_rows": 0,
+                            "chunk_rows": 0,
+                            "edge_rows": [],
+                        }
                     return {
                         "created": record["created"] or 0,
                         "doc_dropped": record["doc_dropped"] or 0,
                         "chunk_dropped": record["chunk_dropped"] or 0,
                         "doc_rows": record["doc_rows"] or 0,
                         "chunk_rows": record["chunk_rows"] or 0,
+                        "edge_rows": record["edge_rows"] or [],
                     }
 
                 async with self._session() as session:
                     tx_result = await session.execute_write(_tx)
                 type_total += tx_result["created"]
+                for er in tx_result["edge_rows"]:
+                    # A row whose source/target MATCH failed yields a null
+                    # ``r`` (no stored_id); skip - it was not persisted.
+                    if er.get("stored_id") is None:
+                        continue
+                    edge_map[er["input_id"]] = (er["stored_id"], bool(er["is_new"]))
                 self._record_truncation(
                     field="source_document_ids",
                     kind="batch",
@@ -2380,7 +2414,7 @@ RETURN count(r) AS updated
                     rel_type=rel_type,
                 )
             _per_type_ms[rel_type] = (_time.perf_counter() - _type_t0) * 1000
-            return type_total
+            return type_total, edge_map
 
         # ---------------------------------------------------------------
         # Hub-entity grouping: When multiple relationship types share
@@ -2427,13 +2461,16 @@ RETURN count(r) AS updated
                         group_entities |= other_entities
                 execution_groups.append(group)
 
-            async def _run_hub_group(group: list[str]) -> int:
+            async def _run_hub_group(group: list[str]) -> tuple[int, dict[str, tuple[str, bool]]]:
                 total = 0
+                merged: dict[str, tuple[str, bool]] = {}
                 for rt in group:
-                    total += await _create_type_group(rt, type_groups[rt])
-                return total
+                    sub_total, sub_map = await _create_type_group(rt, type_groups[rt])
+                    total += sub_total
+                    merged.update(sub_map)
+                return total, merged
 
-            async def _limited_hub_run(group: list[str]) -> int:
+            async def _limited_hub_run(group: list[str]) -> tuple[int, dict[str, tuple[str, bool]]]:
                 async with self._relationship_write_sem:
                     return await _run_hub_group(group)
 
@@ -2443,12 +2480,17 @@ RETURN count(r) AS updated
             results = await asyncio.gather(*[_limited_hub_run(g) for g in execution_groups])
         else:
             # Low-density: simple bounded parallelism (original behavior)
-            async def _limited_create(rel_type: str, rels: list[Relationship]) -> int:
+            async def _limited_create(
+                rel_type: str, rels: list[Relationship]
+            ) -> tuple[int, dict[str, tuple[str, bool]]]:
                 async with self._relationship_write_sem:
                     return await _create_type_group(rel_type, rels)
 
             results = await asyncio.gather(*[_limited_create(rt, type_groups[rt]) for rt in sorted(type_groups)])
-        total_created = sum(results)
+        total_created = sum(count for count, _ in results)
+        edge_map: dict[str, tuple[str, bool]] = {}
+        for _, sub_map in results:
+            edge_map.update(sub_map)
 
         _method_elapsed_ms = (_time.perf_counter() - _method_t0) * 1000
         inverse_count = len(all_rels) - len(relationships)
@@ -2484,7 +2526,22 @@ RETURN count(r) AS updated
         # Dynamically create indexes for observed relationship types
         await self._ensure_relationship_type_indexes(set(type_groups.keys()))
 
-        return total_created
+        # Build the canonical per-edge results (#1320). Only the caller-supplied
+        # ``relationships`` are reported (inverse edges are an internal
+        # bidirectional-mirror detail). Sync each input ``rel.id`` in place to
+        # the persisted id - the MERGE keeps the pre-existing edge's id on a
+        # merge - so the semantic-hook dispatch reports the stored id, never the
+        # submitted one. Rows whose endpoints failed to MATCH are absent from
+        # ``edge_map`` and dropped (not persisted, so not reported).
+        results_out: list[tuple[Relationship, bool]] = []
+        for rel in relationships:
+            mapped = edge_map.get(str(rel.id))
+            if mapped is None:
+                continue
+            stored_id, is_new = mapped
+            rel.id = UUID(stored_id)
+            results_out.append((rel, is_new))
+        return results_out
 
     _indexed_rel_types: set[str] = set()  # Per-process cache of already-indexed types
 

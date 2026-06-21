@@ -742,9 +742,19 @@ class SurrealDBGraphAdapter(GraphBackendBase):
         "khora.surrealdb.graph.create_relationships_batch",
         result=lambda r: {"created": r},
     )
-    async def create_relationships_batch(self, relationships: list[Relationship], *, batch_size: int = 200) -> int:
+    async def create_relationships_batch(
+        self, relationships: list[Relationship], *, batch_size: int = 200
+    ) -> list[tuple[Relationship, bool]]:
+        """Batch-create relationships, returning ``(relationship, is_new)`` per edge.
+
+        **Best-effort created/merged (#1320).** SurrealDB's ``RELATE`` always
+        creates a fresh edge (no MERGE-by-endpoint dedup at this layer), so
+        every successfully-written edge reports ``is_new=True`` with the input
+        ``rel.id`` as the canonical id. The individual-insert fallback only
+        appends results for edges that actually persisted.
+        """
         if not relationships:
-            return 0
+            return []
 
         # Normalise each relationship_type in place so SurrealDB matches the
         # Cypher backends (issue #749).
@@ -780,20 +790,22 @@ class SurrealDBGraphAdapter(GraphBackendBase):
         )
         try:
             await self._conn.execute(sql, {"rels": rels_data})
-            return len(relationships)
+            return [(rel, True) for rel in relationships]
         except Exception:
             logger.warning("Batch relationship creation failed, falling back to individual inserts")
-            created = 0
+            results_out: list[tuple[Relationship, bool]] = []
             failed = 0
             for rel in relationships:
                 try:
                     await self.create_relationship(rel)
-                    created += 1
+                    results_out.append((rel, True))
                 except Exception:
                     failed += 1
                     logger.warning(f"Failed to create relationship {rel.id}, skipping")
-            logger.info(f"Relationship batch fallback: {created}/{len(relationships)} succeeded, {failed} failed")
-            return created
+            logger.info(
+                f"Relationship batch fallback: {len(results_out)}/{len(relationships)} succeeded, {failed} failed"
+            )
+            return results_out
 
     # ------------------------------------------------------------------
     # Episode operations

@@ -294,19 +294,26 @@ class GraphBackendBase:
         relationships: list[Relationship],
         *,
         batch_size: int = 100,
-    ) -> int:
+    ) -> list[tuple[Relationship, bool]]:
         """Default N+1 create - subclasses should override for efficiency.
 
-        Returns the number of relationships written. ``batch_size`` is
-        accepted for signature parity and is irrelevant here. A mid-batch
-        failure propagates (never a silent drop): relationships written
-        before the failure are persisted and the caller sees the exception.
+        Returns one ``(relationship, is_new)`` tuple per written edge.
+        ``batch_size`` is accepted for signature parity and is irrelevant
+        here. A mid-batch failure propagates (never a silent drop):
+        relationships written before the failure are persisted and the caller
+        sees the exception.
+
+        **Best-effort created/merged (#1320).** ``create_relationship`` does
+        not report whether it created or merged, so this path always reports
+        ``is_new=True`` and the canonical id is the input ``relationship.id``.
+        Backends reached through this default (Neptune, AGE) therefore cannot
+        distinguish a genuine create from a dedup-merge.
         """
-        count = 0
+        results: list[tuple[Relationship, bool]] = []
         for relationship in relationships:
             await self.create_relationship(relationship)  # type: ignore[attr-defined]
-            count += 1
-        return count
+            results.append((relationship, True))
+        return results
 
     # -- Forget-cascade cleanup (#923) --------------------------------------
     # Default implementations built on the per-record CRUD primitives every

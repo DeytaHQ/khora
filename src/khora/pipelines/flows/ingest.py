@@ -1410,14 +1410,19 @@ async def process_document(
 
             count = 0
             if valid_relationships:
-                count = await storage.create_relationships_batch(valid_relationships)
+                # ``create_relationships_batch`` returns canonical per-edge
+                # results (#1320): each ``rel.id`` synced to the stored edge id,
+                # plus an ``is_new`` flag. Dispatch relationship.created for a
+                # genuine create and relationship.updated for a dedup-merge,
+                # carrying the canonical id - never a spurious created on merge.
+                rel_results = await storage.create_relationships_batch(valid_relationships)
+                count = len(rel_results)
 
-                # Dispatch relationship hooks
-                for rel in valid_relationships:
+                for rel, is_new in rel_results:
                     await storage.dispatch_hook(
                         MemoryEvent(
                             namespace_id=document.namespace_id,
-                            event_type=EventType.RELATIONSHIP_CREATED,
+                            event_type=(EventType.RELATIONSHIP_CREATED if is_new else EventType.RELATIONSHIP_UPDATED),
                             resource_type="relationship",
                             resource_id=rel.id,
                             data={
@@ -1425,6 +1430,7 @@ async def process_document(
                                 "source_entity_id": str(rel.source_entity_id),
                                 "target_entity_id": str(rel.target_entity_id),
                                 "confidence": rel.confidence,
+                                "is_new": is_new,
                                 "document_id": str(document.id),
                             },
                         )
@@ -2097,7 +2103,7 @@ async def run_smart_resolution(
     inferred_count = 0
     if inferred:
         inferred_rels = [to_relationship(inf, namespace_id) for inf in inferred]
-        inferred_count = await storage.create_relationships_batch(inferred_rels, batch_size=batch_size)
+        inferred_count = len(await storage.create_relationships_batch(inferred_rels, batch_size=batch_size))
 
     logger.info(
         f"Smart resolution complete: {len(resolved_entities)} entities, "
@@ -2188,7 +2194,7 @@ async def run_batch_inference(
     inferred_count = 0
     if expansion_result.inferred_relationships:
         try:
-            inferred_count = await storage.create_relationships_batch(expansion_result.inferred_relationships)
+            inferred_count = len(await storage.create_relationships_batch(expansion_result.inferred_relationships))
         except Exception as e:
             logger.warning(f"Failed to store inferred relationships in batch: {e}")
 

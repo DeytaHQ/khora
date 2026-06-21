@@ -456,14 +456,20 @@ ON MATCH SET n.description = e.description, n.updated_at = e.updated_at, ...
 
 ```python
 # Create relationships in batches, grouped by type
-count = await coordinator.create_relationships_batch(
+results = await coordinator.create_relationships_batch(
     relationships,
     batch_size=50,
 )
-# Returns: number of relationships created
+# Returns: list[(relationship, is_new)] - one tuple per persisted edge,
+# mirroring upsert_entities_batch's (entity, is_new) contract (#1320).
+# Each relationship's `id` is synced in place to the canonical stored
+# edge id; `is_new` is True for a genuine create, False for a dedup-merge.
+# len(results) is the number of relationships written.
 ```
 
-**Neo4j implementation** groups relationships by type and uses `UNWIND + CREATE` with dynamic relationship types.
+**Neo4j implementation** groups relationships by type and uses `UNWIND + MERGE` (matched on source/target + namespace) with dynamic relationship types.
+
+**Created-vs-merged accuracy (#1320).** The split is *exact* on the MERGE-by-endpoint backends (Neo4j, Memgraph), where an `OPTIONAL MATCH` of the pre-MERGE edge reports `is_new`. The ON-CONFLICT(id) fallbacks (pgvector, sqlite_lance) report it from the relationship-`id` collision they key on (so a fresh-id edge between an already-related pair reads `is_new=True`). SurrealDB's bare `RELATE` and the per-record `GraphBackendBase` default (Neptune, AGE) cannot distinguish create from merge and report a best-effort `is_new=True` with the input id. The `relationship.created` / `relationship.updated` semantic hooks are dispatched from these results on both engines (Chronicle ingest flow + VectorCypher remember path), carrying the canonical stored id.
 
 ### When Batch Operations Are Used
 

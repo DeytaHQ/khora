@@ -2419,8 +2419,9 @@ class TestSurrealDBGraphAdapterRelationship:
             Relationship(namespace_id=ns_id, relationship_type="WORKS_WITH"),
             Relationship(namespace_id=ns_id, relationship_type="LOCATED_IN"),
         ]
-        count = await adapter.create_relationships_batch(rels)
-        assert count == 3
+        results = await adapter.create_relationships_batch(rels)
+        # #1320: returns (relationship, is_new) per edge; RELATE always creates.
+        assert results == [(rels[0], True), (rels[1], True), (rels[2], True)]
 
 
 # ── Graph Adapter — episode operations ────────────────────────────────────
@@ -3054,7 +3055,8 @@ class TestSurrealDBBatchOptimizations:
             f"{conn.execute.await_count}. The batch should use a single "
             f"FOR loop, not N individual RELATE statements."
         )
-        assert result == 5
+        # #1320: returns (relationship, is_new) per edge; RELATE always creates.
+        assert result == [(r, True) for r in rels]
 
         # Verify the SQL uses a FOR loop
         sql = conn.execute.call_args[0][0]
@@ -3090,7 +3092,7 @@ class TestSurrealDBBatchOptimizations:
 
         adapter = SurrealDBGraphAdapter(conn)
         result = await adapter.create_relationships_batch([])
-        assert result == 0
+        assert result == []
         conn.execute.assert_not_awaited()
 
 
@@ -3249,7 +3251,9 @@ class TestSurrealDBSilentFailures:
 
         # No exception raised — all 3 failures swallowed
         result = await adapter.create_relationships_batch(rels)
-        assert result == 0  # all failed but no error propagated
+        # #1320: returns (relationship, is_new) per edge that persisted; all
+        # failed, so no edges are reported.
+        assert result == []  # all failed but no error propagated
 
     async def test_row_to_relationship_wrong_uuid_field(self) -> None:
         """If SurrealDB omits 'in'/'out' fields, _parse_uuid gets empty

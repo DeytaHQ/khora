@@ -38,11 +38,21 @@ def _make_session_with_records(
     """Build a mocked neo4j async session.
 
     ``result.data()`` returns ``records`` (list of dicts).  ``result.single()``
-    returns ``single``.  ``session.run`` is awaited and returns this result.
+    returns ``single``.  Async-iterating ``result`` (``async for record in
+    result``) yields ``records`` - the shape ``create_relationships_batch``
+    consumes for its per-edge ``(input_id, stored_id, is_new)`` rows (#1320).
+    ``session.run`` is awaited and returns this result.
     """
+    rows = records or []
     result = MagicMock()
-    result.data = AsyncMock(return_value=records or [])
+    result.data = AsyncMock(return_value=rows)
     result.single = AsyncMock(return_value=single)
+
+    async def _aiter():
+        for row in rows:
+            yield row
+
+    result.__aiter__ = lambda self: _aiter()
     session = AsyncMock()
     session.run = AsyncMock(return_value=result)
     return session
@@ -922,10 +932,12 @@ async def test_upsert_remapped_id_lands_relationship_for_deduped_entity() -> Non
         target_entity_id=uuid4(),
         relationship_type="WORKS_AT",
     )
-    rel_session = _make_session_with_records(single={"written": 1})
+    rel_session = _make_session_with_records(
+        records=[{"input_id": str(rel.id), "stored_id": str(rel.id), "is_new": True}]
+    )
     b2 = _connected_backend(rel_session)
-    count = await b2.create_relationships_batch([rel])
-    assert count == 1
+    results = await b2.create_relationships_batch([rel])
+    assert results == [(rel, True)]
     rows = rel_session.run.await_args.kwargs["rows"]
     assert rows[0]["source_id"] == str(stored_id)
 
@@ -934,27 +946,50 @@ async def test_upsert_remapped_id_lands_relationship_for_deduped_entity() -> Non
 async def test_create_relationships_batch_empty_short_circuits() -> None:
     session = _make_session_with_records()
     b = _connected_backend(session)
-    assert await b.create_relationships_batch([]) == 0
+    assert await b.create_relationships_batch([]) == []
     session.run.assert_not_called()
 
 
 @pytest.mark.unit
-async def test_create_relationships_batch_uses_merge_and_returns_count() -> None:
+async def test_create_relationships_batch_uses_merge_and_returns_results() -> None:
     r = Relationship(
         namespace_id=_NS,
         source_entity_id=uuid4(),
         target_entity_id=uuid4(),
         relationship_type="works at",
     )
-    session = _make_session_with_records(single={"written": 1})
+    session = _make_session_with_records(records=[{"input_id": str(r.id), "stored_id": str(r.id), "is_new": True}])
     b = _connected_backend(session)
-    count = await b.create_relationships_batch([r])
-    assert count == 1
+    results = await b.create_relationships_batch([r])
+    # #1320: returns (relationship, is_new) per persisted edge.
+    assert results == [(r, True)]
     cypher = session.run.await_args.args[0]
     assert "UNWIND $rows AS row" in cypher
     assert "MERGE (source)-[r:WORKS_AT {namespace_id: row.namespace_id}]->(target)" in cypher
+    # The OPTIONAL MATCH gives the exact created/merged split.
+    assert "OPTIONAL MATCH (source)-[pre_r:WORKS_AT" in cypher
     # Type normalised in place on the caller's object (#749).
     assert r.relationship_type == "WORKS_AT"
+
+
+@pytest.mark.unit
+async def test_create_relationships_batch_reports_merge_as_not_new() -> None:
+    """A dedup-merge onto an existing edge reports is_new=False and syncs the
+    in-place id to the stored canonical id (#1320)."""
+    r = Relationship(
+        namespace_id=_NS,
+        source_entity_id=uuid4(),
+        target_entity_id=uuid4(),
+        relationship_type="KNOWS",
+    )
+    stored_id = uuid4()
+    session = _make_session_with_records(
+        records=[{"input_id": str(r.id), "stored_id": str(stored_id), "is_new": False}]
+    )
+    b = _connected_backend(session)
+    results = await b.create_relationships_batch([r])
+    assert results == [(r, False)]
+    assert r.id == stored_id
 
 
 @pytest.mark.unit
@@ -965,12 +1000,17 @@ async def test_create_relationships_batch_groups_by_type() -> None:
             namespace_id=_NS, source_entity_id=uuid4(), target_entity_id=uuid4(), relationship_type="WORKS_AT"
         ),
     ]
-    session = _make_session_with_records(single={"written": 1})
+    # The same single mocked result is reused for both type groups; each
+    # group's RETURN echoes one row keyed by that group's input id.
+    session = _make_session_with_records(
+        records=[{"input_id": str(r.id), "stored_id": str(r.id), "is_new": True} for r in rels]
+    )
     b = _connected_backend(session)
-    total = await b.create_relationships_batch(rels)
-    # Two distinct types -> two MERGE statements -> written counted per group.
-    assert total == 2
+    results = await b.create_relationships_batch(rels)
+    # Two distinct types -> two MERGE statements.
     assert session.run.await_count == 2
+    # Each input relationship is reported once.
+    assert {r.id for r, _ in results} == {r.id for r in rels}
     labels = {c.args[0].split("MERGE (source)-[r:")[1].split(" ")[0] for c in session.run.await_args_list}
     assert labels == {"KNOWS", "WORKS_AT"}
 

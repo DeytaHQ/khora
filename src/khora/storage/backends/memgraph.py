@@ -631,17 +631,23 @@ class MemgraphBackend(GraphBackendBase):
         relationships: list[Relationship],
         *,
         batch_size: int = 100,
-    ) -> int:
+    ) -> list[tuple[Relationship, bool]]:
         """Batch create relationships using UNWIND + MERGE (issue #919).
 
         Relationships are grouped by (sanitised) type because the edge label
         cannot be parameterised in Cypher. Each group is MERGEd on
         ``(source, target, type, namespace_id)`` so re-asserting an edge stays
-        idempotent (issue #921). Returns the number of input relationships
-        written. Pure Cypher (no APOC).
+        idempotent (issue #921). Pure Cypher (no APOC).
+
+        Returns one ``(relationship, is_new)`` tuple per persisted edge
+        (#1320). The ``OPTIONAL MATCH`` of the pre-MERGE edge gives an *exact*
+        created/merged split (``pre_r IS NULL`` => created); each input
+        ``rel.id`` is synced in place to the persisted ``r.id`` (the
+        pre-existing edge's id on a merge), so the semantic-hook dispatch
+        reports the canonical stored id.
         """
         if not relationships:
-            return 0
+            return []
 
         driver = self._get_driver()
 
@@ -652,13 +658,15 @@ class MemgraphBackend(GraphBackendBase):
             rel.relationship_type = sanitize_cypher_label(rel.relationship_type)
             type_groups.setdefault(rel.relationship_type, []).append(rel)
 
-        total = 0
+        edge_map: dict[str, tuple[str, bool]] = {}
         async with driver.session() as session:
             for rel_type, rels in type_groups.items():
                 query = f"""
                 UNWIND $rows AS row
                 MATCH (source:Entity {{id: row.source_id}})
                 MATCH (target:Entity {{id: row.target_id}})
+                OPTIONAL MATCH (source)-[pre_r:{rel_type} {{namespace_id: row.namespace_id}}]->(target)
+                WITH row, source, target, pre_r IS NULL AS is_new
                 MERGE (source)-[r:{rel_type} {{namespace_id: row.namespace_id}}]->(target)
                 ON CREATE SET
                     r.id = row.id,
@@ -683,7 +691,7 @@ class MemgraphBackend(GraphBackendBase):
                     r.confidence = CASE WHEN row.confidence > r.confidence THEN row.confidence ELSE r.confidence END,
                     r.weight = CASE WHEN row.weight > r.weight THEN row.weight ELSE r.weight END,
                     r.updated_at = row.updated_at
-                RETURN count(r) AS written
+                RETURN row.id AS input_id, r.id AS stored_id, is_new
                 """
                 for start in range(0, len(rels), batch_size):
                     batch = rels[start : start + batch_size]
@@ -708,10 +716,22 @@ class MemgraphBackend(GraphBackendBase):
                         for r in batch
                     ]
                     result = await session.run(query, rows=rows)
-                    record = await result.single()
-                    total += (record["written"] if record else 0) or 0
+                    async for record in result:
+                        stored = record["stored_id"]
+                        if stored is None:
+                            continue
+                        edge_map[record["input_id"]] = (stored, bool(record["is_new"]))
 
-        return total
+        # Sync each input ``rel.id`` to its persisted id and pair with is_new.
+        results_out: list[tuple[Relationship, bool]] = []
+        for rel in relationships:
+            mapped = edge_map.get(str(rel.id))
+            if mapped is None:
+                continue
+            stored_id, is_new = mapped
+            rel.id = UUID(stored_id)
+            results_out.append((rel, is_new))
+        return results_out
 
     async def get_relationship(self, relationship_id: UUID, *, namespace_id: UUID) -> Relationship | None:
         """Get a relationship by ID, scoped to ``namespace_id`` (IDOR family)."""

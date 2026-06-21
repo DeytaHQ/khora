@@ -32,6 +32,7 @@ from khora.storage.backends.mixins import AsyncSessionMixin, sanitize_cypher_lab
 from khora.telemetry import trace
 
 if TYPE_CHECKING:
+    from khora.core.models import Relationship
     from khora.filter.ast import FilterNode
 
 try:
@@ -1488,7 +1489,7 @@ class PgVectorBackend(AsyncSessionMixin):
         relationships: list,
         *,
         batch_size: int = 200,
-    ) -> int:
+    ) -> list[tuple[Relationship, bool]]:
         """Batch insert relationship records in PostgreSQL.
 
         Coordinator fallback for graph-less stacks (#1066). On chronicle+PG
@@ -1501,12 +1502,18 @@ class PgVectorBackend(AsyncSessionMixin):
         ``INSERT ... ON CONFLICT (id) DO UPDATE`` so re-ingest is idempotent
         on the relationship id (matching the sqlite_lance graph adapter).
 
-        Returns the number of relationships written.
+        Returns one ``(relationship, is_new)`` tuple per row (#1320). Unlike
+        the graph backends this table keys dedup on the relationship ``id``
+        (not the endpoint pair), so the stored id is always the input
+        ``rel.id`` and ``is_new`` reflects an *id* collision: a fresh-id edge
+        between an already-related pair still reports ``is_new=True``. The flag
+        is read from PostgreSQL's ``(xmax = 0)`` RETURNING idiom - exact for
+        the id-keyed semantics this fallback has.
         """
         if not relationships:
-            return 0
+            return []
 
-        async def _do_insert() -> int:
+        async def _do_insert() -> list[tuple[Relationship, bool]]:
             from sqlalchemy.dialects.postgresql import insert
 
             for rel in relationships:
@@ -1514,7 +1521,7 @@ class PgVectorBackend(AsyncSessionMixin):
 
             namespace_id = relationships[0].namespace_id
             key1, key2 = _namespace_lock_keys(namespace_id)
-            total = 0
+            is_new_by_id: dict[Any, bool] = {}
 
             async with self._get_session() as session:
                 await session.execute(
@@ -1561,12 +1568,20 @@ class PgVectorBackend(AsyncSessionMixin):
                             "updated_at": stmt.excluded.updated_at,
                         },
                     )
-                    await session.execute(stmt)
-                    total += len(batch)
+                    # ``xmax = 0`` is true only for a freshly INSERTed row; a
+                    # row touched by ON CONFLICT DO UPDATE carries a non-zero
+                    # xmax. Gives an exact created/merged split on the id key.
+                    stmt = stmt.returning(
+                        RelationshipModel.id,
+                        text("(xmax = 0) AS is_new"),
+                    )
+                    result = await session.execute(stmt)
+                    for row in result:
+                        is_new_by_id[row.id] = bool(row.is_new)
 
                 await session.commit()
 
-            return total
+            return [(rel, is_new_by_id.get(rel.id, True)) for rel in relationships]
 
         return await _retry_on_deadlock(_do_insert)
 

@@ -91,7 +91,9 @@ async def test_relationship_after_dedup_lands_on_stored_entity() -> None:
             relationship_type="KNOWS",
         )
         created = await adapter.create_relationships_batch([rel])
-        assert created == 1
+        # #1320: returns (relationship, is_new) per edge; SurrealDB RELATE
+        # always creates, so is_new=True.
+        assert created == [(rel, True)]
 
         # Before the fix alice_v2.id kept the extraction-time UUID, so the
         # RELATE targeted a nonexistent record and this read came back empty.
