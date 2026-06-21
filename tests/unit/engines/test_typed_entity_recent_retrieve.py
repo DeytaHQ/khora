@@ -295,7 +295,11 @@ def _make_dispatch_retriever(complexity: QueryComplexity) -> VectorCypherRetriev
     retriever._config = RetrieverConfig(  # type: ignore[attr-defined]
         temporal_recency_floor_enabled=False,
         temporal_llm_disambiguation_enabled=False,
+        # Isolate the dispatch-gate assertions from the HyDE embed step (#1018):
+        # these queries route non-SIMPLE, so default "auto" would fire HyDE.
+        enable_hyde="never",
     )
+    retriever._hyde_expander = None  # type: ignore[attr-defined]
 
     embedder = AsyncMock()
     embedder.embed = AsyncMock(return_value=[0.0] * 4)

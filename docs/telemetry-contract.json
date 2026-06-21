@@ -456,9 +456,21 @@
       "owner": "vectorcypher"
     },
     {
+      "name": "khora.vectorcypher.hyde",
+      "stability": "internal",
+      "owner": "vectorcypher",
+      "_comment": "Wraps the HyDE query-embedding expansion on the default recall() path (Issue #1018). Fires only when query.enable_hyde resolves to expand for this query ('always', or 'auto' on a complex/temporal query). No attributes."
+    },
+    {
       "name": "khora.vectorcypher.llm_reranking",
       "stability": "internal",
       "owner": "vectorcypher"
+    },
+    {
+      "name": "khora.vectorcypher.mmr_diversity",
+      "stability": "internal",
+      "owner": "vectorcypher",
+      "_comment": "Wraps the MMR diversity selection of the final top-k chunks (Issue #1018). Fires only when query.enable_diversity is True and the candidate pool exceeds the requested limit. Attributes: candidate_count (int), k (int)."
     },
     {
       "name": "khora.vectorcypher.recency_boost",

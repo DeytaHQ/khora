@@ -42,6 +42,7 @@ from khora.filter.model import RecallFilterUnsupportedError
 from khora.filter.report import ChannelPlan
 from khora.filter.telemetry import record_graph_channel_empty
 from khora.query import SearchMode
+from khora.query.hyde import HyDEExpander
 from khora.telemetry import bounded_text_hash, trace_span
 from khora.telemetry.metrics import metric_counter
 
@@ -418,6 +419,29 @@ class RetrieverConfig:
     # single global search.  Improves session_crossing_recall.
     enable_session_aware_search: bool = True
 
+    # HyDE query-embedding expansion (#1018). Threaded from
+    # ``KhoraConfig.query.enable_hyde`` so configuring it actually affects the
+    # default recall() path (previously inert on VectorCypher — only the
+    # bypassed ``khora.query.QueryEngine`` honored it). "auto" expands for
+    # complex / temporal queries, "always" always, "never" disables.
+    enable_hyde: str = "auto"
+    hyde_num_hypotheticals: int = 1
+
+    # Stage-1 broad-recall breadth (#1018). When reranking or MMR diversity is
+    # active, the vector channel over-fetches this many candidates so there is a
+    # genuine pool to rerank / diversify across before the final ``limit``
+    # truncation. Mirrors ``QueryEngine`` stage-1. ``None`` keeps the historic
+    # per-channel ``limit`` fetch (no over-fetch).
+    stage1_recall_limit: int = 200
+
+    # MMR diversity selection (#1018). When enabled, the final top-``limit``
+    # chunks are chosen by Maximal Marginal Relevance over the candidate pool
+    # instead of pure score order. ``diversity_lambda`` trades relevance
+    # (1.0) against diversity (0.0). Threaded from ``KhoraConfig.query`` so the
+    # setting is no longer inert on the default recall() path.
+    enable_diversity: bool = True
+    diversity_lambda: float = 0.5
+
     # Personalized PageRank retrieval path (Issue #542 — HippoRAG 2).
     # Default OFF — when ON, _vectorcypher_retrieve replaces the BFS+RRF
     # graph expansion with query-time PPR seeded from entry entities and
@@ -644,6 +668,105 @@ class VectorCypherRetriever:
         # namespace so a hot recall path doesn't spam the operator log.
         self._warned_rerank_skips: set[tuple[UUID | None, str]] = set()
 
+        # Cached HyDE expander (lazy-init on first use, reused across recalls;
+        # #1018). ``None`` until the first query for which HyDE fires.
+        self._hyde_expander: HyDEExpander | None = None
+
+    def _should_hyde(
+        self,
+        routing: RoutingDecision,
+        temporal_signal: TemporalSignal | None,
+    ) -> bool:
+        """Decide whether HyDE should fire for this query (#1018).
+
+        Mirrors ``QueryEngine`` semantics: ``"always"`` always, ``"never"``
+        never, ``"auto"`` for complex (non-SIMPLE routing) or temporal queries.
+        """
+        mode = self._config.enable_hyde
+        if mode == "always":
+            return True
+        if mode == "never":
+            return False
+        # "auto": expand for complex or temporal queries.
+        is_temporal = temporal_signal is not None and temporal_signal.is_temporal
+        is_complex = routing.complexity != QueryComplexity.SIMPLE
+        return is_temporal or is_complex
+
+    async def _maybe_expand_hyde(
+        self,
+        query: str,
+        query_embedding: list[float],
+        *,
+        routing: RoutingDecision,
+        temporal_signal: TemporalSignal | None,
+    ) -> list[float]:
+        """Apply HyDE query-embedding expansion when configured (#1018).
+
+        Returns the expanded embedding when HyDE fires, otherwise the original.
+        The expander degrades to the original embedding on any failure, so this
+        never aborts a recall.
+        """
+        if not self._should_hyde(routing, temporal_signal):
+            return query_embedding
+        if self._hyde_expander is None:
+            self._hyde_expander = HyDEExpander(
+                self._embedder,
+                num_hypotheticals=self._config.hyde_num_hypotheticals,
+            )
+        with trace_span("khora.vectorcypher.hyde"):
+            return await self._hyde_expander.expand_query_embedding(query, query_embedding)
+
+    def _vector_fetch_limit(self, limit: int) -> int:
+        """Broad-recall vector fetch budget for this call (#1018).
+
+        Over-fetches to ``stage1_recall_limit`` when a narrowing stage
+        (reranking or MMR diversity) is active so there is a genuine pool to
+        rerank / diversify across; otherwise keeps the historic per-channel
+        ``limit`` fetch (no extra work).
+        """
+        if self._config.enable_reranking or self._config.enable_diversity:
+            return max(limit, self._config.stage1_recall_limit)
+        return limit
+
+    def _mmr_select_fused(
+        self,
+        fused_results: list[FusedResult],
+        query_embedding: list[float],
+        *,
+        k: int,
+        lambda_param: float,
+    ) -> list[FusedResult]:
+        """Reorder fused results so the MMR-selected top-``k`` lead (#1018).
+
+        Maximal Marginal Relevance balances relevance to the query against
+        diversity among selected chunks. Falls back to score order when chunk
+        embeddings are unavailable (the embedded path may not hydrate them).
+        Mirrors ``QueryEngine._mmr_diversity_select``.
+        """
+        from khora._accel import batch_dot_product as _bdp
+        from khora._accel import mmr_diversity_select, normalize_embeddings_batch
+
+        if len(fused_results) <= k:
+            return fused_results
+
+        chunk_embeddings = [getattr(r.item, "embedding", None) for r in fused_results]
+        if all(e is None for e in chunk_embeddings):
+            return fused_results
+
+        filled = [emb if emb is not None else query_embedding for emb in chunk_embeddings]
+        normalized = normalize_embeddings_batch([query_embedding, *filled])
+        norm_query, norm_embeddings = normalized[0], normalized[1:]
+
+        scores = [0.0] * len(norm_embeddings)
+        for idx, sim in _bdp(norm_query, norm_embeddings, threshold=0.0):
+            scores[idx] = sim
+
+        selected = mmr_diversity_select(norm_embeddings, scores, lambda_param, k)
+        selected_set = set(selected)
+        # Selected (MMR order) first, then the remaining results in their
+        # existing score order so nothing is dropped.
+        return [fused_results[i] for i in selected] + [r for i, r in enumerate(fused_results) if i not in selected_set]
+
     async def retrieve(
         self,
         query: str,
@@ -826,6 +949,15 @@ class VectorCypherRetriever:
                     _post_hits = self._embedder.cache_stats["hits"]
                     embed_span.set_attribute("cache_hit", _post_hits > _pre_hits)
 
+            # Step 2b: HyDE query-embedding expansion (#1018). Honors
+            # ``query.enable_hyde`` on the default recall() path (previously only
+            # the bypassed QueryEngine applied it). "auto" expands for complex /
+            # temporal queries; the expander degrades to the original embedding
+            # on any LLM/embed failure.
+            query_embedding = await self._maybe_expand_hyde(
+                query, query_embedding, routing=routing, temporal_signal=temporal_signal
+            )
+
             # #833 mode dispatch: VECTOR / KEYWORD short-circuit to the
             # simple path (no graph traversal). GRAPH forces the vectorcypher
             # path (entity expansion). HYBRID / ALL keep the legacy routing.
@@ -839,14 +971,20 @@ class VectorCypherRetriever:
                 not force_simple
                 and not force_graph
                 and routing.complexity == QueryComplexity.TYPED_ENTITY_RECENT
-                and filter_ast is None
+                and (filter_ast is None or not filter_ast.children)
             ):
-                # Gate (filter_ast is None): the fast-path Cypher cannot
+                # Gate (no CONSTRAINING filter): the fast-path Cypher cannot
                 # enforce caller filters — chunk metadata is a serialized
                 # JSON property on the graph node, not queryable columns — so
                 # a filtered recall would silently return unfiltered chunks.
-                # Filtered recalls take the full _vectorcypher_retrieve path
-                # below, which enforces + reports the filter per channel.
+                # A constraint-free filter (``filter={}`` / ``RecallFilter()``)
+                # parses to a non-null match-everything ``AND`` with no
+                # children: there is nothing to enforce, so it keeps the fast
+                # path (#1232). The constraint-free test mirrors
+                # ``build_filter_report`` (``filter_ast is None or not
+                # filter_ast.children``). Genuinely-constraining filtered
+                # recalls take the full _vectorcypher_retrieve path below,
+                # which enforces + reports the filter per channel.
                 #
                 # Phase C fast path (#569): a single Cypher query that
                 # finds typed entities (ACTION_ITEM, DECISION, BLOCKER,
@@ -1263,6 +1401,12 @@ class VectorCypherRetriever:
         skip_vector_channel = mode == SearchMode.GRAPH
         skip_bm25_channel = mode == SearchMode.GRAPH
 
+        # #1018: when reranking or MMR diversity will narrow the result set,
+        # over-fetch the vector channel to ``stage1_recall_limit`` so there is a
+        # genuine broad-recall pool to rerank / diversify across before the final
+        # ``limit`` truncation. Mirrors QueryEngine's stage-1 breadth.
+        vector_fetch_limit = self._vector_fetch_limit(limit)
+
         # OPTIMIZATION: Start vector chunk search immediately in parallel
         # This operation doesn't depend on entity search results.
         # When the BM25 channel is active, use pure vector (hybrid_alpha=1.0)
@@ -1282,7 +1426,7 @@ class VectorCypherRetriever:
                     namespace_id=namespace_id,
                     temporal_filter=temporal_filter,
                     query_text=query,
-                    limit=limit,
+                    limit=vector_fetch_limit,
                     hybrid_alpha_override=effective_hybrid_alpha,
                     min_similarity=min_similarity,
                     filter_ast=filter_ast,
@@ -2067,6 +2211,19 @@ class VectorCypherRetriever:
         # rrf_score (after fusion + boosts + reranking); this only rewrites the
         # reported VALUE to the raw cosine captured pre-fusion.
         fused_results = attach_relevance_scores(fused_results)
+
+        # Step 8f: MMR diversity selection (#1018). When enabled, choose the
+        # top-``limit`` fused results by Maximal Marginal Relevance over the
+        # broad-recall pool instead of pure score order, so near-duplicate
+        # chunks don't crowd out diverse-but-relevant ones. Honors
+        # ``query.enable_diversity`` / ``query.diversity_lambda`` (previously
+        # inert on VectorCypher). Reorders ``fused_results`` so the selected
+        # results lead; the existing ``[:limit]`` slices below pick them up.
+        if self._config.enable_diversity and len(fused_results) > limit:
+            with trace_span("khora.vectorcypher.mmr_diversity", candidate_count=len(fused_results), k=limit):
+                fused_results = self._mmr_select_fused(
+                    fused_results, query_embedding, k=limit, lambda_param=self._config.diversity_lambda
+                )
 
         # Build result
         chunk_results = [(r.item, r.rrf_score) for r in fused_results[:limit]]
