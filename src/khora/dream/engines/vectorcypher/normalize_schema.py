@@ -31,6 +31,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import text
 
 from khora.core.models.event import EventType, MemoryEvent
+from khora.dream.engines.vectorcypher._uuid_bind import uuid_bind
 from khora.dream.plan import DreamOp, OpKind
 from khora.dream.result import UndoRecord
 from khora.telemetry import trace_span
@@ -289,6 +290,7 @@ async def _apply_entity_renames(
     applied_at: datetime,
 ) -> list[dict[str, str]]:
     applied: list[dict[str, str]] = []
+    bind_uuid = uuid_bind(session)
     for entry in renames:
         eid = UUID(str(entry["id"]))
         old_type = str(entry["old_type"])
@@ -299,7 +301,7 @@ async def _apply_entity_renames(
             continue
         await session.execute(
             text("UPDATE entities SET entity_type = :new_type, updated_at = :ts WHERE id = :id"),
-            {"new_type": new_type, "ts": applied_at, "id": eid},
+            {"new_type": new_type, "ts": applied_at, "id": bind_uuid(eid)},
         )
         applied.append({"id": str(eid), "old_type": old_type, "new_type": new_type})
         if namespace_id is not None:
@@ -316,6 +318,7 @@ async def _apply_relationship_renames(
     applied_at: datetime,
 ) -> list[dict[str, str]]:
     applied: list[dict[str, str]] = []
+    bind_uuid = uuid_bind(session)
     for entry in renames:
         rid = UUID(str(entry["id"]))
         old_type = str(entry["old_type"])
@@ -325,7 +328,7 @@ async def _apply_relationship_renames(
             continue
         await session.execute(
             text("UPDATE relationships SET relationship_type = :new_type, updated_at = :ts WHERE id = :id"),
-            {"new_type": new_type, "ts": applied_at, "id": rid},
+            {"new_type": new_type, "ts": applied_at, "id": bind_uuid(rid)},
         )
         applied.append({"id": str(rid), "old_type": old_type, "new_type": new_type})
         if namespace_id is not None:
@@ -337,7 +340,7 @@ async def _read_entity_type(session: AsyncSession, eid: UUID) -> str | None:
     """Return the stored entity_type for ``eid`` or ``None`` if absent."""
     result = await session.execute(
         text("SELECT id, entity_type FROM entities WHERE id = :id"),
-        {"id": eid},
+        {"id": uuid_bind(session)(eid)},
     )
     row = result.first()
     if row is None:
@@ -348,7 +351,7 @@ async def _read_entity_type(session: AsyncSession, eid: UUID) -> str | None:
 async def _read_relationship_type(session: AsyncSession, rid: UUID) -> str | None:
     result = await session.execute(
         text("SELECT id, relationship_type FROM relationships WHERE id = :id"),
-        {"id": rid},
+        {"id": uuid_bind(session)(rid)},
     )
     row = result.first()
     if row is None:

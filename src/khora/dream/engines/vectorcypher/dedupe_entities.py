@@ -33,6 +33,7 @@ from loguru import logger
 from sqlalchemy import text
 
 from khora import _accel
+from khora.dream.engines.vectorcypher._uuid_bind import uuid_bind
 from khora.dream.plan import DreamOp, OpKind
 from khora.dream.result import UndoRecord
 from khora.telemetry import trace_span
@@ -597,6 +598,7 @@ async def apply_vectorcypher_dedupe_entities(
 
     merges_undo: list[dict[str, Any]] = []
     now = datetime.now(UTC)
+    bind_uuid = uuid_bind(session)
 
     for entry in merges_input:
         canonical_id = UUID(str(entry["canonical_id"]))
@@ -628,7 +630,7 @@ async def apply_vectorcypher_dedupe_entities(
             continue
 
         # 2. Snapshot rows that reference the absorbed entity.
-        prev_rows = await _select_relationships_touching(session, absorbed_id)
+        prev_rows = await _select_relationships_touching(session, absorbed_id, bind_uuid=bind_uuid)
         previous_serialized: list[dict[str, Any]] = []
         self_loops: list[UUID] = []
 
@@ -655,7 +657,7 @@ async def apply_vectorcypher_dedupe_entities(
                 # Post-rewrite self-loop — invalidate, don't rewrite.
                 await session.execute(
                     text("UPDATE relationships SET invalidated_at = :ts, invalidated_by = :opid WHERE id = :rid"),
-                    {"ts": now, "opid": op.op_id, "rid": rel_id},
+                    {"ts": now, "opid": bind_uuid(op.op_id), "rid": bind_uuid(rel_id)},
                 )
                 self_loops.append(rel_id)
             else:
@@ -668,17 +670,17 @@ async def apply_vectorcypher_dedupe_entities(
                         "WHERE id = :rid"
                     ),
                     {
-                        "src": new_src,
-                        "tgt": new_tgt,
+                        "src": bind_uuid(new_src),
+                        "tgt": bind_uuid(new_tgt),
                         "ts": now,
-                        "rid": rel_id,
+                        "rid": bind_uuid(rel_id),
                     },
                 )
 
         # 3. Soft-delete the absorbed entity row (never hard-delete).
         await session.execute(
             text("UPDATE entities SET valid_until = :ts, updated_at = :ts WHERE id = :aid AND valid_until IS NULL"),
-            {"ts": now, "aid": absorbed_id},
+            {"ts": now, "aid": bind_uuid(absorbed_id)},
         )
 
         merge_record: dict[str, Any] = {
@@ -700,7 +702,7 @@ async def apply_vectorcypher_dedupe_entities(
     )
 
 
-async def _select_relationships_touching(session: AsyncSession, absorbed_id: UUID) -> list[Any]:
+async def _select_relationships_touching(session: AsyncSession, absorbed_id: UUID, *, bind_uuid: Any) -> list[Any]:
     """Return every row whose source or target is ``absorbed_id`` and which is still live."""
     result = await session.execute(
         text(
@@ -709,7 +711,7 @@ async def _select_relationships_touching(session: AsyncSession, absorbed_id: UUI
             "WHERE (source_entity_id = :aid OR target_entity_id = :aid) "
             "  AND invalidated_at IS NULL"
         ),
-        {"aid": absorbed_id},
+        {"aid": bind_uuid(absorbed_id)},
     )
     return list(result)
 
@@ -844,6 +846,7 @@ async def reverse_vectorcypher_dedupe_entities(
 
     op_id_value = undo_op.get("op_id")
     op_uuid = _coerce_uuid(op_id_value) if op_id_value is not None else None
+    bind_uuid = uuid_bind(session)
 
     any_change = False
     for merge in merges:
@@ -863,7 +866,7 @@ async def reverse_vectorcypher_dedupe_entities(
         #    reasons.
         revive = await session.execute(
             text("UPDATE entities SET valid_until = NULL WHERE id = :aid AND valid_until IS NOT NULL"),
-            {"aid": absorbed_id},
+            {"aid": bind_uuid(absorbed_id)},
         )
         if getattr(revive, "rowcount", 0):
             any_change = True
@@ -884,7 +887,7 @@ async def reverse_vectorcypher_dedupe_entities(
                     "    updated_at = :ts "
                     "WHERE id = :rid"
                 ),
-                {"src": src, "tgt": tgt, "ts": datetime.now(UTC), "rid": rid},
+                {"src": bind_uuid(src), "tgt": bind_uuid(tgt), "ts": datetime.now(UTC), "rid": bind_uuid(rid)},
             )
             if getattr(rewrite, "rowcount", 0):
                 any_change = True
@@ -904,12 +907,12 @@ async def reverse_vectorcypher_dedupe_entities(
                         "SET invalidated_at = NULL, invalidated_by = NULL "
                         "WHERE id = :rid AND invalidated_by = :opid"
                     ),
-                    {"rid": sl_id, "opid": op_uuid},
+                    {"rid": bind_uuid(sl_id), "opid": bind_uuid(op_uuid)},
                 )
             else:
                 clear = await session.execute(
                     text("UPDATE relationships SET invalidated_at = NULL, invalidated_by = NULL WHERE id = :rid"),
-                    {"rid": sl_id},
+                    {"rid": bind_uuid(sl_id)},
                 )
             if getattr(clear, "rowcount", 0):
                 any_change = True

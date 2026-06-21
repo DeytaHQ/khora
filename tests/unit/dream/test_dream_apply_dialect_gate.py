@@ -1,14 +1,16 @@
-"""Dialect-gate guard for the vectorcypher apply handlers (#875).
+"""Dialect-gate guard for the still-Postgres-only apply handlers (#875, #1277).
 
-The four vectorcypher mutation apply handlers
-(``apply_vectorcypher_dedupe_entities`` and siblings) bind raw
-``uuid.UUID`` values into ``session.execute``; only PostgreSQL handles
-those natively. Running them against a SQLite session (the
-``sqlite_lance`` test stack) used to crash with
-``sqlite3.ProgrammingError: type 'UUID' is not supported``. The fix is
-an orchestrator-level dialect gate that raises ``DreamBackendUnsupported``
-before the handler runs, logs a warning, advances the checkpoint, and
-records the op as ``skipped``.
+#1277 made the dedupe / prune_edges / normalize_schema apply handlers
+UUID-bind-safe on SQLite (they convert ``uuid.UUID`` binds to hex via
+``vectorcypher._uuid_bind.uuid_bind``) and lifted them out of the gate, so they
+now run on the ``sqlite_lance`` stack. Two op kinds stay gated for reasons
+unrelated to UUID binding: ``vectorcypher_centroid_recompute`` (its embedding
+write targets LanceDB, not SQLite) and ``vectorcypher_source_chunk_ids_gc``
+(Postgres array operators). Running a gated handler against a SQLite session
+used to crash with ``sqlite3.ProgrammingError: type 'UUID' is not supported``;
+the orchestrator-level dialect gate raises ``DreamBackendUnsupported`` before
+the handler runs, logs a warning, advances the checkpoint, and records the op
+as ``skipped``.
 
 Covers:
   * ``_assert_backend_supported`` raises on sqlite for every gated op kind.
@@ -205,11 +207,17 @@ def test_assert_backend_supported_ignores_non_gated_ops() -> None:
 
 @pytest.mark.asyncio
 async def test_apply_phase_marks_op_skipped_on_sqlite(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Running a gated op against a sqlite session marks it skipped, no crash."""
-    op = _op(OpKind.VECTORCYPHER_DEDUPE_ENTITIES)
+    """Running a still-gated op against a sqlite session marks it skipped, no crash.
+
+    #1277 lifted the gate for dedupe / prune_edges / normalize_schema (they are
+    now UUID-bind-safe on SQLite); ``centroid_recompute`` stays Postgres-only
+    (its embedding write targets LanceDB, not SQLite), so it is the gate
+    exemplar here.
+    """
+    op = _op(OpKind.VECTORCYPHER_CENTROID_RECOMPUTE)
     plugin = _StubPlugin([op])
     monkeypatch.setattr(registry_mod, "_REGISTRY", {"stub": plugin})
-    _install_handler(monkeypatch, OpKind.VECTORCYPHER_DEDUPE_ENTITIES, _exploding_handler)
+    _install_handler(monkeypatch, OpKind.VECTORCYPHER_CENTROID_RECOMPUTE, _exploding_handler)
 
     coordinator = _SqliteCoordinator()
     kb = _FakeKB(coordinator)
@@ -219,7 +227,7 @@ async def test_apply_phase_marks_op_skipped_on_sqlite(monkeypatch: pytest.Monkey
 
     # The op was counted as skipped, not applied.
     summaries = {s.op_type: s for s in result.ops}
-    summary = summaries[str(OpKind.VECTORCYPHER_DEDUPE_ENTITIES)]
+    summary = summaries[str(OpKind.VECTORCYPHER_CENTROID_RECOMPUTE)]
     assert summary.planned == 1
     assert summary.applied == 0
     assert summary.skipped == 1
@@ -233,7 +241,7 @@ async def test_apply_phase_does_not_leak_sqlite_programming_error(
     """The orchestrator must NOT surface sqlite3.ProgrammingError to the caller."""
     import sqlite3
 
-    op = _op(OpKind.VECTORCYPHER_PRUNE_EDGES)
+    op = _op(OpKind.VECTORCYPHER_CENTROID_RECOMPUTE)
     plugin = _StubPlugin([op])
     monkeypatch.setattr(registry_mod, "_REGISTRY", {"stub": plugin})
 
@@ -243,7 +251,7 @@ async def test_apply_phase_does_not_leak_sqlite_programming_error(
         # neither this nor DreamBackendUnsupported.
         raise sqlite3.ProgrammingError("type 'UUID' is not supported")
 
-    _install_handler(monkeypatch, OpKind.VECTORCYPHER_PRUNE_EDGES, _crashing_handler)
+    _install_handler(monkeypatch, OpKind.VECTORCYPHER_CENTROID_RECOMPUTE, _crashing_handler)
 
     coordinator = _SqliteCoordinator()
     kb = _FakeKB(coordinator)
@@ -252,7 +260,7 @@ async def test_apply_phase_does_not_leak_sqlite_programming_error(
     # Must NOT raise sqlite3.ProgrammingError.
     result = await orch.run(uuid4(), mode="apply")
 
-    summary = next(s for s in result.ops if s.op_type == str(OpKind.VECTORCYPHER_PRUNE_EDGES))
+    summary = next(s for s in result.ops if s.op_type == str(OpKind.VECTORCYPHER_CENTROID_RECOMPUTE))
     assert summary.skipped == 1
     assert summary.applied == 0
 
@@ -288,14 +296,14 @@ async def test_apply_phase_runs_audit_op_on_sqlite(monkeypatch: pytest.MonkeyPat
 @pytest.mark.asyncio
 async def test_skip_count_per_op_type_drains_in_plan_order(monkeypatch: pytest.MonkeyPatch) -> None:
     """Two gated ops + one audit op produces skipped=2 / applied=1 / planned=3."""
-    gated_a = _op(OpKind.VECTORCYPHER_DEDUPE_ENTITIES)
-    gated_b = _op(OpKind.VECTORCYPHER_DEDUPE_ENTITIES)
+    gated_a = _op(OpKind.VECTORCYPHER_CENTROID_RECOMPUTE)
+    gated_b = _op(OpKind.VECTORCYPHER_CENTROID_RECOMPUTE)
     audit = _op(OpKind.CHRONICLE_TOMBSTONE_AUDIT)
     plugin = _StubPlugin([gated_a, gated_b, audit])
     monkeypatch.setattr(registry_mod, "_REGISTRY", {"stub": plugin})
 
     def _lookup(op_type: OpKind | str) -> Any:
-        if str(op_type) == str(OpKind.VECTORCYPHER_DEDUPE_ENTITIES):
+        if str(op_type) == str(OpKind.VECTORCYPHER_CENTROID_RECOMPUTE):
             return _exploding_handler
         return None
 
@@ -311,10 +319,10 @@ async def test_skip_count_per_op_type_drains_in_plan_order(monkeypatch: pytest.M
     result = await orch.run(uuid4(), mode="apply")
 
     summaries = {s.op_type: s for s in result.ops}
-    dedupe_sum = summaries[str(OpKind.VECTORCYPHER_DEDUPE_ENTITIES)]
+    gated_sum = summaries[str(OpKind.VECTORCYPHER_CENTROID_RECOMPUTE)]
     audit_sum = summaries[str(OpKind.CHRONICLE_TOMBSTONE_AUDIT)]
-    assert dedupe_sum.planned == 2
-    assert dedupe_sum.skipped == 2
-    assert dedupe_sum.applied == 0
+    assert gated_sum.planned == 2
+    assert gated_sum.skipped == 2
+    assert gated_sum.applied == 0
     assert audit_sum.planned == 1
     assert audit_sum.skipped == 0

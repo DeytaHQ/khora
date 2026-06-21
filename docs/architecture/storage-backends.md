@@ -545,6 +545,8 @@ storage:
     user: memgraph
 ```
 
+**Dream graph mirror is flat soft-delete only (#1278).** Memgraph has no versioning primitives and no APOC, and stores `valid_until` as a plain string property. So unlike the Neo4j mirror (which snapshots the retired node into a `:EntityVersion` chain), `MemgraphBackend.soft_retire_entities_batch` simply SETs `valid_until` by id; endpoint rewrite (`rewrite_relationship_endpoints_batch`) and relabel (`rename_types_batch`) are re-create + delete in plain Cypher (no APOC). The reverse verbs flat-restore by clearing `valid_until`. `supports_dream_mirror()` advertises `prune_edges`, `dedupe_entities`, and `normalize_schema` (the flat-capable kinds); `community_summary` (the GraphRAG `:Community` materialization) is **not** advertised. The `list_entities` / `list_relationships` read paths filter `valid_until` unconditionally so a mirrored soft-delete is hidden from recall in lockstep with the PG read filter. The cross-store live-set invariant is guarded by `tests/integration/dream/test_memgraph_dream_mirror_integration.py` against a docker-compose Memgraph stack (3.x; `docker compose up -d memgraph`, opt-in `memgraph` profile). Note: the engine routes Memgraph through the storage-factory-built backend and skips the Neo4j-only `DualNodeManager`, so the `:Chunk` dual-node temporal recall path is Neo4j/SurrealDB/sqlite_lance only.
+
 ## AWS Neptune
 
 Neptune is Amazon's managed graph database. Khora connects via the Bolt protocol (OpenCypher) and optionally supports IAM SigV4 auth for secure, password-less access.
