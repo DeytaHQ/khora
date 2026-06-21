@@ -2728,6 +2728,89 @@ class TestVectorCypherEngineApiTemporalFilter:
         # Detector path produces "dictionary" / "semantic" / "none" — never "api".
         assert signal.source != "api"
 
+    @pytest.mark.asyncio
+    async def test_recall_tier2_disabled_german_collapses_to_none(
+        self, engine_with_mocked_retriever: VectorCypherEngine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#981: with the Tier-2 semantic fallback OFF, a German temporal query
+        the English keyword tier misses stays NONE and the LLM is never called."""
+        from khora.engines.vectorcypher.temporal_detection import TemporalCategory
+
+        engine = engine_with_mocked_retriever
+        engine._config.query.temporal_semantic_fallback_enabled = False
+
+        async def _boom(*args, **kwargs):  # pragma: no cover - must not run
+            raise AssertionError("LLM must not be called when Tier-2 is disabled")
+
+        monkeypatch.setattr("khora.query.temporal_detection.classify_temporal_category_llm", _boom)
+        import khora.query.temporal_detection as _td
+
+        _td._TEMPORAL_CATEGORY_CACHE.clear()
+
+        await engine.recall("Was ist der letzte Deploy?", uuid4())
+        kwargs = engine._retriever.retrieve.await_args.kwargs
+        signal = kwargs["temporal_signal"]
+        assert signal.category == TemporalCategory.NONE
+        assert signal.source == "none"
+
+    @pytest.mark.asyncio
+    async def test_recall_tier2_enabled_german_classifies_via_llm(
+        self, engine_with_mocked_retriever: VectorCypherEngine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#981: with Tier-2 ON, a German temporal query the keyword tier misses
+        is classified into the correct category via the (mocked) LLM fallback,
+        surfaced with source='semantic'."""
+        from khora.engines.vectorcypher.temporal_detection import TemporalCategory
+
+        engine = engine_with_mocked_retriever
+        engine._config.query.temporal_semantic_fallback_enabled = True
+        engine._config.query.temporal_semantic_fallback_model = None
+
+        async def _classify(query: str, *, model=None, timeout: float = 3.0):
+            return TemporalCategory.RECENCY, 1.0
+
+        monkeypatch.setattr("khora.query.temporal_detection.classify_temporal_category_llm", _classify)
+        import khora.query.temporal_detection as _td
+
+        _td._TEMPORAL_CATEGORY_CACHE.clear()
+
+        result = await engine.recall("Was ist der letzte Deploy?", uuid4())
+        kwargs = engine._retriever.retrieve.await_args.kwargs
+        signal = kwargs["temporal_signal"]
+        assert signal.category == TemporalCategory.RECENCY
+        assert signal.source == "semantic"
+        assert result.engine_info["temporal_category"] == "recency"
+        # Happy path: Tier-2 succeeded, so no degradation should be recorded.
+        # RecallResult has no `metadata` attr, so the helper reads engine_info.
+        assert_no_silent_degradation(result)
+
+    @pytest.mark.asyncio
+    async def test_recall_tier2_llm_failure_degrades_and_records(
+        self, engine_with_mocked_retriever: VectorCypherEngine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#981 / ADR-001: a Tier-2 LLM failure degrades to the keyword (NONE)
+        result and records a Degradation on engine_info['degradations']."""
+        from khora.engines.vectorcypher.temporal_detection import TemporalCategory
+
+        engine = engine_with_mocked_retriever
+        engine._config.query.temporal_semantic_fallback_enabled = True
+        engine._config.query.temporal_semantic_fallback_model = None
+
+        async def _raise(*args, **kwargs):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr("khora.query.temporal_detection.classify_temporal_category_llm", _raise)
+        import khora.query.temporal_detection as _td
+
+        _td._TEMPORAL_CATEGORY_CACHE.clear()
+
+        result = await engine.recall("Was ist der letzte Deploy?", uuid4())
+        kwargs = engine._retriever.retrieve.await_args.kwargs
+        signal = kwargs["temporal_signal"]
+        assert signal.category == TemporalCategory.NONE
+        degradations = result.engine_info.get("degradations", [])
+        assert any(d.get("reason") == "llm_failed" for d in degradations)
+
 
 class TestRerankingConfigReconcile:
     """``config.query.reranking_*`` must reach the VectorCypher engine (#1017, #1023)."""

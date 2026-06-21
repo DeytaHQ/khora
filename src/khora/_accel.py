@@ -1324,6 +1324,20 @@ def batch_recency_scores(
 # ---------------------------------------------------------------------------
 # Temporal category detection
 # ---------------------------------------------------------------------------
+#
+# This dictionary is intentionally English-only. The multilingual / paraphrase
+# gap from #981 (German queries and paraphrased-English queries collapsing to
+# NONE) is handled by the opt-in Tier-2 LLM semantic fallback in
+# ``khora.query.temporal_detection.TemporalDetector.detect_async`` -- NOT by
+# growing per-language keyword lists here. Decision (#981): a multilingual
+# keyword dictionary is NOT warranted. Reasons: (1) it would need a separate
+# curated phrase list per language, kept in lockstep across the Rust kernel and
+# this Python fallback, which is unbounded maintenance for a long tail of
+# languages; (2) it cannot resolve paraphrases ("evolved over time", "timeline
+# of milestones") in any language, which the LLM tier handles for free; (3) the
+# LLM tier classifies into the correct six-way category, which a keyword list
+# only approximates. Keep new English whole-word synonyms here (cheap, Tier-1);
+# route everything else to Tier-2.
 
 TEMPORAL_DICTIONARY: dict[int, list[str]] = {
     1: [  # EXPLICIT
