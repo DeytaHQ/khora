@@ -1721,10 +1721,16 @@ class ChronicleEngine:
         _enable_resolver = getattr(qs, "enable_temporal_resolver", True) if qs else True
         if _enable_resolver and temporal_filter is None:
             from khora.query.temporal import TemporalFilter
+            from khora.query.temporal_detection import TemporalDetector
             from khora.query.temporal_resolver import TemporalResolver
 
-            resolver = TemporalResolver()
-            resolved = resolver.resolve_fast(query)
+            # Gate the date parser on temporal intent first (matches
+            # VectorCypher). Without this, resolve_fast's bare-year regex
+            # (``20\d{2}``) treats an incidental year-like token in a
+            # non-temporal query (a version, a room/model number) as a date and
+            # silently narrows every channel, dropping older results (#1222).
+            temporal_signal = TemporalDetector().detect(query)
+            resolved = TemporalResolver().resolve_fast(query) if temporal_signal.is_temporal else None
             if resolved and resolved.confidence > 0.5 and (resolved.start or resolved.end):
                 temporal_filter = TemporalFilter(
                     start_time=resolved.start,
