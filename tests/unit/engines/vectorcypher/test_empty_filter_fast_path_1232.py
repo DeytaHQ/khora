@@ -28,7 +28,9 @@ def _typed_entity_recent_retriever() -> VectorCypherRetriever:
     """A retriever whose router always classifies TYPED_ENTITY_RECENT, with
     both fast and slow sub-paths stubbed so we can see which one fires."""
     retriever = VectorCypherRetriever.__new__(VectorCypherRetriever)
-    retriever._config = RetrieverConfig()
+    # enable_hyde="never" isolates the gate from the #1018 HyDE embed step.
+    retriever._config = RetrieverConfig(enable_hyde="never")
+    retriever._hyde_expander = None
     retriever._storage = AsyncMock()
     retriever._embedder = AsyncMock()
     retriever._embedder.model_name = "mock"

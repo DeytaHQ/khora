@@ -183,7 +183,7 @@ Neither branch sets a 3/5/10/15 chunk ladder, and there is no tier that raises t
 
 The diversity stage (Stage 5 of the query pipeline) uses Maximal Marginal Relevance to select a diverse set of results from the candidate pool:
 
-1. **Enabled by default**: `enable_diversity` defaults to `True` in both `QueryConfig` and `QuerySettings`.
+1. **Enabled by default**: `enable_diversity` defaults to `True` in both `QueryConfig` and `QuerySettings`. As of #1018 it is also honored on the default `Khora.recall()` (VectorCypher) path: MMR selects the final top-`limit` chunks from the broad-recall pool. It degrades to plain score order when chunk embeddings are not hydrated.
 
 2. **Rust acceleration**: MMR selection uses a 3-tier fallback (Rust → NumPy → pure Python). The Rust implementation in `khora-accel` uses SIMD-friendly dot product with GIL release, providing ~5x speedup over pure Python for typical result set sizes.
 

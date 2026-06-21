@@ -287,6 +287,23 @@ are global - configure them via `KhoraConfig.query` (`QueryConfig`) at
 construction time or via `KHORA_QUERY_*` environment variables; there
 is no `config=` kwarg on `kb.recall()`.
 
+#### Which `query.*` settings apply on the default (VectorCypher) recall path
+
+`Khora.recall()` dispatches straight to the VectorCypher retriever, not to
+`HybridQueryEngine`. As of #1018 the following `QuerySettings` are honored on
+that path: `enable_hyde` / `hyde_num_hypotheticals`, `enable_diversity` /
+`diversity_lambda` (MMR over the broad-recall pool), `stage1_recall_limit`
+(vector-channel over-fetch when reranking or diversity will narrow the pool),
+the reranking family (`enable_reranking`, `reranking_model`, ...; #1023), and
+the coherence / temporal / PPR knobs documented elsewhere in this section.
+
+Still inert on the VectorCypher path: `enable_entity_linking` /
+`linked_entity_boost`. Entity linking in `HybridQueryEngine` runs over
+LLM-extracted query mentions (query understanding), a step the VectorCypher
+retriever does not perform - it discovers entry entities via vector search over
+the entity table instead. Setting these two has no effect on `Khora.recall()`;
+use `HybridQueryEngine` if you need mention-based linking.
+
 ### Agentic Search
 
 Per-query agentic search isn't exposed on `kb.recall()`. Use

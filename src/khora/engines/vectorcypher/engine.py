@@ -752,7 +752,39 @@ class VectorCypherEngine:
         self._router = QueryComplexityRouter(router_config)
 
         # Initialize retriever
-        retriever_config = RetrieverConfig(
+        retriever_config = self._assemble_retriever_config()
+        self._retriever = VectorCypherRetriever(
+            vector_store=self._temporal_store,
+            neo4j_driver=self._neo4j_driver,
+            embedder=self._embedder,
+            database=neo4j_database,
+            config=retriever_config,
+            storage=self._storage,
+            neo4j_query_timeout=neo4j_query_timeout,
+            backend=backend,
+        )
+
+        # Initialize telemetry
+        from khora.telemetry import init_telemetry
+        from khora.telemetry.config import TelemetryConfig
+
+        telemetry_cfg = TelemetryConfig(
+            database_url=self._config.telemetry_database_url,
+            service_name=self._config.telemetry_service_name,
+        )
+        await init_telemetry(telemetry_cfg)
+
+        self._connected = True
+        logger.info("VectorCypher engine connected")
+
+    def _assemble_retriever_config(self) -> RetrieverConfig:
+        """Build the RetrieverConfig from ``VectorCypherConfig`` + ``query.*``.
+
+        Factored out of ``connect()`` so the config-mapping contract can be
+        unit-tested without DB connections. Pure: depends only on
+        ``self._vc_config`` and ``self._config.query``.
+        """
+        return RetrieverConfig(
             default_depth=self._vc_config.graph_default_depth,
             max_depth=self._vc_config.graph_max_depth,
             max_entry_entities=self._vc_config.graph_max_entry_entities,
@@ -806,30 +838,15 @@ class VectorCypherEngine:
             ppr_tol=self._config.query.ppr_tol,
             ppr_top_entities=self._config.query.ppr_top_entities,
             metadata_overfetch_multiplier=self._config.query.metadata_overfetch_multiplier,
+            # Issue #1018 — QuerySettings tier on the default recall() path.
+            # These were inert on VectorCypher because recall() dispatches
+            # straight to retriever.retrieve() and bypasses QueryEngine.
+            enable_hyde=self._config.query.enable_hyde,
+            hyde_num_hypotheticals=self._config.query.hyde_num_hypotheticals,
+            stage1_recall_limit=self._config.query.stage1_recall_limit,
+            enable_diversity=self._config.query.enable_diversity,
+            diversity_lambda=self._config.query.diversity_lambda,
         )
-        self._retriever = VectorCypherRetriever(
-            vector_store=self._temporal_store,
-            neo4j_driver=self._neo4j_driver,
-            embedder=self._embedder,
-            database=neo4j_database,
-            config=retriever_config,
-            storage=self._storage,
-            neo4j_query_timeout=neo4j_query_timeout,
-            backend=backend,
-        )
-
-        # Initialize telemetry
-        from khora.telemetry import init_telemetry
-        from khora.telemetry.config import TelemetryConfig
-
-        telemetry_cfg = TelemetryConfig(
-            database_url=self._config.telemetry_database_url,
-            service_name=self._config.telemetry_service_name,
-        )
-        await init_telemetry(telemetry_cfg)
-
-        self._connected = True
-        logger.info("VectorCypher engine connected")
 
     async def disconnect(self) -> None:
         """Disconnect from all storage backends."""
