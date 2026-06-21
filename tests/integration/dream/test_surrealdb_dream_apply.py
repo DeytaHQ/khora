@@ -196,6 +196,42 @@ async def test_dedupe_self_loop_native_apply_converges_and_replay_is_idempotent(
     assert await _live_relationship_ids(kb, ns_row_id) == rels
 
 
+async def test_dedupe_multi_incident_edges_batched_in_one_round_trip(kb: Khora) -> None:
+    """dedupe with several incident edges: all are flat-soft-deleted in a single
+    batched round-trip (unique indexed bind names, no collision) and no live edge
+    points at the retired entity."""
+    ns = await kb.create_namespace()
+    ns_row_id = await kb.storage.resolve_namespace(ns.namespace_id)
+
+    canonical = await _seed_entity(kb, ns_row_id, f"acme-{uuid4().hex[:8]}")
+    absorbed = await _seed_entity(kb, ns_row_id, f"acme-corp-{uuid4().hex[:8]}")
+    n1 = await _seed_entity(kb, ns_row_id, f"vendor-{uuid4().hex[:8]}")
+    n2 = await _seed_entity(kb, ns_row_id, f"client-{uuid4().hex[:8]}")
+    loop = await _seed_edge(kb, ns_row_id, canonical, absorbed, "RELATES_TO")
+    out_edge = await _seed_edge(kb, ns_row_id, absorbed, n1, "SUPPLIES")
+    in_edge = await _seed_edge(kb, ns_row_id, n2, absorbed, "PAYS")
+
+    conn = _surrealdb_connection(kb.storage)
+    from khora.dream.engines.vectorcypher.surrealdb_apply import apply_surrealdb_op
+
+    op = DreamOp(
+        op_id=uuid4(),
+        phase="apply",
+        op_type=OpKind.VECTORCYPHER_DEDUPE_ENTITIES,
+        outputs=({"merges": [{"canonical_id": str(canonical), "absorbed_id": str(absorbed)}]},),
+        namespace_id=ns_row_id,
+    )
+    undo = await apply_surrealdb_op(op, conn=conn)
+
+    ents = await _live_entity_ids(kb, ns_row_id)
+    rels = await _live_relationship_ids(kb, ns_row_id)
+    assert absorbed not in ents
+    assert {loop, out_edge, in_edge}.isdisjoint(rels), "every incident edge must be soft-deleted"
+    assert len(undo.before["merges"][0]["edges_retired"]) == 3
+    live = await kb.storage.list_relationships(ns_row_id, limit=1000)
+    assert all(r.source_entity_id in ents and r.target_entity_id in ents for r in live)
+
+
 async def test_unsupported_op_is_skip_declared_not_crashed(kb: Khora) -> None:
     """An op with no SurrealQL-native handler is declared unsupported with a
     structured ``surrealdb_native_apply_required`` skip (ADR-001) - it advances

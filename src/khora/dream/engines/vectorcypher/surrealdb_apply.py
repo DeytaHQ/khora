@@ -193,6 +193,10 @@ async def _apply_dedupe_entities(op: DreamOp, *, conn: SurrealDBConnection) -> U
         previous_serialized: list[dict[str, Any]] = []
         self_loops: list[str] = []
         edges_retired: list[str] = []
+        # Collect every soft-delete for this merge entry into ONE batch so the
+        # whole merge is a single round-trip (N+1 -> 1). ``execute_batch`` rejects
+        # parameter-name collisions, so each edge gets an indexed bind name.
+        batch_stmts: list[tuple[str, dict[str, Any]]] = []
         for row in rows:
             rel_id = row.get("rel_id")
             src = _record_uuid(row.get("in"))
@@ -211,14 +215,16 @@ async def _apply_dedupe_entities(op: DreamOp, *, conn: SurrealDBConnection) -> U
             )
 
             # Flat soft-delete the incident edge (self-loop or not).
-            await conn.execute_batch(
-                [
-                    (
-                        "UPDATE relates_to SET valid_until = time::now(), updated_at = time::now() "
-                        "WHERE rel_id = $rid AND valid_until IS NONE",
-                        {"rid": str(rel_id)},
-                    )
-                ]
+            # ``param`` is an internally-generated bind name (rid_<n>), never user
+            # input; the rel_id value still binds as a parameter. S608 noqa per
+            # the repo SurrealQL convention.
+            param = f"rid_{len(batch_stmts)}"
+            batch_stmts.append(
+                (
+                    "UPDATE relates_to SET valid_until = time::now(), updated_at = time::now() "  # noqa: S608
+                    f"WHERE rel_id = ${param} AND valid_until IS NONE",
+                    {param: str(rel_id)},
+                )
             )
             edges_retired.append(str(rel_id))
             # A canonical<->absorbed edge collapses to a self-loop on merge.
@@ -226,14 +232,13 @@ async def _apply_dedupe_entities(op: DreamOp, *, conn: SurrealDBConnection) -> U
                 self_loops.append(str(rel_id))
 
         # Flat soft-delete the absorbed entity row (guarded - idempotent).
-        await conn.execute_batch(
-            [
-                (
-                    "UPDATE $aid SET valid_until = time::now(), updated_at = time::now() WHERE valid_until IS NONE",
-                    {"aid": absorbed_rid},
-                )
-            ]
+        batch_stmts.append(
+            (
+                "UPDATE $aid SET valid_until = time::now(), updated_at = time::now() WHERE valid_until IS NONE",
+                {"aid": absorbed_rid},
+            )
         )
+        await conn.execute_batch(batch_stmts)
 
         merges_undo.append(
             {

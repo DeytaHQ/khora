@@ -1470,33 +1470,16 @@ def _graph_backend(coordinator: Any) -> Any | None:
 
 
 def _surrealdb_connection(coordinator: Any) -> Any | None:
-    """Return the shared :class:`SurrealDBConnection` for a unified stack (#1280).
+    """Return the shared SurrealDB connection for a unified stack, else None (#1280).
 
-    A SurrealDB-unified coordinator wires graph + vector (+ relational +
-    event-store) adapters that all share one ``SurrealDBConnection`` via their
-    ``_conn`` slot - there is NO SQL session, so ``coordinator.transaction()``
-    raises. We detect that shape here so dream-apply can route to the
-    SurrealQL-native apply path instead of the (absent) SQL session.
-
-    Returns the connection only when graph and vector share the SAME
-    ``SurrealDBConnection`` instance (the unified contract); any other shape
-    (PG/Neo4j, sqlite_lance, graph-less) returns ``None`` and the apply falls
-    through to the existing SQL / embedded paths.
+    Thin wrapper over :meth:`StorageCoordinator.surrealdb_connection` that
+    tolerates a coordinator stub (test double) without the method - dream-apply
+    then falls through to the SQL / embedded paths.
     """
-    graph = getattr(coordinator, "_graph", None)
-    vector = getattr(coordinator, "_vector", None)
-    if graph is None or vector is None:
+    probe = getattr(coordinator, "surrealdb_connection", None)
+    if probe is None:
         return None
-    try:
-        graph_conn = getattr(graph, "_conn", None)
-        vector_conn = getattr(vector, "_conn", None)
-    except Exception:  # pragma: no cover - advisory probe, mirrors coordinator
-        return None
-    if graph_conn is None or graph_conn is not vector_conn:
-        return None
-    if type(graph_conn).__name__ != "SurrealDBConnection":
-        return None
-    return graph_conn
+    return probe()
 
 
 def _supported_mirror_kinds(graph: Any) -> frozenset[str]:

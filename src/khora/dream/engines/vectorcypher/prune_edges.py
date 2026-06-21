@@ -177,7 +177,8 @@ async def _collect_candidates(
     against the ``relates_to`` edge table, filtering the chunk-liveness conjunct
     in Python (mirroring the SQLite path).
     """
-    surreal_conn = _surrealdb_connection(coordinator)
+    surreal_conn_probe = getattr(coordinator, "surrealdb_connection", None)
+    surreal_conn = surreal_conn_probe() if surreal_conn_probe is not None else None
     if surreal_conn is not None:
         return await _collect_surrealdb(
             surreal_conn,
@@ -249,27 +250,6 @@ async def _collect_postgres(
             }
         )
     return out
-
-
-def _surrealdb_connection(coordinator: Any) -> Any | None:
-    """Return the shared SurrealDB connection for a unified stack, else None (#1280).
-
-    Mirrors ``khora.dream.orchestrator._surrealdb_connection``: a unified
-    SurrealDB coordinator wires graph + vector adapters that share one
-    ``SurrealDBConnection`` via ``_conn``. Any other shape returns ``None`` and
-    the caller falls through to the SQL session path.
-    """
-    graph = getattr(coordinator, "_graph", None)
-    vector = getattr(coordinator, "_vector", None)
-    if graph is None or vector is None:
-        return None
-    graph_conn = getattr(graph, "_conn", None)
-    vector_conn = getattr(vector, "_conn", None)
-    if graph_conn is None or graph_conn is not vector_conn:
-        return None
-    if type(graph_conn).__name__ != "SurrealDBConnection":
-        return None
-    return graph_conn
 
 
 async def _collect_surrealdb(
