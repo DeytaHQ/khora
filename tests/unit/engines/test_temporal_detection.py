@@ -193,6 +193,57 @@ def test_word_boundary_python_fallback(query: str, expected: int, reason: str, m
 
 
 # ---------------------------------------------------------------------------
+# #981 Tier-1 disambiguation of whole-word ambiguous English keywords
+# ---------------------------------------------------------------------------
+#
+# "may" (month vs. modal verb / proper name), "just" (recency vs. "only/simply"
+# adverb), and "active" (state-query vs. generic adjective) are real whole words,
+# so the #1313 word-boundary fix does not help and the #1318 Tier-2 LLM fallback
+# (which only runs when Tier-1 returns NONE) cannot correct these false
+# POSITIVES. They are disambiguated in Tier-1: they classify as temporal only in
+# a temporal context. Checked on BOTH the Rust kernel and the Python fallback.
+
+# (query, expected_category_id, reason)
+_DISAMBIGUATION_CASES = [
+    # "may" — ambiguous false-positives now NONE.
+    ("Describe the May Department Stores company.", 0, "'May' as a company name"),
+    ("Tell me about May Corp.", 0, "'May' as a proper name"),
+    ("You may proceed.", 0, "'may' as a modal verb"),
+    # "may" — genuine month, kept (preposition or number adjacency) -> EXPLICIT.
+    ("What shipped in May?", 1, "'in May' -> month -> EXPLICIT"),
+    ("Everything since May.", 1, "'since May' -> month -> EXPLICIT"),
+    ("What did Acme ship May 2024?", 1, "'May 2024' -> month -> EXPLICIT"),
+    ("The release on 5 May went out.", 1, "'5 May' -> month -> EXPLICIT"),
+    # "just" — adverb false-positive now NONE; recency phrases kept -> RECENCY.
+    ("Just confirm the data structure.", 0, "'just' as the adverb 'only/simply'"),
+    ("What happened just now?", 5, "'just now' -> RECENCY"),
+    ("What was just released?", 5, "'just released' -> RECENCY"),
+    # "active" — generic adjective false-positive now NONE; noun phrases kept.
+    ("Apply the formula to the active variable.", 0, "'active' (math), not temporal"),
+    ("What are all the active deals in the pipeline?", 2, "'active deals' -> STATE_QUERY"),
+    ("List the active projects for Q3.", 2, "'active projects' -> STATE_QUERY"),
+    ("Is it currently active?", 2, "'currently' -> STATE_QUERY"),
+]
+
+
+@pytest.mark.parametrize(("query", "expected", "reason"), _DISAMBIGUATION_CASES)
+def test_disambiguation_rust_path(query: str, expected: int, reason: str) -> None:
+    from khora._accel import detect_temporal_category
+
+    assert detect_temporal_category(query) == expected, reason
+
+
+@pytest.mark.parametrize(("query", "expected", "reason"), _DISAMBIGUATION_CASES)
+def test_disambiguation_python_fallback(
+    query: str, expected: int, reason: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("khora._accel._HAS_RUST", False)
+    from khora._accel import detect_temporal_category
+
+    assert detect_temporal_category(query) == expected, reason
+
+
+# ---------------------------------------------------------------------------
 # Retrieval params mapping tests
 # ---------------------------------------------------------------------------
 

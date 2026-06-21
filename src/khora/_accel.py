@@ -1354,7 +1354,9 @@ TEMPORAL_DICTIONARY: dict[int, list[str]] = {
         "february",
         "march",
         "april",
-        "may ",
+        # "may" is whole-word ambiguous (modal verb / proper name); gated to
+        # temporal context by _may_is_temporal (#981).
+        "may",
         "june",
         "july",
         "august",
@@ -1408,7 +1410,14 @@ TEMPORAL_DICTIONARY: dict[int, list[str]] = {
         " current project",
         " current plan",
         " current team",
-        " active ",
+        # Bare " active " was whole-word ambiguous ("the active variable" —
+        # math, not temporal); narrowed to state-query noun phrases (#981).
+        "active deal",
+        "active deals",
+        "active project",
+        "active projects",
+        "active since",
+        "currently active",
         "who is the ",
         "who are the ",
         "up-to-date",
@@ -1450,9 +1459,22 @@ TEMPORAL_DICTIONARY: dict[int, list[str]] = {
     5: [  # RECENCY
         "most recent",
         "newest",
-        "just ",
         "recently",
         "latest ",
+        # Bare "just " was whole-word ambiguous ("just confirm" — adverb
+        # meaning "only/simply"); narrowed to "just"+recency phrases (#981).
+        "just now",
+        "just released",
+        "just announced",
+        "just shipped",
+        "just launched",
+        "just published",
+        "just landed",
+        "just happened",
+        "just finished",
+        "just completed",
+        "just started",
+        "just arrived",
     ],
     6: [  # CHANGE
         "changed",
@@ -1477,6 +1499,18 @@ TEMPORAL_DICTIONARY: dict[int, list[str]] = {
 }
 
 
+# "may" only reads as the month name (EXPLICIT) in a temporal context — when
+# preceded by a temporal preposition / number or followed by a number (#981).
+# This mirrors the Rust kernel's `may_is_temporal`: bare "may" (modal verb) and
+# "May Corp" (proper name) do NOT classify as temporal. Temporal prepositions
+# kept in lockstep with `MAY_TEMPORAL_PREPS` in rust/khora-accel/src/temporal.rs.
+_MAY_TEMPORAL_RE = re.compile(
+    r"\b(?:in|on|by|since|until|before|after|during|early|late|\d+)\b\W*\bmay\b"
+    r"|\bmay\s+\d",
+    re.IGNORECASE,
+)
+
+
 def _compile_temporal_term(term: str) -> re.Pattern[str]:
     """Compile a dictionary term into a word-boundary-aware regex.
 
@@ -1488,8 +1522,14 @@ def _compile_temporal_term(term: str) -> re.Pattern[str]:
     ``\\b`` only on the side where the term begins/ends with a word character,
     so internal-space phrases and hyphenated terms ("up-to-date", "ex-") keep
     matching while substrings of larger words no longer do.
+
+    The whole-word ambiguous "may" (month vs. modal verb vs. proper name) is
+    special-cased to require a temporal context (#981), in parity with the Rust
+    kernel's ``may_is_temporal``.
     """
     core = term.strip()
+    if core == "may":
+        return _MAY_TEMPORAL_RE
     left = r"\b" if core[:1].isalnum() else ""
     right = r"\b" if core[-1:].isalnum() else ""
     return re.compile(left + re.escape(core) + right, re.IGNORECASE)

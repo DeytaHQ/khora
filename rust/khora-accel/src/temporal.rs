@@ -136,8 +136,8 @@ fn matches_op(ts: f64, op: Op, start: Option<f64>, end: Option<f64>) -> bool {
 /// This replaces Python-side regex for zero-overhead temporal detection.
 #[pyfunction]
 pub fn detect_temporal_keywords(query: &str) -> bool {
-    use std::sync::LazyLock;
     use regex::Regex;
+    use std::sync::LazyLock;
 
     static TEMPORAL_RE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(
@@ -186,6 +186,46 @@ fn match_on_word_boundary(text: &str, start: usize, end: usize, pattern: &str) -
     true
 }
 
+/// Temporal prepositions that, when they precede the month name "may", make it
+/// read as the month rather than the modal verb / proper name (#981).
+const MAY_TEMPORAL_PREPS: &[&str] = &[
+    "in", "on", "by", "since", "until", "before", "after", "during", "early", "late",
+];
+
+/// Disambiguate a whole-word "may" match: the month name is ambiguous with the
+/// modal verb ("you may") and a proper name ("May Corp"), so it only classifies
+/// as a date when it sits in a temporal context (#981) — either preceded by a
+/// temporal preposition ("in May", "since May") or adjacent to a number
+/// ("May 2024", "May 5", "5 May"). Bare "May" / "May Department Stores" is NOT
+/// temporal.
+///
+/// `text` is the space-padded query; `start`/`end` are the byte offsets of the
+/// "may" span within it.
+fn may_is_temporal(text: &str, start: usize, end: usize) -> bool {
+    // Number adjacent on the right: "May 2024", "May 5".
+    let after = text[end..].trim_start();
+    if after.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    // Tokens before "may" (the text up to the match, reversed word-by-word).
+    let before = text[..start].trim_end();
+    let prev_word = before
+        .rsplit(|c: char| !is_word_char(c))
+        .find(|w| !w.is_empty());
+    if let Some(word) = prev_word {
+        // Number adjacent on the left: "5 May" (prev_word is always non-empty).
+        if word.chars().all(|c| c.is_ascii_digit()) {
+            return true;
+        }
+        // Temporal preposition immediately before: "in May", "since May".
+        let lower = word.to_ascii_lowercase();
+        if MAY_TEMPORAL_PREPS.contains(&lower.as_str()) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Categorized temporal keyword detection using Aho-Corasick automaton.
 ///
 /// Returns a category ID:
@@ -231,7 +271,9 @@ pub fn detect_temporal_category(query: &str) -> u8 {
                 "february",
                 "march",
                 "april",
-                "may ",
+                // "may" is whole-word ambiguous (modal verb / proper name);
+                // gated to temporal context by may_is_temporal (#981).
+                "may",
                 "june",
                 "july",
                 "august",
@@ -290,7 +332,15 @@ pub fn detect_temporal_category(query: &str) -> u8 {
                 " current project",
                 " current plan",
                 " current team",
-                " active ",     // "active deals", "active projects"
+                // Bare " active " was whole-word ambiguous ("the active
+                // variable" — math, not temporal); narrowed to state-query
+                // noun phrases (#981).
+                "active deal",
+                "active deals",
+                "active project",
+                "active projects",
+                "active since",
+                "currently active",
                 "who is the ",  // implicit state: "Who is the account manager?"
                 "who are the ", // "Who are the team members involved?"
                 "up-to-date",
@@ -345,9 +395,29 @@ pub fn detect_temporal_category(query: &str) -> u8 {
         );
 
         // Category 5: RECENCY
+        // Bare "just " was whole-word ambiguous ("just confirm" — adverb
+        // meaning "only/simply", not temporal); narrowed to "just"+recency
+        // phrases (#981).
         add(
             5,
-            &["most recent", "newest", "just ", "recently", "latest "],
+            &[
+                "most recent",
+                "newest",
+                "recently",
+                "latest ",
+                "just now",
+                "just released",
+                "just announced",
+                "just shipped",
+                "just launched",
+                "just published",
+                "just landed",
+                "just happened",
+                "just finished",
+                "just completed",
+                "just started",
+                "just arrived",
+            ],
         );
 
         // Category 6: CHANGE
@@ -396,6 +466,10 @@ pub fn detect_temporal_category(query: &str) -> u8 {
     for mat in ac.find_overlapping_iter(&padded) {
         let pattern = &patterns[mat.pattern().as_usize()];
         if !match_on_word_boundary(&padded, mat.start(), mat.end(), pattern) {
+            continue;
+        }
+        // "may" only counts as the month in a temporal context (#981).
+        if pattern == "may" && !may_is_temporal(&padded, mat.start(), mat.end()) {
             continue;
         }
         let cat = cats[mat.pattern().as_usize()];
@@ -450,7 +524,8 @@ pub fn detect_temporal_category_with_confidence(query: &str) -> (u8, f64, Vec<St
                 "february",
                 "march",
                 "april",
-                "may ",
+                // "may" is whole-word ambiguous; gated by may_is_temporal (#981).
+                "may",
                 "june",
                 "july",
                 "august",
@@ -504,7 +579,13 @@ pub fn detect_temporal_category_with_confidence(query: &str) -> (u8, f64, Vec<St
                 " current project",
                 " current plan",
                 " current team",
-                " active ",
+                // Narrowed from bare " active " (#981).
+                "active deal",
+                "active deals",
+                "active project",
+                "active projects",
+                "active since",
+                "currently active",
                 "who is the ",
                 "who are the ",
                 "up-to-date",
@@ -550,9 +631,27 @@ pub fn detect_temporal_category_with_confidence(query: &str) -> (u8, f64, Vec<St
                 "how often ",
             ],
         );
+        // Bare "just " narrowed to recency phrases (#981).
         add(
             5,
-            &["most recent", "newest", "just ", "recently", "latest "],
+            &[
+                "most recent",
+                "newest",
+                "recently",
+                "latest ",
+                "just now",
+                "just released",
+                "just announced",
+                "just shipped",
+                "just launched",
+                "just published",
+                "just landed",
+                "just happened",
+                "just finished",
+                "just completed",
+                "just started",
+                "just arrived",
+            ],
         );
         // NOTE: "still " intentionally omitted — see detect_temporal_category.
         add(
@@ -603,6 +702,10 @@ pub fn detect_temporal_category_with_confidence(query: &str) -> (u8, f64, Vec<St
     for mat in ac.find_overlapping_iter(&padded) {
         let term = &patterns[mat.pattern().as_usize()];
         if !match_on_word_boundary(&padded, mat.start(), mat.end(), term) {
+            continue;
+        }
+        // "may" only counts as the month in a temporal context (#981).
+        if term == "may" && !may_is_temporal(&padded, mat.start(), mat.end()) {
             continue;
         }
         let cat = cats[mat.pattern().as_usize()];
@@ -1098,5 +1201,106 @@ mod tests {
             detect_temporal_category("Does the wiki have the more up-to-date status?"),
             2
         );
+    }
+
+    // #981: Tier-1 disambiguation of whole-word ambiguous English keywords.
+    // "may" (month vs. modal verb / proper name), "just" (recency vs. adverb),
+    // "active" (state-query vs. generic adjective) only classify as temporal in
+    // a temporal context.
+
+    #[test]
+    fn test_may_company_name_not_explicit() {
+        // "May" as a company name must NOT trip EXPLICIT.
+        assert_eq!(
+            detect_temporal_category("Describe the May Department Stores company."),
+            0
+        );
+        assert_eq!(detect_temporal_category("Tell me about May Corp."), 0);
+    }
+
+    #[test]
+    fn test_may_modal_verb_not_explicit() {
+        // "may" as a modal verb must NOT trip EXPLICIT.
+        assert_eq!(detect_temporal_category("You may proceed."), 0);
+    }
+
+    #[test]
+    fn test_may_month_with_preposition_is_explicit() {
+        // "in May" / "since May" read as the month -> EXPLICIT.
+        assert_eq!(detect_temporal_category("What shipped in May?"), 1);
+        assert_eq!(detect_temporal_category("Everything since May."), 1);
+    }
+
+    #[test]
+    fn test_may_month_with_year_is_explicit() {
+        // "May 2024" / "5 May" read as the month -> EXPLICIT.
+        assert_eq!(detect_temporal_category("What did Acme ship May 2024?"), 1);
+        assert_eq!(
+            detect_temporal_category("The release on 5 May went out."),
+            1
+        );
+    }
+
+    #[test]
+    fn test_just_adverb_not_recency() {
+        // "just" as the adverb "only/simply" must NOT trip RECENCY.
+        assert_eq!(
+            detect_temporal_category("Just confirm the data structure."),
+            0
+        );
+    }
+
+    #[test]
+    fn test_just_recency_phrase_is_recency() {
+        // "just now" / "just released" / "just shipped" -> RECENCY.
+        // (NB: "just updated" trips CHANGE via "updated" — cat 6 wins by
+        // max-priority; both are temporal, so that is acceptable behavior.)
+        assert_eq!(detect_temporal_category("What happened just now?"), 5);
+        assert_eq!(detect_temporal_category("What was just released?"), 5);
+        assert_eq!(detect_temporal_category("The build just shipped."), 5);
+    }
+
+    #[test]
+    fn test_active_generic_adjective_not_state_query() {
+        // "active" as a generic adjective (math) must NOT trip STATE_QUERY.
+        assert_eq!(
+            detect_temporal_category("Apply the formula to the active variable."),
+            0
+        );
+    }
+
+    #[test]
+    fn test_active_deals_is_state_query() {
+        // "active deals" / "active projects" remain STATE_QUERY.
+        assert_eq!(
+            detect_temporal_category("What are all the active deals in the pipeline?"),
+            2
+        );
+        assert_eq!(
+            detect_temporal_category("List the active projects for Q3."),
+            2
+        );
+    }
+
+    #[test]
+    fn test_currently_active_is_state_query() {
+        // "is it currently active?" stays STATE_QUERY (via "currently").
+        assert_eq!(detect_temporal_category("Is it currently active?"), 2);
+    }
+
+    #[test]
+    fn test_disambiguation_in_confidence_path() {
+        // The confidence path applies the same disambiguation.
+        let (cat, _, _) =
+            detect_temporal_category_with_confidence("Describe the May Department Stores company.");
+        assert_eq!(cat, 0);
+        let (cat, _, _) = detect_temporal_category_with_confidence("Just confirm the structure.");
+        assert_eq!(cat, 0);
+        let (cat, _, _) =
+            detect_temporal_category_with_confidence("Apply the formula to the active variable.");
+        assert_eq!(cat, 0);
+        // Genuine temporal forms still classify.
+        let (cat, _, _) = detect_temporal_category_with_confidence("What shipped in May 2024?");
+        assert_eq!(cat, 1);
     }
 }
