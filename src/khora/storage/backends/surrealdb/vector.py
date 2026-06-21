@@ -119,6 +119,7 @@ class SurrealDBVectorAdapter:
         sql = (
             "CREATE $rid SET "
             "namespace = $ns_rid, "
+            "namespace_id = $ns_str, "
             "document = $doc_rid, "
             "content = $content, "
             "embedding = $embedding, "
@@ -150,6 +151,7 @@ class SurrealDBVectorAdapter:
                 {
                     "id": _rid("chunk", chunk.id),
                     "namespace": _rid("memory_namespace", chunk.namespace_id),
+                    "namespace_id": str(chunk.namespace_id),
                     "document": _rid("document", chunk.document_id),
                     "content": chunk.content,
                     "embedding": list(chunk.embedding) if chunk.embedding is not None else None,
@@ -235,21 +237,30 @@ class SurrealDBVectorAdapter:
         skipped, preventing cross-tenant deletion by document id.
         """
         doc_rid = _rid("document", document_id)
+        ns_rid = _rid("memory_namespace", namespace_id)
         ns_str = str(namespace_id)
+        # Match the compound namespace predicate every sibling read method uses
+        # (scalar `namespace_id` OR the `namespace` record-link), so the delete
+        # works for newly written rows and any pre-#1221 rows that carry only
+        # the record-link.
+        bindings = {"doc_rid": doc_rid, "ns_rid": ns_rid, "ns_str": ns_str}
         # First count so we can report back
-        count_sql = "SELECT count() AS cnt FROM chunk WHERE document = $doc_rid AND namespace_id = $ns GROUP ALL"
-        count_row = await self._conn.query_one(
-            count_sql,
-            {"doc_rid": doc_rid, "ns": ns_str},
+        count_sql = (
+            "SELECT count() AS cnt FROM chunk "
+            "WHERE document = $doc_rid "
+            "AND (namespace = $ns_rid OR namespace.namespace_id = $ns_str OR namespace_id = $ns_str) "
+            "GROUP ALL"
         )
+        count_row = await self._conn.query_one(count_sql, bindings)
         count = int(count_row.get("cnt", 0)) if count_row else 0
 
         if count > 0:
-            del_sql = "DELETE FROM chunk WHERE document = $doc_rid AND namespace_id = $ns"
-            await self._conn.execute(
-                del_sql,
-                {"doc_rid": doc_rid, "ns": ns_str},
+            del_sql = (
+                "DELETE FROM chunk "
+                "WHERE document = $doc_rid "
+                "AND (namespace = $ns_rid OR namespace.namespace_id = $ns_str OR namespace_id = $ns_str)"
             )
+            await self._conn.execute(del_sql, bindings)
 
         return count
 
@@ -836,6 +847,7 @@ class SurrealDBVectorAdapter:
         return {
             "rid": _rid("chunk", chunk.id),
             "ns_rid": _rid("memory_namespace", chunk.namespace_id),
+            "ns_str": str(chunk.namespace_id),
             "doc_rid": _rid("document", chunk.document_id),
             "content": chunk.content,
             "embedding": list(chunk.embedding) if chunk.embedding is not None else None,
