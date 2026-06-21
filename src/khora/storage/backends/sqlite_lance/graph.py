@@ -223,6 +223,26 @@ _RELATIONSHIP_COLUMNS = (
 )
 
 
+# Live-set filters for the read paths (#1277). Soft-deleted rows stamped by the
+# dream apply handlers must drop from the live set the recall path sees, in
+# lockstep with the pgvector backend's ``_entity_live_filter`` /
+# ``_relationship_live_filter`` and the PG ground-truth used by the cross-store
+# invariant gate. ``datetime(...)`` normalizes the stored ISO string (space- or
+# T-separated, with a ``+00:00`` offset) and ``datetime('now')`` is UTC, so the
+# validity-window comparison is format- and timezone-robust on SQLite.
+#
+# Entities carry only ``valid_until`` (migration 033 added ``valid_to`` /
+# ``invalidated_at`` to relationships + memory_facts, not entities). Dream-apply
+# retires an absorbed entity by stamping ``valid_until = NOW()``.
+_ENTITY_LIVE_FILTER = "(valid_until IS NULL OR datetime(valid_until) > datetime('now'))"
+# Relationships additionally honor the bi-temporal soft-delete tombstones:
+# prune_edges stamps ``valid_to`` and dedupe self-loop invalidation stamps
+# ``invalidated_at``.
+_RELATIONSHIP_LIVE_FILTER = (
+    "valid_to IS NULL AND invalidated_at IS NULL AND (valid_until IS NULL OR datetime(valid_until) > datetime('now'))"
+)
+
+
 def _relationship_insert_params(rel: Relationship) -> tuple:
     rel_type = sanitize_cypher_label(rel.relationship_type or "RELATES_TO")
     return (
@@ -380,7 +400,7 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         limit: int = 100,
         offset: int = 0,
     ) -> list[Entity]:
-        conditions = ["namespace_id = ?"]
+        conditions = ["namespace_id = ?", _ENTITY_LIVE_FILTER]
         params: list[Any] = [uuid_to_text(namespace_id)]
         if entity_type is not None:
             conditions.append("entity_type = ?")
@@ -584,7 +604,7 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         limit: int = 1000,
         offset: int = 0,
     ) -> list[Relationship]:
-        conditions = ["namespace_id = ?"]
+        conditions = ["namespace_id = ?", _RELATIONSHIP_LIVE_FILTER]
         params: list[Any] = [uuid_to_text(namespace_id)]
         if relationship_type is not None:
             conditions.append("relationship_type = ?")

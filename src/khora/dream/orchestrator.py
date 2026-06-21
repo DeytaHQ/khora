@@ -110,25 +110,24 @@ _APPLY_DISABLED_ENV_VAR = "KHORA_DREAM_DISABLE_APPLY"
 _APPLY_DISABLED_FALSEY: frozenset[str] = frozenset({"", "0", "false", "False", "FALSE", "no", "No", "NO"})
 
 
-# Apply handlers that bind raw uuid.UUID values into session.execute and
-# therefore require a PostgreSQL session. On any other dialect (notably
-# SQLite via the sqlite_lance test stack) the bind raises
-# ``sqlite3.ProgrammingError: type 'UUID' is not supported``; the
-# orchestrator catches that at the dialect gate below and skips the op
-# instead of crashing the run. See #875.
+# Apply handlers that still require a PostgreSQL session. #1277 made the
+# dedupe / prune_edges / normalize_schema handlers UUID-bind-safe on SQLite
+# (they convert ``uuid.UUID`` binds to hex via
+# ``vectorcypher._uuid_bind.uuid_bind``) and lifted them out of this gate, so
+# they now run on the sqlite_lance embedded stack. The two remaining gated
+# kinds can't run on the embedded stack for reasons unrelated to UUID binding:
 #
-# ``vectorcypher_normalize_schema`` (#1264) belongs here too: its apply
-# handler rewrites ``entities.entity_type`` / ``relationships.relationship_type``
-# via ``session.execute`` binding raw ``uuid.UUID`` row ids, so it needs
-# Postgres for the same reason. Its graph-label relabel mirror is deferred
-# (out of scope for #1272, which mirrors the prune / dedupe soft-deletes).
+# - ``vectorcypher_centroid_recompute`` rewrites ``entities.embedding``, which
+#   lives in LanceDB (not SQLite) on the embedded stack, so a SQL UPDATE is a
+#   no-op there; the session-aware SQLite path is deferred to a later phase.
+# - ``vectorcypher_source_chunk_ids_gc`` relies on Postgres array operators.
+#
+# On any non-Postgres dialect the orchestrator catches the gate below and skips
+# the op instead of crashing the run. See #875 / #1277.
 _POSTGRES_ONLY_OP_KINDS: frozenset[str] = frozenset(
     {
-        "vectorcypher_dedupe_entities",
         "vectorcypher_centroid_recompute",
-        "vectorcypher_prune_edges",
         "vectorcypher_source_chunk_ids_gc",
-        "vectorcypher_normalize_schema",
     }
 )
 
