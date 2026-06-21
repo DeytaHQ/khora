@@ -10,6 +10,7 @@ from uuid import uuid4
 import pytest
 
 from khora.core.models import Chunk
+from khora.core.models.entity import CommunityNode, Entity
 from khora.engines.vectorcypher.engine import (
     ExtractionQualityMetrics,
     VectorCypherConfig,
@@ -17,6 +18,7 @@ from khora.engines.vectorcypher.engine import (
     _mirror_chunks_or_degrade,
 )
 from khora.khora import RecallResult
+from tests.test_helpers.diagnostics import assert_no_silent_degradation
 
 
 def _ent(entity_id, source_document_ids):
@@ -1472,6 +1474,65 @@ class TestVectorCypherEngineRecall:
         assert result.namespace_id == namespace_id
         assert len(result.chunks) == 2
         assert result.engine_info["engine"] == "vectorcypher"
+
+    @pytest.mark.asyncio
+    async def test_recall_projects_communities_onto_result(self, connected_engine: VectorCypherEngine) -> None:
+        """recall() surfaces materialized communities for matched entities (#1308).
+
+        Drives the public recall() path end-to-end (not the private helper): the
+        retriever returns a matched entity, get_entity_communities returns the
+        community it belongs to, and the projection lands on
+        RecallResult.communities. Happy path is silent-degradation-free.
+        """
+        from khora.engines.vectorcypher.retriever import VectorCypherResult
+        from khora.engines.vectorcypher.router import QueryComplexity, RoutingDecision
+
+        namespace_id = uuid4()
+        entity = Entity(namespace_id=namespace_id, name="Alice", entity_type="PERSON", description="")
+        community = CommunityNode(
+            id=uuid4(),
+            namespace_id=namespace_id,
+            summary="alice's community summary",
+            member_ids=[entity.id],
+            summary_depth=1,
+        )
+        connected_engine._retriever.retrieve = AsyncMock(
+            return_value=VectorCypherResult(
+                chunks=[],
+                entities=[(entity, 0.9)],
+                routing_decision=RoutingDecision(
+                    complexity=QueryComplexity.SIMPLE,
+                    use_graph=False,
+                    graph_depth=0,
+                    confidence=0.8,
+                    reasoning="test",
+                ),
+                metadata={"search_mode": "simple_vector"},
+            )
+        )
+        connected_engine._storage.get_entity_communities = AsyncMock(return_value=[community])
+
+        result = await connected_engine.recall("who is alice", namespace_id)
+
+        assert isinstance(result, RecallResult)
+        assert [c.id for c in result.communities] == [community.id]
+        assert result.communities[0].summary == "alice's community summary"
+        connected_engine._storage.get_entity_communities.assert_awaited_once_with(
+            [entity.id], namespace_id=namespace_id
+        )
+        assert_no_silent_degradation(result)
+
+    @pytest.mark.asyncio
+    async def test_recall_communities_empty_without_materialization(self, connected_engine: VectorCypherEngine) -> None:
+        """recall() returns empty communities when none are materialized (#1308)."""
+        namespace_id = uuid4()
+        # Default connected_engine returns no entities; the reader returns [].
+        connected_engine._storage.get_entity_communities = AsyncMock(return_value=[])
+
+        result = await connected_engine.recall("test query", namespace_id)
+
+        assert result.communities == []
+        assert_no_silent_degradation(result)
 
     @pytest.mark.asyncio
     async def test_recall_filters_duplicates(self, connected_engine: VectorCypherEngine) -> None:

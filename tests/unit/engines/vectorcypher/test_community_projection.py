@@ -123,6 +123,20 @@ class TestCommunityProjection:
         assert result[0].summary_depth == 0
 
     @pytest.mark.asyncio
+    async def test_same_depth_orders_by_id_deterministically(self) -> None:
+        # Same-depth communities are ordered by str(id), pinning the full
+        # (summary_depth, str(id)) sort contract against nondeterministic regressions.
+        ns_id = uuid4()
+        communities = [_community(uuid4(), depth=2) for _ in range(5)]
+        storage = AsyncMock()
+        storage.get_entity_communities = AsyncMock(return_value=communities)
+        engine = _engine_with_storage(storage)
+
+        result = await engine._project_communities([_entity(uuid4())], namespace_id=ns_id, degradations=[])
+
+        assert [str(c.id) for c in result] == sorted(str(c.id) for c in communities)
+
+    @pytest.mark.asyncio
     async def test_empty_entities_skips_reader_zero_cost(self) -> None:
         storage = AsyncMock()
         storage.get_entity_communities = AsyncMock()
