@@ -389,7 +389,14 @@ class SurrealDBGraphAdapter(GraphBackendBase):
         offset: int = 0,
     ) -> list[Entity]:
         ns_rid = _rid("memory_namespace", namespace_id)
-        where = ["namespace = $ns_rid"]
+        # Hide dream-retired entities unconditionally (#1280): the SurrealQL
+        # native dream-apply stamps ``valid_until = time::now()`` on a
+        # soft-deleted entity, and recall must filter it out in lockstep with
+        # the PG / Neo4j read filters so the stores agree on the live set
+        # (the P1-4 cross-store invariant). A future ``valid_until`` is still a
+        # live temporal window; retirement stamps ``valid_until = now``, so the
+        # ``> time::now()`` comparison hides it.
+        where = ["namespace = $ns_rid", "(valid_until IS NONE OR valid_until > time::now())"]
         bindings: dict[str, Any] = {"ns_rid": ns_rid, "limit": limit, "offset": offset}
         if entity_type is not None:
             where.append("entity_type = $entity_type")
@@ -712,7 +719,12 @@ class SurrealDBGraphAdapter(GraphBackendBase):
         limit: int = 1000,
         offset: int = 0,
     ) -> list[Relationship]:
-        conditions = ["namespace_id = $ns"]
+        # Hide dream-pruned / merged-self-loop edges unconditionally (#1280):
+        # the SurrealQL native dream-apply stamps ``valid_until = time::now()``
+        # on a soft-deleted edge, and recall must filter it out in lockstep with
+        # the PG / Neo4j read filters so the stores agree on the live set (the
+        # P1-4 cross-store invariant).
+        conditions = ["namespace_id = $ns", "(valid_until IS NONE OR valid_until > time::now())"]
         bindings: dict[str, Any] = {"ns": str(namespace_id), "limit": limit, "offset": offset}
 
         if relationship_type is not None:
