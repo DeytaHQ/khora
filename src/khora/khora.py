@@ -750,9 +750,11 @@ class Khora:
         # Wire durable hook subscriptions (#599). When the coordinator
         # exposes a SQL session factory, give the dispatcher a store and
         # reload any persisted subscriptions so events delivered after a
-        # restart still find their subscriber. No-op on stacks without a
-        # SQL backend (e.g. SurrealDB-unified) and never raises into connect.
-        if hasattr(self, "_hook_dispatcher") and storage is not None:
+        # restart still find their subscriber. Always attaches the store
+        # post-connect (so a later subscribe_persistent() has somewhere to
+        # write) — no-op on stacks without a SQL backend (e.g.
+        # SurrealDB-unified) and never raises into connect.
+        if storage is not None:
             try:
                 await self._wire_persistent_hooks(storage)
             except Exception as exc:  # pragma: no cover - defensive
