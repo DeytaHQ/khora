@@ -212,6 +212,7 @@ async def test_dedupe_multi_incident_edges_batched_in_one_round_trip(kb: Khora) 
     in_edge = await _seed_edge(kb, ns_row_id, n2, absorbed, "PAYS")
 
     conn = _surrealdb_connection(kb.storage)
+    assert conn is not None, "expected unified SurrealDB connection"
     from khora.dream.engines.vectorcypher.surrealdb_apply import apply_surrealdb_op
 
     op = DreamOp(

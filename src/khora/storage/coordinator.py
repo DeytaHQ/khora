@@ -286,6 +286,10 @@ class StorageCoordinator:
             graph_conn = getattr(graph, "_conn", None)
             vector_conn = getattr(vector, "_conn", None)
         except Exception:  # pragma: no cover - advisory probe
+            logger.warning(
+                "surrealdb_connection probe failed; falling back to non-unified path",
+                exc_info=True,
+            )
             return None
         if graph_conn is None or graph_conn is not vector_conn:
             return None
