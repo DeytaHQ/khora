@@ -682,6 +682,7 @@ class MemgraphBackend(GraphBackendBase):
                     r.created_at = row.created_at,
                     r.updated_at = row.updated_at
                 ON MATCH SET
+                    r.id = coalesce(r.id, row.id),
                     r.description = CASE WHEN size(row.description) > size(coalesce(r.description, ''))
                         THEN row.description ELSE r.description END,
                     r.source_document_ids = r.source_document_ids +

@@ -740,7 +740,7 @@ class SurrealDBGraphAdapter(GraphBackendBase):
 
     @trace(
         "khora.surrealdb.graph.create_relationships_batch",
-        result=lambda r: {"created": r},
+        result=lambda r: {"created": len(r)},
     )
     async def create_relationships_batch(
         self, relationships: list[Relationship], *, batch_size: int = 200
@@ -792,7 +792,7 @@ class SurrealDBGraphAdapter(GraphBackendBase):
             await self._conn.execute(sql, {"rels": rels_data})
             return [(rel, True) for rel in relationships]
         except Exception:
-            logger.warning("Batch relationship creation failed, falling back to individual inserts")
+            logger.warning("Batch relationship creation failed, falling back to individual inserts", exc_info=True)
             results_out: list[tuple[Relationship, bool]] = []
             failed = 0
             for rel in relationships:
@@ -801,7 +801,7 @@ class SurrealDBGraphAdapter(GraphBackendBase):
                     results_out.append((rel, True))
                 except Exception:
                     failed += 1
-                    logger.warning(f"Failed to create relationship {rel.id}, skipping")
+                    logger.warning(f"Failed to create relationship {rel.id}, skipping", exc_info=True)
             logger.info(
                 f"Relationship batch fallback: {len(results_out)}/{len(relationships)} succeeded, {failed} failed"
             )
