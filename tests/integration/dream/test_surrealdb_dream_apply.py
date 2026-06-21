@@ -233,6 +233,74 @@ async def test_dedupe_multi_incident_edges_batched_in_one_round_trip(kb: Khora) 
     assert all(r.source_entity_id in ents and r.target_entity_id in ents for r in live)
 
 
+async def test_dedupe_repoints_incident_edges_onto_canonical_and_replay_is_noop(kb: Khora) -> None:
+    """dedupe re-pointing (#1303): each non-self-loop incident edge of the
+    absorbed entity is re-pointed onto the canonical - the old edge is
+    soft-deleted and an equivalent live edge to/from the canonical is created
+    with the same type + properties. No live edge touches the absorbed entity,
+    the canonical carries the re-pointed edges, and a replay is a no-op."""
+    ns = await kb.create_namespace()
+    ns_row_id = await kb.storage.resolve_namespace(ns.namespace_id)
+
+    canonical = await _seed_entity(kb, ns_row_id, f"acme-{uuid4().hex[:8]}")
+    absorbed = await _seed_entity(kb, ns_row_id, f"acme-corp-{uuid4().hex[:8]}")
+    n1 = await _seed_entity(kb, ns_row_id, f"vendor-{uuid4().hex[:8]}")
+    n2 = await _seed_entity(kb, ns_row_id, f"client-{uuid4().hex[:8]}")
+    # canonical<->absorbed collapses to a self-loop on merge: soft-deleted, NOT
+    # re-pointed. The out/in edges to third parties ARE re-pointed.
+    loop = await _seed_edge(kb, ns_row_id, canonical, absorbed, "RELATES_TO")
+    out_edge = await _seed_edge(kb, ns_row_id, absorbed, n1, "SUPPLIES", confidence=0.77)
+    in_edge = await _seed_edge(kb, ns_row_id, n2, absorbed, "PAYS", confidence=0.55)
+
+    conn = _surrealdb_connection(kb.storage)
+    assert conn is not None, "expected unified SurrealDB connection"
+    from khora.dream.engines.vectorcypher.surrealdb_apply import apply_surrealdb_op
+
+    op = DreamOp(
+        op_id=uuid4(),
+        phase="apply",
+        op_type=OpKind.VECTORCYPHER_DEDUPE_ENTITIES,
+        outputs=({"merges": [{"canonical_id": str(canonical), "absorbed_id": str(absorbed)}]},),
+        namespace_id=ns_row_id,
+    )
+    undo = await apply_surrealdb_op(op, conn=conn)
+
+    ents = await _live_entity_ids(kb, ns_row_id)
+    rels = await _live_relationship_ids(kb, ns_row_id)
+    assert absorbed not in ents
+    assert canonical in ents
+    # Every original incident edge id is soft-deleted (the re-pointed edges
+    # carry fresh rel_ids).
+    assert {loop, out_edge, in_edge}.isdisjoint(rels)
+
+    live = await kb.storage.list_relationships(ns_row_id, limit=1000)
+    # Internal consistency: no live edge points at the retired entity.
+    assert all(r.source_entity_id in ents and r.target_entity_id in ents for r in live)
+
+    # The canonical now carries the re-pointed edges, preserving type +
+    # properties (the self-loop is NOT re-pointed).
+    out_repointed = [r for r in live if r.source_entity_id == canonical and r.target_entity_id == n1]
+    in_repointed = [r for r in live if r.source_entity_id == n2 and r.target_entity_id == canonical]
+    assert len(out_repointed) == 1, "absorbed->n1 must be re-pointed to canonical->n1"
+    assert len(in_repointed) == 1, "n2->absorbed must be re-pointed to n2->canonical"
+    assert out_repointed[0].relationship_type == "SUPPLIES"
+    assert out_repointed[0].confidence == 0.77
+    assert in_repointed[0].relationship_type == "PAYS"
+    assert in_repointed[0].confidence == 0.55
+    # No self-loop on the canonical was created for the collapsed loop edge.
+    assert not [r for r in live if r.source_entity_id == canonical and r.target_entity_id == canonical]
+
+    undo_entry = undo.before["merges"][0]
+    assert len(undo_entry["edges_repointed"]) == 2
+
+    # Idempotent replay: a second apply of the same op creates no duplicate
+    # re-pointed edge and leaves the live sets unchanged (the absorbed entity
+    # has no live incident edges left, so nothing is re-pointed again).
+    await apply_surrealdb_op(op, conn=conn)
+    assert await _live_entity_ids(kb, ns_row_id) == ents
+    assert await _live_relationship_ids(kb, ns_row_id) == rels
+
+
 async def test_unsupported_op_is_skip_declared_not_crashed(kb: Khora) -> None:
     """An op with no SurrealQL-native handler is declared unsupported with a
     structured ``surrealdb_native_apply_required`` skip (ADR-001) - it advances
