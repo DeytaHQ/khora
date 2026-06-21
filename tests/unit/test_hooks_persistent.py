@@ -29,8 +29,20 @@ from khora.hooks.subscription_store import (
     deserialize_filter,
     serialize_filter,
 )
+from tests.test_helpers.diagnostics import assert_no_silent_degradation
 
 pytestmark = pytest.mark.unit
+
+
+def _assert_no_degradation(dispatcher: HookDispatcher) -> None:
+    """Guard a happy path: the dispatcher recorded no ADR-001 degradation.
+
+    Wraps the dispatcher's real ``_last_persist_degradation`` in a result-shaped
+    dict (not a tautological empty literal) so a regression that silently records
+    a persist/load/wire degradation on a success path fails the test.
+    """
+    deg = dispatcher._last_persist_degradation
+    assert_no_silent_degradation({"degradations": [deg] if deg is not None else []})
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +131,7 @@ class TestFlagOff:
         assert count == 1
         cb.assert_awaited_once()
         assert d.persistent_count == 0
+        _assert_no_degradation(d)
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +167,8 @@ class TestPersistAndRestart:
         event = _event()
         await d2.dispatch(event)
         assert delivered == [(sub_id, event.resource_id)]
+        _assert_no_degradation(d1)
+        _assert_no_degradation(d2)
 
     async def test_persistent_respects_filter(self, session_factory) -> None:
         store = HookSubscriptionStore(session_factory)
@@ -174,6 +189,7 @@ class TestPersistAndRestart:
         # ORGANIZATION event must not match the PRODUCT-only filter.
         await d2.dispatch(_event())
         assert delivered == []
+        _assert_no_degradation(d2)
 
     async def test_unregister_persistent_deletes_row(self, session_factory) -> None:
         store = HookSubscriptionStore(session_factory)
@@ -184,6 +200,8 @@ class TestPersistAndRestart:
         # A fresh dispatcher loads nothing.
         d2 = HookDispatcher(subscription_store=store)
         assert await d2.load_persistent() == 0
+        _assert_no_degradation(d)
+        _assert_no_degradation(d2)
 
 
 # ---------------------------------------------------------------------------

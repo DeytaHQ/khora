@@ -758,7 +758,20 @@ class Khora:
             try:
                 await self._wire_persistent_hooks(storage)
             except Exception as exc:  # pragma: no cover - defensive
-                logger.warning("Failed to wire persistent hook subscriptions: {}", exc)
+                # ADR-001: durable reload is disabled but connect() lives on -
+                # record a Degradation on the dispatcher (when it exists) so
+                # the fallback isn't silent.
+                if hasattr(self, "_hook_dispatcher"):
+                    self._hook_dispatcher._last_persist_degradation = {
+                        "component": "hooks.subscription_store",
+                        "reason": "wire_failed",
+                        "detail": None,
+                        "exception": repr(exc),
+                    }
+                logger.warning(
+                    "Failed to wire persistent hook subscriptions; persistent hooks are disabled.",
+                    exc_info=True,
+                )
 
         # Drain any hook filters that were registered with a description
         # but no precomputed embedding (Issue #576 Phase 1, Item 2). After
