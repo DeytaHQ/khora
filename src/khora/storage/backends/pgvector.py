@@ -1571,13 +1571,15 @@ class PgVectorBackend(AsyncSessionMixin):
                     # ``xmax = 0`` is true only for a freshly INSERTed row; a
                     # row touched by ON CONFLICT DO UPDATE carries a non-zero
                     # xmax. Gives an exact created/merged split on the id key.
+                    # ``literal_column(...).label(...)`` (not ``text(...)``) so
+                    # the result column is addressable by name in the Row.
                     stmt = stmt.returning(
                         RelationshipModel.id,
-                        text("(xmax = 0) AS is_new"),
+                        literal_column("(xmax = 0)").label("is_new"),
                     )
                     result = await session.execute(stmt)
-                    for row in result:
-                        is_new_by_id[row.id] = bool(row.is_new)
+                    for row in result.mappings():
+                        is_new_by_id[row["id"]] = bool(row["is_new"])
 
                 await session.commit()
 
