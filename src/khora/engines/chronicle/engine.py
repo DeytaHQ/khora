@@ -1721,10 +1721,16 @@ class ChronicleEngine:
         _enable_resolver = getattr(qs, "enable_temporal_resolver", True) if qs else True
         if _enable_resolver and temporal_filter is None:
             from khora.query.temporal import TemporalFilter
+            from khora.query.temporal_detection import TemporalDetector
             from khora.query.temporal_resolver import TemporalResolver
 
-            resolver = TemporalResolver()
-            resolved = resolver.resolve_fast(query)
+            # Gate the date parser on temporal intent first (matches
+            # VectorCypher). Without this, resolve_fast's bare-year regex
+            # (``20\d{2}``) treats an incidental year-like token in a
+            # non-temporal query (a version, a room/model number) as a date and
+            # silently narrows every channel, dropping older results (#1222).
+            temporal_signal = TemporalDetector().detect(query)
+            resolved = TemporalResolver().resolve_fast(query) if temporal_signal.is_temporal else None
             if resolved and resolved.confidence > 0.5 and (resolved.start or resolved.end):
                 temporal_filter = TemporalFilter(
                     start_time=resolved.start,
@@ -2898,7 +2904,12 @@ class ChronicleEngine:
                         continue  # Below relevance threshold
                     results.append((chunk, chunk_scores[cid] * sim))
                 else:
-                    results.append((chunk, chunk_scores[cid]))
+                    # No embedding -> can't be cosine-checked. Penalize at the
+                    # 0.3 relevance floor instead of passing through at full
+                    # base score, so an un-verifiable chunk never outranks one
+                    # the gate verified as relevant (cosine >= 0.3) at the same
+                    # base score (#1226).
+                    results.append((chunk, chunk_scores[cid] * 0.3))
         else:
             results = [(chunk, chunk_scores[cid]) for chunk, cid in ordered_chunks]
 
