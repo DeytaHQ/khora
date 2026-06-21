@@ -173,7 +173,20 @@ async def _collect_candidates(
     SQLite: the test fixture path — pulls the rows that satisfy the
     cheap conjuncts (``confidence`` + ``valid_to``) and filters the
     chunk-liveness conjunct in Python.
+
+    SurrealDB-unified (#1280): no SQL session exists, so collect via SurrealQL
+    against the ``relates_to`` edge table, filtering the chunk-liveness conjunct
+    in Python (mirroring the SQLite path).
     """
+    surreal_conn_probe = getattr(coordinator, "surrealdb_connection", None)
+    surreal_conn = surreal_conn_probe() if surreal_conn_probe is not None else None
+    if surreal_conn is not None:
+        return await _collect_surrealdb(
+            surreal_conn,
+            resolved_namespace_id=resolved_namespace_id,
+            target_predicates=target_predicates,
+            confidence_threshold=confidence_threshold,
+        )
     async with coordinator.transaction() as txn:
         session = txn.session
         dialect = session.bind.dialect.name if session.bind is not None else ""
@@ -238,6 +251,64 @@ async def _collect_postgres(
             }
         )
     return out
+
+
+async def _collect_surrealdb(
+    conn: Any,
+    *,
+    resolved_namespace_id: UUID,
+    target_predicates: tuple[str, ...],
+    confidence_threshold: float,
+) -> list[dict[str, Any]]:
+    """SurrealDB-unified path — SurrealQL pulls the cheap conjuncts, Python the
+    chunk-liveness conjunct (mirrors :func:`_collect_sqlite`)."""
+    if not target_predicates:
+        return []
+    rows = await conn.query(
+        "SELECT rel_id, relationship_type, confidence, source_chunk_ids FROM relates_to "
+        "WHERE namespace_id = $ns AND relationship_type IN $rel_types "
+        "AND confidence < $threshold AND valid_until IS NONE",
+        {
+            "ns": str(resolved_namespace_id),
+            "rel_types": list(target_predicates),
+            "threshold": float(confidence_threshold),
+        },
+    )
+
+    # Build the live-chunk id set for the namespace (chunk:<uuid> RecordIDs).
+    chunk_rows = await conn.query(
+        "SELECT id FROM chunk WHERE namespace_id = $ns",
+        {"ns": str(resolved_namespace_id)},
+    )
+    live_chunk_ids: set[UUID] = set()
+    for crow in chunk_rows:
+        cid = _coerce_uuid(_record_id_value(crow.get("id")))
+        if cid is not None:
+            live_chunk_ids.add(cid)
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        rel_id = _coerce_uuid(row.get("rel_id"))
+        if rel_id is None:
+            continue
+        chunk_ids = [c for c in (_coerce_uuid(x) for x in (row.get("source_chunk_ids") or [])) if c is not None]
+        # Predicate: every source chunk is dead (or the array is empty).
+        if chunk_ids and any(cid in live_chunk_ids for cid in chunk_ids):
+            continue
+        out.append(
+            {
+                "id": rel_id,
+                "relationship_type": str(row.get("relationship_type")),
+                "confidence": float(row.get("confidence", 1.0)),
+            }
+        )
+    return out
+
+
+def _record_id_value(value: Any) -> Any:
+    """Extract the uuid part of a SurrealDB RecordID (``.id``) or a raw value."""
+    inner = getattr(value, "id", None)
+    return inner if inner is not None else value
 
 
 async def _collect_sqlite(

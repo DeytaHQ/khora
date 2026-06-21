@@ -535,6 +535,13 @@ class DreamOrchestrator:
         budget_skip_reasons: list[dict[str, Any]] = []
         mirror_degradations: list[dict[str, Any]] = []
 
+        # SurrealDB-unified detection (#1280): on a unified SurrealDB stack the
+        # coordinator has no SQL session, so the SQL apply handlers can't run.
+        # When present, route mutation ops through the SurrealQL-native apply
+        # path (or skip-declare the kinds it doesn't support) instead of the
+        # ``coordinator.transaction()`` SQL path below.
+        surrealdb_conn = _surrealdb_connection(self._kb.storage)
+
         # Reconciler drain (#1272): re-attempt any committed-but-unmirrored ops
         # left by a crash between the PG commit and the graph mirror. The
         # checkpoint advances INSIDE the PG commit, so resume alone skips those
@@ -589,6 +596,40 @@ class DreamOrchestrator:
                     op_type=op.op_type,
                     detail=breach,
                 )
+                self._fire_progress(on_progress, run_id, plan, seq, op, "apply")
+                continue
+
+            # SurrealDB-unified mutation op (#1280): no SQL session exists, so
+            # route through the SurrealQL-native apply path. Supported kinds
+            # (prune_edges / dedupe_entities) flat-soft-delete via the shared
+            # connection; every other kind is declared unsupported with a
+            # structured ``surrealdb_native_apply_required`` skip (ADR-001)
+            # rather than crashing. The unified store is its own "mirror" - the
+            # apply IS the graph mutation, so no post-commit mirror runs here.
+            if surrealdb_conn is not None:
+                undo = await self._apply_one_op_surrealdb(
+                    run_id=run_id,
+                    seq=seq,
+                    op=op,
+                    conn=surrealdb_conn,
+                    skipped_by_op_type=skipped_by_op_type,
+                    budget_skip_reasons=budget_skip_reasons,
+                )
+                if undo is None:
+                    # Skip-declared: checkpoint advanced inside the helper.
+                    self._fire_progress(on_progress, run_id, plan, seq, op, "apply")
+                    continue
+                _assert_no_chunk_id_mutation(undo)
+                undo_records.append(undo)
+                self._drain_llm_usage(plan.namespace_id)
+                if file_sink is not None:
+                    file_sink.write_undo_incremental(
+                        undo_records,
+                        run_id=run_id,
+                        namespace_id=plan.namespace_id,
+                        started_at=started,
+                    )
+                await self._emit_op_event(run_id, op)
                 self._fire_progress(on_progress, run_id, plan, seq, op, "apply")
                 continue
 
@@ -718,6 +759,55 @@ class DreamOrchestrator:
             await self._record_committed(run_id, seq)
             await self._pre_mark_graph_mirror_pending(None, run_id, seq, op, undo)
             return undo
+
+    async def _apply_one_op_surrealdb(
+        self,
+        *,
+        run_id: UUID,
+        seq: int,
+        op: DreamOp,
+        conn: Any,
+        skipped_by_op_type: dict[str, int],
+        budget_skip_reasons: list[dict[str, Any]],
+    ) -> UndoRecord | None:
+        """Apply one op via the SurrealQL-native path (#1280).
+
+        Returns the :class:`UndoRecord` on a successful apply, or ``None`` when
+        the op kind has no SurrealQL-native handler - in which case it records a
+        structured ``surrealdb_native_apply_required`` skip (ADR-001), advances
+        the checkpoint (so a resume doesn't re-attempt the impossible apply),
+        and increments the per-op-kind skip counter.
+
+        The checkpoint advance runs AFTER the apply so a crash mid-apply leaves
+        the op un-checkpointed and a resume retries it. On embedded SurrealDB
+        the apply and the checkpoint are not one atomic transaction (surrealkv
+        has no cross-statement BEGIN), so each native handler is idempotent on
+        replay - matching the existing embedded partial-atomicity contract.
+        """
+        from khora.dream.engines.vectorcypher.surrealdb_apply import (
+            SURREALDB_NATIVE_APPLY_KINDS,
+            apply_surrealdb_op,
+            surrealdb_native_skip_reason,
+        )
+
+        op_type = str(op.op_type)
+        if op_type not in SURREALDB_NATIVE_APPLY_KINDS:
+            from loguru import logger
+
+            reason = surrealdb_native_skip_reason(op)
+            logger.warning(
+                "dream apply op {op_type!s} skipped on SurrealDB-unified: {detail}",
+                op_type=op.op_type,
+                detail=reason["detail"],
+            )
+            await self._record_committed(run_id, seq)
+            skipped_by_op_type[op_type] = skipped_by_op_type.get(op_type, 0) + 1
+            budget_skip_reasons.append(reason)
+            return None
+
+        undo = await apply_surrealdb_op(op, conn=conn)
+        await self._record_committed(run_id, seq)
+        return undo
 
     async def _mirror_dream_op(
         self,
@@ -1384,6 +1474,19 @@ def _graph_backend(coordinator: Any) -> Any | None:
     deprecation warnings during a dream run.
     """
     return getattr(coordinator, "_graph", None)
+
+
+def _surrealdb_connection(coordinator: Any) -> Any | None:
+    """Return the shared SurrealDB connection for a unified stack, else None (#1280).
+
+    Thin wrapper over :meth:`StorageCoordinator.surrealdb_connection` that
+    tolerates a coordinator stub (test double) without the method - dream-apply
+    then falls through to the SQL / embedded paths.
+    """
+    probe = getattr(coordinator, "surrealdb_connection", None)
+    if probe is None:
+        return None
+    return probe()
 
 
 def _graph_shares_sql_store(coordinator: Any) -> bool:

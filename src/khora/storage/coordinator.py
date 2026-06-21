@@ -266,6 +266,37 @@ class StorageCoordinator:
                 self._is_unified_backend = True
                 logger.info("Detected unified SurrealDB backend — entity dual-writes will be collapsed")
 
+    def surrealdb_connection(self) -> Any | None:
+        """Return the shared :class:`SurrealDBConnection` on a unified stack (#1280).
+
+        A SurrealDB-unified coordinator wires graph + vector adapters that share
+        one ``SurrealDBConnection`` via their ``_conn`` slot - there is NO SQL
+        session, so ``transaction()`` raises. Callers (dream-apply) use this to
+        route to the SurrealQL-native path instead of the absent SQL session.
+
+        Returns the connection only when graph and vector share the SAME
+        ``SurrealDBConnection`` instance; any other shape (PG/Neo4j,
+        sqlite_lance, graph-less) returns ``None``.
+        """
+        graph = self._graph
+        vector = self._vector
+        if graph is None or vector is None:
+            return None
+        try:
+            graph_conn = getattr(graph, "_conn", None)
+            vector_conn = getattr(vector, "_conn", None)
+        except Exception:  # pragma: no cover - advisory probe
+            logger.warning(
+                "surrealdb_connection probe failed; falling back to non-unified path",
+                exc_info=True,
+            )
+            return None
+        if graph_conn is None or graph_conn is not vector_conn:
+            return None
+        if type(graph_conn).__name__ != "SurrealDBConnection":
+            return None
+        return graph_conn
+
     async def connect(self) -> None:
         """Connect all configured backends in parallel.
 

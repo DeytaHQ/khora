@@ -133,6 +133,10 @@ DEFINE FIELD IF NOT EXISTS embedding ON entity TYPE option<array<float>>;
 DEFINE FIELD IF NOT EXISTS embedding_model ON entity TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS mention_count ON entity TYPE int DEFAULT 1;
 DEFINE FIELD IF NOT EXISTS valid_from ON entity TYPE option<datetime>;
+-- ``valid_until`` is the flat soft-delete marker the SurrealQL-native
+-- dream-apply stamps on a retired entity (#1280). SCHEMAFULL strips
+-- undefined fields, so it MUST stay defined here; the recall read filter
+-- (graph.list_entities) hides rows where ``valid_until <= time::now()``.
 DEFINE FIELD IF NOT EXISTS valid_until ON entity TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS confidence ON entity TYPE float DEFAULT 1.0;
 DEFINE FIELD IF NOT EXISTS metadata_ ON entity FLEXIBLE TYPE option<object>;
@@ -159,6 +163,11 @@ DEFINE FIELD IF NOT EXISTS source_document_ids[*] ON relates_to TYPE string;
 DEFINE FIELD IF NOT EXISTS source_chunk_ids ON relates_to TYPE option<array>;
 DEFINE FIELD IF NOT EXISTS source_chunk_ids[*] ON relates_to TYPE string;
 DEFINE FIELD IF NOT EXISTS valid_from ON relates_to TYPE option<datetime>;
+-- ``valid_until`` is the flat soft-delete marker the SurrealQL-native
+-- dream-apply stamps on a pruned edge / merged self-loop (#1280). SCHEMAFULL
+-- strips undefined fields, so it MUST stay defined here; the recall read
+-- filter (graph.list_relationships) hides rows where ``valid_until <=
+-- time::now()``.
 DEFINE FIELD IF NOT EXISTS valid_until ON relates_to TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS confidence ON relates_to TYPE float DEFAULT 1.0;
 DEFINE FIELD IF NOT EXISTS metadata_ ON relates_to FLEXIBLE TYPE option<object>;
