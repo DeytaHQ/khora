@@ -34,6 +34,8 @@ from khora.core.models import (
     Chunk,
     Document,
     Entity,
+    EventType,
+    MemoryEvent,
     MemoryNamespace,
     Relationship,
 )
@@ -1447,7 +1449,39 @@ class VectorCypherEngine:
             pre_upsert_ids = [str(e.id) for e in entities]
 
             # Store entities in Neo4j + pgvector
-            await storage.upsert_entities_batch(namespace_id, entities)
+            upsert_results = await storage.upsert_entities_batch(namespace_id, entities)
+
+            # All chunks in a single _run_skeleton_extraction call belong to one
+            # document (the per-document call from _process_document), so any
+            # chunk's document_id identifies it for the hook payload.
+            document_id_str = str(chunks[0].document_id) if chunks else None
+
+            # Emit entity.created / entity.updated semantic hooks (#978).
+            # Matches the Chronicle ingest flow's payload shape and its
+            # created-vs-updated split (the ``is_new`` flag from the upsert);
+            # a dedup-merge of an existing entity fires ``entity.updated``, not
+            # ``entity.created``, so subscribers never double-fire on re-ingest.
+            # Embeddings are already populated above (unlike the Chronicle flow,
+            # which runs embedding in parallel after upsert and backfills), so
+            # the payload can carry ``embedding`` directly for the Level 1 gate.
+            for entity, is_new in upsert_results:
+                await storage.dispatch_hook(
+                    MemoryEvent(
+                        namespace_id=namespace_id,
+                        event_type=EventType.ENTITY_CREATED if is_new else EventType.ENTITY_UPDATED,
+                        resource_type="entity",
+                        resource_id=entity.id,
+                        data={
+                            "name": entity.name,
+                            "entity_type": entity.entity_type,
+                            "description": entity.description,
+                            "confidence": entity.confidence,
+                            "is_new": is_new,
+                            "document_id": document_id_str,
+                            "embedding": entity.embedding,
+                        },
+                    )
+                )
 
             # Build pre-upsert -> canonical remap (only diffs).
             id_remap: dict[str, str] = {}
@@ -1479,6 +1513,28 @@ class VectorCypherEngine:
             relationships_created = 0
             if relationships:
                 relationships_created = await storage.create_relationships_batch(relationships)
+
+                # Emit relationship.created semantic hooks (#978), one per
+                # persisted relationship, matching the Chronicle ingest flow's
+                # payload shape. ``create_relationships_batch`` does not report a
+                # per-edge created/updated split, so - as in the Chronicle flow -
+                # all persisted relationships fire ``relationship.created``.
+                for rel in relationships:
+                    await storage.dispatch_hook(
+                        MemoryEvent(
+                            namespace_id=namespace_id,
+                            event_type=EventType.RELATIONSHIP_CREATED,
+                            resource_type="relationship",
+                            resource_id=rel.id,
+                            data={
+                                "relationship_type": rel.relationship_type,
+                                "source_entity_id": str(rel.source_entity_id),
+                                "target_entity_id": str(rel.target_entity_id),
+                                "confidence": rel.confidence,
+                                "document_id": document_id_str,
+                            },
+                        )
+                    )
 
             # Build entity-chunk links from source_chunk_ids
             entity_chunk_links: list[EntityChunkLink] = []
