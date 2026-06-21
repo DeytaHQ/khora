@@ -618,7 +618,16 @@ class VectorCypherEngine:
         backend = getattr(self._config.storage, "backend", "postgres")
         is_surrealdb = backend == "surrealdb"
         is_sqlite_lance = backend == "sqlite_lance"
-        skip_neo4j = is_surrealdb or is_sqlite_lance
+        # Memgraph (#1278) is built by the storage factory from ``graph_config``
+        # and owns its own driver; the engine must NOT overwrite it with a shared
+        # Neo4jBackend (which would force ``database="neo4j"`` - fatal on Memgraph,
+        # which has no multi-database support) nor run the Neo4j-only
+        # DualNodeManager. Only a genuine ``neo4j`` graph backend takes the shared
+        # driver path below.
+        _graph_cfg_probe = self._config.get_graph_config()
+        _graph_backend_name = getattr(_graph_cfg_probe, "backend", "neo4j") if _graph_cfg_probe else "neo4j"
+        is_memgraph = _graph_backend_name == "memgraph"
+        skip_neo4j = is_surrealdb or is_sqlite_lance or is_memgraph
         neo4j_database = "neo4j"
         neo4j_query_timeout: float | None = 5.0
 

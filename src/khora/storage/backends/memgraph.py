@@ -11,13 +11,14 @@ Key differences from Neo4j:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
 from loguru import logger
 
 from khora.core.models import Entity, Episode, Relationship
+from khora.dream.plan import OpKind
 from khora.storage.backends.mixins import (
     GraphBackendBase,
     deserialize_dict,
@@ -400,14 +401,29 @@ class MemgraphBackend(GraphBackendBase):
         limit: int = 100,
         offset: int = 0,
     ) -> list[Entity]:
+        """List entities in a namespace.
+
+        Hides dream-retired nodes unconditionally (#1278): the flat soft-delete
+        mirror stamps ``valid_until`` on the absorbed node, and recall filters it
+        out in lockstep with the PG read filter so the two stores agree on the
+        live set. Ported from the Neo4j read filter (#1272). ``valid_until`` is an
+        ISO-8601 string, so compare lexicographically against an ISO ``$now``
+        bind. A future ``valid_until`` is still a live temporal window;
+        retirement stamps ``valid_until = retired_at`` (now), so it is hidden.
+        """
         driver = self._get_driver()
 
         query = "MATCH (e:Entity {namespace_id: $namespace_id})"
-        params: dict[str, Any] = {"namespace_id": str(namespace_id)}
+        params: dict[str, Any] = {
+            "namespace_id": str(namespace_id),
+            "now": datetime.now(UTC).isoformat(),
+        }
 
+        conditions = ["(e.valid_until IS NULL OR e.valid_until > $now)"]
         if entity_type:
-            query += " WHERE e.entity_type = $entity_type"
+            conditions.append("e.entity_type = $entity_type")
             params["entity_type"] = entity_type
+        query += " WHERE " + " AND ".join(conditions)
 
         query += " RETURN e ORDER BY e.name SKIP $offset LIMIT $limit"
         params["offset"] = offset
@@ -801,9 +817,15 @@ class MemgraphBackend(GraphBackendBase):
         # Both endpoints constrained to in-namespace ``:Entity`` nodes, matching
         # get_relationship() / get_entity_relationships() (IDOR family): edges
         # with non-Entity or cross-namespace endpoints never surface (#1238).
+        # Hides dream-pruned / merged-self-loop edges unconditionally (#1278): the
+        # flat soft-delete mirror stamps ``valid_until`` on the edge (translating
+        # PG's ``valid_to`` / ``invalidated_at``), and recall filters it out in
+        # lockstep with the PG read filter. ``valid_until`` is an ISO-8601 string,
+        # so compare lexicographically against an ISO ``$now`` bind.
         query = f"""
         MATCH (source:Entity {{namespace_id: $namespace_id}})-[r{rel_filter}]->(target:Entity {{namespace_id: $namespace_id}})
         WHERE r.namespace_id = $namespace_id
+          AND (r.valid_until IS NULL OR r.valid_until > $now)
         RETURN properties(r) as rel_props, source.id as source_id, target.id as target_id, type(r) as rel_type
         ORDER BY r.created_at DESC
         SKIP $offset
@@ -816,6 +838,7 @@ class MemgraphBackend(GraphBackendBase):
                 namespace_id=str(namespace_id),
                 offset=offset,
                 limit=limit,
+                now=datetime.now(UTC).isoformat(),
             )
             records = await result.data()
             rels = (
@@ -1071,3 +1094,406 @@ class MemgraphBackend(GraphBackendBase):
                 if len(matches) >= limit:
                     break
         return matches
+
+    # ------------------------------------------------------------------
+    # Dream flat soft-delete mirror verbs (#1278)
+    # ------------------------------------------------------------------
+    # Memgraph has no versioning primitives and no APOC: it stores ``valid_until``
+    # as a plain string property (see ``create_entity`` / ``upsert_entities_batch``),
+    # so the dream graph mirror is FLAT soft-delete only - SET ``valid_until`` by
+    # id, endpoint rewrite = re-create + delete, relabel = re-create + delete.
+    # There is NO :EntityVersion snapshot (unlike the Neo4j mirror, #1271/#1272);
+    # the reverse verbs flat-restore by clearing ``valid_until``. All verbs are
+    # namespace-scoped (IDOR family) and idempotent by id (replay is a no-op on
+    # rows already in the target state). Empty batches return 0 (no Cypher).
+    # ``valid_until`` is stamped as an ISO-8601 string so the lexicographic
+    # ``list_*`` read filters hide the row in lockstep with the PG read filter.
+
+    def supports_dream_mirror(self) -> frozenset[OpKind]:
+        """Memgraph flat-mirrors prune / dedupe / normalize-schema.
+
+        - ``VECTORCYPHER_PRUNE_EDGES`` -> :meth:`soft_invalidate_relationships_batch`
+        - ``VECTORCYPHER_DEDUPE_ENTITIES`` -> :meth:`soft_retire_entities_batch`
+          (flat, no :EntityVersion) + :meth:`rewrite_relationship_endpoints_batch`
+        - ``VECTORCYPHER_NORMALIZE_SCHEMA`` -> :meth:`rename_types_batch`
+
+        ``VECTORCYPHER_COMMUNITY_SUMMARY`` is NOT advertised: community
+        materialization (:Community nodes + read accessors) is the GraphRAG payoff
+        and is out of scope for the flat soft-delete mirror.
+        """
+        return frozenset(
+            {
+                OpKind.VECTORCYPHER_PRUNE_EDGES,
+                OpKind.VECTORCYPHER_DEDUPE_ENTITIES,
+                OpKind.VECTORCYPHER_NORMALIZE_SCHEMA,
+            }
+        )
+
+    async def soft_invalidate_relationships_batch(
+        self,
+        relationship_ids: list[UUID],
+        *,
+        namespace_id: UUID,
+        invalidated_at: datetime,
+    ) -> int:
+        """Soft-delete edges by stamping ``valid_until`` (the column recall honors).
+
+        Mirrors ``prune_edges``. Matched by relationship id within
+        ``namespace_id`` (IDOR family); idempotent - only edges with a null
+        ``valid_until`` are touched, so a replay is a no-op. Never deletes.
+
+        Returns the number of edges actually invalidated.
+        """
+        if not relationship_ids:
+            return 0
+        driver = self._get_driver()
+        ids = [str(r) for r in relationship_ids]
+        ts = invalidated_at.isoformat()
+
+        query = """
+        UNWIND $relationship_ids AS rid
+        MATCH ()-[rel {id: rid, namespace_id: $namespace_id}]-()
+        WHERE rel.valid_until IS NULL
+        SET rel.valid_until = $invalidated_at,
+            rel.updated_at = $invalidated_at
+        RETURN count(DISTINCT rel) AS invalidated
+        """
+
+        async with driver.session() as session:
+            result = await session.run(
+                query,
+                relationship_ids=ids,
+                namespace_id=str(namespace_id),
+                invalidated_at=ts,
+            )
+            record = await result.single()
+            count = record["invalidated"] if record else 0
+        logger.debug(f"Dream-invalidated {count} relationships in namespace {namespace_id}")
+        return count
+
+    async def soft_retire_entities_batch(
+        self,
+        entity_ids: list[UUID],
+        *,
+        namespace_id: UUID,
+        retired_at: datetime,
+        reason: str = "dream_consolidated",
+    ) -> int:
+        """Flat soft-retire entities by id: SET ``valid_until`` (no :EntityVersion).
+
+        Mirrors the absorbed-entity soft-delete in ``dedupe_entities``. Unlike the
+        Neo4j mirror this backend has no versioning primitives, so it does NOT
+        snapshot the live node into an :EntityVersion - it simply stamps
+        ``valid_until`` so recall hides it. Scoped to ``namespace_id`` (IDOR
+        family); idempotent - only entities with a null ``valid_until`` are
+        retired, so a replay neither double-stamps nor re-touches. Never
+        hard-deletes. ``reason`` is accepted for signature parity and recorded on
+        the node so the soft-delete is auditable.
+
+        Returns the number of entities actually retired.
+        """
+        if not entity_ids:
+            return 0
+        driver = self._get_driver()
+        ids = [str(e) for e in entity_ids]
+        ts = retired_at.isoformat()
+
+        query = """
+        UNWIND $entity_ids AS eid
+        MATCH (current:Entity {id: eid, namespace_id: $namespace_id})
+        WHERE current.valid_until IS NULL
+        SET current.valid_until = $retired_at,
+            current.updated_at = $retired_at,
+            current.retirement_reason = $reason
+        RETURN count(DISTINCT current) AS retired
+        """
+
+        async with driver.session() as session:
+            result = await session.run(
+                query,
+                entity_ids=ids,
+                namespace_id=str(namespace_id),
+                retired_at=ts,
+                reason=reason,
+            )
+            record = await result.single()
+            count = record["retired"] if record else 0
+        logger.debug(f"Dream-retired {count} entities in namespace {namespace_id}")
+        return count
+
+    async def rewrite_relationship_endpoints_batch(
+        self,
+        rewrites: list[dict[str, Any]],
+        *,
+        namespace_id: UUID,
+        rewritten_at: datetime,
+    ) -> int:
+        """Re-point relationship endpoints by id.
+
+        Mirrors the absorbed-endpoint rewrite in ``dedupe_entities``. Memgraph
+        cannot move an existing edge's endpoints in place, so each edge is
+        re-created between the new endpoints with its properties preserved and the
+        stale edge deleted - keyed by relationship id within ``namespace_id``
+        (IDOR family). Idempotent: an edge already pointing at the new endpoints
+        matches nothing to move.
+
+        Each dict carries ``relationship_id``, ``source_entity_id``,
+        ``target_entity_id`` (the post-rewrite endpoints), and
+        ``relationship_type`` (the Cypher edge label). The type is a Cypher LABEL
+        and CANNOT be ``$``-parameterized, so it is routed through
+        ``sanitize_cypher_label`` and rewrites are grouped by sanitized label so
+        each CREATE uses a static literal - no APOC dependency. Memgraph has no
+        ``elementId()``, so the "skip when already on the new endpoints" guard
+        compares the matched endpoints' ``id`` properties instead.
+
+        Returns the number of edges actually re-pointed.
+        """
+        if not rewrites:
+            return 0
+        driver = self._get_driver()
+        ts = rewritten_at.isoformat()
+
+        # Group by sanitized relationship type so the new edge's label is a static
+        # literal (labels cannot be $-parameterized).
+        by_label: dict[str, list[dict[str, str]]] = {}
+        for rw in rewrites:
+            label = sanitize_cypher_label(str(rw["relationship_type"]))
+            by_label.setdefault(label, []).append(
+                {
+                    "relationship_id": str(rw["relationship_id"]),
+                    "source_entity_id": str(rw["source_entity_id"]),
+                    "target_entity_id": str(rw["target_entity_id"]),
+                }
+            )
+
+        total = 0
+        async with driver.session() as session:
+            # Sorted for deterministic lock ordering (deadlock avoidance).
+            for label in sorted(by_label):
+                rows = by_label[label]
+                # Memgraph has no elementId(): guard on the endpoint id property so
+                # an edge already on the target endpoints is left untouched.
+                query = f"""
+                UNWIND $rows AS r
+                MATCH (oldSrc)-[rel:{label} {{id: r.relationship_id, namespace_id: $namespace_id}}]->(oldTgt)
+                MATCH (newSrc:Entity {{id: r.source_entity_id, namespace_id: $namespace_id}})
+                MATCH (newTgt:Entity {{id: r.target_entity_id, namespace_id: $namespace_id}})
+                WHERE oldSrc.id <> newSrc.id OR oldTgt.id <> newTgt.id
+                WITH rel, newSrc, newTgt, properties(rel) AS relProps
+                CREATE (newSrc)-[newRel:{label}]->(newTgt)
+                SET newRel = relProps,
+                    newRel.updated_at = $rewritten_at
+                DELETE rel
+                RETURN count(newRel) AS rewritten
+                """
+                result = await session.run(
+                    query,
+                    rows=rows,
+                    namespace_id=str(namespace_id),
+                    rewritten_at=ts,
+                )
+                record = await result.single()
+                total += (record["rewritten"] if record else 0) or 0
+        logger.debug(f"Dream-rewrote endpoints on {total} relationships in namespace {namespace_id}")
+        return total
+
+    async def rename_types_batch(
+        self,
+        renames: list[dict[str, str]],
+        *,
+        namespace_id: UUID,
+    ) -> int:
+        """Relabel relationship types (Cypher edge labels) = re-create + delete.
+
+        Mirrors ``normalize_schema``. The relationship type is a Cypher edge LABEL
+        and CANNOT be ``$``-parameterized, so both ``old_type`` (the MATCH label)
+        and ``new_type`` (the new label) are routed through
+        ``sanitize_cypher_label`` (the Cypher-injection surface). One
+        MATCH/CREATE/DELETE pass per distinct (old, new) pair so each label is a
+        static, sanitized literal. Scoped to ``namespace_id``.
+
+        Returns the total number of edges relabeled.
+        """
+        if not renames:
+            return 0
+        driver = self._get_driver()
+
+        total = 0
+        async with driver.session() as session:
+            for rename in renames:
+                old_label = sanitize_cypher_label(rename["old_type"])
+                new_label = sanitize_cypher_label(rename["new_type"])
+                if old_label == new_label:
+                    continue
+                ts = datetime.now(UTC).isoformat()
+                # Labels are sanitized literals (NOT params). Endpoints / props
+                # are preserved by re-creating the edge under the new label and
+                # deleting the old one.
+                query = f"""
+                MATCH (s:Entity {{namespace_id: $namespace_id}})-[rel:{old_label} {{namespace_id: $namespace_id}}]->(t:Entity {{namespace_id: $namespace_id}})
+                WITH s, t, rel, properties(rel) AS relProps
+                CREATE (s)-[newRel:{new_label}]->(t)
+                SET newRel = relProps,
+                    newRel.updated_at = $updated_at
+                DELETE rel
+                RETURN count(newRel) AS renamed
+                """
+                result = await session.run(
+                    query,
+                    namespace_id=str(namespace_id),
+                    updated_at=ts,
+                )
+                record = await result.single()
+                total += (record["renamed"] if record else 0) or 0
+        logger.debug(f"Dream-renamed {total} relationship-type edges in namespace {namespace_id}")
+        return total
+
+    # ------------------------------------------------------------------
+    # Dream flat soft-delete mirror REVERSE verbs (#1278)
+    # ------------------------------------------------------------------
+    # ``dream_undo`` reverses the PG soft-deletes; these reverse the matching
+    # forward flat mirror so undo restores PG and graph to identical pre-apply
+    # live sets. Flat-restore = clear ``valid_until`` (no :EntityVersion snapshot
+    # to delete, unlike the Neo4j reverse). Namespace-scoped and idempotent by id.
+
+    async def restore_entities_batch(
+        self,
+        entity_ids: list[UUID],
+        *,
+        namespace_id: UUID,
+    ) -> int:
+        """Un-retire entities by clearing ``valid_until`` (flat restore).
+
+        Reverses :meth:`soft_retire_entities_batch`. There is no :EntityVersion
+        snapshot to delete (this backend never created one). Matched by entity id
+        within ``namespace_id`` (IDOR family); idempotent - only entities with a
+        non-null ``valid_until`` transition. Returns the number restored.
+        """
+        if not entity_ids:
+            return 0
+        driver = self._get_driver()
+        ids = [str(e) for e in entity_ids]
+        ts = datetime.now(UTC).isoformat()
+
+        query = """
+        UNWIND $entity_ids AS eid
+        MATCH (current:Entity {id: eid, namespace_id: $namespace_id})
+        WHERE current.valid_until IS NOT NULL
+        SET current.valid_until = NULL,
+            current.updated_at = $updated_at,
+            current.retirement_reason = NULL
+        RETURN count(DISTINCT current) AS restored
+        """
+
+        async with driver.session() as session:
+            result = await session.run(
+                query,
+                entity_ids=ids,
+                namespace_id=str(namespace_id),
+                updated_at=ts,
+            )
+            record = await result.single()
+            count = record["restored"] if record else 0
+        logger.debug(f"Dream-restored {count} entities in namespace {namespace_id}")
+        return count
+
+    async def restore_relationships_batch(
+        self,
+        relationship_ids: list[UUID],
+        *,
+        namespace_id: UUID,
+    ) -> int:
+        """Un-invalidate relationships by clearing ``valid_until``.
+
+        Reverses :meth:`soft_invalidate_relationships_batch`. Matched by
+        relationship id within ``namespace_id`` (IDOR family); idempotent - only
+        edges with a non-null ``valid_until`` are touched. Returns the number
+        restored.
+        """
+        if not relationship_ids:
+            return 0
+        driver = self._get_driver()
+        ids = [str(r) for r in relationship_ids]
+        ts = datetime.now(UTC).isoformat()
+
+        query = """
+        UNWIND $relationship_ids AS rid
+        MATCH ()-[rel {id: rid, namespace_id: $namespace_id}]-()
+        WHERE rel.valid_until IS NOT NULL
+        SET rel.valid_until = NULL,
+            rel.updated_at = $updated_at
+        RETURN count(DISTINCT rel) AS restored
+        """
+
+        async with driver.session() as session:
+            result = await session.run(
+                query,
+                relationship_ids=ids,
+                namespace_id=str(namespace_id),
+                updated_at=ts,
+            )
+            record = await result.single()
+            count = record["restored"] if record else 0
+        logger.debug(f"Dream-restored {count} relationships in namespace {namespace_id}")
+        return count
+
+    async def restore_relationship_endpoints_batch(
+        self,
+        rewrites: list[dict[str, Any]],
+        *,
+        namespace_id: UUID,
+    ) -> int:
+        """Re-point relationship endpoints back to their pre-rewrite endpoints.
+
+        Reverses :meth:`rewrite_relationship_endpoints_batch`. Same re-create +
+        delete shape (Memgraph cannot move endpoints in place), keyed by
+        relationship id within ``namespace_id`` (IDOR family). Each dict carries
+        ``relationship_id``, ``source_entity_id``, ``target_entity_id`` (the
+        PRE-rewrite endpoints to restore), and ``relationship_type`` (the Cypher
+        edge label, routed through ``sanitize_cypher_label`` and grouped so each
+        CREATE uses a static literal). Idempotent: an edge already on the old
+        endpoints matches nothing to move. Returns the number re-pointed.
+        """
+        if not rewrites:
+            return 0
+        driver = self._get_driver()
+        ts = datetime.now(UTC).isoformat()
+
+        by_label: dict[str, list[dict[str, str]]] = {}
+        for rw in rewrites:
+            label = sanitize_cypher_label(str(rw["relationship_type"]))
+            by_label.setdefault(label, []).append(
+                {
+                    "relationship_id": str(rw["relationship_id"]),
+                    "source_entity_id": str(rw["source_entity_id"]),
+                    "target_entity_id": str(rw["target_entity_id"]),
+                }
+            )
+
+        total = 0
+        async with driver.session() as session:
+            for label in sorted(by_label):
+                rows = by_label[label]
+                query = f"""
+                UNWIND $rows AS r
+                MATCH (oldSrc)-[rel:{label} {{id: r.relationship_id, namespace_id: $namespace_id}}]->(oldTgt)
+                MATCH (newSrc:Entity {{id: r.source_entity_id, namespace_id: $namespace_id}})
+                MATCH (newTgt:Entity {{id: r.target_entity_id, namespace_id: $namespace_id}})
+                WHERE oldSrc.id <> newSrc.id OR oldTgt.id <> newTgt.id
+                WITH rel, newSrc, newTgt, properties(rel) AS relProps
+                CREATE (newSrc)-[newRel:{label}]->(newTgt)
+                SET newRel = relProps,
+                    newRel.updated_at = $rewritten_at
+                DELETE rel
+                RETURN count(newRel) AS rewritten
+                """
+                result = await session.run(
+                    query,
+                    rows=rows,
+                    namespace_id=str(namespace_id),
+                    rewritten_at=ts,
+                )
+                record = await result.single()
+                total += (record["rewritten"] if record else 0) or 0
+        logger.debug(f"Dream-restored endpoints on {total} relationships in namespace {namespace_id}")
+        return total

@@ -366,6 +366,10 @@ jobs:
       KHORA_NEO4J_USERNAME: neo4j
       KHORA_NEO4J_PASSWORD: password
       NEO4J_INTEGRATION_TEST: "1"
+      # Memgraph side-car for the dream flat soft-delete mirror gate (#1278). The
+      # integration test reads KHORA_MEMGRAPH_URL and self-skips if unreachable.
+      # 7688 on the runner avoids colliding with the Neo4j side-car's 7687.
+      KHORA_MEMGRAPH_URL: bolt://localhost:7688
     services:
       postgres:
         image: pgvector/pgvector:pg17
@@ -395,6 +399,20 @@ jobs:
           --health-timeout 5s
           --health-retries 10
           --health-start-period 30s
+      memgraph:
+        # Flat soft-delete dream-mirror gate (#1278). 3.x supports the list
+        # comprehension + WHERE forms the Memgraph CRUD path emits (2.x does not).
+        # No volume → runs as the image's `memgraph` user with no ownership clash.
+        image: memgraph/memgraph:3.11.0
+        ports:
+          - 7688:7687
+        # Memgraph ships no curl/wget; probe the bolt TCP port from the shell.
+        options: >-
+          --health-cmd "echo '' > /dev/tcp/localhost/7687 || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 15s
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -461,6 +479,20 @@ jobs:
           done
           echo "neo4j did not become ready within 60s"
           exit 1
+
+      - name: Wait for Memgraph readiness
+        # Mirrors the Neo4j readiness loop for the #1278 dream-mirror gate. The
+        # integration test self-skips if Memgraph is unreachable, so a slow or
+        # failed side-car degrades to a skip rather than a hard failure.
+        run: |
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/localhost/7688) >/dev/null 2>&1; then
+              echo "memgraph bolt ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "memgraph did not become ready within 60s (test will self-skip)"
 
       - name: Apply database migrations
         # env.py normalizes the plain DSN to asyncpg internally and takes the
