@@ -165,8 +165,8 @@ async def _apply_dedupe_entities(op: DreamOp, *, conn: SurrealDBConnection) -> U
       SurrealDB RELATION ``in`` / ``out`` are not rewritable in place, so
       re-pointing = soft-delete-old + create-new (the SurrealDB analog of the
       Neo4j #1273 endpoint rewrite). The new edge gets a deterministic
-      ``rel_id`` (``uuid5(old_rel_id, canonical)``) so a replay produces the
-      same id rather than a duplicate.
+      ``rel_id`` (``uuid5(NAMESPACE_URL, f"{old_rel_id}->{canonical_id}")``) so
+      a replay produces the same id rather than a duplicate.
 
     Finally the absorbed entity row is flat-soft-deleted. No ``:EntityVersion``
     snapshot - flat soft-delete only.
