@@ -37,6 +37,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import text
 
+from khora.dream.engines.vectorcypher._uuid_bind import uuid_bind
 from khora.dream.plan import DreamOp, OpKind
 from khora.dream.result import UndoRecord
 from khora.telemetry import trace_span
@@ -355,9 +356,10 @@ async def apply_vectorcypher_prune_edges(
         )
 
     now = datetime.now(UTC)
+    bind_uuid = uuid_bind(session)
     await session.execute(
         text("UPDATE relationships SET valid_to = :ts, updated_at = :ts WHERE id = :rid AND valid_to IS NULL"),
-        {"ts": now, "rid": rel_id},
+        {"ts": now, "rid": bind_uuid(rel_id)},
     )
 
     return UndoRecord(
@@ -383,7 +385,7 @@ async def _read_pre_state(
     """Return ``(confidence, valid_to)`` for the relationship, or None if missing."""
     result = await session.execute(
         text("SELECT confidence, valid_to FROM relationships WHERE id = :rid"),
-        {"rid": rel_id},
+        {"rid": uuid_bind(session)(rel_id)},
     )
     row = result.first()
     if row is None:
