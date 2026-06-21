@@ -775,51 +775,86 @@ class SurrealDBRelationalAdapter:
     # chronicle engine's reconciliation path works without changes.
     # ------------------------------------------------------------------
 
+    async def _write_rows_atomic(
+        self,
+        statements: list[tuple[str, dict[str, Any]]],
+    ) -> None:
+        """Execute a batch of CREATE statements all-or-nothing (issue #1228).
+
+        Each statement uses row-unique parameter names so the whole batch can
+        be sent together. Remote (``ws://``) mode wraps the per-row executes in
+        :meth:`SurrealDBConnection.transaction` (BEGIN/COMMIT, CANCEL on error).
+        Embedded / memory modes -- where a standalone ``BEGIN`` is rejected by
+        surrealkv -- send the rows as a single ``BEGIN TRANSACTION; ...;
+        COMMIT TRANSACTION;`` multi-statement query via
+        :meth:`SurrealDBConnection.execute_batch`, which surrealkv applies
+        atomically and rolls back wholesale on any statement error. Either way a
+        mid-write failure leaves the table unchanged rather than half-written.
+        """
+        if not statements:
+            return
+        if self._conn.supports_transactions:
+            async with self._conn.transaction():
+                for sql, bindings in statements:
+                    await self._conn.execute(sql, bindings)
+            return
+        # Embedded / memory: a single BEGIN..COMMIT multi-statement query is
+        # the only way to get cross-row atomicity (a bare BEGIN raises on
+        # surrealkv, so conn.transaction() is a no-op there).
+        batch: list[tuple[str, dict[str, Any] | None]] = [("BEGIN TRANSACTION", None)]
+        batch.extend(statements)
+        batch.append(("COMMIT TRANSACTION", None))
+        await self._conn.execute_batch(batch)
+
     async def write_events(
         self,
         events: list[Any],
         *,
         namespace_id: UUID,
     ) -> list[UUID]:
-        """Insert chronicle_event rows; returns inserted IDs in input order."""
+        """Insert chronicle_event rows atomically; returns IDs in input order."""
         if not events:
             return []
         now = datetime.now(UTC)
         ns_str = str(namespace_id)
         ids: list[UUID] = []
-        for ev in events:
+        statements: list[tuple[str, dict[str, Any]]] = []
+        for i, ev in enumerate(events):
             ev_id: UUID = getattr(ev, "id", None) or uuid4()
             ids.append(ev_id)
-            await self._conn.execute(
-                "CREATE $rid SET "
-                "namespace_id = $ns, "
-                "chunk_id = $chunk_id, "
-                "subject = $subject, "
-                "verb = $verb, "
-                "object = $object, "
-                "observation_date = $observation_date, "
-                "referenced_date = $referenced_date, "
-                "relative_offset = $relative_offset, "
-                "confidence = $confidence, "
-                "source_text = $source_text, "
-                "embedding = $embedding, "
-                "created_at = $created_at",
-                {
-                    "rid": _record_id("chronicle_event", ev_id),
-                    "ns": ns_str,
-                    "chunk_id": str(ev.chunk_id) if getattr(ev, "chunk_id", None) else None,
-                    "subject": ev.subject,
-                    "verb": ev.verb,
-                    "object": ev.object or None,
-                    "observation_date": ev.observation_date or now,
-                    "referenced_date": ev.referenced_date,
-                    "relative_offset": ev.relative_offset or None,
-                    "confidence": float(ev.confidence),
-                    "source_text": ev.source_text or "",
-                    "embedding": list(ev.embedding) if getattr(ev, "embedding", None) is not None else None,
-                    "created_at": now,
-                },
+            statements.append(
+                (
+                    f"CREATE $rid_{i} SET "
+                    f"namespace_id = $ns_{i}, "
+                    f"chunk_id = $chunk_id_{i}, "
+                    f"subject = $subject_{i}, "
+                    f"verb = $verb_{i}, "
+                    f"object = $object_{i}, "
+                    f"observation_date = $observation_date_{i}, "
+                    f"referenced_date = $referenced_date_{i}, "
+                    f"relative_offset = $relative_offset_{i}, "
+                    f"confidence = $confidence_{i}, "
+                    f"source_text = $source_text_{i}, "
+                    f"embedding = $embedding_{i}, "
+                    f"created_at = $created_at_{i}",
+                    {
+                        f"rid_{i}": _record_id("chronicle_event", ev_id),
+                        f"ns_{i}": ns_str,
+                        f"chunk_id_{i}": str(ev.chunk_id) if getattr(ev, "chunk_id", None) else None,
+                        f"subject_{i}": ev.subject,
+                        f"verb_{i}": ev.verb,
+                        f"object_{i}": ev.object or None,
+                        f"observation_date_{i}": ev.observation_date or now,
+                        f"referenced_date_{i}": ev.referenced_date,
+                        f"relative_offset_{i}": ev.relative_offset or None,
+                        f"confidence_{i}": float(ev.confidence),
+                        f"source_text_{i}": ev.source_text or "",
+                        f"embedding_{i}": list(ev.embedding) if getattr(ev, "embedding", None) is not None else None,
+                        f"created_at_{i}": now,
+                    },
+                )
             )
+        await self._write_rows_atomic(statements)
         return ids
 
     async def write_facts(
@@ -828,45 +863,49 @@ class SurrealDBRelationalAdapter:
         *,
         namespace_id: UUID,
     ) -> list[UUID]:
-        """Insert memory_fact rows; returns inserted IDs in input order."""
+        """Insert memory_fact rows atomically; returns IDs in input order."""
         if not facts:
             return []
         now = datetime.now(UTC)
         ns_str = str(namespace_id)
         ids: list[UUID] = []
-        for f in facts:
+        statements: list[tuple[str, dict[str, Any]]] = []
+        for i, f in enumerate(facts):
             fact_id: UUID = getattr(f, "id", None) or uuid4()
             ids.append(fact_id)
             chunk_ids = [str(cid) for cid in (getattr(f, "source_chunk_ids", None) or [])]
             superseded_by = getattr(f, "superseded_by", None)
-            await self._conn.execute(
-                "CREATE $rid SET "
-                "namespace_id = $ns, "
-                "subject = $subject, "
-                "predicate = $predicate, "
-                "object = $object, "
-                "fact_text = $fact_text, "
-                "confidence = $confidence, "
-                "is_active = $is_active, "
-                "superseded_by = $superseded_by, "
-                "source_chunk_ids = $source_chunk_ids, "
-                "created_at = $created_at, "
-                "updated_at = $updated_at",
-                {
-                    "rid": _record_id("memory_fact", fact_id),
-                    "ns": ns_str,
-                    "subject": f.subject or "",
-                    "predicate": f.predicate or "",
-                    "object": f.object_ or "",
-                    "fact_text": f.fact_text or "",
-                    "confidence": float(f.confidence),
-                    "is_active": bool(getattr(f, "is_active", True)),
-                    "superseded_by": str(superseded_by) if superseded_by else None,
-                    "source_chunk_ids": chunk_ids,
-                    "created_at": now,
-                    "updated_at": now,
-                },
+            statements.append(
+                (
+                    f"CREATE $rid_{i} SET "
+                    f"namespace_id = $ns_{i}, "
+                    f"subject = $subject_{i}, "
+                    f"predicate = $predicate_{i}, "
+                    f"object = $object_{i}, "
+                    f"fact_text = $fact_text_{i}, "
+                    f"confidence = $confidence_{i}, "
+                    f"is_active = $is_active_{i}, "
+                    f"superseded_by = $superseded_by_{i}, "
+                    f"source_chunk_ids = $source_chunk_ids_{i}, "
+                    f"created_at = $created_at_{i}, "
+                    f"updated_at = $updated_at_{i}",
+                    {
+                        f"rid_{i}": _record_id("memory_fact", fact_id),
+                        f"ns_{i}": ns_str,
+                        f"subject_{i}": f.subject or "",
+                        f"predicate_{i}": f.predicate or "",
+                        f"object_{i}": f.object_ or "",
+                        f"fact_text_{i}": f.fact_text or "",
+                        f"confidence_{i}": float(f.confidence),
+                        f"is_active_{i}": bool(getattr(f, "is_active", True)),
+                        f"superseded_by_{i}": str(superseded_by) if superseded_by else None,
+                        f"source_chunk_ids_{i}": chunk_ids,
+                        f"created_at_{i}": now,
+                        f"updated_at_{i}": now,
+                    },
+                )
             )
+        await self._write_rows_atomic(statements)
         return ids
 
     async def query_events(
