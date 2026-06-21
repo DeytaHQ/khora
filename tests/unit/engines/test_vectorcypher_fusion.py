@@ -10,6 +10,7 @@ from khora.engines.vectorcypher.fusion import (
     FusedResult,
     apply_coherence_boost,
     apply_recency_boost,
+    attach_relevance_scores,
     bigram_coherence_score,
     normalize_scores,
     reciprocal_rank_fusion,
@@ -225,6 +226,91 @@ class TestNormalizeScores:
         ]
         normalized = normalize_scores(results)
         assert all(r.rrf_score == 1.0 for r in normalized)
+
+
+class TestAttachRelevanceScores:
+    """Tests for attach_relevance_scores (#811).
+
+    The reported score must be an ABSOLUTE relevance measure (raw vector cosine),
+    not a per-result-set min-max rescaling that forces top=1.0 / bottom=0.0.
+    """
+
+    def test_offtopic_top_is_not_one(self) -> None:
+        """An off-topic result set has all-low cosines; the top must NOT be 1.0."""
+        # Simulate a sourdough query against an IT-support corpus: every chunk's
+        # raw cosine sits in the noise band, but RRF still orders them.
+        results = [
+            FusedResult(item_id=uuid4(), item="t1", rrf_score=0.0166, vector_score=0.11),
+            FusedResult(item_id=uuid4(), item="t2", rrf_score=0.0161, vector_score=0.09),
+            FusedResult(item_id=uuid4(), item="t3", rrf_score=0.0159, vector_score=0.06),
+        ]
+
+        attach_relevance_scores(results)
+
+        scores = [r.rrf_score for r in results]
+        # min-max would have produced exactly 1.0 and 0.0 - the bug.
+        assert scores[0] != 1.0
+        assert scores[-1] != 0.0
+        # Reported value is the absolute cosine, in the low band.
+        assert scores == [0.11, 0.09, 0.06]
+        # A relevance threshold drops every chunk on this off-topic query.
+        assert all(s < 0.3 for s in scores)
+
+    def test_scores_comparable_across_result_sets(self) -> None:
+        """Two different result sets keep their absolute scales (not rescaled)."""
+        offtopic = [
+            FusedResult(item_id=uuid4(), item="a", rrf_score=0.016, vector_score=0.10),
+            FusedResult(item_id=uuid4(), item="b", rrf_score=0.015, vector_score=0.05),
+        ]
+        ontopic = [
+            FusedResult(item_id=uuid4(), item="c", rrf_score=0.016, vector_score=0.88),
+            FusedResult(item_id=uuid4(), item="d", rrf_score=0.015, vector_score=0.71),
+        ]
+
+        attach_relevance_scores(offtopic)
+        attach_relevance_scores(ontopic)
+
+        # The on-topic top outscores the off-topic top - impossible under
+        # per-result-set min-max (both would be exactly 1.0).
+        assert ontopic[0].rrf_score > offtopic[0].rrf_score
+        assert offtopic[0].rrf_score == 0.10
+        assert ontopic[0].rrf_score == 0.88
+
+    def test_ordering_is_preserved(self) -> None:
+        """Order is decided by rrf_score upstream; this must not re-sort."""
+        # Deliberately make cosine NON-monotonic with the existing order (a
+        # reranker legitimately reorders vs pure cosine). The order must stay.
+        ids = [uuid4() for _ in range(3)]
+        results = [
+            FusedResult(item_id=ids[0], item="first", rrf_score=0.9, vector_score=0.40),
+            FusedResult(item_id=ids[1], item="second", rrf_score=0.5, vector_score=0.95),
+            FusedResult(item_id=ids[2], item="third", rrf_score=0.1, vector_score=0.60),
+        ]
+
+        attach_relevance_scores(results)
+
+        assert [r.item_id for r in results] == ids
+        assert [r.rrf_score for r in results] == [0.40, 0.95, 0.60]
+
+    def test_graph_only_falls_back_to_graph_score(self) -> None:
+        """A chunk with no vector hit uses the graph score, not min-max."""
+        results = [
+            FusedResult(item_id=uuid4(), item="g", rrf_score=0.02, vector_score=None, graph_score=0.42),
+        ]
+        attach_relevance_scores(results)
+        assert results[0].rrf_score == 0.42
+
+    def test_no_signal_keeps_rrf_score(self) -> None:
+        """With neither vector nor graph score, the existing score is untouched."""
+        results = [
+            FusedResult(item_id=uuid4(), item="x", rrf_score=0.123, vector_score=None, graph_score=None),
+        ]
+        attach_relevance_scores(results)
+        assert results[0].rrf_score == 0.123
+
+    def test_empty_list(self) -> None:
+        """Empty input returns empty."""
+        assert attach_relevance_scores([]) == []
 
 
 class TestWeightedRrfNormalized:
