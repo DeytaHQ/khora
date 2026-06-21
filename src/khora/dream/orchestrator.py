@@ -750,6 +750,14 @@ class DreamOrchestrator:
         if graph is None:
             return None
 
+        if _graph_shares_sql_store(self._kb.storage):
+            # Single-store embedded stack (sqlite_lance): the graph backend reads
+            # the same SQLite store the SQL apply handler just wrote, so the
+            # soft-delete is already visible to the graph read path. There is no
+            # second store to mirror to and nothing diverged - clean convergence,
+            # no skip/degradation (#1277).
+            return None
+
         op_type = str(op.op_type)
         supported = _supported_mirror_kinds(graph)
         if op_type not in supported or op_type not in MIRRORABLE_OP_KINDS:
@@ -1376,6 +1384,25 @@ def _graph_backend(coordinator: Any) -> Any | None:
     deprecation warnings during a dream run.
     """
     return getattr(coordinator, "_graph", None)
+
+
+def _graph_shares_sql_store(coordinator: Any) -> bool:
+    """True when the graph backend reads the same store the SQL handler wrote.
+
+    On the embedded ``sqlite_lance`` stack the graph adapter and the relational
+    adapter share one :class:`EmbeddedStorageHandle` (the same SQLite file), so a
+    dream-apply SQL soft-delete is already visible to the graph read path - there
+    is no second store to mirror to (#1277). Detected by identity of the shared
+    ``_handle``, mirroring the advisory ``_is_unified_backend`` probe style;
+    degrades to ``False`` (treat as a distinct store) if the internals shift.
+    """
+    graph = getattr(coordinator, "_graph", None)
+    relational = getattr(coordinator, "_relational", None)
+    if graph is None or relational is None:
+        return False
+    graph_handle = getattr(graph, "_handle", None)
+    relational_handle = getattr(relational, "_handle", None)
+    return graph_handle is not None and graph_handle is relational_handle
 
 
 def _supported_mirror_kinds(graph: Any) -> frozenset[str]:

@@ -43,6 +43,7 @@ from khora.dream.engines.vectorcypher.dedupe_entities import (  # noqa: E402
 )
 from khora.dream.plan import DreamOp, DreamScope, OpKind  # noqa: E402
 from khora.khora import Khora  # noqa: E402
+from tests.test_helpers.diagnostics import assert_no_silent_degradation  # noqa: E402
 
 pytestmark = pytest.mark.embedded
 
@@ -175,6 +176,7 @@ async def test_prune_full_pipeline_converges_and_is_idempotent(kb: Khora) -> Non
         mode="apply",
         scope=DreamScope(op_kinds=(OpKind.VECTORCYPHER_PRUNE_EDGES,)),
     )
+    assert_no_silent_degradation(result)
     # The op ran (gate lifted) and was applied, not skipped.
     assert sum(op.applied for op in result.ops) == 1, result.ops
     assert sum(op.skipped for op in result.ops) == 0, result.ops
@@ -188,6 +190,7 @@ async def test_prune_full_pipeline_converges_and_is_idempotent(kb: Khora) -> Non
         mode="apply",
         scope=DreamScope(op_kinds=(OpKind.VECTORCYPHER_PRUNE_EDGES,)),
     )
+    assert_no_silent_degradation(result2)
     assert sum(op.applied for op in result2.ops) == 0, result2.ops
     _, post_rels2 = await _assert_live_sets_byte_identical(kb, ns_row_id)
     assert post_rels2 == post_rels
