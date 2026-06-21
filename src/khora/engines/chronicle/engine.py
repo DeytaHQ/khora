@@ -1131,6 +1131,7 @@ class ChronicleEngine:
         namespace_id: UUID,
         expertise: ExpertiseConfig | None,
         errors_out: list[ErrorRecord] | None = None,
+        degradations_out: list[Degradation] | None = None,
     ) -> int:
         """Extract events from chunks, embed summaries, persist, and return count.
 
@@ -1153,7 +1154,15 @@ class ChronicleEngine:
         try:
             await self._get_storage().write_events(events, namespace_id=namespace_id)
         except Exception as exc:
-            logger.warning("write_events failed (skipping event persistence): {}", exc)
+            logger.warning("write_events failed (skipping event persistence): {}", exc, exc_info=True)
+            if degradations_out is not None:
+                _record_channel_degradation(
+                    degradations_out,
+                    component="chronicle.events",
+                    reason="write_events_failed",
+                    detail=f"{len(events)} event(s) dropped; persistence raised",
+                    exc=exc,
+                )
             return 0
         logger.debug("Persisted {} chronicle events across {} chunks", len(events), len(chunks))
         return len(events)
@@ -1252,6 +1261,7 @@ class ChronicleEngine:
         new_facts: list[MemoryFact],
         namespace_id: UUID,
         expertise: ExpertiseConfig | None,
+        degradations_out: list[Degradation] | None = None,
     ) -> tuple[int, int]:
         """Apply ADD/UPDATE/DELETE/NOOP/SKIP reconciliation and persist results.
 
@@ -1357,7 +1367,15 @@ class ChronicleEngine:
             try:
                 await storage.write_facts(facts_to_write, namespace_id=namespace_id)
             except Exception as exc:
-                logger.warning("write_facts failed during reconciliation: {}", exc)
+                logger.warning("write_facts failed during reconciliation: {}", exc, exc_info=True)
+                if degradations_out is not None:
+                    _record_channel_degradation(
+                        degradations_out,
+                        component="chronicle.facts",
+                        reason="write_facts_failed",
+                        detail=f"{len(facts_to_write)} fact(s) dropped during reconciliation; persistence raised",
+                        exc=exc,
+                    )
                 return 0, reconcile_errors
 
         # Supersede old → new for UPDATEs.
@@ -1385,6 +1403,7 @@ class ChronicleEngine:
         namespace_id: UUID,
         expertise: ExpertiseConfig | None,
         errors_out: list[ErrorRecord] | None = None,
+        degradations_out: list[Degradation] | None = None,
     ) -> tuple[int, int]:
         """Extract facts from chunks, reconcile, persist, and return count.
 
@@ -1409,13 +1428,21 @@ class ChronicleEngine:
 
         reconcile = expertise.facts.reconcile if expertise is not None else True
         if reconcile:
-            return await self._reconcile_facts(new_facts, namespace_id, expertise)
+            return await self._reconcile_facts(new_facts, namespace_id, expertise, degradations_out=degradations_out)
 
         # Fast path: no reconciliation, write everything as ADD.
         try:
             await self._get_storage().write_facts(new_facts, namespace_id=namespace_id)
         except Exception as exc:
-            logger.warning("write_facts failed (skipping fact persistence): {}", exc)
+            logger.warning("write_facts failed (skipping fact persistence): {}", exc, exc_info=True)
+            if degradations_out is not None:
+                _record_channel_degradation(
+                    degradations_out,
+                    component="chronicle.facts",
+                    reason="write_facts_failed",
+                    detail=f"{len(new_facts)} fact(s) dropped; persistence raised",
+                    exc=exc,
+                )
             return 0, 0
         logger.debug("Persisted {} memory facts across {} chunks (no reconcile)", len(new_facts), len(chunks))
         return len(new_facts), 0
@@ -1585,13 +1612,21 @@ class ChronicleEngine:
                 if run_events:
                     start = time.perf_counter()
                     events_extracted = await self._extract_and_persist_events(
-                        chunks, namespace_id, expertise, errors_out=extraction_errors
+                        chunks,
+                        namespace_id,
+                        expertise,
+                        errors_out=extraction_errors,
+                        degradations_out=ingest_degradations,
                     )
                     timings["event_extraction_ms"] = (time.perf_counter() - start) * 1000
                 if run_facts:
                     start = time.perf_counter()
                     facts_extracted, reconcile_errors = await self._extract_and_persist_facts(
-                        chunks, namespace_id, expertise, errors_out=extraction_errors
+                        chunks,
+                        namespace_id,
+                        expertise,
+                        errors_out=extraction_errors,
+                        degradations_out=ingest_degradations,
                     )
                     timings["fact_extraction_ms"] = (time.perf_counter() - start) * 1000
 
@@ -3370,12 +3405,14 @@ class ChronicleEngine:
                 chunks = [chunks_map[cid] for cid in all_chunk_ids if cid in chunks_map]
                 if run_events:
                     start = time.perf_counter()
-                    events_extracted = await self._extract_and_persist_events(chunks, namespace_id, expertise)
+                    events_extracted = await self._extract_and_persist_events(
+                        chunks, namespace_id, expertise, degradations_out=batch_degradations
+                    )
                     timings["event_extraction_ms"] = (time.perf_counter() - start) * 1000
                 if run_facts:
                     start = time.perf_counter()
                     facts_extracted, reconcile_errors = await self._extract_and_persist_facts(
-                        chunks, namespace_id, expertise
+                        chunks, namespace_id, expertise, degradations_out=batch_degradations
                     )
                     timings["fact_extraction_ms"] = (time.perf_counter() - start) * 1000
 
