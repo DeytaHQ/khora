@@ -90,19 +90,27 @@ class TestEnabledMultilingualAndParaphrase:
         q = "Was ist der letzte Deploy?"
         monkeypatch.setattr(td, "classify_temporal_category_llm", _stub_llm({q: TemporalCategory.RECENCY}))
         detector = TemporalDetector(llm_enabled=True)
-        signal = await detector.detect_async(q)
+        degradations: list = []
+        signal = await detector.detect_async(q, degradations=degradations)
         assert signal.category == TemporalCategory.RECENCY
         assert signal.source == "semantic"
         assert signal.is_temporal is True
+        # Happy path: a successful Tier-2 classification records no degradation.
+        # NOTE: the bare `degradations` list is checked directly, NOT via
+        # assert_no_silent_degradation() - that helper only inspects a result
+        # object's metadata/engine_info dict and is vacuous on a plain list.
+        assert degradations == []
 
     @pytest.mark.asyncio
     async def test_german_state_query(self, monkeypatch: pytest.MonkeyPatch) -> None:
         q = "Wer leitet derzeit das Phoenix-Projekt?"
         monkeypatch.setattr(td, "classify_temporal_category_llm", _stub_llm({q: TemporalCategory.STATE_QUERY}))
         detector = TemporalDetector(llm_enabled=True)
-        signal = await detector.detect_async(q)
+        degradations: list = []
+        signal = await detector.detect_async(q, degradations=degradations)
         assert signal.category == TemporalCategory.STATE_QUERY
         assert signal.source == "semantic"
+        assert degradations == []
 
     @pytest.mark.asyncio
     async def test_paraphrase_change(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -111,9 +119,11 @@ class TestEnabledMultilingualAndParaphrase:
         assert TemporalDetector().detect(q).category == TemporalCategory.NONE
         monkeypatch.setattr(td, "classify_temporal_category_llm", _stub_llm({q: TemporalCategory.CHANGE}))
         detector = TemporalDetector(llm_enabled=True)
-        signal = await detector.detect_async(q)
+        degradations: list = []
+        signal = await detector.detect_async(q, degradations=degradations)
         assert signal.category == TemporalCategory.CHANGE
         assert signal.source == "semantic"
+        assert degradations == []
 
     @pytest.mark.asyncio
     async def test_paraphrase_ordinal_timeline(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -121,9 +131,11 @@ class TestEnabledMultilingualAndParaphrase:
         assert TemporalDetector().detect(q).category == TemporalCategory.NONE
         monkeypatch.setattr(td, "classify_temporal_category_llm", _stub_llm({q: TemporalCategory.ORDINAL}))
         detector = TemporalDetector(llm_enabled=True)
-        signal = await detector.detect_async(q)
+        degradations: list = []
+        signal = await detector.detect_async(q, degradations=degradations)
         assert signal.category == TemporalCategory.ORDINAL
         assert signal.source == "semantic"
+        assert degradations == []
 
     @pytest.mark.asyncio
     async def test_llm_returns_none_stays_none(self, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -2780,6 +2780,9 @@ class TestVectorCypherEngineApiTemporalFilter:
         assert signal.category == TemporalCategory.RECENCY
         assert signal.source == "semantic"
         assert result.engine_info["temporal_category"] == "recency"
+        # Happy path: Tier-2 succeeded, so no degradation should be recorded.
+        # RecallResult has no `metadata` attr, so the helper reads engine_info.
+        assert_no_silent_degradation(result)
 
     @pytest.mark.asyncio
     async def test_recall_tier2_llm_failure_degrades_and_records(
