@@ -1522,7 +1522,8 @@ def detect_temporal_category_with_confidence(
     - ``confidence``: 0.0–1.0 based on match count and strength
     - ``matched_terms``: list of matched keyword strings
 
-    Uses Rust Aho-Corasick when available, otherwise Python substring matching.
+    Uses Rust Aho-Corasick when available, otherwise Python word-boundary
+    regex matching (parity with the Rust kernel).
     """
     if _HAS_RUST:
         return _rust_detect_temporal_category_with_confidence(query)
