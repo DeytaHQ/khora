@@ -1103,6 +1103,7 @@ class TestDreamFlatMirror:
         assert supported == frozenset(
             {
                 OpKind.VECTORCYPHER_PRUNE_EDGES,
+                OpKind.VECTORCYPHER_CONTRADICTION_RECONCILE,
                 OpKind.VECTORCYPHER_DEDUPE_ENTITIES,
                 OpKind.VECTORCYPHER_NORMALIZE_SCHEMA,
             }

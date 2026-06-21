@@ -57,6 +57,10 @@ if TYPE_CHECKING:
 # incident-edge re-pointing (#1273).
 _PRUNE_EDGES = "vectorcypher_prune_edges"
 _DEDUPE_ENTITIES = "vectorcypher_dedupe_entities"
+# Two-LLM-judged contradiction reconcile (#1281): soft-deletes the losing edge
+# of a judge-agreed contradiction. ``UndoRecord.before["relationships"]`` is
+# shaped exactly like prune_edges, so the invalidate leg shares its translation.
+_CONTRADICTION_RECONCILE = "vectorcypher_contradiction_reconcile"
 # Additive community materialization (#1276): the GraphRAG payoff. Unlike the
 # prune / dedupe legs (soft-deletes), this MERGEs :Community nodes + member
 # edges into the graph so the dream summaries are queryable at recall.
@@ -66,7 +70,9 @@ _COMMUNITY_SUMMARY = "vectorcypher_community_summary"
 # mirror. Anything outside this set (centroid recompute, normalize_schema
 # relabel, source-chunk GC) is recorded as a structured skip rather than
 # mirrored - see ``mirror_skip_reason``.
-MIRRORABLE_OP_KINDS: frozenset[str] = frozenset({_PRUNE_EDGES, _DEDUPE_ENTITIES, _COMMUNITY_SUMMARY})
+MIRRORABLE_OP_KINDS: frozenset[str] = frozenset(
+    {_PRUNE_EDGES, _DEDUPE_ENTITIES, _COMMUNITY_SUMMARY, _CONTRADICTION_RECONCILE}
+)
 
 
 # Emitted once per op whose PG commit succeeded but whose graph mirror raised.
@@ -139,8 +145,11 @@ def extract_mirror_targets(op_type: str, undo: UndoRecord) -> dict[str, list[Any
     invalidate_relationship_ids: list[UUID] = []
     rewrite_relationships: list[dict[str, str]] = []
 
-    if op_type == _PRUNE_EDGES:
-        # prune_edges: before == {"noop": True} or {"relationships": [{...}]}.
+    if op_type in (_PRUNE_EDGES, _CONTRADICTION_RECONCILE):
+        # prune_edges / contradiction_reconcile: before carries
+        # {"relationships": [{"relationship_id": ...}]} for each soft-deleted
+        # edge (a pruned orphan, or the judge-invalidated loser of a
+        # contradiction). Both fold onto the graph valid_until the same way.
         for row in before.get("relationships") or []:
             rel_id = _coerce_uuid(row.get("relationship_id"))
             if rel_id is not None:

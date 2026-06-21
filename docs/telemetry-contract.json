@@ -713,6 +713,18 @@
       "_comment": "Inner span for the vectorcypher contradiction-detection op (OpKind.VECTORCYPHER_CONTRADICTION_DETECT, #672, Phase 5.3 of #649). Report only - never mutates `relationships`; findings persist to the `dream_conflicts` table (migration 035) for human triage and Phase 5.4 (#673) mapping recommendations. Attributes: run_id, op_id, namespace_id (span attr only, never a metric label per cardinality rule), phase, similarity_threshold, total_relationships, live_relationships, finding_count, duration_ms, and per-finding `finding_<i>_desc_a_hash` / `finding_<i>_desc_b_hash` / `finding_<i>_reason` / `finding_<i>_similarity`. Description hashes go through bounded_text_hash - raw text never lands on the span."
     },
     {
+      "name": "khora.dream.vectorcypher.contradiction_reconcile",
+      "stability": "internal",
+      "owner": "dream",
+      "_comment": "Planner span for the vectorcypher contradiction-reconciliation op (OpKind.VECTORCYPHER_CONTRADICTION_RECONCILE, #1281, Phase 5 of dream-on-graph #1282). Opt-in two-LLM-judged promotion of contradiction_detect: only judge-AGREED invalidations soft-delete the losing edge (mirrored via the #1271 verbs); defer/keep write a triage row to dream_conflicts (migration 048 columns). Default OFF behind DreamConfig.contradiction_reconcile_enabled. Pure planner span - zero LLM calls (the budget-gated judge runs at apply time). Attributes: op_id, namespace_id (span attr only, never a metric label per cardinality rule), phase=audit, similarity_threshold, total_relationships, live_relationships, finding_count, duration_ms."
+    },
+    {
+      "name": "khora.dream.vectorcypher.contradiction.judge",
+      "stability": "internal",
+      "owner": "dream",
+      "_comment": "Wraps each LLM judge call inside the two-LLM contradiction-reconcile judge on the apply path (#1281). Attributes: direction ('verifier'|'auditor', bounded), model (str), similarity (str), prompt_hash (bounded_text_hash - never raw prompt text), outcome ('parsed'|'parse_error'|'timeout'|'error'), decision ('invalidate'|'keep'|'defer'; only on 'parsed'), confidence (str; only on 'parsed'), error_type (str; only on 'timeout' / 'error'). Both judges must agree on 'invalidate' for the SAME loser, above the confidence floor, with a grounded citation, before the losing edge is soft-deleted; otherwise the pair defers (no mutation) and a triage row is written. LLM token spend is recorded via the acompletion wrapper (_telemetry_op='dream.contradiction.{direction}') and counted against the dream LLM budget."
+    },
+    {
       "name": "khora.dream.vectorcypher.normalize_schema",
       "stability": "internal",
       "owner": "dream",
@@ -1400,6 +1412,15 @@
       "description": "Dream apply committed on PostgreSQL but the post-commit Neo4j tombstone-mirror raised. PG is the source of truth; the op is queued in khora_dream_runs.graph_mirror_pending and re-attempted by the reconciler on the next run. Operators monitor this to detect cross-store divergence between PG and the graph backend.",
       "labels": [],
       "_comment": "Issue #1272 (#970 DoD). NO namespace_id label - cardinality rule. Incremented on the post-commit mirror failure AND on each reconcile re-attempt that still fails. See docs/architecture/failure-observability-contract.md."
+    },
+    {
+      "name": "khora.dream.contradiction.reconcile_deferred_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "description": "Contradiction pairs the two-LLM reconcile judge did NOT invalidate (disagreement, timeout, below-confidence, ungrounded citation, or a judged keep). No relationship was mutated; a triage row was written to dream_conflicts. Operators monitor this to gauge reconcile coverage and judge-agreement rate.",
+      "labels": [],
+      "_comment": "Issue #1281 (dream-on-graph Phase 5). NO namespace_id label - cardinality rule. Incremented once per flagged pair the judge declined to invalidate. The op is OFF by default behind DreamConfig.contradiction_reconcile_enabled."
     },
     {
       "name": "khora.dream.graph_unmirror.partial_failure",

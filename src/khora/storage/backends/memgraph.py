@@ -1110,9 +1110,11 @@ class MemgraphBackend(GraphBackendBase):
     # ``list_*`` read filters hide the row in lockstep with the PG read filter.
 
     def supports_dream_mirror(self) -> frozenset[OpKind]:
-        """Memgraph flat-mirrors prune / dedupe / normalize-schema.
+        """Memgraph flat-mirrors prune / reconcile / dedupe / normalize-schema.
 
         - ``VECTORCYPHER_PRUNE_EDGES`` -> :meth:`soft_invalidate_relationships_batch`
+        - ``VECTORCYPHER_CONTRADICTION_RECONCILE`` -> :meth:`soft_invalidate_relationships_batch`
+          (the judge-invalidated losing edge, #1281)
         - ``VECTORCYPHER_DEDUPE_ENTITIES`` -> :meth:`soft_retire_entities_batch`
           (flat, no :EntityVersion) + :meth:`rewrite_relationship_endpoints_batch`
         - ``VECTORCYPHER_NORMALIZE_SCHEMA`` -> :meth:`rename_types_batch`
@@ -1124,6 +1126,7 @@ class MemgraphBackend(GraphBackendBase):
         return frozenset(
             {
                 OpKind.VECTORCYPHER_PRUNE_EDGES,
+                OpKind.VECTORCYPHER_CONTRADICTION_RECONCILE,
                 OpKind.VECTORCYPHER_DEDUPE_ENTITIES,
                 OpKind.VECTORCYPHER_NORMALIZE_SCHEMA,
             }

@@ -116,15 +116,15 @@ def _age_with_cypher_capture(per_call_return: int) -> tuple[AGEBackend, list[str
 
 @pytest.mark.unit
 class TestSupportsDreamMirror:
-    def test_neptune_advertises_only_prune_edges(self) -> None:
+    def test_neptune_advertises_flat_soft_delete_kinds(self) -> None:
         caps = NeptuneBackend("bolt://localhost:8182").supports_dream_mirror()
         assert isinstance(caps, frozenset)
-        assert caps == frozenset({OpKind.VECTORCYPHER_PRUNE_EDGES})
+        assert caps == frozenset({OpKind.VECTORCYPHER_PRUNE_EDGES, OpKind.VECTORCYPHER_CONTRADICTION_RECONCILE})
 
-    def test_age_advertises_only_prune_edges(self) -> None:
+    def test_age_advertises_flat_soft_delete_kinds(self) -> None:
         caps = AGEBackend("postgresql://x/y").supports_dream_mirror()
         assert isinstance(caps, frozenset)
-        assert caps == frozenset({OpKind.VECTORCYPHER_PRUNE_EDGES})
+        assert caps == frozenset({OpKind.VECTORCYPHER_PRUNE_EDGES, OpKind.VECTORCYPHER_CONTRADICTION_RECONCILE})
 
     @pytest.mark.parametrize(
         "backend",

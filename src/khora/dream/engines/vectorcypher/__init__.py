@@ -15,6 +15,10 @@ from khora.dream.engines.vectorcypher.community_summary import (
 from khora.dream.engines.vectorcypher.contradiction_detect import (
     plan_vectorcypher_contradiction_detect,
 )
+from khora.dream.engines.vectorcypher.contradiction_reconcile import (
+    apply_vectorcypher_contradiction_reconcile,
+    plan_vectorcypher_contradiction_reconcile,
+)
 from khora.dream.engines.vectorcypher.dedupe_entities import (
     plan_vectorcypher_dedupe_entities,
 )
@@ -40,11 +44,13 @@ from khora.dream.engines.vectorcypher.source_chunk_ids_gc import (
 )
 
 __all__ = [
+    "apply_vectorcypher_contradiction_reconcile",
     "apply_vectorcypher_normalize_schema",
     "apply_vectorcypher_prune_edges",
     "plan_vectorcypher_centroid_recompute",
     "plan_vectorcypher_community_summary",
     "plan_vectorcypher_contradiction_detect",
+    "plan_vectorcypher_contradiction_reconcile",
     "plan_vectorcypher_dedupe_entities",
     "plan_vectorcypher_normalize_schema",
     "plan_vectorcypher_orphan_report",

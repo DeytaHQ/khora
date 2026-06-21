@@ -36,6 +36,7 @@ from khora.dream.engines.vectorcypher import (
     plan_vectorcypher_centroid_recompute,
     plan_vectorcypher_community_summary,
     plan_vectorcypher_contradiction_detect,
+    plan_vectorcypher_contradiction_reconcile,
     plan_vectorcypher_dedupe_entities,
     plan_vectorcypher_normalize_schema,
     plan_vectorcypher_orphan_report,
@@ -177,6 +178,10 @@ _APPLY_HANDLER_NAMES: dict[OpKind, tuple[str, str]] = {
     OpKind.VECTORCYPHER_CONTRADICTION_DETECT: (
         "khora.dream.engines.vectorcypher.contradiction_detect",
         "apply_vectorcypher_contradiction_detect",
+    ),
+    OpKind.VECTORCYPHER_CONTRADICTION_RECONCILE: (
+        "khora.dream.engines.vectorcypher.contradiction_reconcile",
+        "apply_vectorcypher_contradiction_reconcile",
     ),
     OpKind.VECTORCYPHER_NORMALIZE_SCHEMA: (
         "khora.dream.engines.vectorcypher.normalize_schema",
@@ -358,6 +363,7 @@ class _VectorCypherPlugin:
                 OpKind.VECTORCYPHER_COMMUNITY_SUMMARY,
                 OpKind.VECTORCYPHER_PRUNE_EDGES,
                 OpKind.VECTORCYPHER_CONTRADICTION_DETECT,
+                OpKind.VECTORCYPHER_CONTRADICTION_RECONCILE,
                 OpKind.VECTORCYPHER_NORMALIZE_SCHEMA,
                 OpKind.VECTORCYPHER_DEDUPE_ENTITIES,
                 OpKind.VECTORCYPHER_CENTROID_RECOMPUTE,
@@ -451,6 +457,25 @@ class _VectorCypherPlugin:
                 similarity_threshold=config.contradiction_detect_similarity_threshold,
             )
             ops.append(op)
+
+        # #1281 — two-LLM-judged reconcile op. Default OFF; when requested but
+        # disabled, record a structured skip_reason so "off" reads apart from
+        # "no candidates". The judge runs at apply time (budget-gated).
+        if OpKind.VECTORCYPHER_CONTRADICTION_RECONCILE in wanted:
+            if config.contradiction_reconcile_enabled:
+                op = await plan_vectorcypher_contradiction_reconcile(
+                    namespace_id,
+                    coordinator=coordinator,
+                    similarity_threshold=config.contradiction_detect_similarity_threshold,
+                )
+                ops.append(op)
+            else:
+                skip_reasons.append(
+                    _disabled_skip_reason(
+                        OpKind.VECTORCYPHER_CONTRADICTION_RECONCILE,
+                        "contradiction_reconcile_enabled",
+                    )
+                )
 
         if OpKind.VECTORCYPHER_NORMALIZE_SCHEMA in wanted:
             normalize_ops = await plan_vectorcypher_normalize_schema(
