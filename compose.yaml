@@ -103,8 +103,9 @@ services:
     # `memgraph`) refuses to start when /var/lib/memgraph is owned by another
     # user, so an ephemeral data dir is both simpler and crash-free.
     healthcheck:
-      # Memgraph ships no curl/wget; probe the bolt TCP port from the shell.
-      test: ["CMD-SHELL", "echo '' > /dev/tcp/localhost/7687 || exit 1"]
+      # Memgraph ships no curl/wget and /bin/sh is dash (no /dev/tcp), so probe
+      # Bolt with the bundled mgconsole client instead.
+      test: ["CMD-SHELL", "echo 'RETURN 1;' | mgconsole --host 127.0.0.1 --port 7687 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10

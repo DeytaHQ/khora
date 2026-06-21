@@ -406,9 +406,10 @@ jobs:
         image: memgraph/memgraph:3.11.0
         ports:
           - 7688:7687
-        # Memgraph ships no curl/wget; probe the bolt TCP port from the shell.
+        # Memgraph ships no curl/wget and /bin/sh is dash (no /dev/tcp); probe
+        # Bolt with the bundled mgconsole client.
         options: >-
-          --health-cmd "echo '' > /dev/tcp/localhost/7687 || exit 1"
+          --health-cmd "echo 'RETURN 1;' | mgconsole --host 127.0.0.1 --port 7687 || exit 1"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10
@@ -482,8 +483,10 @@ jobs:
 
       - name: Wait for Memgraph readiness
         # Mirrors the Neo4j readiness loop for the #1278 dream-mirror gate. The
-        # integration test self-skips if Memgraph is unreachable, so a slow or
-        # failed side-car degrades to a skip rather than a hard failure.
+        # service healthcheck already gates step start, so fail fast on timeout
+        # (like the Neo4j loop) rather than letting the test silently self-skip
+        # and the Memgraph gate pass without running. The test's own
+        # reachability-skip stays as the graceful path for local dev only.
         run: |
           for i in $(seq 1 30); do
             if (echo > /dev/tcp/localhost/7688) >/dev/null 2>&1; then
@@ -492,7 +495,8 @@ jobs:
             fi
             sleep 2
           done
-          echo "memgraph did not become ready within 60s (test will self-skip)"
+          echo "memgraph did not become ready within 60s"
+          exit 1
 
       - name: Apply database migrations
         # env.py normalizes the plain DSN to asyncpg internally and takes the
