@@ -47,13 +47,19 @@ _HYDE_DEGRADED_COUNTER = metric_counter(
 )
 
 
-def _detect_category(query: str) -> TemporalCategory | None:
+def _detect_category(
+    query: str,
+    *,
+    out_diagnostics: list[Degradation] | None = None,
+) -> TemporalCategory | None:
     """Best-effort temporal-category detection for a HyDE query.
 
     Wraps ``khora.query.temporal_detection.detect_temporal_category`` so
     the import is local (avoids a hard dependency at module import time)
     and any unexpected failure degrades to ``None`` (generic prompt) —
-    HyDE should never crash a query because of a detector error.
+    HyDE should never crash a query because of a detector error. On
+    failure, when ``out_diagnostics`` is supplied, a :class:`Degradation`
+    is appended so the fallback is observable per ADR-001 (issue #1324).
     """
     try:
         from khora._accel import detect_temporal_category
@@ -67,6 +73,17 @@ def _detect_category(query: str) -> TemporalCategory | None:
             type(exc).__name__,
             exc,
         )
+        if out_diagnostics is not None:
+            from khora.core.diagnostics import Degradation
+
+            out_diagnostics.append(
+                Degradation(
+                    component="query.hyde",
+                    reason="temporal_category_detection_failed",
+                    detail="HyDE temporal-category detection failed; using generic prompt.",
+                    exception=type(exc).__name__,
+                )
+            )
         return None
 
 
@@ -165,7 +182,7 @@ class HyDEExpander:
         from khora.telemetry.instrument import pipeline_stage
 
         if temporal_category is None:
-            temporal_category = _detect_category(query)
+            temporal_category = _detect_category(query, out_diagnostics=out_diagnostics)
 
         try:
             async with pipeline_stage("query", "hyde", extra_metadata={"num_hypotheticals": self._num_hypotheticals}):
@@ -187,7 +204,7 @@ class HyDEExpander:
 
         except Exception as e:
             logger.warning("HyDE expansion failed, using original embedding: {}", e, exc_info=True)
-            _HYDE_DEGRADED_COUNTER.add(1, attributes={"reason": "hyde_embedding_failed"})
+            _HYDE_DEGRADED_COUNTER.add(1, attributes={"channel": "query_embedding", "reason": "hyde_embedding_failed"})
             if out_diagnostics is not None:
                 out_diagnostics.append(
                     Degradation(

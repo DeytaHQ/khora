@@ -1159,6 +1159,7 @@
       "unit": "1",
       "owner": "query",
       "labels": [
+        {"name": "channel", "values": ["query_embedding"], "_comment": "Which HyDE channel degraded; query_embedding = the embedding-averaging expansion path."},
         {"name": "reason", "values": ["hyde_embedding_failed"], "_comment": "Low-cardinality enum; extend when adding new HyDE fallback paths."}
       ],
       "description": "Issue #1324 (ADR-001). HyDE query-embedding expansion silent fallback - incremented when expand_query_embedding catches any exception (LLM call failure, embed failure) and returns the original embedding unchanged. The same event is also appended to the caller-supplied out_diagnostics list, surfacing on RecallResult.engine_info['degradations'] or QueryResult.metadata['degradations']. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."

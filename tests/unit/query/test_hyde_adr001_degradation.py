@@ -21,6 +21,7 @@ import pytest
 
 from khora.core.diagnostics import Degradation
 from khora.query.hyde import HyDEExpander, _detect_category
+from tests.test_helpers.diagnostics import assert_no_silent_degradation
 
 pytestmark = pytest.mark.unit
 
@@ -104,7 +105,9 @@ async def test_expand_query_embedding_no_degradation_on_success() -> None:
         result = await expander.expand_query_embedding("what is the status", original, out_diagnostics=out)
 
     assert result != original  # expanded (averaged)
-    assert out == []  # no degradation recorded
+    # `out` is the real degradations bag for this call; the helper guards that
+    # the happy path recorded none (non-vacuous - a degradation here would fail).
+    assert_no_silent_degradation({"degradations": out})
 
 
 @pytest.mark.asyncio
@@ -127,7 +130,10 @@ async def test_expand_query_embedding_increments_counter_on_failure(monkeypatch)
         await expander.expand_query_embedding("query", [0.5] * 8)
 
     assert len(counter_calls) == 1
-    assert counter_calls[0]["attributes"] == {"reason": "hyde_embedding_failed"}
+    assert counter_calls[0]["attributes"] == {
+        "channel": "query_embedding",
+        "reason": "hyde_embedding_failed",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -169,3 +175,17 @@ def test_detect_category_does_not_raise_on_any_exception() -> None:
         with patch("khora._accel.detect_temporal_category", side_effect=exc):
             result = _detect_category("any query")
         assert result is None, f"Expected None for {type(exc).__name__}, got {result!r}"
+
+
+def test_detect_category_records_degradation_on_failure() -> None:
+    """On failure, _detect_category appends a Degradation when out_diagnostics
+    is supplied (ADR-001, issue #1324) - not log-only."""
+    out: list[Degradation] = []
+    with patch("khora._accel.detect_temporal_category", side_effect=RuntimeError("boom")):
+        result = _detect_category("query text", out_diagnostics=out)
+
+    assert result is None
+    assert len(out) == 1
+    assert out[0]["component"] == "query.hyde"
+    assert out[0]["reason"] == "temporal_category_detection_failed"
+    assert out[0]["exception"] == "RuntimeError"
