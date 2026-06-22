@@ -1780,6 +1780,23 @@ class QuerySettings(BaseSettings):
             "identical across modes; only should_abstain differs. See khora#1331."
         ),
     )
+
+    @model_validator(mode="after")
+    def _validate_abstention_weights(self) -> QuerySettings:
+        # combined_score is a documented [0,1] contract; cap the simplex so a
+        # mis-set weight triple can't push it above 1.0 in weighted mode.
+        total = (
+            self.abstention_weight_entities_empty
+            + self.abstention_weight_chunks_below_min
+            + self.abstention_weight_top_score_low
+        )
+        if total > 1.0:
+            raise ValueError(
+                f"abstention weights must sum to <= 1.0 (got {total:.3f}); a larger sum "
+                "would push combined_score above the documented [0,1] range."
+            )
+        return self
+
     # Calibrated retrieval confidence (#1331), surfaced as
     # ``engine_info['confidence']``: 0.8*clip01(top_cosine/target_cosine)
     # + 0.2*clip01(top_score_gap/target_gap).

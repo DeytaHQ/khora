@@ -81,10 +81,12 @@ def compute_abstention_signals(
 
     if mode == "weighted":
         should_abstain = combined >= combined_threshold
-    else:
+    elif mode == "cosine_floor":
         # cosine_floor (default): the topicality floor decides on its own;
         # chunk/entity COUNTS only matter in the genuinely-empty case.
         should_abstain = top_score_low or (chunks_empty and entities_empty)
+    else:
+        raise ValueError(f"unknown abstention mode: {mode!r}")
 
     return {
         "entities_empty": entities_empty,
