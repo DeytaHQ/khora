@@ -642,20 +642,35 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         relationships: list[Relationship],
         *,
         batch_size: int = 100,
-    ) -> int:
+    ) -> list[tuple[Relationship, bool]]:
+        """Batch-upsert relationships, returning ``(relationship, is_new)`` per row.
+
+        Like the pgvector fallback, this table keys dedup on the relationship
+        ``id`` (``ON CONFLICT(id)``), not the endpoint pair, so the stored id
+        is always the input ``rel.id``. ``is_new`` reflects an *id* collision -
+        a fresh-id edge between an already-related pair still reports
+        ``is_new=True`` - and is computed exactly from a pre-upsert existence
+        probe over the batch's ids (#1320).
+        """
         if not relationships:
-            return 0
-        total = 0
+            return []
+        existing_ids: set[str] = set()
         for start in range(0, len(relationships), batch_size):
             chunk = relationships[start : start + batch_size]
+            ids = [uuid_to_text(r.id) for r in chunk]
+            placeholders = ", ".join("?" for _ in ids)
+            async with self._conn.execute(
+                f"SELECT id FROM relationships WHERE id IN ({placeholders})",  # noqa: S608
+                ids,
+            ) as cur:
+                existing_ids.update(row[0] for row in await cur.fetchall())
             await self._conn.executemany(_RELATIONSHIP_UPSERT_SQL, [_relationship_insert_params(r) for r in chunk])
-            total += len(chunk)
         await self._conn.commit()
         # Mirror the sanitized type back into the caller-provided objects
         # so consumers see what was actually persisted.
         for rel in relationships:
             rel.relationship_type = sanitize_cypher_label(rel.relationship_type or "RELATES_TO")
-        return total
+        return [(rel, uuid_to_text(rel.id) not in existing_ids) for rel in relationships]
 
     # ------------------------------------------------------------------
     # Traversal — recursive CTEs

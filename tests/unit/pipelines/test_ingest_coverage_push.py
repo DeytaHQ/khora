@@ -79,7 +79,7 @@ def _make_storage(**overrides) -> MagicMock:
     storage.create_chunks_batch = AsyncMock()
     storage.upsert_entities_batch = AsyncMock(return_value=[])
     storage.update_entity_embeddings_batch = AsyncMock(return_value=0)
-    storage.create_relationships_batch = AsyncMock(return_value=0)
+    storage.create_relationships_batch = AsyncMock(return_value=[])
     storage.list_entities = AsyncMock(return_value=[])
     storage.list_relationships = AsyncMock(return_value=[])
     storage.get_entity_by_name = AsyncMock(return_value=None)
@@ -754,7 +754,8 @@ class TestRunBatchInference:
         storage = _make_storage(
             list_entities=AsyncMock(return_value=[ent_a, ent_b]),
             list_relationships=AsyncMock(return_value=[]),
-            create_relationships_batch=AsyncMock(return_value=2),
+            # #1320: returns (relationship, is_new) per edge; the flow counts via len().
+            create_relationships_batch=AsyncMock(side_effect=lambda rels, **kw: [(r, True) for r in rels]),
         )
         expertise = _make_expertise()
 

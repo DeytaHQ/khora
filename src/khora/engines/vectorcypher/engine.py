@@ -1529,18 +1529,20 @@ class VectorCypherEngine:
             # Store relationships in Neo4j
             relationships_created = 0
             if relationships:
-                relationships_created = await storage.create_relationships_batch(relationships)
+                # ``create_relationships_batch`` returns canonical per-edge
+                # results (#1320): each ``rel.id`` synced to the stored edge id,
+                # plus an ``is_new`` flag. Emit relationship.created for a
+                # genuine create and relationship.updated for a dedup-merge,
+                # carrying the canonical stored id - matching the Chronicle
+                # ingest flow's payload shape and its created-vs-updated split.
+                rel_results = await storage.create_relationships_batch(relationships)
+                relationships_created = len(rel_results)
 
-                # Emit relationship.created semantic hooks (#978), one per
-                # persisted relationship, matching the Chronicle ingest flow's
-                # payload shape. ``create_relationships_batch`` does not report a
-                # per-edge created/updated split, so - as in the Chronicle flow -
-                # all persisted relationships fire ``relationship.created``.
-                for rel in relationships:
+                for rel, is_new in rel_results:
                     await storage.dispatch_hook(
                         MemoryEvent(
                             namespace_id=namespace_id,
-                            event_type=EventType.RELATIONSHIP_CREATED,
+                            event_type=(EventType.RELATIONSHIP_CREATED if is_new else EventType.RELATIONSHIP_UPDATED),
                             resource_type="relationship",
                             resource_id=rel.id,
                             data={
@@ -1548,6 +1550,7 @@ class VectorCypherEngine:
                                 "source_entity_id": str(rel.source_entity_id),
                                 "target_entity_id": str(rel.target_entity_id),
                                 "confidence": rel.confidence,
+                                "is_new": is_new,
                                 "document_id": document_id_str,
                             },
                         )

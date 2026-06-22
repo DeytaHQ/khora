@@ -119,7 +119,14 @@ async def test_neo4j_create_relationships_batch_mirrors_sanitized_type() -> None
     fake_session.__aenter__ = AsyncMock(return_value=fake_session)
     fake_session.__aexit__ = AsyncMock(return_value=None)
     fake_session.execute_write = AsyncMock(
-        return_value={"created": 1, "doc_dropped": 0, "chunk_dropped": 0, "doc_rows": 0, "chunk_rows": 0}
+        return_value={
+            "created": 1,
+            "doc_dropped": 0,
+            "chunk_dropped": 0,
+            "doc_rows": 0,
+            "chunk_rows": 0,
+            "edge_rows": [],
+        }
     )
     backend._session = MagicMock(return_value=fake_session)  # type: ignore[attr-defined]
     # _ensure_relationship_type_indexes touches the live driver — short-circuit.
@@ -238,7 +245,8 @@ async def test_surrealdb_create_relationships_batch_mirrors_sanitized_type() -> 
     adapter = SurrealDBGraphAdapter(conn)
 
     rels = [_make_rel("lives in"), _make_rel("works AT")]
-    created = await adapter.create_relationships_batch(rels)
-    assert created == 2
+    results = await adapter.create_relationships_batch(rels)
+    # #1320: bare RELATE always creates - best-effort is_new=True per edge.
+    assert results == [(rels[0], True), (rels[1], True)]
     assert rels[0].relationship_type == "LIVES_IN"
     assert rels[1].relationship_type == "WORKS_AT"

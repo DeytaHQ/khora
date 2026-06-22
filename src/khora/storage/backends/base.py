@@ -811,10 +811,26 @@ class GraphBackendProtocol(Protocol):
         relationships: list[Relationship],
         *,
         batch_size: int = 100,
-    ) -> int:
-        """Batch create relationships.
+    ) -> list[tuple[Relationship, bool]]:
+        """Batch create relationships using MERGE semantics.
 
-        Returns the number of relationships created.
+        Returns one ``(relationship, is_new)`` tuple per *persisted* edge,
+        mirroring ``upsert_entities_batch``'s ``(entity, is_new)`` contract.
+        On a dedup-merge onto an existing edge the input relationship's ``id``
+        MUST be synced in place to the stored edge's canonical id (the #806
+        id-remap contract, applied to edges) so callers - notably the
+        ``relationship.created`` / ``relationship.updated`` semantic-hook
+        dispatch (#1320) - report the actually-stored id, never the submitted
+        one. ``is_new`` is ``True`` for a genuine create and ``False`` for a
+        merge.
+
+        Backends whose write path cannot cheaply distinguish create from
+        merge (SurrealDB's bare ``RELATE``, the per-record ``GraphBackendBase``
+        default used by Neptune/AGE) return a best-effort ``is_new=True`` with
+        the canonical id and document the limitation; the MERGE-by-endpoint
+        backends (Neo4j, Memgraph) report the split exactly, and the
+        ON-CONFLICT(id) backends (pgvector, sqlite_lance) report it from the
+        id-collision they key on.
         """
         ...
 

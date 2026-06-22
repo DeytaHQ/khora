@@ -475,7 +475,8 @@ class TestB8BatchRelationshipsInExpansion:
 
         storage = MagicMock()
         storage.update_entity = AsyncMock()
-        storage.create_relationships_batch = AsyncMock(return_value=3)
+        # #1320: returns (relationship, is_new) per edge; the flow counts via len().
+        storage.create_relationships_batch = AsyncMock(side_effect=lambda rels, **kw: [(r, True) for r in rels])
 
         rels = [MagicMock(), MagicMock(), MagicMock()]
 

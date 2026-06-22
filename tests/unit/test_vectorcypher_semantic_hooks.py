@@ -26,8 +26,14 @@ from khora.core.models.event import EventType
 from khora.core.temporal import TemporalChunk
 
 
-def _make_engine(upsert_results, *, rels_created: int = 0):
-    """Build a minimally-wired VectorCypherEngine for _run_skeleton_extraction."""
+def _make_engine(upsert_results, *, rel_results=None):
+    """Build a minimally-wired VectorCypherEngine for _run_skeleton_extraction.
+
+    ``rel_results`` is the canonical ``list[(relationship, is_new)]`` the
+    stubbed ``create_relationships_batch`` returns (the #1320 contract). When
+    ``None`` the stub echoes its input as all-created so callers that don't
+    care about the relationship split stay simple.
+    """
     from khora.config import KhoraConfig
     from khora.engines.vectorcypher.engine import VectorCypherConfig, VectorCypherEngine
 
@@ -35,9 +41,14 @@ def _make_engine(upsert_results, *, rels_created: int = 0):
     engine._config = KhoraConfig()
     engine._vc_config = VectorCypherConfig()
 
+    async def _rel_batch(relationships, **_kwargs):
+        if rel_results is not None:
+            return rel_results
+        return [(r, True) for r in relationships]
+
     storage = MagicMock()
     storage.upsert_entities_batch = AsyncMock(return_value=upsert_results)
-    storage.create_relationships_batch = AsyncMock(return_value=rels_created)
+    storage.create_relationships_batch = AsyncMock(side_effect=_rel_batch)
     storage.dispatch_hook = AsyncMock()
     storage.get_entity_by_name = AsyncMock(return_value=None)
     engine._storage = storage
@@ -98,7 +109,7 @@ class TestVectorCypherSemanticHooks:
             confidence=0.9,
         )
 
-        engine, storage = _make_engine([(acme, True), (beta, True)], rels_created=1)
+        engine, storage = _make_engine([(acme, True), (beta, True)], rel_results=[(rel, True)])
 
         with patch(
             "khora.pipelines.tasks.extract.extract_entities",
@@ -133,6 +144,53 @@ class TestVectorCypherSemanticHooks:
         assert revt.data["relationship_type"] == "ACQUIRED"
         assert revt.data["source_entity_id"] == str(acme.id)
         assert revt.data["target_entity_id"] == str(beta.id)
+
+    @pytest.mark.asyncio
+    async def test_relationship_created_uses_canonical_stored_id(self) -> None:
+        """The hook carries the id ``create_relationships_batch`` returns, not the
+        submitted ``rel.id`` (#1320). The backend MERGE may stamp a different
+        canonical id onto an existing edge; the hook must report that one."""
+        ns_id, doc_id = uuid4(), uuid4()
+        chunk = _make_chunk(ns_id, doc_id)
+        acme = _make_entity(ns_id, "Acme", "ORGANIZATION", chunk.id)
+        beta = _make_entity(ns_id, "Beta", "ORGANIZATION", chunk.id)
+        submitted = Relationship(
+            id=uuid4(),
+            namespace_id=ns_id,
+            source_entity_id=acme.id,
+            target_entity_id=beta.id,
+            relationship_type="ACQUIRED",
+            confidence=0.9,
+        )
+        # Backend MERGEs onto a pre-existing edge: it syncs the in-place id to
+        # the canonical stored id and reports is_new=False.
+        canonical_id = uuid4()
+
+        def _merge(relationships, **_kwargs):
+            relationships[0].id = canonical_id
+            return [(relationships[0], False)]
+
+        engine, storage = _make_engine([(acme, True), (beta, True)])
+        storage.create_relationships_batch = AsyncMock(side_effect=lambda rels, **kw: _merge(rels, **kw))
+
+        with patch(
+            "khora.pipelines.tasks.extract.extract_entities",
+            new=AsyncMock(return_value=([acme, beta], [submitted])),
+        ):
+            await engine._run_skeleton_extraction(
+                [chunk],
+                ns_id,
+                entity_types=["ORGANIZATION"],
+                relationship_types=["ACQUIRED"],
+            )
+
+        created = _events_of(storage, EventType.RELATIONSHIP_CREATED)
+        updated = _events_of(storage, EventType.RELATIONSHIP_UPDATED)
+        # A dedup-merge fires relationship.updated, NOT relationship.created.
+        assert created == []
+        assert len(updated) == 1
+        # ... and carries the canonical stored id, not the submitted one.
+        assert updated[0].resource_id == canonical_id
 
     @pytest.mark.asyncio
     async def test_dedup_merge_emits_entity_updated_not_created(self) -> None:

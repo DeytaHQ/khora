@@ -136,9 +136,10 @@ async def test_default_relationships_batch_writes_every_relationship() -> None:
     backend = _StubGraphBackend()
     rels = [Relationship(namespace_id=_NS) for _ in range(3)]
 
-    count = await backend.create_relationships_batch(rels)
+    results = await backend.create_relationships_batch(rels)
 
-    assert count == 3
+    # #1320: the default path can't tell create from merge - best-effort True.
+    assert results == [(r, True) for r in rels]
     assert backend.relationships == rels
 
 
@@ -223,9 +224,9 @@ async def test_coordinator_batch_relationships_reach_backend(make_backend: Any) 
     coordinator = StorageCoordinator(graph=backend)
     rels = [Relationship(namespace_id=_NS) for _ in range(3)]
 
-    count = await coordinator.create_relationships_batch(rels)
+    results = await coordinator.create_relationships_batch(rels)
 
-    assert count == 3
+    assert results == [(r, True) for r in rels]
     written = [call.args[0] for call in backend.create_relationship.await_args_list]
     assert written == rels
 
@@ -265,8 +266,8 @@ async def test_neptune_batch_methods_issue_cypher() -> None:
     assert len(creates) == 2
 
     session.run.reset_mock()
-    count = await backend.create_relationships_batch([Relationship(namespace_id=_NS), Relationship(namespace_id=_NS)])
-    assert count == 2
+    results = await backend.create_relationships_batch([Relationship(namespace_id=_NS), Relationship(namespace_id=_NS)])
+    assert [is_new for _, is_new in results] == [True, True]
     rel_creates = [c.args[0] for c in session.run.await_args_list if "CREATE (source)-[r:" in c.args[0]]
     assert len(rel_creates) == 2
 
@@ -305,8 +306,8 @@ async def test_age_batch_methods_issue_cypher() -> None:
     assert len(creates) == 2
 
     session.execute.reset_mock()
-    count = await backend.create_relationships_batch([Relationship(namespace_id=_NS), Relationship(namespace_id=_NS)])
-    assert count == 2
+    results = await backend.create_relationships_batch([Relationship(namespace_id=_NS), Relationship(namespace_id=_NS)])
+    assert [is_new for _, is_new in results] == [True, True]
     statements = [str(c.args[0]) for c in session.execute.await_args_list]
     rel_creates = [s for s in statements if "CREATE (source)-[r:" in s]
     assert len(rel_creates) == 2

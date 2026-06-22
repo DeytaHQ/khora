@@ -116,7 +116,8 @@ def _storage_with_canonicalisation(canonical_by_name_type: dict[tuple[str, str],
 
     async def _create_rels(rels, **_kwargs):
         captured_relationships.extend(rels)
-        return len(rels)
+        # #1320: returns (relationship, is_new) per persisted edge.
+        return [(r, True) for r in rels]
 
     storage.upsert_entities_batch = AsyncMock(side_effect=_upsert)
     storage.create_relationships_batch = AsyncMock(side_effect=_create_rels)

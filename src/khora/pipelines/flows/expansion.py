@@ -108,7 +108,7 @@ async def store_expansion_results(
 
     # Store inferred relationships in batch
     if result.inferred_relationships:
-        stored_relationships = await storage.create_relationships_batch(result.inferred_relationships)
+        stored_relationships = len(await storage.create_relationships_batch(result.inferred_relationships))
 
     return {
         "updated_entities": stored_entities,

@@ -915,7 +915,7 @@ class StorageCoordinator:
                 ]
                 relationships_created = 0
                 if net_new_relationships:
-                    relationships_created = await self.create_relationships_batch(net_new_relationships)
+                    relationships_created = len(await self.create_relationships_batch(net_new_relationships))
                 # Survivor relationships are accounted for implicitly via remap;
                 # their id is preserved from the old graph state.
             except Exception as graph_exc:
@@ -1619,25 +1619,31 @@ class StorageCoordinator:
         relationships: list[Relationship],
         *,
         batch_size: int = 50,
-    ) -> int:
+    ) -> list[tuple[Relationship, bool]]:
         """Batch create relationships in the graph backend.
 
-        Returns the number of relationships created.
+        Returns one ``(relationship, is_new)`` tuple per persisted edge,
+        mirroring ``upsert_entities_batch`` (#1320). Each relationship's ``id``
+        is synced in place to the canonical stored edge id; ``is_new``
+        distinguishes a genuine create from a dedup-merge so the
+        ``relationship.created`` / ``relationship.updated`` hook dispatch
+        reports the right event with the stored id. ``len(result)`` is the
+        number of relationships written.
         """
         if not relationships:
-            return 0
+            return []
 
-        count = 0
+        results: list[tuple[Relationship, bool]] = []
         if self._graph and hasattr(self._graph, "create_relationships_batch"):
-            count = await self._graph.create_relationships_batch(relationships, batch_size=batch_size)
+            results = await self._graph.create_relationships_batch(relationships, batch_size=batch_size)
         elif not self._graph and self._vector and hasattr(self._vector, "create_relationships_batch"):
             # Graph-less stacks (PostgreSQL-only chronicle, #1066): persist
             # extracted relationships to the vector backend's relationships
             # mirror so they are not silently dropped, mirroring the entity
             # write/count fallback.
-            count = await self._vector.create_relationships_batch(relationships, batch_size=batch_size)  # type: ignore[unresolved-attribute]
+            results = await self._vector.create_relationships_batch(relationships, batch_size=batch_size)  # type: ignore[unresolved-attribute]
 
-        return count
+        return results
 
     # =========================================================================
     # Relationship operations (delegated to graph)

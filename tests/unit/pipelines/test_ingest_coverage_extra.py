@@ -45,7 +45,7 @@ def _make_storage(**overrides: Any) -> MagicMock:
     storage.list_relationships = AsyncMock(return_value=[])
     storage.upsert_entities_batch = AsyncMock(return_value=[])
     storage.update_entity_embeddings_batch = AsyncMock(return_value=0)
-    storage.create_relationships_batch = AsyncMock(return_value=0)
+    storage.create_relationships_batch = AsyncMock(return_value=[])
     storage.create_episode = AsyncMock()
     storage.get_document_by_checksum = AsyncMock(return_value=None)
     storage.get_documents_by_checksums = AsyncMock(return_value={})
