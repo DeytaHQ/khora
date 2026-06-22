@@ -76,36 +76,42 @@ def _has_table() -> bool:
     return sa.inspect(op.get_bind()).has_table(TABLE_NAME)
 
 
+def _has_index() -> bool:
+    return any(ix["name"] == INDEX_NAME for ix in sa.inspect(op.get_bind()).get_indexes(TABLE_NAME))
+
+
 def upgrade() -> None:
     # Idempotent on the live schema: the integration migration harness shares
     # one PostgreSQL instance across parallel test files (each resets via
     # DROP SCHEMA public CASCADE), so a plain CREATE TABLE can re-run against
     # an already-migrated DB. Guard on the table, not the version row.
-    if _has_table():
-        return
+    if not _has_table():
+        uuid_type = _uuid_type()
+        ts_type = _timestamp_type()
 
-    uuid_type = _uuid_type()
-    ts_type = _timestamp_type()
+        op.create_table(
+            TABLE_NAME,
+            sa.Column("id", uuid_type, primary_key=True),
+            sa.Column("namespace_id", uuid_type, nullable=True),
+            sa.Column("event_type", sa.Text(), nullable=False),
+            sa.Column("filter", _json_type(), nullable=True),
+            sa.Column("delivery", _json_type(), nullable=False),
+            sa.Column("created_at", ts_type, nullable=False),
+            sa.Column("last_delivered_at", ts_type, nullable=True),
+            sa.Column(
+                "delivery_failure_count",
+                sa.Integer(),
+                nullable=False,
+                server_default=sa.text("0"),
+            ),
+            sa.Column("paused_at", ts_type, nullable=True),
+        )
 
-    op.create_table(
-        TABLE_NAME,
-        sa.Column("id", uuid_type, primary_key=True),
-        sa.Column("namespace_id", uuid_type, nullable=True),
-        sa.Column("event_type", sa.Text(), nullable=False),
-        sa.Column("filter", _json_type(), nullable=True),
-        sa.Column("delivery", _json_type(), nullable=False),
-        sa.Column("created_at", ts_type, nullable=False),
-        sa.Column("last_delivered_at", ts_type, nullable=True),
-        sa.Column(
-            "delivery_failure_count",
-            sa.Integer(),
-            nullable=False,
-            server_default=sa.text("0"),
-        ),
-        sa.Column("paused_at", ts_type, nullable=True),
-    )
-
-    op.create_index(INDEX_NAME, TABLE_NAME, ["namespace_id", "event_type"])
+    # Create the index unconditionally (guarded only on the index itself) so a
+    # prior run that built the table but failed before this line still gets the
+    # index on a re-run — the table-exists early-return used to skip it.
+    if not _has_index():
+        op.create_index(INDEX_NAME, TABLE_NAME, ["namespace_id", "event_type"])
 
 
 def downgrade() -> None:

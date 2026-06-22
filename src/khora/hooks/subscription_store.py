@@ -198,7 +198,10 @@ class HookSubscriptionStore:
                     " namespace_id = EXCLUDED.namespace_id, "
                     " event_type = EXCLUDED.event_type, "
                     " filter = EXCLUDED.filter, "
-                    " delivery = EXCLUDED.delivery"
+                    " delivery = EXCLUDED.delivery, "
+                    " last_delivered_at = EXCLUDED.last_delivered_at, "
+                    " delivery_failure_count = EXCLUDED.delivery_failure_count, "
+                    " paused_at = EXCLUDED.paused_at"
                 ),
                 {
                     "id": _uuid_param(session, sub.id),

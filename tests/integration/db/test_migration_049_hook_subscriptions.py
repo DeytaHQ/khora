@@ -121,9 +121,9 @@ def pg_url() -> Iterator[str]:
     yield DATABASE_URL
 
 
-def _factory(url: str) -> async_sessionmaker:
+def _factory(url: str) -> tuple[AsyncEngine, async_sessionmaker]:
     engine = create_async_engine(url)
-    return async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    return engine, async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
 def _event(namespace_id):
@@ -204,55 +204,65 @@ class TestMigration049Schema:
 class TestHookSubscriptionStorePG:
     def test_round_trip(self, pg_url: str) -> None:
         async def run() -> None:
-            store = HookSubscriptionStore(_factory(pg_url))
-            ns = uuid4()
-            sub = PersistentSubscription(
-                event_type="entity.created",
-                delivery={"type": "webhook", "url": "https://example.test/hook"},
-                namespace_id=ns,
-                filter=SemanticFilter(name="orgs", entity_types=["ORGANIZATION"], namespace_id=ns),
-            )
-            await store.persist(sub)
+            engine, factory = _factory(pg_url)
+            try:
+                store = HookSubscriptionStore(factory)
+                ns = uuid4()
+                sub = PersistentSubscription(
+                    event_type="entity.created",
+                    delivery={"type": "webhook", "url": "https://example.test/hook"},
+                    namespace_id=ns,
+                    filter=SemanticFilter(name="orgs", entity_types=["ORGANIZATION"], namespace_id=ns),
+                )
+                await store.persist(sub)
 
-            loaded = await store.load_all()
-            assert len(loaded) == 1
-            got = loaded[0]
-            assert got.id == sub.id
-            assert got.namespace_id == ns
-            assert got.event_type == "entity.created"
-            assert got.delivery["url"] == "https://example.test/hook"
-            assert got.filter is not None
-            assert got.filter.entity_types == ["ORGANIZATION"]
+                loaded = await store.load_all()
+                assert len(loaded) == 1
+                got = loaded[0]
+                assert got.id == sub.id
+                assert got.namespace_id == ns
+                assert got.event_type == "entity.created"
+                assert got.delivery["url"] == "https://example.test/hook"
+                assert got.filter is not None
+                assert got.filter.entity_types == ["ORGANIZATION"]
 
-            assert await store.delete(sub.id) is True
-            assert await store.load_all() == []
+                assert await store.delete(sub.id) is True
+                assert await store.load_all() == []
+            finally:
+                await engine.dispose()
 
         asyncio.run(run())
 
     def test_restart_replays_to_worker(self, pg_url: str) -> None:
         async def run() -> None:
-            store = HookSubscriptionStore(_factory(pg_url))
-            ns = uuid4()
+            engine1, factory1 = _factory(pg_url)
+            engine2, factory2 = _factory(pg_url)
+            try:
+                store = HookSubscriptionStore(factory1)
+                ns = uuid4()
 
-            # Process #1 registers a persistent subscription.
-            d1 = HookDispatcher(subscription_store=store)
-            sub_id = await d1.register_persistent(
-                EventType.ENTITY_CREATED,
-                {"type": "webhook", "url": "https://example.test/hook"},
-                namespace_id=ns,
-            )
+                # Process #1 registers a persistent subscription.
+                d1 = HookDispatcher(subscription_store=store)
+                sub_id = await d1.register_persistent(
+                    EventType.ENTITY_CREATED,
+                    {"type": "webhook", "url": "https://example.test/hook"},
+                    namespace_id=ns,
+                )
 
-            # --- restart: fresh dispatcher, fresh store, same DB ---
-            delivered: list = []
+                # --- restart: fresh dispatcher, fresh store, same DB ---
+                delivered: list = []
 
-            async def sink(s: PersistentSubscription, e: MemoryEvent) -> None:
-                delivered.append((s.id, e.resource_id))
+                async def sink(s: PersistentSubscription, e: MemoryEvent) -> None:
+                    delivered.append((s.id, e.resource_id))
 
-            d2 = HookDispatcher(subscription_store=HookSubscriptionStore(_factory(pg_url)), delivery_sink=sink)
-            assert await d2.load_persistent() == 1
+                d2 = HookDispatcher(subscription_store=HookSubscriptionStore(factory2), delivery_sink=sink)
+                assert await d2.load_persistent() == 1
 
-            event = _event(ns)
-            await d2.dispatch(event)
-            assert delivered == [(sub_id, event.resource_id)]
+                event = _event(ns)
+                await d2.dispatch(event)
+                assert delivered == [(sub_id, event.resource_id)]
+            finally:
+                await engine1.dispose()
+                await engine2.dispose()
 
         asyncio.run(run())

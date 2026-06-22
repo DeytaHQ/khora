@@ -1660,12 +1660,17 @@
       "owner": "khora",
       "labels": [
         {
+          "name": "channel",
+          "values": ["subscription_store"],
+          "_comment": "ADR-001 component channel. Stable single value today; the only durable-subscription store path."
+        },
+        {
           "name": "reason",
-          "values": ["persist_failed"],
-          "_comment": "persist_failed = the store INSERT raised; the subscription is kept in memory per ADR-001 but loses durability."
+          "values": ["persist_failed", "load_failed", "delete_failed"],
+          "_comment": "persist_failed = register-time INSERT raised (kept in memory, loses durability); load_failed = startup load_all() raised (zero loaded); delete_failed = unregister DELETE raised (row lingers and resurrects on next load)."
         }
       ],
-      "description": "Persistent-subscription writes that fell back to in-memory after a store failure. ADR-001 degrade signal. NO namespace_id label - cardinality rule.",
+      "description": "Persistent hook-subscription store operations that degraded under ADR-001 (register kept in memory after a write failure, startup load returned zero, or unregister left a lingering row). NO namespace_id label - cardinality rule.",
       "_comment": "Issue #599 Phase 3."
     }
   ]

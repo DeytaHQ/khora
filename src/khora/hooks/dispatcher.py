@@ -123,8 +123,15 @@ class HookDispatcher:
         """
         key = event_type.value if isinstance(event_type, EventType) else str(event_type)
 
-        if filter and namespace_id:
-            filter.namespace_id = namespace_id
+        if namespace_id:
+            # Fold the scope onto the filter so the cascade's namespace check
+            # engages. HookSubscription has no namespace_id field, so without
+            # this an in-memory sub scoped to a namespace but carrying no
+            # filter would match EVERY namespace's events (cross-tenant leak).
+            if filter is None:
+                filter = SemanticFilter(namespace_id=namespace_id)
+            else:
+                filter.namespace_id = namespace_id
 
         sub = HookSubscription(
             event_type=key,
@@ -245,7 +252,7 @@ class HookDispatcher:
         except Exception as exc:
             # ADR-001: a persistence failure degrades to in-memory-only
             # rather than dropping the subscription or crashing register.
-            _PERSIST_DEGRADED_COUNTER.add(1, {"reason": "persist_failed"})
+            _PERSIST_DEGRADED_COUNTER.add(1, {"channel": "subscription_store", "reason": "persist_failed"})
             logger.warning(
                 "Failed to persist hook subscription {} ({}). It is registered in "
                 "memory but will NOT survive a restart.",
@@ -284,13 +291,25 @@ class HookDispatcher:
         if self._subscription_store is not None:
             try:
                 await self._subscription_store.delete(subscription_id)
-            except Exception:
+            except Exception as exc:
+                # ADR-001: the durable row survives and will resurrect this
+                # subscription on the next load_persistent(). Record the
+                # degradation + metric so the lingering row is observable
+                # rather than silently masked by the True return.
+                _PERSIST_DEGRADED_COUNTER.add(1, {"channel": "subscription_store", "reason": "delete_failed"})
                 logger.warning(
                     "Failed to delete persistent hook subscription {} from storage; "
-                    "it is removed from memory but the row may linger.",
+                    "it is removed from memory but the row may linger and will "
+                    "resurrect on the next load_persistent().",
                     subscription_id,
                     exc_info=True,
                 )
+                self._last_persist_degradation = {
+                    "component": "hooks.subscription_store",
+                    "reason": "delete_failed",
+                    "detail": f"subscription_id={subscription_id}",
+                    "exception": repr(exc),
+                }
         return True
 
     async def load_persistent(self) -> int:
@@ -311,6 +330,7 @@ class HookDispatcher:
             try:
                 records = await self._subscription_store.load_all()
             except Exception as exc:
+                _PERSIST_DEGRADED_COUNTER.add(1, {"channel": "subscription_store", "reason": "load_failed"})
                 logger.warning(
                     "Failed to load persistent hook subscriptions from storage; "
                     "persistent hooks are inactive until the next load. {}",
@@ -528,6 +548,12 @@ class HookDispatcher:
         matching = []
         for sub in subs:
             if sub.paused_at is not None:
+                continue
+            # Namespace isolation (independent of the filter). A subscription
+            # scoped to a namespace must never see another namespace's events,
+            # even when it carries no filter — the filter cascade returns True
+            # for ``filter is None``, so the scope check cannot live there.
+            if sub.namespace_id is not None and event.namespace_id != sub.namespace_id:
                 continue
             if not await self._passes_filter_cascade(event, sub.filter):
                 continue

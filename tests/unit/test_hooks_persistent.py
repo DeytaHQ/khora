@@ -220,6 +220,73 @@ class _RaisingStore:
         raise RuntimeError("db down")
 
 
+class TestNamespaceIsolation:
+    """A subscription scoped to a namespace must never fire on another
+    namespace's events, even when it carries no filter (the cascade returns
+    True for ``filter is None``, so the scope check cannot live there)."""
+
+    async def test_persistent_bound_to_namespace_does_not_fire_cross_namespace(self, session_factory) -> None:
+        ns_a = uuid4()
+        ns_b = uuid4()
+        store = HookSubscriptionStore(session_factory)
+
+        # Persistent sub bound to namespace A, NO filter.
+        d1 = HookDispatcher(subscription_store=store)
+        await d1.register_persistent(
+            EventType.ENTITY_CREATED,
+            {"url": "https://x"},
+            namespace_id=ns_a,
+        )
+
+        delivered: list = []
+
+        async def sink(sub: PersistentSubscription, event: MemoryEvent) -> None:
+            delivered.append(sub.id)
+
+        d2 = HookDispatcher(subscription_store=store, delivery_sink=sink)
+        await d2.load_persistent()
+
+        # A namespace-B event must NOT reach the namespace-A subscriber.
+        await d2.dispatch(_event(namespace_id=ns_b))
+        assert delivered == []
+
+        # A namespace-A event still reaches it.
+        await d2.dispatch(_event(namespace_id=ns_a))
+        assert len(delivered) == 1
+
+    async def test_persistent_unbound_matches_all_namespaces(self, session_factory) -> None:
+        store = HookSubscriptionStore(session_factory)
+        d1 = HookDispatcher(subscription_store=store)
+        # No namespace_id, no filter => unbound, matches every namespace.
+        await d1.register_persistent(EventType.ENTITY_CREATED, {"url": "https://x"})
+
+        delivered: list = []
+
+        async def sink(sub: PersistentSubscription, event: MemoryEvent) -> None:
+            delivered.append(sub.id)
+
+        d2 = HookDispatcher(subscription_store=store, delivery_sink=sink)
+        await d2.load_persistent()
+
+        await d2.dispatch(_event(namespace_id=uuid4()))
+        await d2.dispatch(_event(namespace_id=uuid4()))
+        assert len(delivered) == 2
+
+    async def test_in_memory_subscribe_scopes_namespace_without_filter(self) -> None:
+        ns_a = uuid4()
+        ns_b = uuid4()
+        d = HookDispatcher()
+        cb = AsyncMock()
+        # Scoped to namespace A, NO filter — must not leak to namespace B.
+        d.subscribe(EventType.ENTITY_CREATED, cb, namespace_id=ns_a)
+
+        await d.dispatch(_event(namespace_id=ns_b))
+        cb.assert_not_awaited()
+
+        await d.dispatch(_event(namespace_id=ns_a))
+        cb.assert_awaited_once()
+
+
 class TestDegradeOnFailure:
     async def test_persist_failure_keeps_in_memory_and_records_degradation(self) -> None:
         d = HookDispatcher(subscription_store=_RaisingStore())
@@ -239,3 +306,14 @@ class TestDegradeOnFailure:
         assert loaded == 0
         assert d._last_persist_degradation is not None
         assert d._last_persist_degradation["reason"] == "load_failed"
+
+    async def test_delete_failure_records_degradation(self) -> None:
+        d = HookDispatcher(subscription_store=_RaisingStore())
+        sub_id = await d.register_persistent(EventType.ENTITY_CREATED, {"url": "https://x"})
+        # Clear the persist_failed degradation so we observe delete's own record.
+        d._last_persist_degradation = None
+        # delete() raises; the row may linger but the method still returns True
+        # (removed from memory) and records an ADR-001 degradation.
+        assert await d.unregister_persistent(sub_id) is True
+        assert d._last_persist_degradation is not None
+        assert d._last_persist_degradation["reason"] == "delete_failed"
