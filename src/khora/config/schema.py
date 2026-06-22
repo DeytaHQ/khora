@@ -18,6 +18,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # time KhoraConfig is instantiated all chains are resolved. See
 # Issue #576 Phase 1 Item 4.
 from khora.config._secrets import AllowSecretTyping
+from khora.config.llm import DEFAULT_API_KEY_ENV, derive_api_key_env
 from khora.dream.config import DreamConfig
 from khora.hooks.models import SemanticHooksConfig as _SemanticHooksConfig
 
@@ -1112,7 +1113,14 @@ class LLMSettings(BaseSettings):
 
     model: str = Field(default="gpt-4o-mini", description="Primary LLM model")
     api_key_env: Annotated[str, AllowSecretTyping(reason="env-var name pointer, not a credential")] = Field(
-        default="OPENAI_API_KEY", description="Environment variable for API key"
+        default=DEFAULT_API_KEY_ENV,
+        description=(
+            "Environment variable that holds the API key. When left at the "
+            "OpenAI default but ``model`` names another provider (``gemini/``, "
+            "``claude``, ``anthropic/``, ``vertex_ai/``, ...) it is auto-derived "
+            "from the model prefix so the wrong provider's key is not read. An "
+            "explicit non-default value is always honored verbatim."
+        ),
     )
     temperature: float = Field(default=0.7, description="Sampling temperature")
     max_tokens: int = Field(default=12288, description="Maximum tokens for LLM extraction output")
@@ -1155,6 +1163,20 @@ class LLMSettings(BaseSettings):
         gt=0,
         description="Idle keepalive seconds for connections in the shared aiohttp session.",
     )
+
+    @model_validator(mode="after")
+    def _derive_api_key_env(self) -> LLMSettings:
+        """Co-evolve ``api_key_env`` with ``model`` when left at the OpenAI default.
+
+        Without this, ``LLMSettings(model="gemini/...")`` silently keeps
+        ``api_key_env="OPENAI_API_KEY"`` and reads the OpenAI key for a Google
+        model. We only override the default; an explicit value is left alone.
+        """
+        if self.api_key_env == DEFAULT_API_KEY_ENV:
+            derived = derive_api_key_env(self.model)
+            if derived is not None and derived != self.api_key_env:
+                self.api_key_env = derived
+        return self
 
 
 class PipelineSettings(BaseSettings):

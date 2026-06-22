@@ -13,9 +13,35 @@ from typing import Annotated, Any
 
 import yaml
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from khora.config._secrets import AllowSecretTyping
+
+# Default env-var name pointer for the API key. Shared by ``LiteLLMConfig`` and
+# ``LLMSettings`` so the two cannot drift apart.
+DEFAULT_API_KEY_ENV = "OPENAI_API_KEY"
+
+# Provider prefix -> API-key env-var name. Order matters: the first matching
+# prefix wins. ``configure_litellm`` and the config validators both consume this
+# mapping so the model -> key-env derivation lives in exactly one place.
+_PROVIDER_KEY_ENV: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("gemini/", "gemini-", "vertex_ai/", "vertex_ai-"), "GOOGLE_API_KEY"),
+    (("claude", "anthropic/", "anthropic."), "ANTHROPIC_API_KEY"),
+    (("gpt", "openai/", "o1", "o3"), "OPENAI_API_KEY"),
+)
+
+
+def derive_api_key_env(model: str) -> str | None:
+    """Return the API-key env-var name implied by a model's provider prefix.
+
+    Returns ``None`` when the provider is unknown so the caller can keep
+    whatever ``api_key_env`` was configured rather than guessing wrong.
+    """
+    lowered = model.lower()
+    for prefixes, env_name in _PROVIDER_KEY_ENV:
+        if any(lowered.startswith(p) for p in prefixes):
+            return env_name
+    return None
 
 
 class LiteLLMConfig(BaseModel):
@@ -38,8 +64,15 @@ class LiteLLMConfig(BaseModel):
         description="Primary model to use (e.g., gpt-4o-mini, claude-sonnet-4-20250514, gemini-2.0-flash)",
     )
     api_key_env: Annotated[str, AllowSecretTyping(reason="env-var name pointer, not a credential")] = Field(
-        default="OPENAI_API_KEY",
-        description="Environment variable name for API key",
+        default=DEFAULT_API_KEY_ENV,
+        description=(
+            "Environment variable name that holds the API key. If left at the "
+            "OpenAI default while ``model`` names a different provider "
+            "(``gemini/``, ``claude``, ``anthropic/``, ``vertex_ai/``, ...), it "
+            "is auto-derived from the model prefix so the wrong provider's key "
+            "is not read by mistake. An explicit non-default value is always "
+            "honored verbatim."
+        ),
     )
 
     # Model parameters
@@ -162,6 +195,20 @@ class LiteLLMConfig(BaseModel):
         description="Idle keepalive seconds for connections in the shared aiohttp session.",
     )
 
+    @model_validator(mode="after")
+    def _derive_api_key_env(self) -> LiteLLMConfig:
+        """Co-evolve ``api_key_env`` with ``model`` when left at the OpenAI default.
+
+        Without this, ``LiteLLMConfig(model="gemini/...")`` silently keeps
+        ``api_key_env="OPENAI_API_KEY"`` and reads the OpenAI key for a Google
+        model. We only override the default; an explicit value is left alone.
+        """
+        if self.api_key_env == DEFAULT_API_KEY_ENV:
+            derived = derive_api_key_env(self.model)
+            if derived is not None and derived != self.api_key_env:
+                self.api_key_env = derived
+        return self
+
     @classmethod
     def from_yaml(cls, path: str | Path) -> LiteLLMConfig:
         """Load configuration from a YAML file.
@@ -248,13 +295,12 @@ def configure_litellm(config: LiteLLMConfig | None = None) -> None:
     # Set up API keys from environment
     api_key = config.get_api_key()
     if api_key:
-        # LiteLLM uses provider-specific env vars, so we ensure they're set
-        if "openai" in config.model.lower() or config.model.startswith("gpt"):
-            os.environ.setdefault("OPENAI_API_KEY", api_key)
-        elif "claude" in config.model.lower() or "anthropic" in config.model.lower():
-            os.environ.setdefault("ANTHROPIC_API_KEY", api_key)
-        elif "gemini" in config.model.lower():
-            os.environ.setdefault("GOOGLE_API_KEY", api_key)
+        # LiteLLM uses provider-specific env vars, so we ensure they're set.
+        # Reuse the single prefix -> env-var mapping that the config validators
+        # use so the two can't drift.
+        provider_env = derive_api_key_env(config.model)
+        if provider_env is not None:
+            os.environ.setdefault(provider_env, api_key)
 
     # Cache connector settings for the shared session. First config wins —
     # subsequent calls with different connector settings warn (the session is
