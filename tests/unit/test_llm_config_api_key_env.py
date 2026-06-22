@@ -93,3 +93,7 @@ class TestLLMSettingsAutoDerive:
     def test_explicit_override_is_honored(self) -> None:
         cfg = LLMSettings(model="gemini/gemini-2.5-flash", api_key_env="MY_GEMINI_KEY")
         assert cfg.api_key_env == "MY_GEMINI_KEY"
+
+    def test_unknown_model_keeps_default(self) -> None:
+        cfg = LLMSettings(model="some-local-llm")
+        assert cfg.api_key_env == "OPENAI_API_KEY"

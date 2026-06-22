@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from khora.extraction.extractors.llm import LLMEntityExtractor
+from tests.test_helpers.diagnostics import assert_no_silent_degradation
 
 
 def _truncated_response(finish_reason: str = "length") -> MagicMock:
@@ -63,6 +64,37 @@ class TestMaxTokensFinishReason:
         assert result.metadata.get("error") == "truncated_response"
         assert result.metadata.get("finish_reason") == "MAX_TOKENS"
 
+    @pytest.mark.asyncio
+    async def test_batch_empty_content_with_max_tokens_is_truncation(self) -> None:
+        """A thinking model can burn the whole budget and return empty content
+        with finish_reason=MAX_TOKENS. The batch path must classify that as a
+        truncation (drives bisection), not an empty response."""
+        extractor = LLMEntityExtractor(model="test-model", max_retries=1, max_tokens=1000)
+
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        resp.choices[0].message.content = ""  # all budget spent on "thinking"
+        resp.choices[0].finish_reason = "MAX_TOKENS"
+        resp.usage = MagicMock(prompt_tokens=100, completion_tokens=0, total_tokens=100)
+        resp.model = "test-model"
+
+        with (
+            patch("litellm.acompletion", new_callable=AsyncMock, return_value=resp),
+            patch("khora.telemetry.get_collector") as mock_telem,
+        ):
+            mock_telem.return_value.record_llm_call = MagicMock()
+            results = await extractor.extract_multi(
+                ["text1", "text2"],
+                batch_size=5,
+                entity_types=["PERSON"],
+                tiered_extraction=False,
+            )
+
+        # Both texts come back flagged as truncated, not empty_response.
+        assert len(results) == 2
+        for r in results:
+            assert r.metadata.get("error") == "truncated_response"
+
 
 class TestTruncationAutoRetry:
     @pytest.mark.asyncio
@@ -88,9 +120,9 @@ class TestTruncationAutoRetry:
         assert len(result.entities) == 1
         assert result.entities[0].name == "Alice"
         assert "error" not in result.metadata
-        # Second call used a larger budget than the first.
-        assert len(seen_max_tokens) == 2
-        assert seen_max_tokens[1] > seen_max_tokens[0]
+        assert_no_silent_degradation(result)
+        # Second call used exactly the doubled budget.
+        assert seen_max_tokens == [1000, 2000]
 
     @pytest.mark.asyncio
     async def test_persistent_truncation_surfaces_degradation(self) -> None:
@@ -137,8 +169,9 @@ class TestThinkingModelBudgetFloor:
             patch("khora.telemetry.get_collector") as mock_telem,
         ):
             mock_telem.return_value.record_llm_call = MagicMock()
-            await extractor.extract("some text", entity_types=["PERSON"])
+            result = await extractor.extract("some text", entity_types=["PERSON"])
 
+        assert_no_silent_degradation(result)
         assert seen_max_tokens, "extract did not call the LLM"
         # First attempt budget raised above the configured 12288 for a thinking model.
         assert seen_max_tokens[0] > 12288
@@ -159,6 +192,7 @@ class TestThinkingModelBudgetFloor:
             patch("khora.telemetry.get_collector") as mock_telem,
         ):
             mock_telem.return_value.record_llm_call = MagicMock()
-            await extractor.extract("some text", entity_types=["PERSON"])
+            result = await extractor.extract("some text", entity_types=["PERSON"])
 
+        assert_no_silent_degradation(result)
         assert seen_max_tokens == [12288]

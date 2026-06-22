@@ -311,6 +311,8 @@ _THINKING_MODEL_PREFIXES = (
     "gemini/gemini-2.5",
     "gemini-2.5",
     "vertex_ai/gemini-2.5",
+    "openai/o1",
+    "openai/o3",
     "o1",
     "o3",
 )
@@ -2063,20 +2065,12 @@ Return ONLY valid JSON, no other text."""
                     finish_reason = getattr(response.choices[0], "finish_reason", "unknown")
                     model_used = getattr(response, "model", self._model)
 
-                    if not content:
-                        # Log more details about the response for debugging
-                        logger.warning(
-                            f"Empty response content from LLM in batch extraction. "
-                            f"Model: {model_used}, finish_reason: {finish_reason}, "
-                            f"response keys: {list(vars(response).keys()) if hasattr(response, '__dict__') else 'N/A'}"
-                        )
-                        return [
-                            ExtractionResult(metadata={"error": "empty_response", "finish_reason": finish_reason})
-                            for _ in texts
-                        ]
-
                     # Check for truncated response (hit max_tokens limit). Covers
                     # OpenAI/Anthropic "length" and Gemini/Vertex "MAX_TOKENS".
+                    # Classified BEFORE the empty-content check: a thinking model
+                    # can spend its whole budget on reasoning and return empty
+                    # content with a truncation finish_reason, which must drive
+                    # bisection rather than be mislabelled as an empty response.
                     if _is_truncation_finish_reason(finish_reason):
                         logger.warning(
                             f"LLM response truncated (finish_reason={finish_reason}) in batch extraction. "
@@ -2086,6 +2080,18 @@ Return ONLY valid JSON, no other text."""
                         # Don't retry - truncation will happen again. Return empty results.
                         return [
                             ExtractionResult(metadata={"error": "truncated_response", "finish_reason": finish_reason})
+                            for _ in texts
+                        ]
+
+                    if not content:
+                        # Log more details about the response for debugging
+                        logger.warning(
+                            f"Empty response content from LLM in batch extraction. "
+                            f"Model: {model_used}, finish_reason: {finish_reason}, "
+                            f"response keys: {list(vars(response).keys()) if hasattr(response, '__dict__') else 'N/A'}"
+                        )
+                        return [
+                            ExtractionResult(metadata={"error": "empty_response", "finish_reason": finish_reason})
                             for _ in texts
                         ]
 
