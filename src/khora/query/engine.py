@@ -923,7 +923,11 @@ class HybridQueryEngine:
                     should_hyde = understanding.complexity_score > 0.6 or understanding.intent == QueryIntent.TEMPORAL
                 if should_hyde:
                     with trace_span("khora.query.hyde"):
-                        query_embedding = await self._hyde_expander.expand_query_embedding(query_text, query_embedding)
+                        query_embedding = await self._hyde_expander.expand_query_embedding(
+                            query_text,
+                            query_embedding,
+                            out_diagnostics=metadata.setdefault("degradations", []),
+                        )
                     metadata["hyde_applied"] = True
 
         # Step 3-7: Execute search pipeline

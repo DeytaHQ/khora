@@ -702,12 +702,15 @@ class VectorCypherRetriever:
         *,
         routing: RoutingDecision,
         temporal_signal: TemporalSignal | None,
+        out_degradations: list[Degradation] | None = None,
     ) -> list[float]:
         """Apply HyDE query-embedding expansion when configured (#1018).
 
         Returns the expanded embedding when HyDE fires, otherwise the original.
         The expander degrades to the original embedding on any failure, so this
-        never aborts a recall.
+        never aborts a recall. When ``out_degradations`` is supplied and the
+        expander falls back, a :class:`Degradation` is appended (ADR-001,
+        issue #1324).
         """
         if not self._should_hyde(routing, temporal_signal):
             return query_embedding
@@ -717,7 +720,9 @@ class VectorCypherRetriever:
                 num_hypotheticals=self._config.hyde_num_hypotheticals,
             )
         with trace_span("khora.vectorcypher.hyde"):
-            return await self._hyde_expander.expand_query_embedding(query, query_embedding)
+            return await self._hyde_expander.expand_query_embedding(
+                query, query_embedding, out_diagnostics=out_degradations
+            )
 
     def _vector_fetch_limit(self, limit: int) -> int:
         """Broad-recall vector fetch budget for this call (#1018).
@@ -957,8 +962,15 @@ class VectorCypherRetriever:
             # the bypassed QueryEngine applied it). "auto" expands for complex /
             # temporal queries; the expander degrades to the original embedding
             # on any LLM/embed failure.
+            # ADR-001 (#1324): collect HyDE degradations here and merge them
+            # into the sub-path result's ``metadata["degradations"]`` below.
+            _hyde_degradations: list[Degradation] = []
             query_embedding = await self._maybe_expand_hyde(
-                query, query_embedding, routing=routing, temporal_signal=temporal_signal
+                query,
+                query_embedding,
+                routing=routing,
+                temporal_signal=temporal_signal,
+                out_degradations=_hyde_degradations,
             )
 
             # #833 mode dispatch: VECTOR / KEYWORD short-circuit to the
@@ -1069,6 +1081,13 @@ class VectorCypherRetriever:
 
             span.set_attribute("chunk_count", len(result.chunks))
             span.set_attribute("entity_count", len(result.entities))
+
+            # ADR-001 (#1324): fold any HyDE degradations collected before the
+            # sub-path dispatch into the result's ``metadata["degradations"]``
+            # list so they surface on ``RecallResult.engine_info["degradations"]``
+            # via the engine's ``**result.metadata`` spread.
+            if _hyde_degradations:
+                result.metadata.setdefault("degradations", []).extend(_hyde_degradations)
 
             # Record top-1 chunk age — feeds the
             # ``khora.recall.recency.query_to_top1_age_days`` histogram so
