@@ -125,6 +125,16 @@ class TestVectorCypherEngineInit:
         config.storage.postgresql_pool_size = 5
         config.storage.postgresql_max_overflow = 10
         config.storage.embedding_dimension = 1536
+        # Abstention knobs (#1331) — recall() reads these off config.query.
+        config.query.abstention_min_chunks = 1
+        config.query.abstention_min_top_score = 0.3
+        config.query.abstention_combined_threshold = 0.5
+        config.query.abstention_weight_entities_empty = 0.3
+        config.query.abstention_weight_chunks_below_min = 0.4
+        config.query.abstention_weight_top_score_low = 0.3
+        config.query.abstention_mode = "cosine_floor"
+        config.query.abstention_confidence_target_cosine = 0.5
+        config.query.abstention_confidence_target_gap = 0.1
         config.llm.model = "gpt-4o-mini"
         config.llm.embedding_model = "text-embedding-3-small"
         config.llm.embedding_dimension = 1536
@@ -182,6 +192,16 @@ class TestVectorCypherEngineGetters:
         config.storage.postgresql_pool_size = 5
         config.storage.postgresql_max_overflow = 10
         config.storage.embedding_dimension = 1536
+        # Abstention knobs (#1331) — recall() reads these off config.query.
+        config.query.abstention_min_chunks = 1
+        config.query.abstention_min_top_score = 0.3
+        config.query.abstention_combined_threshold = 0.5
+        config.query.abstention_weight_entities_empty = 0.3
+        config.query.abstention_weight_chunks_below_min = 0.4
+        config.query.abstention_weight_top_score_low = 0.3
+        config.query.abstention_mode = "cosine_floor"
+        config.query.abstention_confidence_target_cosine = 0.5
+        config.query.abstention_confidence_target_gap = 0.1
         return VectorCypherEngine(config)
 
     def test_get_storage_raises_when_not_connected(self, engine: VectorCypherEngine) -> None:
@@ -227,6 +247,16 @@ class TestVectorCypherEngineDisconnect:
         config.storage.postgresql_pool_size = 5
         config.storage.postgresql_max_overflow = 10
         config.storage.embedding_dimension = 1536
+        # Abstention knobs (#1331) — recall() reads these off config.query.
+        config.query.abstention_min_chunks = 1
+        config.query.abstention_min_top_score = 0.3
+        config.query.abstention_combined_threshold = 0.5
+        config.query.abstention_weight_entities_empty = 0.3
+        config.query.abstention_weight_chunks_below_min = 0.4
+        config.query.abstention_weight_top_score_low = 0.3
+        config.query.abstention_mode = "cosine_floor"
+        config.query.abstention_confidence_target_cosine = 0.5
+        config.query.abstention_confidence_target_gap = 0.1
 
         engine = VectorCypherEngine(config)
         # Should not raise
@@ -247,6 +277,16 @@ class TestVectorCypherEngineDisconnect:
         config.storage.postgresql_pool_size = 5
         config.storage.postgresql_max_overflow = 10
         config.storage.embedding_dimension = 1536
+        # Abstention knobs (#1331) — recall() reads these off config.query.
+        config.query.abstention_min_chunks = 1
+        config.query.abstention_min_top_score = 0.3
+        config.query.abstention_combined_threshold = 0.5
+        config.query.abstention_weight_entities_empty = 0.3
+        config.query.abstention_weight_chunks_below_min = 0.4
+        config.query.abstention_weight_top_score_low = 0.3
+        config.query.abstention_mode = "cosine_floor"
+        config.query.abstention_confidence_target_cosine = 0.5
+        config.query.abstention_confidence_target_gap = 0.1
 
         engine = VectorCypherEngine(config)
 
@@ -291,6 +331,16 @@ class TestVectorCypherEngineRemember:
         config.storage.postgresql_pool_size = 5
         config.storage.postgresql_max_overflow = 10
         config.storage.embedding_dimension = 1536
+        # Abstention knobs (#1331) — recall() reads these off config.query.
+        config.query.abstention_min_chunks = 1
+        config.query.abstention_min_top_score = 0.3
+        config.query.abstention_combined_threshold = 0.5
+        config.query.abstention_weight_entities_empty = 0.3
+        config.query.abstention_weight_chunks_below_min = 0.4
+        config.query.abstention_weight_top_score_low = 0.3
+        config.query.abstention_mode = "cosine_floor"
+        config.query.abstention_confidence_target_cosine = 0.5
+        config.query.abstention_confidence_target_gap = 0.1
         config.llm.model = "gpt-4o-mini"
         config.pipeline.extract_entities = True
 
@@ -1420,6 +1470,16 @@ class TestVectorCypherEngineRecall:
         config.storage.postgresql_pool_size = 5
         config.storage.postgresql_max_overflow = 10
         config.storage.embedding_dimension = 1536
+        # Abstention knobs (#1331) — recall() reads these off config.query.
+        config.query.abstention_min_chunks = 1
+        config.query.abstention_min_top_score = 0.3
+        config.query.abstention_combined_threshold = 0.5
+        config.query.abstention_weight_entities_empty = 0.3
+        config.query.abstention_weight_chunks_below_min = 0.4
+        config.query.abstention_weight_top_score_low = 0.3
+        config.query.abstention_mode = "cosine_floor"
+        config.query.abstention_confidence_target_cosine = 0.5
+        config.query.abstention_confidence_target_gap = 0.1
 
         engine = VectorCypherEngine(config)
         engine._connected = True
@@ -1595,6 +1655,16 @@ class TestVectorCypherEngineForget:
         config.storage.postgresql_pool_size = 5
         config.storage.postgresql_max_overflow = 10
         config.storage.embedding_dimension = 1536
+        # Abstention knobs (#1331) — recall() reads these off config.query.
+        config.query.abstention_min_chunks = 1
+        config.query.abstention_min_top_score = 0.3
+        config.query.abstention_combined_threshold = 0.5
+        config.query.abstention_weight_entities_empty = 0.3
+        config.query.abstention_weight_chunks_below_min = 0.4
+        config.query.abstention_weight_top_score_low = 0.3
+        config.query.abstention_mode = "cosine_floor"
+        config.query.abstention_confidence_target_cosine = 0.5
+        config.query.abstention_confidence_target_gap = 0.1
 
         engine = VectorCypherEngine(config)
         engine._connected = True
@@ -1919,6 +1989,16 @@ class TestVectorCypherEngineHealthCheck:
         config.storage.postgresql_pool_size = 5
         config.storage.postgresql_max_overflow = 10
         config.storage.embedding_dimension = 1536
+        # Abstention knobs (#1331) — recall() reads these off config.query.
+        config.query.abstention_min_chunks = 1
+        config.query.abstention_min_top_score = 0.3
+        config.query.abstention_combined_threshold = 0.5
+        config.query.abstention_weight_entities_empty = 0.3
+        config.query.abstention_weight_chunks_below_min = 0.4
+        config.query.abstention_weight_top_score_low = 0.3
+        config.query.abstention_mode = "cosine_floor"
+        config.query.abstention_confidence_target_cosine = 0.5
+        config.query.abstention_confidence_target_gap = 0.1
 
         engine = VectorCypherEngine(config)
         result = await engine.health_check()
@@ -1939,6 +2019,16 @@ class TestVectorCypherEngineHealthCheck:
         config.storage.postgresql_pool_size = 5
         config.storage.postgresql_max_overflow = 10
         config.storage.embedding_dimension = 1536
+        # Abstention knobs (#1331) — recall() reads these off config.query.
+        config.query.abstention_min_chunks = 1
+        config.query.abstention_min_top_score = 0.3
+        config.query.abstention_combined_threshold = 0.5
+        config.query.abstention_weight_entities_empty = 0.3
+        config.query.abstention_weight_chunks_below_min = 0.4
+        config.query.abstention_weight_top_score_low = 0.3
+        config.query.abstention_mode = "cosine_floor"
+        config.query.abstention_confidence_target_cosine = 0.5
+        config.query.abstention_confidence_target_gap = 0.1
 
         engine = VectorCypherEngine(config)
         engine._connected = True
@@ -1978,6 +2068,16 @@ class TestVectorCypherEngineHealthCheck:
         config.storage.postgresql_pool_size = 5
         config.storage.postgresql_max_overflow = 10
         config.storage.embedding_dimension = 1536
+        # Abstention knobs (#1331) — recall() reads these off config.query.
+        config.query.abstention_min_chunks = 1
+        config.query.abstention_min_top_score = 0.3
+        config.query.abstention_combined_threshold = 0.5
+        config.query.abstention_weight_entities_empty = 0.3
+        config.query.abstention_weight_chunks_below_min = 0.4
+        config.query.abstention_weight_top_score_low = 0.3
+        config.query.abstention_mode = "cosine_floor"
+        config.query.abstention_confidence_target_cosine = 0.5
+        config.query.abstention_confidence_target_gap = 0.1
 
         engine = VectorCypherEngine(config)
         engine._connected = True
@@ -2018,6 +2118,16 @@ class TestVectorCypherEngineValidateRecallResults:
         config.storage.postgresql_pool_size = 5
         config.storage.postgresql_max_overflow = 10
         config.storage.embedding_dimension = 1536
+        # Abstention knobs (#1331) — recall() reads these off config.query.
+        config.query.abstention_min_chunks = 1
+        config.query.abstention_min_top_score = 0.3
+        config.query.abstention_combined_threshold = 0.5
+        config.query.abstention_weight_entities_empty = 0.3
+        config.query.abstention_weight_chunks_below_min = 0.4
+        config.query.abstention_weight_top_score_low = 0.3
+        config.query.abstention_mode = "cosine_floor"
+        config.query.abstention_confidence_target_cosine = 0.5
+        config.query.abstention_confidence_target_gap = 0.1
         return VectorCypherEngine(config)
 
     def test_filters_empty_content(self, engine: VectorCypherEngine) -> None:
@@ -2104,6 +2214,16 @@ class TestVectorCypherEngineConnectAcquisitionTimeout:
         config.storage.postgresql_pool_size = 5
         config.storage.postgresql_max_overflow = 10
         config.storage.embedding_dimension = 1536
+        # Abstention knobs (#1331) — recall() reads these off config.query.
+        config.query.abstention_min_chunks = 1
+        config.query.abstention_min_top_score = 0.3
+        config.query.abstention_combined_threshold = 0.5
+        config.query.abstention_weight_entities_empty = 0.3
+        config.query.abstention_weight_chunks_below_min = 0.4
+        config.query.abstention_weight_top_score_low = 0.3
+        config.query.abstention_mode = "cosine_floor"
+        config.query.abstention_confidence_target_cosine = 0.5
+        config.query.abstention_confidence_target_gap = 0.1
         config.storage.backend = "postgres"
         config.llm.model = "gpt-4o-mini"
         config.llm.embedding_model = "text-embedding-3-small"
@@ -2214,6 +2334,16 @@ class TestVectorCypherEngineParseDatetime:
         config.storage.postgresql_pool_size = 5
         config.storage.postgresql_max_overflow = 10
         config.storage.embedding_dimension = 1536
+        # Abstention knobs (#1331) — recall() reads these off config.query.
+        config.query.abstention_min_chunks = 1
+        config.query.abstention_min_top_score = 0.3
+        config.query.abstention_combined_threshold = 0.5
+        config.query.abstention_weight_entities_empty = 0.3
+        config.query.abstention_weight_chunks_below_min = 0.4
+        config.query.abstention_weight_top_score_low = 0.3
+        config.query.abstention_mode = "cosine_floor"
+        config.query.abstention_confidence_target_cosine = 0.5
+        config.query.abstention_confidence_target_gap = 0.1
         return VectorCypherEngine(config)
 
     def test_parse_datetime_object(self, engine: VectorCypherEngine) -> None:
@@ -2295,6 +2425,16 @@ class TestProcessDocumentWindowing:
         config.storage.postgresql_pool_size = 5
         config.storage.postgresql_max_overflow = 10
         config.storage.embedding_dimension = 1536
+        # Abstention knobs (#1331) — recall() reads these off config.query.
+        config.query.abstention_min_chunks = 1
+        config.query.abstention_min_top_score = 0.3
+        config.query.abstention_combined_threshold = 0.5
+        config.query.abstention_weight_entities_empty = 0.3
+        config.query.abstention_weight_chunks_below_min = 0.4
+        config.query.abstention_weight_top_score_low = 0.3
+        config.query.abstention_mode = "cosine_floor"
+        config.query.abstention_confidence_target_cosine = 0.5
+        config.query.abstention_confidence_target_gap = 0.1
         config.pipeline.extract_entities = False
         config.pipeline.chunking_strategy = "recursive"
         config.pipeline.chunk_size = 512
@@ -2642,6 +2782,16 @@ class TestVectorCypherEngineApiTemporalFilter:
         config.storage.postgresql_pool_size = 5
         config.storage.postgresql_max_overflow = 10
         config.storage.embedding_dimension = 1536
+        # Abstention knobs (#1331) — recall() reads these off config.query.
+        config.query.abstention_min_chunks = 1
+        config.query.abstention_min_top_score = 0.3
+        config.query.abstention_combined_threshold = 0.5
+        config.query.abstention_weight_entities_empty = 0.3
+        config.query.abstention_weight_chunks_below_min = 0.4
+        config.query.abstention_weight_top_score_low = 0.3
+        config.query.abstention_mode = "cosine_floor"
+        config.query.abstention_confidence_target_cosine = 0.5
+        config.query.abstention_confidence_target_gap = 0.1
 
         engine = VectorCypherEngine(config)
         engine._connected = True

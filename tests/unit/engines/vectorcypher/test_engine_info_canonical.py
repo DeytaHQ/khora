@@ -49,6 +49,17 @@ def _make_config() -> MagicMock:
     config.pipeline.chunk_overlap = 200
     config.telemetry_database_url = None
     config.telemetry_service_name = "test"
+    # Abstention knobs (#1331) — the engine reads these off config.query now
+    # instead of hardcoded literals, so the MagicMock needs concrete values.
+    config.query.abstention_min_chunks = 1
+    config.query.abstention_min_top_score = 0.3
+    config.query.abstention_combined_threshold = 0.5
+    config.query.abstention_weight_entities_empty = 0.3
+    config.query.abstention_weight_chunks_below_min = 0.4
+    config.query.abstention_weight_top_score_low = 0.3
+    config.query.abstention_mode = "cosine_floor"
+    config.query.abstention_confidence_target_cosine = 0.5
+    config.query.abstention_confidence_target_gap = 0.1
     return config
 
 
@@ -165,6 +176,9 @@ class TestEngineInfoCanonicalKeys:
         assert isinstance(signals["top_score_low"], bool)
         assert isinstance(signals["combined_score"], float)
         assert isinstance(signals["should_abstain"], bool)
+        # #1331: calibrated confidence rides alongside the signals, in [0, 1].
+        assert "confidence" in result.engine_info
+        assert 0.0 <= result.engine_info["confidence"] <= 1.0
 
     @pytest.mark.asyncio
     async def test_channels_used_is_constrained_string_list(self) -> None:

@@ -111,7 +111,11 @@ class TestComputeAbstentionSignals:
         assert sig["should_abstain"] is True
 
     def test_low_top_score_with_decent_chunks(self):
-        """Chunks present but top score below threshold → only top_score_low fires."""
+        """Chunks present but top cosine below the floor → only top_score_low
+        fires. Under the default cosine_floor mode (#1331) the topicality floor
+        decides on its own, so should_abstain is True even though chunks and
+        entities are present (the issue's whole point). combined_score still
+        reports the legacy 0.3 weighting (unchanged public contract)."""
         engine = _make_engine()
         chunks = [(_make_chunk(), 0.1), (_make_chunk(), 0.05)]
         entities = [(_make_entity(), 0.7)]
@@ -123,7 +127,7 @@ class TestComputeAbstentionSignals:
         assert sig["chunks_below_min"] is False
         assert sig["top_score_low"] is True
         assert sig["combined_score"] == pytest.approx(0.3)
-        assert sig["should_abstain"] is False
+        assert sig["should_abstain"] is True
 
     def test_custom_min_chunks_threshold(self):
         """abstention_min_chunks=5 with 3 chunks → chunks_below_min fires."""
@@ -152,8 +156,10 @@ class TestComputeAbstentionSignals:
         assert sig["combined_score"] == pytest.approx(0.3)
 
     def test_custom_combined_threshold_makes_weak_signals_trigger(self):
-        """Lowering abstention_combined_threshold flips weak signals to abstain."""
-        engine = _make_engine(abstention_combined_threshold=0.3)
+        """Lowering abstention_combined_threshold flips weak signals to abstain.
+        The combined_threshold only governs the decision in weighted mode
+        (#1331), so build the engine in that mode."""
+        engine = _make_engine(abstention_combined_threshold=0.3, abstention_mode="weighted")
         chunks = [(_make_chunk(), 0.9)]
         entities: list[tuple[Entity, float]] = []  # only entities_empty fires
 
@@ -267,6 +273,41 @@ async def test_recall_metadata_keeps_existing_keys():
     assert "timings" in result.engine_info
     # New key
     assert "abstention_signals" in result.engine_info
+    # #1331: calibrated confidence is surfaced alongside the signals.
+    assert "confidence" in result.engine_info
+    assert 0.0 <= result.engine_info["confidence"] <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# #1331: thresholds inherit from config.query; explicit kwargs win.
+# ---------------------------------------------------------------------------
+
+
+def test_thresholds_default_from_config_query():
+    """With no kwargs, the engine inherits config.query.abstention_* (#1331)."""
+    cfg = KhoraConfig()
+    cfg.query.abstention_min_top_score = 0.42
+    cfg.query.abstention_min_chunks = 3
+    cfg.query.abstention_combined_threshold = 0.66
+    cfg.query.abstention_mode = "weighted"
+
+    engine = ChronicleEngine(cfg)
+
+    assert engine._abstention_min_top_score == 0.42
+    assert engine._abstention_min_chunks == 3
+    assert engine._abstention_combined_threshold == 0.66
+    assert engine._abstention_mode == "weighted"
+
+
+def test_explicit_kwargs_win_over_config():
+    """An explicit constructor kwarg overrides the config default (#1331)."""
+    cfg = KhoraConfig()
+    cfg.query.abstention_min_top_score = 0.42
+
+    engine = ChronicleEngine(cfg, abstention_min_top_score=0.9, abstention_mode="weighted")
+
+    assert engine._abstention_min_top_score == 0.9
+    assert engine._abstention_mode == "weighted"
 
 
 # ---------------------------------------------------------------------------
