@@ -202,3 +202,111 @@ class TestStageDocumentsBatchDedupe:
         assert results[0] is None  # COMPLETED doc skipped
         assert results[1] is not None  # FAILED doc re-created
         assert storage.create_document.call_count == 1
+
+
+class TestStageDocumentsBatchIdentityScopedDedup:
+    """#1171: checksum dedup in stage_documents_batch is scoped by identity."""
+
+    def _make_existing_doc_with_identity(
+        self,
+        checksum: str,
+        *,
+        external_id: str | None = None,
+        session_id=None,
+    ) -> MagicMock:
+        doc = MagicMock()
+        doc.id = uuid4()
+        doc.status = "completed"
+        doc.checksum = checksum
+        doc.external_id = external_id
+        doc.session_id = session_id
+        return doc
+
+    def _make_storage_with_identity(self, existing_doc, checksum: str):
+        storage = AsyncMock()
+        storage.get_documents_by_checksums = AsyncMock(return_value={checksum: existing_doc})
+        storage.create_document = AsyncMock(side_effect=lambda doc: doc)
+        return storage
+
+    @pytest.mark.asyncio
+    async def test_same_content_new_session_id_creates_document(self) -> None:
+        """#1171: same content + new session_id in batch MUST NOT be silently dropped."""
+        from uuid import uuid4 as _uuid4
+
+        session_a = _uuid4()
+        session_b = _uuid4()
+        content = "same content here"
+        checksum = compute_checksum(content)
+
+        existing = self._make_existing_doc_with_identity(checksum, external_id=None, session_id=session_a)
+        storage = self._make_storage_with_identity(existing, checksum)
+
+        inputs = [
+            {"content": content, "metadata": {"session_id": str(session_b)}},
+        ]
+        results = await stage_documents_batch(inputs, NAMESPACE_ID, storage)
+
+        assert len(results) == 1
+        assert results[0] is not None, "New session_id must create a new document, not be dropped"
+        assert storage.create_document.call_count == 1
+        assert storage.create_document.call_args[0][0].session_id == session_b
+
+    @pytest.mark.asyncio
+    async def test_same_content_new_external_id_creates_document(self) -> None:
+        """#1171: same content + new external_id in batch MUST NOT be silently dropped."""
+        content = "same content here"
+        checksum = compute_checksum(content)
+
+        existing = self._make_existing_doc_with_identity(checksum, external_id="ext-a", session_id=None)
+        storage = self._make_storage_with_identity(existing, checksum)
+
+        inputs = [
+            {"content": content, "external_id": "ext-b"},
+        ]
+        results = await stage_documents_batch(inputs, NAMESPACE_ID, storage)
+
+        assert len(results) == 1
+        assert results[0] is not None, "New external_id must create a new document, not be dropped"
+        assert storage.create_document.call_count == 1
+        assert storage.create_document.call_args[0][0].external_id == "ext-b"
+
+    @pytest.mark.asyncio
+    async def test_same_content_same_session_still_dedups(self) -> None:
+        """#1171: same content + same session_id is still a legitimate duplicate."""
+        from uuid import uuid4 as _uuid4
+
+        session = _uuid4()
+        content = "same content here"
+        checksum = compute_checksum(content)
+
+        existing = self._make_existing_doc_with_identity(checksum, external_id=None, session_id=session)
+        storage = self._make_storage_with_identity(existing, checksum)
+
+        inputs = [
+            {"content": content, "metadata": {"session_id": str(session)}},
+        ]
+        results = await stage_documents_batch(inputs, NAMESPACE_ID, storage)
+
+        assert len(results) == 1
+        assert results[0] is None, "Same session_id + same checksum should still be a duplicate"
+        assert storage.create_document.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_same_content_no_identity_still_dedups(self) -> None:
+        """#1171: caller supplies no external_id/session_id -> checksum-only dedup."""
+        from uuid import uuid4 as _uuid4
+
+        content = "same content here"
+        checksum = compute_checksum(content)
+
+        existing = self._make_existing_doc_with_identity(checksum, external_id=None, session_id=_uuid4())
+        storage = self._make_storage_with_identity(existing, checksum)
+
+        inputs = [
+            {"content": content},
+        ]
+        results = await stage_documents_batch(inputs, NAMESPACE_ID, storage)
+
+        assert len(results) == 1
+        assert results[0] is None, "No identity supplied -> checksum-only dedup applies"
+        assert storage.create_document.call_count == 0

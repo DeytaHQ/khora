@@ -540,6 +540,21 @@ def compute_checksum(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def _checksum_dedup_applies(existing: Any, *, external_id: str | None, session_id: UUID | None) -> bool:
+    """Whether a checksum hit on *existing* counts as a duplicate (#1139/#1171).
+
+    Content checksum alone conflates distinct logical documents: a caller that
+    supplies a new ``external_id`` or ``session_id`` must get a new document.
+    Dedup applies only when every caller-supplied identity matches the existing
+    row; callers that supply neither keep the checksum-only behavior.
+    """
+    if external_id is not None and existing.external_id != external_id:
+        return False
+    if session_id is not None and existing.session_id != session_id:
+        return False
+    return True
+
+
 def _coerce_session_id(value: Any) -> UUID | None:
     """Coerce a session_id value from custom metadata to a UUID.
 
@@ -595,14 +610,18 @@ async def stage_document(
     content = doc_input.get("content", "")
     checksum = compute_checksum(content)
 
-    # Check for existing document - skip if any document with same checksum exists
+    # Check for existing document - skip only when the caller-supplied identity
+    # also matches the existing row (#1139/#1171): a new external_id or
+    # session_id means this is a distinct logical document, not a duplicate.
+    custom_metadata = doc_input.get("metadata", {})
     existing = await storage.get_document_by_checksum(namespace_id, checksum)
-    if existing:
+    if existing and _checksum_dedup_applies(
+        existing,
+        external_id=doc_input.get("external_id"),
+        session_id=_coerce_session_id(custom_metadata.get("session_id")),
+    ):
         logger.debug(f"Document unchanged (checksum={checksum[:8]}..., status={existing.status})")
         return None
-
-    # Extract custom metadata
-    custom_metadata = doc_input.get("metadata", {})
 
     # Explicit doc_input["source_timestamp"] wins; otherwise fall back to the
     # metadata-derived value (sent_at / occurred_at / created_at / ...).
@@ -677,12 +696,18 @@ async def stage_documents_batch(
     stage_sem = asyncio.Semaphore(10)
 
     async def _create_one(idx: int, doc_input: dict[str, Any], checksum: str) -> None:
-        if checksum in existing:
+        custom_metadata = doc_input.get("metadata", {})
+        # Identity-scoped dedup (#1171): skip only when the caller-supplied
+        # external_id/session_id also matches the existing row.
+        if checksum in existing and _checksum_dedup_applies(
+            existing[checksum],
+            external_id=doc_input.get("external_id"),
+            session_id=_coerce_session_id(custom_metadata.get("session_id")),
+        ):
             logger.debug(f"Document unchanged (checksum={checksum[:8]}..., status={existing[checksum].status})")
             return
 
         content = doc_input.get("content", "")
-        custom_metadata = doc_input.get("metadata", {})
 
         # Explicit doc_input["source_timestamp"] wins; otherwise fall back to
         # the metadata-derived value (sent_at / occurred_at / created_at / ...).

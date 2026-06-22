@@ -1453,6 +1453,183 @@ class TestVectorCypherEngineRemember:
 
 
 @pytest.mark.unit
+class TestVectorCypherEngineBatchDedupScope:
+    """#1171: remember_batch Stage 0 dedup is scoped by caller-supplied identity."""
+
+    @pytest.fixture
+    def connected_engine(self) -> VectorCypherEngine:
+        """Mock-connected VectorCypherEngine for batch Stage 0 dedup tests."""
+        config = MagicMock()
+        config.get_postgresql_url.return_value = "postgresql://localhost/test"
+        config.get_neo4j_url.return_value = "bolt://localhost:7687"
+        config.get_neo4j_user.return_value = "neo4j"
+        config.get_neo4j_password.return_value = "password"
+        config.get_neo4j_database.return_value = "neo4j"
+        config.get_graph_config.return_value = MagicMock()
+        config.get_vector_config.return_value = MagicMock()
+        config.storage.postgresql_pool_size = 5
+        config.storage.postgresql_max_overflow = 10
+        config.storage.embedding_dimension = 1536
+        config.query.abstention_min_chunks = 1
+        config.query.abstention_min_top_score = 0.3
+        config.query.abstention_combined_threshold = 0.5
+        config.query.abstention_weight_entities_empty = 0.3
+        config.query.abstention_weight_chunks_below_min = 0.4
+        config.query.abstention_weight_top_score_low = 0.3
+        config.query.abstention_mode = "cosine_floor"
+        config.query.abstention_confidence_target_cosine = 0.5
+        config.query.abstention_confidence_target_gap = 0.1
+        config.llm.model = "gpt-4o-mini"
+        config.pipeline.extract_entities = True
+
+        engine = VectorCypherEngine(config)
+        engine._connected = True
+        engine._storage = AsyncMock()
+        engine._temporal_store = AsyncMock()
+        engine._embedder = AsyncMock()
+        engine._dual_nodes = AsyncMock()
+        engine._retriever = AsyncMock()
+        engine._router = MagicMock()
+        engine._neo4j_driver = AsyncMock()
+        return engine
+
+    def _make_existing_doc(self, *, external_id=None, session_id=None):
+        doc = MagicMock()
+        doc.id = uuid4()
+        doc.external_id = external_id
+        doc.session_id = session_id
+        doc.status = "completed"
+        doc.chunk_count = 1
+        doc.entity_count = 0
+        doc.relationship_count = 0
+        return doc
+
+    @pytest.mark.asyncio
+    async def test_batch_same_content_new_session_id_not_dropped(self, connected_engine: VectorCypherEngine) -> None:
+        """#1171: batch Stage 0 must not drop a doc whose session_id differs from existing."""
+        import hashlib
+
+        namespace_id = uuid4()
+        session_a = uuid4()
+        session_b = uuid4()
+        content = "same content"
+        checksum = hashlib.sha256(content.encode()).hexdigest()
+
+        existing = self._make_existing_doc(session_id=session_a)
+        connected_engine._storage.get_documents_by_external_ids = AsyncMock(return_value={})
+        connected_engine._storage.get_documents_by_checksums = AsyncMock(return_value={checksum: existing})
+
+        created_doc = MagicMock()
+        created_doc.id = uuid4()
+        created_doc.content = content
+        created_doc.session_id = session_b
+        connected_engine._storage.create_document = AsyncMock(return_value=created_doc)
+        connected_engine._storage.update_document = AsyncMock()
+
+        mock_chunker = MagicMock()
+        mock_chunker.chunk.return_value = []  # empty -> doc goes to failed_states path
+
+        with patch("khora.extraction.chunkers.create_chunker", return_value=mock_chunker):
+            result = await connected_engine.remember_batch(
+                [{"content": content, "metadata": {"session_id": str(session_b)}}],
+                namespace_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+            )
+
+        # Doc must NOT have been silently skipped at Stage 0.
+        assert result.skipped == 0, "New session_id must not be dropped at Stage 0"
+        connected_engine._storage.create_document.assert_called_once()
+        created_arg = connected_engine._storage.create_document.call_args[0][0]
+        assert created_arg.session_id == session_b
+
+    @pytest.mark.asyncio
+    async def test_batch_same_content_new_external_id_not_dropped(self, connected_engine: VectorCypherEngine) -> None:
+        """#1171: batch Stage 0 must not drop a doc whose external_id differs from existing."""
+        import hashlib
+
+        namespace_id = uuid4()
+        content = "same content"
+        checksum = hashlib.sha256(content.encode()).hexdigest()
+
+        existing = self._make_existing_doc(external_id="ext-a")
+        connected_engine._storage.get_documents_by_external_ids = AsyncMock(return_value={})
+        connected_engine._storage.get_documents_by_checksums = AsyncMock(return_value={checksum: existing})
+
+        created_doc = MagicMock()
+        created_doc.id = uuid4()
+        created_doc.content = content
+        created_doc.external_id = "ext-b"
+        connected_engine._storage.create_document = AsyncMock(return_value=created_doc)
+        connected_engine._storage.update_document = AsyncMock()
+
+        mock_chunker = MagicMock()
+        mock_chunker.chunk.return_value = []
+
+        with patch("khora.extraction.chunkers.create_chunker", return_value=mock_chunker):
+            result = await connected_engine.remember_batch(
+                [{"content": content, "external_id": "ext-b"}],
+                namespace_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+            )
+
+        assert result.skipped == 0, "New external_id must not be dropped at Stage 0"
+        connected_engine._storage.create_document.assert_called_once()
+        created_arg = connected_engine._storage.create_document.call_args[0][0]
+        assert created_arg.external_id == "ext-b"
+
+    @pytest.mark.asyncio
+    async def test_batch_same_content_same_session_still_dedups(self, connected_engine: VectorCypherEngine) -> None:
+        """#1171: same content + same session_id in a batch is still a valid duplicate."""
+        import hashlib
+
+        namespace_id = uuid4()
+        session = uuid4()
+        content = "same content"
+        checksum = hashlib.sha256(content.encode()).hexdigest()
+
+        existing = self._make_existing_doc(session_id=session)
+        connected_engine._storage.get_documents_by_external_ids = AsyncMock(return_value={})
+        connected_engine._storage.get_documents_by_checksums = AsyncMock(return_value={checksum: existing})
+        connected_engine._storage.create_document = AsyncMock()
+
+        result = await connected_engine.remember_batch(
+            [{"content": content, "metadata": {"session_id": str(session)}}],
+            namespace_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+
+        assert result.skipped == 1, "Same session_id + same checksum must still be deduplicated"
+        connected_engine._storage.create_document.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_batch_same_content_no_identity_still_dedups(self, connected_engine: VectorCypherEngine) -> None:
+        """#1171: no identity supplied in a batch -> checksum-only dedup still applies."""
+        import hashlib
+
+        namespace_id = uuid4()
+        content = "same content"
+        checksum = hashlib.sha256(content.encode()).hexdigest()
+
+        existing = self._make_existing_doc(session_id=uuid4())
+        connected_engine._storage.get_documents_by_external_ids = AsyncMock(return_value={})
+        connected_engine._storage.get_documents_by_checksums = AsyncMock(return_value={checksum: existing})
+        connected_engine._storage.create_document = AsyncMock()
+
+        result = await connected_engine.remember_batch(
+            [{"content": content}],
+            namespace_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+
+        assert result.skipped == 1, "No identity supplied -> checksum-only dedup must apply"
+        connected_engine._storage.create_document.assert_not_called()
+
+
+@pytest.mark.unit
 class TestVectorCypherEngineRecall:
     """Tests for engine recall() with mocked backends."""
 
