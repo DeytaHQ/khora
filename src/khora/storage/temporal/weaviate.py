@@ -732,7 +732,10 @@ class WeaviateTemporalStore(TemporalVectorStore):
         if created_after is not None:
             date_clauses.append(Filter.by_property("created_at").greater_or_equal(created_after.isoformat()))
         if created_before is not None:
-            date_clauses.append(Filter.by_property("created_at").less_or_equal(created_before.isoformat()))
+            # Exclusive upper bound, matching _build_weaviate_filter / the
+            # vector+hybrid path so KEYWORD mode doesn't include boundary rows
+            # the other modes exclude.
+            date_clauses.append(Filter.by_property("created_at").less_than(created_before.isoformat()))
         if date_clauses:
             weaviate_filter = date_clauses[0]
             for extra in date_clauses[1:]:
