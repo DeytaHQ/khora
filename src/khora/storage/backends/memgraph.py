@@ -547,7 +547,16 @@ class MemgraphBackend(GraphBackendBase):
                 # batch resolves endpoints by ``entity.id`` and would
                 # silently drop edges pointing at the extraction-time id.
                 stored_by_input = {r["input_id"]: r["stored_id"] for r in records}
+                # Dedupe by MERGE key (namespace_id, name, entity_type): when the
+                # caller submits duplicate entities in one batch the MERGE stores a
+                # single node, so only the first occurrence of each key is reported
+                # (#1329 - prevents hook over-fire).
+                seen_entity_merge_keys: set[tuple[str, str, str]] = set()
                 for e in batch:
+                    merge_key = (str(e.namespace_id), e.name, e.entity_type)
+                    if merge_key in seen_entity_merge_keys:
+                        continue
+                    seen_entity_merge_keys.add(merge_key)
                     input_id = str(e.id)
                     stored_id = stored_by_input.get(input_id, input_id)
                     if stored_id != input_id:
@@ -663,8 +672,8 @@ class MemgraphBackend(GraphBackendBase):
             for rel_type, rels in type_groups.items():
                 query = f"""
                 UNWIND $rows AS row
-                MATCH (source:Entity {{id: row.source_id}})
-                MATCH (target:Entity {{id: row.target_id}})
+                MATCH (source:Entity {{id: row.source_id, namespace_id: row.namespace_id}})
+                MATCH (target:Entity {{id: row.target_id, namespace_id: row.namespace_id}})
                 OPTIONAL MATCH (source)-[pre_r:{rel_type} {{namespace_id: row.namespace_id}}]->(target)
                 WITH row, source, target, pre_r IS NULL AS is_new
                 MERGE (source)-[r:{rel_type} {{namespace_id: row.namespace_id}}]->(target)
@@ -724,13 +733,27 @@ class MemgraphBackend(GraphBackendBase):
                         edge_map[record["input_id"]] = (stored, bool(record["is_new"]))
 
         # Sync each input ``rel.id`` to its persisted id and pair with is_new.
+        # Dedupe by MERGE key (namespace_id, source, target, type): when the
+        # caller submits duplicate relationships in one batch the MERGE stores a
+        # single edge, so only the first occurrence of each key is reported
+        # (#1329 Part 2 - prevents hook over-fire).
         results_out: list[tuple[Relationship, bool]] = []
+        seen_merge_keys: set[tuple[str, str, str, str]] = set()
         for rel in relationships:
             mapped = edge_map.get(str(rel.id))
             if mapped is None:
                 continue
             stored_id, is_new = mapped
             rel.id = UUID(stored_id)
+            merge_key = (
+                str(rel.namespace_id),
+                str(rel.source_entity_id),
+                str(rel.target_entity_id),
+                rel.relationship_type,
+            )
+            if merge_key in seen_merge_keys:
+                continue
+            seen_merge_keys.add(merge_key)
             results_out.append((rel, is_new))
         return results_out
 
