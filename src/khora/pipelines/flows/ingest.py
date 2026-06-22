@@ -675,21 +675,30 @@ async def stage_documents_batch(
     # Compute all checksums upfront
     checksums = [compute_checksum(doc.get("content", "")) for doc in doc_inputs]
 
-    # Intra-batch dedup: only process first occurrence of each checksum
-    canonical_idx: dict[str, int] = {}
-    dup_groups: dict[str, list[int]] = {}
-    for i, checksum in enumerate(checksums):
-        if checksum not in canonical_idx:
-            canonical_idx[checksum] = i
+    # Intra-batch dedup keyed by (checksum, external_id, session_id) so two
+    # same-content docs with different identities both proceed (#1171).
+    IdentityKey = tuple[str, str | None, str | None]
+
+    def _identity_key(i: int) -> IdentityKey:
+        doc = doc_inputs[i]
+        sid = _coerce_session_id(doc.get("metadata", {}).get("session_id"))
+        return (checksums[i], doc.get("external_id"), str(sid) if sid else None)
+
+    canonical_idx: dict[IdentityKey, int] = {}
+    dup_groups: dict[IdentityKey, list[int]] = {}
+    for i in range(len(doc_inputs)):
+        key = _identity_key(i)
+        if key not in canonical_idx:
+            canonical_idx[key] = i
         else:
-            dup_groups.setdefault(checksum, []).append(i)
+            dup_groups.setdefault(key, []).append(i)
 
     if dup_groups:
         total_dups = sum(len(idxs) for idxs in dup_groups.values())
-        logger.debug(f"Intra-batch dedup: {total_dups} duplicate(s) across {len(dup_groups)} checksum(s)")
+        logger.debug(f"Intra-batch dedup: {total_dups} duplicate(s) across {len(dup_groups)} identity key(s)")
 
     # Single batch query for existing documents — query only unique checksums
-    unique_checksums = list(canonical_idx.keys())
+    unique_checksums = list({checksums[i] for i in range(len(doc_inputs))})
     existing = await storage.get_documents_by_checksums(namespace_id, unique_checksums)
 
     results: list[Document | None] = [None] * len(doc_inputs)
@@ -745,15 +754,12 @@ async def stage_documents_batch(
 
     # Only create documents for canonical (first-occurrence) indices
     await asyncio.gather(
-        *[
-            _create_one(canonical_idx[checksum], doc_inputs[canonical_idx[checksum]], checksum)
-            for checksum in canonical_idx
-        ]
+        *[_create_one(canonical_idx[key], doc_inputs[canonical_idx[key]], key[0]) for key in canonical_idx]
     )
 
     # Copy results from canonical indices to their intra-batch duplicates
-    for checksum, dup_idxs in dup_groups.items():
-        canonical_result = results[canonical_idx[checksum]]
+    for key, dup_idxs in dup_groups.items():
+        canonical_result = results[canonical_idx[key]]
         for dup_idx in dup_idxs:
             results[dup_idx] = canonical_result
 

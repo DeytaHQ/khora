@@ -1628,6 +1628,48 @@ class TestVectorCypherEngineBatchDedupScope:
         assert result.skipped == 1, "No identity supplied -> checksum-only dedup must apply"
         connected_engine._storage.create_document.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_batch_two_same_content_different_session_ids_both_proceed(
+        self, connected_engine: VectorCypherEngine
+    ) -> None:
+        """#1171: two same-content docs in one batch with different session_ids must both proceed."""
+        namespace_id = uuid4()
+        session_a = uuid4()
+        session_b = uuid4()
+        content = "same content"
+
+        # Nothing in DB — only intra-batch dedup applies.
+        connected_engine._storage.get_documents_by_external_ids = AsyncMock(return_value={})
+        connected_engine._storage.get_documents_by_checksums = AsyncMock(return_value={})
+
+        created_docs = [MagicMock(id=uuid4(), content=content) for _ in range(2)]
+        call_count = {"n": 0}
+
+        async def _create(doc):
+            result = created_docs[call_count["n"]]
+            call_count["n"] += 1
+            return result
+
+        connected_engine._storage.create_document = AsyncMock(side_effect=_create)
+        connected_engine._storage.update_document = AsyncMock()
+
+        mock_chunker = MagicMock()
+        mock_chunker.chunk.return_value = []  # empty -> failed_states path
+
+        with patch("khora.extraction.chunkers.create_chunker", return_value=mock_chunker):
+            result = await connected_engine.remember_batch(
+                [
+                    {"content": content, "metadata": {"session_id": str(session_a)}},
+                    {"content": content, "metadata": {"session_id": str(session_b)}},
+                ],
+                namespace_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+            )
+
+        assert result.skipped == 0, "Neither doc should be skipped — they have distinct session_ids"
+        assert connected_engine._storage.create_document.call_count == 2, "Both docs must be created"
+
 
 @pytest.mark.unit
 class TestVectorCypherEngineRecall:

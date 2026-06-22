@@ -2909,7 +2909,9 @@ class VectorCypherEngine:
         # Identity-scoped dedup (#1171): a checksum hit only counts as a
         # duplicate when the caller-supplied external_id/session_id also match
         # the existing row (mirrors the single-doc fix from #1170).
-        checksums_seen: set[str] = set()
+        # Intra-batch dedup is also identity-scoped: two same-content docs with
+        # different identities in the same batch both proceed.
+        identity_seen: set[tuple[str, str | None, str | None]] = set()
         active_indices: list[int] = []
         for idx, checksum in enumerate(doc_checksums):
             if idx in external_id_handled:
@@ -2917,6 +2919,7 @@ class VectorCypherEngine:
             doc_data = documents[idx]
             doc_external_id = doc_data.get("external_id")
             doc_session_id = _coerce_session_id_from_metadata(doc_data.get("metadata", {}))
+            identity_key = (checksum, doc_external_id, str(doc_session_id) if doc_session_id else None)
             db_dup = (
                 deduplicate
                 and checksum in existing_docs
@@ -2926,11 +2929,11 @@ class VectorCypherEngine:
                     session_id=doc_session_id,
                 )
             )
-            if checksum in checksums_seen or db_dup:
+            if identity_key in identity_seen or db_dup:
                 results["skipped"] += 1
                 _report_progress()
             else:
-                checksums_seen.add(checksum)
+                identity_seen.add(identity_key)
                 active_indices.append(idx)
         _stage0_ms = (_time.perf_counter() - _stage0_t0) * 1000
 

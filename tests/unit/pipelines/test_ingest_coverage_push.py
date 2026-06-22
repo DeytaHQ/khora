@@ -351,6 +351,19 @@ class TestStageDocument:
         assert result is None, "Same session_id + same checksum must still be a duplicate"
         storage.create_document.assert_not_called()
 
+    async def test_same_external_id_still_dedups_in_stage_document(self):
+        """#1171: same content + same external_id is still a duplicate in stage_document."""
+        ns = uuid4()
+        existing = MagicMock(status="completed", external_id="ext-1", session_id=None)
+        storage = _make_storage(get_document_by_checksum=AsyncMock(return_value=existing))
+        result = await stage_document(
+            {"content": "same", "external_id": "ext-1"},
+            ns,
+            storage,
+        )
+        assert result is None, "Same external_id + same checksum must still be a duplicate"
+        storage.create_document.assert_not_called()
+
 
 @pytest.mark.unit
 @pytest.mark.asyncio

@@ -310,3 +310,45 @@ class TestStageDocumentsBatchIdentityScopedDedup:
         assert len(results) == 1
         assert results[0] is None, "No identity supplied -> checksum-only dedup applies"
         assert storage.create_document.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_intra_batch_same_content_different_session_ids_both_created(self) -> None:
+        """#1171: two same-content docs with different session_ids in one batch are BOTH created."""
+        from uuid import uuid4 as _uuid4
+
+        session_a = _uuid4()
+        session_b = _uuid4()
+        content = "shared content"
+        storage = AsyncMock()
+        storage.get_documents_by_checksums = AsyncMock(return_value={})  # nothing in DB
+        storage.create_document = AsyncMock(side_effect=lambda doc: doc)
+
+        inputs = [
+            {"content": content, "metadata": {"session_id": str(session_a)}},
+            {"content": content, "metadata": {"session_id": str(session_b)}},
+        ]
+        results = await stage_documents_batch(inputs, NAMESPACE_ID, storage)
+
+        assert len(results) == 2
+        assert results[0] is not None, "First doc (session_a) must be created"
+        assert results[1] is not None, "Second doc (session_b) must be created"
+        assert storage.create_document.call_count == 2, "Both docs must be created independently"
+
+    @pytest.mark.asyncio
+    async def test_intra_batch_same_content_different_external_ids_both_created(self) -> None:
+        """#1171: two same-content docs with different external_ids in one batch are BOTH created."""
+        content = "shared content"
+        storage = AsyncMock()
+        storage.get_documents_by_checksums = AsyncMock(return_value={})
+        storage.create_document = AsyncMock(side_effect=lambda doc: doc)
+
+        inputs = [
+            {"content": content, "external_id": "ext-a"},
+            {"content": content, "external_id": "ext-b"},
+        ]
+        results = await stage_documents_batch(inputs, NAMESPACE_ID, storage)
+
+        assert len(results) == 2
+        assert results[0] is not None, "First doc (ext-a) must be created"
+        assert results[1] is not None, "Second doc (ext-b) must be created"
+        assert storage.create_document.call_count == 2, "Both docs must be created independently"
