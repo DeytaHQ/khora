@@ -159,3 +159,46 @@ async def test_tenant_isolation(store: WeaviateTemporalStore) -> None:
     assert visible_in_b is None
 
     await store.delete_chunk(chunk_id, ns_a)
+
+
+@pytest.mark.asyncio
+async def test_search_fulltext_returns_bm25_hits(store: WeaviateTemporalStore) -> None:
+    """search_fulltext dispatches to Weaviate BM25 and returns scored Chunk tuples."""
+    namespace_id = uuid4()
+    doc_id = uuid4()
+
+    chunks = [
+        TemporalChunk(
+            id=uuid4(),
+            namespace_id=namespace_id,
+            document_id=doc_id,
+            content="turbopuffer is a serverless vector database",
+            embedding=[0.01] * 1536,
+        ),
+        TemporalChunk(
+            id=uuid4(),
+            namespace_id=namespace_id,
+            document_id=doc_id,
+            content="weaviate supports hybrid search with BM25 and vector",
+            embedding=[0.02] * 1536,
+        ),
+    ]
+    await store.create_chunks_batch(chunks)
+
+    results = await store.search_fulltext(namespace_id, "weaviate hybrid", limit=5)
+
+    # At minimum the weaviate chunk should surface - BM25 exact match
+    assert len(results) >= 1
+    contents = [chunk.content for chunk, _score in results]
+    assert any("weaviate" in c for c in contents)
+    # Scores should be non-negative floats
+    for _chunk, score in results:
+        assert score >= 0.0
+
+    await store.delete_chunks_by_document(doc_id, namespace_id)
+
+
+@pytest.mark.asyncio
+async def test_search_fulltext_empty_query_returns_empty(store: WeaviateTemporalStore) -> None:
+    result = await store.search_fulltext(uuid4(), "")
+    assert result == []

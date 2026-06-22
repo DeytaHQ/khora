@@ -810,3 +810,102 @@ class TestFilterAstFailLoud:
         with pytest.raises(RecallFilterUnsupportedError):
             await store.search(uuid4(), [0.1] * 4, filter_ast=node, filter_plan_out=sink)
         assert sink == []
+
+
+# ---------------------------------------------------------------------------
+# search_fulltext
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestSearchFulltextTurbopuffer:
+    """Unit tests for TurbopufferTemporalStore.search_fulltext."""
+
+    def test_search_fulltext_is_overridden(self) -> None:
+        """TurbopufferTemporalStore must override search_fulltext (not inherit the
+        empty-list default from TemporalVectorStore)."""
+        from khora.storage.temporal import TemporalVectorStore
+
+        assert TurbopufferTemporalStore.search_fulltext is not TemporalVectorStore.search_fulltext
+
+    @pytest.mark.asyncio
+    async def test_empty_query_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _tp, client = _install_fake_turbopuffer(monkeypatch)
+        store = _build_store("k")
+        await store.connect()
+
+        result = await store.search_fulltext(uuid4(), "")
+        assert result == []
+        client.namespace.return_value.query.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_uses_bm25_rank_by(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """search_fulltext dispatches to turbopuffer BM25 (not ANN)."""
+        _tp, client = _install_fake_turbopuffer(monkeypatch)
+        store = _build_store("k")
+        await store.connect()
+
+        ns_handle = client.namespace.return_value
+        ns_handle.query = AsyncMock(return_value=SimpleNamespace(rows=[]))
+
+        await store.search_fulltext(uuid4(), "hello world", limit=7)
+
+        ns_handle.query.assert_awaited_once()
+        kwargs = ns_handle.query.call_args.kwargs
+        rank_by = kwargs["rank_by"]
+        assert rank_by[1] == "BM25"
+        assert rank_by[2] == "hello world"
+        assert kwargs["top_k"] == 7
+
+    @pytest.mark.asyncio
+    async def test_returns_chunks_with_bm25_scores(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        rows = [
+            {"id": str(uuid4()), "content": "foo", "document_id": str(uuid4()), "$bm25_score": 0.8},
+            {"id": str(uuid4()), "content": "bar", "document_id": str(uuid4()), "$bm25_score": 0.3},
+        ]
+        _tp, client = _install_fake_turbopuffer(monkeypatch)
+        store = _build_store("k")
+        await store.connect()
+
+        client.namespace.return_value.query = AsyncMock(return_value=SimpleNamespace(rows=rows))
+
+        results = await store.search_fulltext(uuid4(), "foo")
+        assert len(results) == 2
+        chunk0, score0 = results[0]
+        assert score0 == pytest.approx(0.8)
+        assert chunk0.content == "foo"
+
+    @pytest.mark.asyncio
+    async def test_constraint_filter_ast_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A constraint-bearing filter_ast raises RecallFilterUnsupportedError,
+        matching the search() contract."""
+        _install_fake_turbopuffer(monkeypatch)
+        store = _build_store("k")
+        await store.connect()
+
+        node = _filter_ast_node()
+        with pytest.raises(RecallFilterUnsupportedError):
+            await store.search_fulltext(uuid4(), "query", filter_ast=node)
+
+    @pytest.mark.asyncio
+    async def test_empty_filter_ast_does_not_raise(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A constraint-free (empty) filter_ast is a no-op."""
+        _install_fake_turbopuffer(monkeypatch)
+        store = _build_store("k")
+        await store.connect()
+
+        empty_ast = parse_to_ast(RecallFilter())
+        result = await store.search_fulltext(uuid4(), "hello", filter_ast=empty_ast)
+        assert result == []  # empty rows from mock
+
+    @pytest.mark.asyncio
+    async def test_filter_plan_empty_on_no_constraints(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from khora.filter.report import ChannelPlan
+
+        _install_fake_turbopuffer(monkeypatch)
+        store = _build_store("k")
+        await store.connect()
+
+        sink: list[ChannelPlan] = []
+        await store.search_fulltext(uuid4(), "query", filter_plan_out=sink)
+        assert sink == [ChannelPlan()]
