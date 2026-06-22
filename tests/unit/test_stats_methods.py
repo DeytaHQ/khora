@@ -193,13 +193,17 @@ class TestSkeletonEngineStats:
             relationship_count=1,
             last_activity_at=ts,
         )
+        # Skeleton counts chunks via the temporal store, not storage.count_chunks (#1070).
+        engine._temporal_store = AsyncMock()
+        engine._temporal_store.count_chunks = AsyncMock(return_value=8)
 
         result = await engine.stats(uuid4())
 
         assert result.documents == 2
         assert result.chunks == 8
-        assert result.entities == 4
-        assert result.relationships == 1
+        # Skeleton skips graph extraction, so entity/relationship counts are 0.
+        assert result.entities == 0
+        assert result.relationships == 0
         assert result.last_activity_at == ts
 
     @pytest.mark.asyncio
