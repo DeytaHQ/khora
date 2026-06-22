@@ -417,8 +417,11 @@ class SQLiteRelationalBackend:
         await self._conn.commit()
         return document
 
-    async def get_document(self, document_id: UUID) -> Document | None:
-        cursor = await self._conn.execute("SELECT * FROM documents WHERE id = ?", (str(document_id),))
+    async def get_document(self, document_id: UUID, *, namespace_id: UUID) -> Document | None:
+        cursor = await self._conn.execute(
+            "SELECT * FROM documents WHERE id = ? AND namespace_id = ?",
+            (str(document_id), str(namespace_id)),
+        )
         row = await cursor.fetchone()
         if row is None:
             return None
@@ -597,13 +600,13 @@ class SQLiteRelationalBackend:
             return None
         return self._row_to_document(row)
 
-    async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
+    async def get_documents_batch(self, document_ids: list[UUID], *, namespace_id: UUID) -> dict[UUID, Document]:
         if not document_ids:
             return {}
         placeholders = ",".join("?" for _ in document_ids)
         cursor = await self._conn.execute(
-            f"SELECT * FROM documents WHERE id IN ({placeholders})",  # noqa: S608
-            [str(d) for d in document_ids],
+            f"SELECT * FROM documents WHERE id IN ({placeholders}) AND namespace_id = ?",  # noqa: S608
+            [str(d) for d in document_ids] + [str(namespace_id)],
         )
         rows = await cursor.fetchall()
         result: dict[UUID, Document] = {}
@@ -635,14 +638,16 @@ class SQLiteRelationalBackend:
                 result[doc.external_id] = doc
         return result
 
-    async def get_document_sources_batch(self, document_ids: list[UUID]) -> dict[UUID, DocumentSource]:
+    async def get_document_sources_batch(
+        self, document_ids: list[UUID], *, namespace_id: UUID
+    ) -> dict[UUID, DocumentSource]:
         if not document_ids:
             return {}
         placeholders = ",".join("?" for _ in document_ids)
         cursor = await self._conn.execute(
             f"SELECT id, title, source, source_type, created_at, source_timestamp "  # noqa: S608
-            f"FROM documents WHERE id IN ({placeholders})",
-            [str(d) for d in document_ids],
+            f"FROM documents WHERE id IN ({placeholders}) AND namespace_id = ?",
+            [str(d) for d in document_ids] + [str(namespace_id)],
         )
         rows = await cursor.fetchall()
         result: dict[UUID, DocumentSource] = {}
@@ -1122,8 +1127,11 @@ class SQLiteVectorBackend:
         )
         await self._conn.commit()
 
-    async def entity_exists(self, entity_id: UUID) -> bool:
-        cursor = await self._conn.execute("SELECT 1 FROM entities WHERE id = ?", (str(entity_id),))
+    async def entity_exists(self, entity_id: UUID, *, namespace_id: UUID) -> bool:
+        cursor = await self._conn.execute(
+            "SELECT 1 FROM entities WHERE id = ? AND namespace_id = ?",
+            (str(entity_id), str(namespace_id)),
+        )
         row = await cursor.fetchone()
         return row is not None
 

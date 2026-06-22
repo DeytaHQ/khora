@@ -211,7 +211,7 @@ class TestDocumentCRUD:
         created = await relational.create_document(doc)
         assert created.id == doc.id
 
-        fetched = await relational.get_document(doc.id)
+        fetched = await relational.get_document(doc.id, namespace_id=ns.id)
         assert fetched is not None
         assert fetched.title == "Test Document"
 
@@ -240,7 +240,7 @@ class TestDocumentCRUD:
         updated = await relational.update_document(doc)
         assert updated.content == "Updated content"
 
-        fetched = await relational.get_document(doc.id)
+        fetched = await relational.get_document(doc.id, namespace_id=ns.id)
         assert fetched.status == DocumentStatus.COMPLETED
 
     async def test_delete_document(self, relational: SQLiteRelationalBackend):
@@ -253,7 +253,7 @@ class TestDocumentCRUD:
         result = await relational.delete_document(doc.id, namespace_id=ns.id)
         assert result is True
 
-        fetched = await relational.get_document(doc.id)
+        fetched = await relational.get_document(doc.id, namespace_id=ns.id)
         assert fetched is None
 
     async def test_count_documents(self, relational: SQLiteRelationalBackend):
@@ -277,7 +277,7 @@ class TestDocumentCRUD:
         doc.external_id = "ext-456"
         await relational.update_document(doc)
 
-        fetched = await relational.get_document(doc.id)
+        fetched = await relational.get_document(doc.id, namespace_id=ns.id)
         assert fetched is not None
         assert fetched.external_id == "ext-456"
 
@@ -289,7 +289,7 @@ class TestDocumentCRUD:
         created = await relational.create_document(doc)
         assert created.external_id == "ext-123"
 
-        fetched = await relational.get_document(doc.id)
+        fetched = await relational.get_document(doc.id, namespace_id=ns.id)
         assert fetched is not None
         assert fetched.external_id == "ext-123"
 
@@ -301,7 +301,7 @@ class TestDocumentCRUD:
         created = await relational.create_document(doc)
         assert created.external_id is None
 
-        fetched = await relational.get_document(doc.id)
+        fetched = await relational.get_document(doc.id, namespace_id=ns.id)
         assert fetched is not None
         assert fetched.external_id is None
 
@@ -370,7 +370,7 @@ class TestDocumentCRUD:
         await relational.create_document(doc1)
         await relational.create_document(doc2)
 
-        batch = await relational.get_documents_batch([doc1.id, doc2.id])
+        batch = await relational.get_documents_batch([doc1.id, doc2.id], namespace_id=ns.id)
         assert len(batch) == 2
 
     async def test_get_document_sources_batch(self, relational: SQLiteRelationalBackend):
@@ -380,7 +380,7 @@ class TestDocumentCRUD:
         doc = _make_document(ns.id)
         await relational.create_document(doc)
 
-        sources = await relational.get_document_sources_batch([doc.id])
+        sources = await relational.get_document_sources_batch([doc.id], namespace_id=ns.id)
         assert len(sources) == 1
         assert sources[doc.id].title == "Test Document"
 
@@ -566,8 +566,8 @@ class TestEntityOperations:
         entity = _make_entity(uuid4(), embedding=_unit_embedding(8))
         await vector.create_entity(entity)
 
-        assert await vector.entity_exists(entity.id)
-        assert not await vector.entity_exists(uuid4())
+        assert await vector.entity_exists(entity.id, namespace_id=entity.namespace_id)
+        assert not await vector.entity_exists(uuid4(), namespace_id=entity.namespace_id)
 
     async def test_update_entity(self, vector: SQLiteVectorBackend):
         entity = _make_entity(uuid4(), embedding=_unit_embedding(8))
@@ -577,7 +577,7 @@ class TestEntityOperations:
         await vector.update_entity(entity, namespace_id=entity.namespace_id)
 
         # Verify by checking it still exists (no get_entity on vector protocol)
-        assert await vector.entity_exists(entity.id)
+        assert await vector.entity_exists(entity.id, namespace_id=entity.namespace_id)
 
     async def test_update_entity_embedding(self, vector: SQLiteVectorBackend):
         entity = _make_entity(uuid4())
@@ -585,7 +585,7 @@ class TestEntityOperations:
 
         new_emb = _unit_embedding(8, 3)
         await vector.update_entity_embedding(entity.id, new_emb, "updated-model", namespace_id=entity.namespace_id)
-        assert await vector.entity_exists(entity.id)
+        assert await vector.entity_exists(entity.id, namespace_id=entity.namespace_id)
 
     async def test_update_entity_embeddings_batch(self, vector: SQLiteVectorBackend):
         ns_id = uuid4()
@@ -697,3 +697,71 @@ class TestConfigSchema:
 
         cfg = SQLiteVectorConfig.model_validate({"backend": "sqlite", "url": "sqlite:///test.db"})
         assert cfg.backend == "sqlite"
+
+
+# ---------------------------------------------------------------------------
+# Cross-namespace isolation (IDOR) for read-by-id methods
+# ---------------------------------------------------------------------------
+
+
+class TestCrossNamespaceReadIsolation:
+    """A namespace-B caller must not read namespace-A rows by guessing IDs.
+
+    The legacy ``sqlite`` backend's read-by-id methods previously omitted the
+    ``namespace_id`` filter, so a caller in namespace B could fetch namespace
+    A's documents and probe entity existence by id (cross-tenant IDOR).
+    """
+
+    async def test_get_document_drops_foreign_namespace(self, relational: SQLiteRelationalBackend):
+        ns_a = uuid4()
+        ns_b = uuid4()
+        doc = _make_document(ns_a)
+        await relational.create_document(doc)
+
+        # Owner sees it; cross-namespace caller does not.
+        assert (await relational.get_document(doc.id, namespace_id=ns_a)) is not None
+        assert (await relational.get_document(doc.id, namespace_id=ns_b)) is None
+
+    async def test_get_documents_batch_drops_foreign_namespace(self, relational: SQLiteRelationalBackend):
+        ns_a = uuid4()
+        ns_b = uuid4()
+        doc = _make_document(ns_a)
+        await relational.create_document(doc)
+
+        assert (await relational.get_documents_batch([doc.id], namespace_id=ns_a)).keys() == {doc.id}
+        assert await relational.get_documents_batch([doc.id], namespace_id=ns_b) == {}
+
+    async def test_get_document_sources_batch_drops_foreign_namespace(self, relational: SQLiteRelationalBackend):
+        ns_a = uuid4()
+        ns_b = uuid4()
+        doc = _make_document(ns_a)
+        await relational.create_document(doc)
+
+        assert (await relational.get_document_sources_batch([doc.id], namespace_id=ns_a)).keys() == {doc.id}
+        assert await relational.get_document_sources_batch([doc.id], namespace_id=ns_b) == {}
+
+    async def test_entity_exists_drops_foreign_namespace(self, vector: SQLiteVectorBackend):
+        ns_a = uuid4()
+        ns_b = uuid4()
+        entity = _make_entity(ns_a, embedding=_unit_embedding(8))
+        await vector.create_entity(entity)
+
+        assert await vector.entity_exists(entity.id, namespace_id=ns_a) is True
+        assert await vector.entity_exists(entity.id, namespace_id=ns_b) is False
+
+    def test_read_methods_declare_keyword_only_namespace_id(self):
+        """Structural gate: each read-by-id method takes keyword-only ``namespace_id``."""
+        import inspect
+
+        methods = [
+            SQLiteRelationalBackend.get_document,
+            SQLiteRelationalBackend.get_documents_batch,
+            SQLiteRelationalBackend.get_document_sources_batch,
+            SQLiteVectorBackend.entity_exists,
+        ]
+        for method in methods:
+            param = inspect.signature(method).parameters.get("namespace_id")
+            assert param is not None, f"{method.__qualname__} is missing namespace_id"
+            assert param.kind is inspect.Parameter.KEYWORD_ONLY, (
+                f"{method.__qualname__} namespace_id must be keyword-only, got {param.kind.name}"
+            )

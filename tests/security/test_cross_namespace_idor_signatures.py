@@ -50,12 +50,14 @@ def _try_import(module_path: str, class_name: str) -> Any | None:
 
 _RELATIONAL_BACKENDS = [
     ("khora.storage.backends.postgresql", "PostgreSQLBackend"),
+    ("khora.storage.backends.sqlite", "SQLiteRelationalBackend"),
     ("khora.storage.backends.sqlite_lance.relational", "SQLiteLanceRelationalAdapter"),
     ("khora.storage.backends.surrealdb.relational", "SurrealDBRelationalAdapter"),
 ]
 
 _VECTOR_BACKENDS = [
     ("khora.storage.backends.pgvector", "PgVectorBackend"),
+    ("khora.storage.backends.sqlite", "SQLiteVectorBackend"),
     ("khora.storage.backends.sqlite_lance.vector", "SQLiteLanceVectorAdapter"),
     ("khora.storage.backends.surrealdb.vector", "SurrealDBVectorAdapter"),
 ]
