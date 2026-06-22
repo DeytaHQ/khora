@@ -50,12 +50,14 @@ def _try_import(module_path: str, class_name: str) -> Any | None:
 
 _RELATIONAL_BACKENDS = [
     ("khora.storage.backends.postgresql", "PostgreSQLBackend"),
+    ("khora.storage.backends.sqlite", "SQLiteRelationalBackend"),
     ("khora.storage.backends.sqlite_lance.relational", "SQLiteLanceRelationalAdapter"),
     ("khora.storage.backends.surrealdb.relational", "SurrealDBRelationalAdapter"),
 ]
 
 _VECTOR_BACKENDS = [
     ("khora.storage.backends.pgvector", "PgVectorBackend"),
+    ("khora.storage.backends.sqlite", "SQLiteVectorBackend"),
     ("khora.storage.backends.sqlite_lance.vector", "SQLiteLanceVectorAdapter"),
     ("khora.storage.backends.surrealdb.vector", "SurrealDBVectorAdapter"),
 ]
@@ -268,3 +270,8 @@ def test_backend_registry_not_empty() -> None:
     names = {cls.__name__ for cls, _ in _ALL_BACKENDS}
     assert "PgVectorBackend" in names
     assert "PostgreSQLBackend" in names
+    # The legacy embedded ``sqlite`` backend ships with the base extras too
+    # (aiosqlite only, no lancedb); assert it so the IDOR coverage added for
+    # it can't silently disappear if its import ever starts failing.
+    assert "SQLiteRelationalBackend" in names
+    assert "SQLiteVectorBackend" in names
