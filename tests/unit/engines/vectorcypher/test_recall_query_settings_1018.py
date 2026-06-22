@@ -57,6 +57,19 @@ def test_stage1_recall_limit_flows_to_retriever_config() -> None:
     assert rc.stage1_recall_limit == 321
 
 
+def test_enable_bm25_channel_defaults_off() -> None:
+    """#1330 — the lexical channel stays opt-out by default (unchanged behavior)."""
+    rc = _build_retriever_config(_config())
+    assert rc.enable_bm25_channel is False
+
+
+def test_enable_bm25_channel_flows_to_retriever_config() -> None:
+    """#1330 — KHORA_QUERY_ENABLE_BM25_CHANNEL=true makes the channel operable."""
+    cfg = _config(enable_bm25_channel=True)
+    rc = _build_retriever_config(cfg)
+    assert rc.enable_bm25_channel is True
+
+
 def test_query_settings_defaults_match_retriever_defaults() -> None:
     """The default KhoraConfig.query values must produce the RetrieverConfig
     defaults (no silent drift between the two contracts)."""

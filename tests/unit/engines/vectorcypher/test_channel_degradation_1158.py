@@ -149,6 +149,64 @@ async def test_bm25_search_chunks_no_degradation_when_sink_absent() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Empty-multitoken channel degradation (#1330): a >=2-token keyword query that
+# returns ZERO BM25 rows is the OR-fix's residual failure mode. It does not
+# raise, so it took its own reason value rather than channel_exception.
+# ---------------------------------------------------------------------------
+
+
+def _make_empty_bm25_retriever() -> VectorCypherRetriever:
+    """A retriever whose BM25 channel returns 0 rows without raising."""
+    storage = MagicMock()
+    storage.search_fulltext_chunks = AsyncMock(return_value=[])
+    vector_store = MagicMock()
+    vector_store.search_fulltext = None
+    return VectorCypherRetriever(
+        vector_store=vector_store,
+        neo4j_driver=None,
+        embedder=AsyncMock(),
+        config=RetrieverConfig(),
+        storage=storage,
+    )
+
+
+async def test_bm25_empty_multitoken_records_degradation() -> None:
+    """A >=2-token query with 0 BM25 rows records an empty_multitoken_channel degradation."""
+    retriever = _make_empty_bm25_retriever()
+    degradations: list[Degradation] = []
+    results = await retriever._bm25_search_chunks(
+        query="status of MER-0001",
+        namespace_id=uuid4(),
+        limit=10,
+        degradations=degradations,
+    )
+    assert results == []
+    assert len(degradations) == 1, f"expected one degradation, got {degradations!r}"
+    deg = degradations[0]
+    assert deg["component"] == "vectorcypher.bm25"
+    assert deg["reason"] == "empty_multitoken_channel"
+
+
+async def test_bm25_empty_singletoken_does_not_degrade() -> None:
+    """A single-token (bare-ID) query with 0 rows is NOT a degradation.
+
+    A bare ``MER-9999`` lookup that legitimately finds nothing is expected;
+    only multi-token sentence queries that drop the whole lexical channel are
+    the observable failure mode the #1330 fix targets.
+    """
+    retriever = _make_empty_bm25_retriever()
+    degradations: list[Degradation] = []
+    results = await retriever._bm25_search_chunks(
+        query="MER-9999",
+        namespace_id=uuid4(),
+        limit=10,
+        degradations=degradations,
+    )
+    assert results == []
+    assert degradations == []
+
+
+# ---------------------------------------------------------------------------
 # Full retrieve() tests (degradation surfaces on the result, recall survives)
 # ---------------------------------------------------------------------------
 

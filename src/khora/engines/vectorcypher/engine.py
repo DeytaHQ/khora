@@ -594,6 +594,11 @@ class VectorCypherEngine:
                 "llm_reranking_model",
                 "llm_reranking_top_n",
                 "llm_reranking_confidence_threshold",
+                # Issue #1330 — expose the independent BM25 lexical channel via
+                # KHORA_QUERY_ENABLE_BM25_CHANNEL. Reconciled (not read directly
+                # in _assemble_retriever_config) so a caller-supplied
+                # VectorCypherConfig still wins per the established precedence.
+                "enable_bm25_channel",
             ):
                 _query_val = getattr(query_cfg, _field, None)
                 if _query_val is None:
