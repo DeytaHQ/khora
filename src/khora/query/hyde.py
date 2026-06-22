@@ -13,8 +13,11 @@ from typing import TYPE_CHECKING
 import numpy as np
 from loguru import logger
 
+from khora.telemetry import metric_counter
+
 if TYPE_CHECKING:
     from khora.config.llm import LiteLLMConfig
+    from khora.core.diagnostics import Degradation
     from khora.extraction.embedders import Embedder
     from khora.query.temporal_detection import TemporalCategory
 
@@ -25,14 +28,38 @@ if TYPE_CHECKING:
 # carry the same tokens (Slack/email headers, calendar invites). See #592.
 _TEMPORAL_HYDE_CATEGORIES = {"recency", "state_query", "change"}
 
+# ADR-001 (issue #1324). When ``expand_query_embedding`` catches an exception
+# and falls back to the original embedding, a ``Degradation`` is appended to
+# the caller-supplied ``out_diagnostics`` list and this counter is incremented.
+# NO namespace_id label - cardinality rule.
+_HYDE_DEGRADED_COUNTER = metric_counter(
+    "khora.query.hyde.degraded_total",
+    unit="1",
+    description=(
+        "Issue #1324 (ADR-001). HyDE query-embedding expansion silent fallback. "
+        "Incremented when ``expand_query_embedding`` catches any exception (LLM "
+        "call failure, embed failure, etc.) and returns the original embedding "
+        "unchanged. The same event is also appended to the caller-supplied "
+        "out_diagnostics list, which surfaces on RecallResult.engine_info"
+        "['degradations'] or QueryResult.metadata['degradations']. "
+        "NO namespace_id label - cardinality rule."
+    ),
+)
 
-def _detect_category(query: str) -> TemporalCategory | None:
+
+def _detect_category(
+    query: str,
+    *,
+    out_diagnostics: list[Degradation] | None = None,
+) -> TemporalCategory | None:
     """Best-effort temporal-category detection for a HyDE query.
 
     Wraps ``khora.query.temporal_detection.detect_temporal_category`` so
     the import is local (avoids a hard dependency at module import time)
     and any unexpected failure degrades to ``None`` (generic prompt) —
-    HyDE should never crash a query because of a detector error.
+    HyDE should never crash a query because of a detector error. On
+    failure, when ``out_diagnostics`` is supplied, a :class:`Degradation`
+    is appended so the fallback is observable per ADR-001 (issue #1324).
     """
     try:
         from khora._accel import detect_temporal_category
@@ -40,7 +67,23 @@ def _detect_category(query: str) -> TemporalCategory | None:
 
         cat_id = detect_temporal_category(query)
         return CATEGORY_MAP.get(cat_id)
-    except Exception:  # noqa: BLE001 — degrade to generic prompt on any failure
+    except Exception as exc:  # noqa: BLE001 — degrade to generic prompt on any failure
+        logger.debug(
+            "HyDE temporal-category detection failed, using generic prompt: {} {}",
+            type(exc).__name__,
+            exc,
+        )
+        if out_diagnostics is not None:
+            from khora.core.diagnostics import Degradation
+
+            out_diagnostics.append(
+                Degradation(
+                    component="query.hyde",
+                    reason="temporal_category_detection_failed",
+                    detail="HyDE temporal-category detection failed; using generic prompt.",
+                    exception=type(exc).__name__,
+                )
+            )
         return None
 
 
@@ -120,6 +163,7 @@ class HyDEExpander:
         query_embedding: list[float],
         *,
         temporal_category: TemporalCategory | None = None,
+        out_diagnostics: list[Degradation] | None = None,
     ) -> list[float]:
         """Expand a query embedding by averaging with hypothetical doc embeddings.
 
@@ -129,12 +173,16 @@ class HyDEExpander:
         derived internally from the query via the Rust Aho-Corasick
         ``detect_temporal_category`` (sub-millisecond, no LLM cost).
 
-        On any failure, returns the original embedding unchanged.
+        On any failure, returns the original embedding unchanged and - when
+        ``out_diagnostics`` is supplied - appends a :class:`Degradation` so
+        the silent fallback is observable on
+        ``RecallResult.engine_info['degradations']`` (ADR-001, issue #1324).
         """
+        from khora.core.diagnostics import Degradation
         from khora.telemetry.instrument import pipeline_stage
 
         if temporal_category is None:
-            temporal_category = _detect_category(query)
+            temporal_category = _detect_category(query, out_diagnostics=out_diagnostics)
 
         try:
             async with pipeline_stage("query", "hyde", extra_metadata={"num_hypotheticals": self._num_hypotheticals}):
@@ -156,4 +204,14 @@ class HyDEExpander:
 
         except Exception as e:
             logger.warning("HyDE expansion failed, using original embedding: {}", e, exc_info=True)
+            _HYDE_DEGRADED_COUNTER.add(1, attributes={"channel": "query_embedding", "reason": "hyde_embedding_failed"})
+            if out_diagnostics is not None:
+                out_diagnostics.append(
+                    Degradation(
+                        component="query.hyde",
+                        reason="hyde_embedding_failed",
+                        detail=str(e)[:200] or None,
+                        exception=type(e).__name__,
+                    )
+                )
             return query_embedding
