@@ -21,6 +21,8 @@ from pathlib import Path
 
 from loguru import logger
 
+from khora.exceptions import ExtractionError
+
 # ---------------------------------------------------------------------------
 # Optional dependency detection
 # ---------------------------------------------------------------------------
@@ -87,6 +89,10 @@ def extract_xlsx_text(path: Path) -> str:
 
     try:
         wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+    except Exception as e:
+        raise ExtractionError(f"Excel extraction failed for {path.name}: {e}") from e
+
+    try:
         sections: list[str] = []
 
         for sheet_name in wb.sheetnames:
@@ -101,12 +107,15 @@ def extract_xlsx_text(path: Path) -> str:
 
             if row_count > 0:
                 sections.append(f"## Sheet: {sheet_name}\n\n```csv\n{buf.getvalue()}```\n")
-
-        wb.close()
-        return "\n".join(sections)
     except Exception as e:
-        logger.error(f"Excel extraction failed for {path.name}: {e}")
-        return ""
+        raise ExtractionError(f"Excel extraction failed for {path.name}: {e}") from e
+    finally:
+        try:
+            wb.close()
+        except Exception:  # noqa: BLE001,S110 - best-effort; don't mask the real error
+            pass
+
+    return "\n".join(sections)
 
 
 def extract_xls_text(path: Path) -> str:
@@ -137,8 +146,7 @@ def extract_docx_text(path: Path) -> str:
         paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
         return "\n\n".join(paragraphs)
     except Exception as e:
-        logger.error(f"DOCX extraction failed for {path.name}: {e}")
-        return ""
+        raise ExtractionError(f"DOCX extraction failed for {path.name}: {e}") from e
 
 
 def extract_parquet_text(path: Path) -> str:
@@ -166,8 +174,7 @@ def extract_parquet_text(path: Path) -> str:
 
         return schema_text + rows_text
     except Exception as e:
-        logger.error(f"Parquet extraction failed for {path.name}: {e}")
-        return ""
+        raise ExtractionError(f"Parquet extraction failed for {path.name}: {e}") from e
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +214,12 @@ def extract_if_needed(path: Path) -> Path | None:
 
     If extraction succeeds, writes a `{name}_extracted.md` file alongside
     the original and returns the path to it.  Returns None if no
-    extraction was needed or if it failed.
+    extraction was needed (unknown extension or legitimately-empty content).
+
+    Raises :class:`~khora.exceptions.ExtractionError` when a reader is
+    available but the file is corrupt, malformed, or causes a parse error.
+    This distinguishes a genuine failure from a file that has no extractable
+    text (which returns None).
 
     Raises :class:`NotImplementedError` for ``.pdf`` inputs: PDF parsing is
     not bundled with khora; preprocess PDFs upstream.
