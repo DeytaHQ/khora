@@ -84,17 +84,20 @@ def test_runtime_import_does_not_load_skeleton() -> None:
     )
 
 
-def _resolved_targets(tree: ast.Module, module_name: str) -> list[tuple[int, str]]:
+def _resolved_targets(tree: ast.Module, package: str) -> list[tuple[int, str]]:
     """Yield (lineno, resolved-module) for every import in ``tree``.
 
-    Relative imports are resolved against ``module_name`` so that a
-    ``from ..skeleton import x`` inside the vectorcypher package resolves to
-    its absolute ``khora.engines.skeleton`` form. ``from khora.engines import
-    skeleton`` is expanded to the imported submodule too, so the bare-package
-    form is caught. TYPE_CHECKING-guarded imports are visible to the AST and
-    therefore included.
+    Relative imports are resolved against ``package`` (the importing module's
+    package) so that a ``from ..skeleton import x`` resolves to its absolute
+    ``khora.engines.skeleton`` form, matching ``importlib`` semantics: a level-N
+    relative import strips ``N-1`` trailing components from ``package`` and
+    appends the target. This mirrors ``importlib._bootstrap._resolve_name``;
+    note that for a package's ``__init__`` the package IS the module name, so
+    the caller must pass the package, not the module name (otherwise level-N is
+    off by one for ``__init__`` files). ``from khora.engines import skeleton`` is
+    expanded to the imported submodule too, so the bare-package form is caught.
+    TYPE_CHECKING-guarded imports are visible to the AST and therefore included.
     """
-    package_parts = module_name.split(".")
     results: list[tuple[int, str]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -104,10 +107,10 @@ def _resolved_targets(tree: ast.Module, module_name: str) -> list[tuple[int, str
             if node.level == 0:
                 base = node.module or ""
             else:
-                # Resolve the relative import against the current module's
-                # package. level 1 == current package, level 2 == parent, etc.
-                anchor = package_parts[: len(package_parts) - node.level]
-                base = ".".join([*anchor, node.module] if node.module else anchor)
+                # level 1 == the importing module's own package; each extra
+                # level strips one more trailing component off that package.
+                anchor = package.rsplit(".", node.level - 1)[0]
+                base = f"{anchor}.{node.module}" if node.module else anchor
             results.append((node.lineno, base))
             # ``from <base> import <name>`` may itself name a submodule, so
             # record each imported name as a candidate dotted module too.
@@ -116,12 +119,18 @@ def _resolved_targets(tree: ast.Module, module_name: str) -> list[tuple[int, str
     return results
 
 
-def _module_name_for(path: Path, pkg_dir: Path) -> str:
-    """Compute the dotted module name for ``path`` within the package."""
+def _package_for(path: Path, pkg_dir: Path) -> str:
+    """Compute the dotted package of ``path`` for relative-import resolution.
+
+    For an ``__init__.py`` the package IS the module's own dotted name; for any
+    other module it is that module's parent package.
+    """
     rel = path.relative_to(pkg_dir).with_suffix("")
     parts = list(rel.parts)
-    if parts[-1] == "__init__":
+    if parts and parts[-1] == "__init__":
         parts = parts[:-1]
+    else:
+        parts = parts[:-1]  # drop the module leaf to reach its package
     return ".".join([_VECTORCYPHER_PACKAGE, *parts]) if parts else _VECTORCYPHER_PACKAGE
 
 
@@ -130,9 +139,9 @@ def test_static_scan_finds_no_skeleton_import() -> None:
     pkg_dir = _vectorcypher_dir()
     offenders: list[str] = []
     for path in sorted(pkg_dir.rglob("*.py")):
-        module_name = _module_name_for(path, pkg_dir)
+        package = _package_for(path, pkg_dir)
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for lineno, target in _resolved_targets(tree, module_name):
+        for lineno, target in _resolved_targets(tree, package):
             if target == _FORBIDDEN_PREFIX or target.startswith(_FORBIDDEN_PREFIX + "."):
                 offenders.append(f"{path}:{lineno}: imports {target}")
     assert not offenders, "vectorcypher imports forbidden skeleton modules:\n" + "\n".join(offenders)
