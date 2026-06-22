@@ -290,11 +290,14 @@ class _ChroniclePlugin:
 
         if OpKind.CHRONICLE_ABSTENTION_DRIFT_REPORT in wanted:
             engine = kb._get_engine()
-            # The op only reads three threshold attrs. The
-            # vectorcypher engine doesn't have them; if the orchestrator
-            # routed an abstention-drift op to it, that's a misconfig -
-            # raise rather than silently produce a meaningless report.
-            if not hasattr(engine, "_abstention_min_top_score"):
+            # The op reads the engine's chronicle abstention thresholds. Both
+            # engines now expose ``_abstention_*`` attrs (#1331), so the
+            # ``hasattr`` guard would route this chronicle-specific op to a
+            # VectorCypher engine. Gate on the active engine name instead: if
+            # the orchestrator routed abstention-drift to a non-chronicle
+            # engine, that's a misconfig - raise rather than silently produce
+            # a meaningless report.
+            if getattr(kb, "_engine_name", None) != "chronicle":
                 raise KhoraError("chronicle abstention drift requested but active engine is not a ChronicleEngine")
             op = await plan_chronicle_abstention_drift(namespace_id, engine=engine, config=config)
             ops.append(op)

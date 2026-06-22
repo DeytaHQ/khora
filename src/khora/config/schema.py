@@ -1731,6 +1731,71 @@ class QuerySettings(BaseSettings):
         default=True, description="Validate LLM-generated dates (swap inverted, cap future, reject ancient)"
     )
 
+    # Recall abstention (#1331). Both engines compute a passive
+    # ``abstention_signals`` block whose ``should_abstain`` tells callers the
+    # knowledge base doesn't cover the query. These knobs were hardcoded at the
+    # call sites; they are now operator-tunable here. Defaults reproduce the
+    # historical literals so flags + combined_score are unchanged.
+    abstention_min_chunks: int = Field(
+        default=1, ge=0, description="Chunk count below which the chunks_below_min abstention flag fires."
+    )
+    abstention_min_top_score: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description="Raw top-chunk cosine below which the top_score_low abstention flag fires (the topicality floor).",
+    )
+    abstention_combined_threshold: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Combined-score threshold at or above which should_abstain is True in abstention_mode='weighted'.",
+    )
+    abstention_weight_entities_empty: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description="Weight of entities_empty in the weighted-mode combined_score.",
+    )
+    abstention_weight_chunks_below_min: float = Field(
+        default=0.4,
+        ge=0.0,
+        le=1.0,
+        description="Weight of chunks_below_min in the weighted-mode combined_score.",
+    )
+    abstention_weight_top_score_low: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description="Weight of top_score_low in the weighted-mode combined_score.",
+    )
+    abstention_mode: Literal["cosine_floor", "weighted"] = Field(
+        default="cosine_floor",
+        description=(
+            "should_abstain derivation. 'cosine_floor' (default) abstains when "
+            "top_score_low fires OR retrieval is genuinely empty (chunks_empty "
+            "AND entities_empty) - the topicality floor decides on its own. "
+            "'weighted' is the legacy escape hatch: combined_score >= "
+            "abstention_combined_threshold. The four flags + combined_score are "
+            "identical across modes; only should_abstain differs. See khora#1331."
+        ),
+    )
+    # Calibrated retrieval confidence (#1331), surfaced as
+    # ``engine_info['confidence']``: 0.8*clip01(top_cosine/target_cosine)
+    # + 0.2*clip01(top_score_gap/target_gap).
+    abstention_confidence_target_cosine: float = Field(
+        default=0.5,
+        gt=0.0,
+        le=1.0,
+        description="Cosine at which the confidence cosine-component saturates to 1.0.",
+    )
+    abstention_confidence_target_gap: float = Field(
+        default=0.1,
+        gt=0.0,
+        le=1.0,
+        description="Top-two score gap at which the confidence gap-component saturates to 1.0.",
+    )
+
 
 class KhoraConfig(BaseSettings):
     """Main application configuration."""

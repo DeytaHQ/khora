@@ -345,6 +345,16 @@ def _make_config() -> MagicMock:
     config.pipeline.chunk_overlap = 200
     config.telemetry_database_url = None
     config.telemetry_service_name = "test"
+    # Abstention knobs (#1331) — the engine reads these off config.query now.
+    config.query.abstention_min_chunks = 1
+    config.query.abstention_min_top_score = 0.3
+    config.query.abstention_combined_threshold = 0.5
+    config.query.abstention_weight_entities_empty = 0.3
+    config.query.abstention_weight_chunks_below_min = 0.4
+    config.query.abstention_weight_top_score_low = 0.3
+    config.query.abstention_mode = "cosine_floor"
+    config.query.abstention_confidence_target_cosine = 0.5
+    config.query.abstention_confidence_target_gap = 0.1
     return config
 
 

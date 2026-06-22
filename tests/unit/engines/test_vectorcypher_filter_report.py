@@ -292,6 +292,18 @@ def _build_engine(retriever: VectorCypherRetriever) -> VectorCypherEngine:
     """
     engine = VectorCypherEngine.__new__(VectorCypherEngine)
     engine._config = MagicMock()
+    # Abstention knobs (#1331) — recall() reads these off config.query and
+    # compares them numerically, so a bare MagicMock would raise on the
+    # ``chunk_count < min_chunks`` comparison.
+    engine._config.query.abstention_min_chunks = 1
+    engine._config.query.abstention_min_top_score = 0.3
+    engine._config.query.abstention_combined_threshold = 0.5
+    engine._config.query.abstention_weight_entities_empty = 0.3
+    engine._config.query.abstention_weight_chunks_below_min = 0.4
+    engine._config.query.abstention_weight_top_score_low = 0.3
+    engine._config.query.abstention_mode = "cosine_floor"
+    engine._config.query.abstention_confidence_target_cosine = 0.5
+    engine._config.query.abstention_confidence_target_gap = 0.1
     engine._vc_config = VectorCypherConfig()
     engine._retriever = retriever
     engine._connected = True

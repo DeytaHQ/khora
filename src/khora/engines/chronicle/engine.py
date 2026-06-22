@@ -42,7 +42,7 @@ from khora.core.models.recall import (
     RecallChunk,
     RecallEntity,
 )
-from khora.core.recall_abstention import compute_abstention_signals
+from khora.core.recall_abstention import compute_abstention_signals, compute_confidence
 from khora.core.recall_scoring import min_max_normalize
 from khora.engines._forget_cascade import _FORGET_DEGRADED_COUNTER, cascade_forget_extraction
 from khora.engines._stats import gather_counts
@@ -775,9 +775,10 @@ class ChronicleEngine:
         temporal_event_cosine_weight: float = 0.5,
         entity_limit: int = 20,
         router_enabled: bool = True,
-        abstention_min_chunks: int = 1,
-        abstention_min_top_score: float = 0.3,
-        abstention_combined_threshold: float = 0.5,
+        abstention_min_chunks: int | None = None,
+        abstention_min_top_score: float | None = None,
+        abstention_combined_threshold: float | None = None,
+        abstention_mode: Literal["cosine_floor", "weighted"] | None = None,
     ) -> None:
         """Initialize the Chronicle engine.
 
@@ -818,12 +819,19 @@ class ChronicleEngine:
                 classify SIMPLE keep the temporal channel via ``temporal_signal``.
                 When False, all four channels run on every query (legacy behaviour).
             abstention_min_chunks: Minimum chunk count below which the
-                ``chunks_below_min`` abstention flag fires.
+                ``chunks_below_min`` abstention flag fires. ``None`` (default)
+                inherits ``config.query.abstention_min_chunks``; an explicit
+                kwarg wins (#1331).
             abstention_min_top_score: Top-chunk score below which the
-                ``top_score_low`` abstention flag fires.
+                ``top_score_low`` abstention flag fires. ``None`` inherits
+                ``config.query.abstention_min_top_score``.
             abstention_combined_threshold: Combined-score threshold at or above
-                which ``should_abstain`` becomes True. See
+                which ``should_abstain`` becomes True in ``abstention_mode=
+                "weighted"``. ``None`` inherits the config value. See
                 ``_compute_abstention_signals`` for the weighting scheme.
+            abstention_mode: ``should_abstain`` derivation - ``"cosine_floor"``
+                (default) or the legacy ``"weighted"`` escape hatch. ``None``
+                inherits ``config.query.abstention_mode``.
         """
         self._config = config
         self._storage_backend: ChronicleStorageBackend | None = storage_backend
@@ -845,9 +853,25 @@ class ChronicleEngine:
             # for pgvector mode (entity SQL columns live on pgvector itself).
             self._storage_config = build_storage_config(config, skip_graph=True)
 
-        self._abstention_min_chunks = abstention_min_chunks
-        self._abstention_min_top_score = abstention_min_top_score
-        self._abstention_combined_threshold = abstention_combined_threshold
+        # Explicit kwarg wins; otherwise inherit from config.query (#1331).
+        _q = config.query
+        self._abstention_min_chunks = (
+            abstention_min_chunks if abstention_min_chunks is not None else _q.abstention_min_chunks
+        )
+        self._abstention_min_top_score = (
+            abstention_min_top_score if abstention_min_top_score is not None else _q.abstention_min_top_score
+        )
+        self._abstention_combined_threshold = (
+            abstention_combined_threshold
+            if abstention_combined_threshold is not None
+            else _q.abstention_combined_threshold
+        )
+        self._abstention_mode = abstention_mode if abstention_mode is not None else _q.abstention_mode
+        self._abstention_weight_entities_empty = _q.abstention_weight_entities_empty
+        self._abstention_weight_chunks_below_min = _q.abstention_weight_chunks_below_min
+        self._abstention_weight_top_score_low = _q.abstention_weight_top_score_low
+        self._abstention_confidence_target_cosine = _q.abstention_confidence_target_cosine
+        self._abstention_confidence_target_gap = _q.abstention_confidence_target_gap
 
         self._storage: StorageCoordinator | None = None
         self._embedder: LiteLLMEmbedder | None = None
@@ -2198,6 +2222,18 @@ class ChronicleEngine:
         abstention_signals = self._compute_abstention_signals(
             chunks_with_scores, entity_hits, top_vector_score=max_raw_cosine
         )
+        # Calibrated retrieval confidence (#1331). Inputs are absolute cosines
+        # (#1319): the top raw semantic cosine and the gap to the runner-up.
+        # Use the raw semantic channel, not the post-rerank fused scores, for
+        # the same reason top_score_low does (#809).
+        _raw_cosines = sorted((score for _, score in semantic_results), reverse=True)
+        _top_gap = (_raw_cosines[0] - _raw_cosines[1]) if len(_raw_cosines) >= 2 else 0.0
+        confidence = compute_confidence(
+            top_cosine=max_raw_cosine,
+            top_score_gap=_top_gap,
+            target_cosine=self._abstention_confidence_target_cosine,
+            target_gap=self._abstention_confidence_target_gap,
+        )
 
         timings["total_ms"] = (time.perf_counter() - total_start) * 1000
 
@@ -2339,6 +2375,7 @@ class ChronicleEngine:
                 "decay_weight": decay_weight,
                 "max_raw_vector_score": max_raw_cosine,
                 "abstention_signals": abstention_signals,
+                "confidence": round(confidence, 4),
                 "timings": timings,
                 # Honest recall-filter pushdown report. Chronicle is
                 # partial-pushdown by design: only the source_timestamp date bound
@@ -2409,6 +2446,10 @@ class ChronicleEngine:
             min_chunks=self._abstention_min_chunks,
             min_top_score=self._abstention_min_top_score,
             combined_threshold=self._abstention_combined_threshold,
+            weight_entities_empty=self._abstention_weight_entities_empty,
+            weight_chunks_below_min=self._abstention_weight_chunks_below_min,
+            weight_top_score_low=self._abstention_weight_top_score_low,
+            mode=self._abstention_mode,
         )
 
         if signals["entities_empty"]:

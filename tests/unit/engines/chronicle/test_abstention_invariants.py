@@ -42,6 +42,13 @@ def _engine_with_thresholds(min_chunks: int, min_top: float, combined: float):
     engine._abstention_min_chunks = min_chunks
     engine._abstention_min_top_score = min_top
     engine._abstention_combined_threshold = combined
+    # These properties pin the weighted-formula invariants (combined_score
+    # bounds + should_abstain ⟺ combined >= threshold), so drive the engine in
+    # weighted mode (#1331). The default cosine_floor mode decides differently.
+    engine._abstention_mode = "weighted"
+    engine._abstention_weight_entities_empty = 0.3
+    engine._abstention_weight_chunks_below_min = 0.4
+    engine._abstention_weight_top_score_low = 0.3
     return engine
 
 

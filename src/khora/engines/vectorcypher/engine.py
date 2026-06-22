@@ -47,7 +47,7 @@ from khora.core.models.recall import (
     RecallRelationship,
 )
 from khora.core.ranking import select_core_chunk_ids
-from khora.core.recall_abstention import compute_abstention_signals
+from khora.core.recall_abstention import compute_abstention_signals, compute_confidence
 from khora.core.temporal import (
     ChunkTemporalFilter,
     TemporalChunk,
@@ -2423,14 +2423,26 @@ class VectorCypherEngine:
         # vector channel is empty (graph-only recall), this is 0.0 and
         # the signal correctly flags as "low".
         max_raw_vector_score = float(result.metadata.get("max_raw_vector_score") or 0.0)
+        _abst_cfg = self._config.query
         abstention_signals = compute_abstention_signals(
             chunk_count=len(validated_chunks),
             top_vector_score=max_raw_vector_score,
             entity_count=len(recall_entities),
-            # Hardcoded to ChronicleEngine defaults — same passive-signal semantics.
-            min_chunks=1,
-            min_top_score=0.3,
-            combined_threshold=0.5,
+            min_chunks=_abst_cfg.abstention_min_chunks,
+            min_top_score=_abst_cfg.abstention_min_top_score,
+            combined_threshold=_abst_cfg.abstention_combined_threshold,
+            weight_entities_empty=_abst_cfg.abstention_weight_entities_empty,
+            weight_chunks_below_min=_abst_cfg.abstention_weight_chunks_below_min,
+            weight_top_score_low=_abst_cfg.abstention_weight_top_score_low,
+            mode=_abst_cfg.abstention_mode,
+        )
+        # Calibrated retrieval confidence (#1331). Inputs are absolute cosines
+        # after #1319 (max_raw_vector_score) plus the top-two display-score gap.
+        confidence = compute_confidence(
+            top_cosine=max_raw_vector_score,
+            top_score_gap=top_score_gap,
+            target_cosine=_abst_cfg.abstention_confidence_target_cosine,
+            target_gap=_abst_cfg.abstention_confidence_target_gap,
         )
 
         if abstention_signals["entities_empty"]:
@@ -2502,6 +2514,7 @@ class VectorCypherEngine:
                     else {"category": "none", "source": "none"}
                 ),
                 "abstention_signals": abstention_signals,
+                "confidence": round(confidence, 4),
                 "routing": result.routing_decision.complexity.value,
                 "use_graph": result.routing_decision.use_graph,
                 "graph_depth": result.routing_decision.graph_depth,
