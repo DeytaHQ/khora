@@ -649,6 +649,7 @@ async def stage_document(
         metadata=dict(custom_metadata),
         source_timestamp=source_timestamp,
         session_id=session_id,
+        external_id=doc_input.get("external_id"),
     )
 
     return await storage.create_document(document)
