@@ -10,11 +10,26 @@ from uuid import UUID
 
 from loguru import logger
 
+from khora.core.diagnostics import Degradation
 from khora.core.models.event import EventType, MemoryEvent
+from khora.telemetry import metric_counter, trace_span
 
 from .embedding_filter import EmbeddingFilterCache
 from .match_dsl import matches as _match_dsl
 from .models import HookSubscription, SemanticFilter, SemanticHooksConfig
+from .subscription_store import PersistentSubscription
+
+# Module-level OTel instruments (#599). Created once per process; no-op
+# when no MeterProvider is installed. NO namespace_id label — cardinality.
+_LOAD_SPAN = "khora.hooks.subscription.load"
+_PERSISTENT_COUNTER = metric_counter(
+    "khora.hooks.subscription.persistent_count",
+    description="Persistent hook subscriptions loaded from storage on startup (#599).",
+)
+_PERSIST_DEGRADED_COUNTER = metric_counter(
+    "khora.hooks.subscription.persist_degraded_total",
+    description="Persistent-subscription writes that fell back to in-memory after a store failure (#599).",
+)
 
 
 class HookDispatcher:
@@ -51,9 +66,22 @@ class HookDispatcher:
         max_concurrent: int = 10,
         callback_timeout_seconds: float = 30.0,
         config: SemanticHooksConfig | None = None,
+        subscription_store: Any = None,
+        delivery_sink: Callable[[PersistentSubscription, MemoryEvent], Awaitable[None]] | None = None,
     ) -> None:
         self._subscriptions: dict[str, list[HookSubscription]] = defaultdict(list)
         self._sub_by_id: dict[UUID, HookSubscription] = {}
+        # Phase 3 (#599): durable subscriptions. Default off — when
+        # ``subscription_store`` is None the dispatcher is pure in-process
+        # and never touches the DB, preserving the single-process fast path
+        # and zero new cost for in-memory-only callers.
+        self._subscription_store = subscription_store
+        self._delivery_sink = delivery_sink
+        self._persistent: dict[str, list[PersistentSubscription]] = defaultdict(list)
+        self._persistent_by_id: dict[UUID, PersistentSubscription] = {}
+        # Last ADR-001 degradation from a store persist/load failure, for
+        # observability assertions / callers that surface it on a result.
+        self._last_persist_degradation: Degradation | None = None
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._embedding_cache = EmbeddingFilterCache()
         self._callback_timeout_seconds = callback_timeout_seconds
@@ -95,8 +123,15 @@ class HookDispatcher:
         """
         key = event_type.value if isinstance(event_type, EventType) else str(event_type)
 
-        if filter and namespace_id:
-            filter.namespace_id = namespace_id
+        if namespace_id:
+            # Fold the scope onto the filter so the cascade's namespace check
+            # engages. HookSubscription has no namespace_id field, so without
+            # this an in-memory sub scoped to a namespace but carrying no
+            # filter would match EVERY namespace's events (cross-tenant leak).
+            if filter is None:
+                filter = SemanticFilter(namespace_id=namespace_id)
+            else:
+                filter.namespace_id = namespace_id
 
         sub = HookSubscription(
             event_type=key,
@@ -142,15 +177,200 @@ class HookDispatcher:
         return True
 
     def clear(self) -> None:
-        """Remove all subscriptions."""
+        """Remove all subscriptions (in-process and the in-memory copy of
+        persistent ones — does NOT delete persisted rows from storage)."""
         self._subscriptions.clear()
         self._sub_by_id.clear()
         self._pending_filters.clear()
+        self._persistent.clear()
+        self._persistent_by_id.clear()
 
     @property
     def subscription_count(self) -> int:
-        """Total number of active subscriptions."""
+        """Total number of active in-process callback subscriptions."""
         return len(self._sub_by_id)
+
+    @property
+    def persistent_count(self) -> int:
+        """Total number of loaded persistent subscriptions (#599)."""
+        return len(self._persistent_by_id)
+
+    # ------------------------------------------------------------------
+    # Phase 3 (#599): persistent subscriptions
+    # ------------------------------------------------------------------
+
+    async def register_persistent(
+        self,
+        event_type: EventType | str,
+        delivery: dict[str, Any],
+        *,
+        filter: SemanticFilter | None = None,
+        namespace_id: UUID | None = None,
+    ) -> UUID:
+        """Register a durable subscription with a delivery target.
+
+        Unlike :meth:`subscribe` (an in-process callback that dies with the
+        process), a persistent subscription records its ``delivery`` config
+        (webhook URL / queue identifier) to storage so a worker re-subscribes
+        on restart. The record is also kept in memory so dispatch matches it
+        without a DB round-trip.
+
+        Requires a ``subscription_store`` at construction time. If the store
+        write fails the subscription is still registered in memory and a
+        ``Degradation`` is recorded (ADR-001) — the durability guarantee is
+        lost for this row but the subscription is not silently dropped.
+
+        Args:
+            event_type: The event type to subscribe to.
+            delivery: Webhook URL / queue config the worker resolves.
+            filter: Optional semantic filter (same cascade as ``subscribe``).
+            namespace_id: Scope. None = all namespaces.
+
+        Returns:
+            Subscription UUID.
+        """
+        key = event_type.value if isinstance(event_type, EventType) else str(event_type)
+
+        if filter and namespace_id:
+            filter.namespace_id = namespace_id
+
+        sub = PersistentSubscription(
+            event_type=key,
+            delivery=delivery,
+            namespace_id=namespace_id,
+            filter=filter,
+        )
+
+        if self._subscription_store is None:
+            raise RuntimeError(
+                "register_persistent requires a subscription_store; "
+                "construct HookDispatcher with subscription_store=... or use subscribe() for in-process hooks."
+            )
+
+        try:
+            await self._subscription_store.persist(sub)
+        except Exception as exc:
+            # ADR-001: a persistence failure degrades to in-memory-only
+            # rather than dropping the subscription or crashing register.
+            _PERSIST_DEGRADED_COUNTER.add(1, {"channel": "subscription_store", "reason": "persist_failed"})
+            logger.warning(
+                "Failed to persist hook subscription {} ({}). It is registered in "
+                "memory but will NOT survive a restart.",
+                sub.id,
+                key,
+                exc_info=True,
+            )
+            degradation: Degradation = {
+                "component": "hooks.subscription_store",
+                "reason": "persist_failed",
+                "detail": f"event_type={key}",
+                "exception": repr(exc),
+            }
+            self._last_persist_degradation = degradation
+
+        self._add_persistent_in_memory(sub)
+        if filter:
+            self._register_filter_embedding(filter)
+
+        logger.debug("Persistent hook registered: {} → {} (filter={})", key, sub.id, filter.name if filter else "none")
+        return sub.id
+
+    async def unregister_persistent(self, subscription_id: UUID) -> bool:
+        """Remove a persistent subscription from memory AND storage.
+
+        Returns True if found (in memory); the storage delete is best-effort
+        and a failure is logged but does not flip the return value.
+        """
+        sub = self._persistent_by_id.pop(subscription_id, None)
+        if sub is None:
+            return False
+
+        subs = self._persistent.get(sub.event_type, [])
+        self._persistent[sub.event_type] = [s for s in subs if s.id != subscription_id]
+
+        if self._subscription_store is not None:
+            try:
+                await self._subscription_store.delete(subscription_id)
+            except Exception as exc:
+                # ADR-001: the durable row survives and will resurrect this
+                # subscription on the next load_persistent(). Record the
+                # degradation + metric so the lingering row is observable
+                # rather than silently masked by the True return.
+                _PERSIST_DEGRADED_COUNTER.add(1, {"channel": "subscription_store", "reason": "delete_failed"})
+                logger.warning(
+                    "Failed to delete persistent hook subscription {} from storage; "
+                    "it is removed from memory but the row may linger and will "
+                    "resurrect on the next load_persistent().",
+                    subscription_id,
+                    exc_info=True,
+                )
+                self._last_persist_degradation = {
+                    "component": "hooks.subscription_store",
+                    "reason": "delete_failed",
+                    "detail": f"subscription_id={subscription_id}",
+                    "exception": repr(exc),
+                }
+        return True
+
+    async def load_persistent(self) -> int:
+        """Load persistent subscriptions from storage into memory (#599).
+
+        Called on startup so events delivered after a restart still find
+        the subscriber. Idempotent — keyed on subscription id, so a second
+        call replaces rather than duplicates. A store read failure degrades
+        to zero loaded subscriptions (ADR-001) rather than crashing startup.
+
+        Returns:
+            Number of persistent subscriptions loaded.
+        """
+        if self._subscription_store is None:
+            return 0
+
+        with trace_span(_LOAD_SPAN):
+            try:
+                records = await self._subscription_store.load_all()
+            except Exception as exc:
+                _PERSIST_DEGRADED_COUNTER.add(1, {"channel": "subscription_store", "reason": "load_failed"})
+                logger.warning(
+                    "Failed to load persistent hook subscriptions from storage; "
+                    "persistent hooks are inactive until the next load. {}",
+                    exc,
+                    exc_info=True,
+                )
+                self._last_persist_degradation = {
+                    "component": "hooks.subscription_store",
+                    "reason": "load_failed",
+                    "detail": None,
+                    "exception": repr(exc),
+                }
+                return 0
+
+            self._persistent.clear()
+            self._persistent_by_id.clear()
+            for sub in records:
+                self._add_persistent_in_memory(sub)
+                if sub.filter:
+                    self._register_filter_embedding(sub.filter)
+
+        _PERSISTENT_COUNTER.add(len(records))
+        logger.debug("Loaded {} persistent hook subscriptions from storage", len(records))
+        return len(records)
+
+    def _add_persistent_in_memory(self, sub: PersistentSubscription) -> None:
+        # Replace any prior copy with the same id (idempotent reload).
+        existing = self._persistent_by_id.get(sub.id)
+        if existing is not None:
+            self._persistent[existing.event_type] = [
+                s for s in self._persistent.get(existing.event_type, []) if s.id != sub.id
+            ]
+        self._persistent[sub.event_type].append(sub)
+        self._persistent_by_id[sub.id] = sub
+
+    def _register_filter_embedding(self, filter: SemanticFilter) -> None:
+        if filter.embedding is not None:
+            self._embedding_cache.register_filter(filter)
+        elif filter.description:
+            self._pending_filters[filter.id] = filter
 
     async def embed_pending_filters(self, embedder: Any) -> int:
         """Embed any filters that were registered with a description but
@@ -221,52 +441,25 @@ class HookDispatcher:
         """
         key = event.event_type.value if isinstance(event.event_type, EventType) else str(event.event_type)
         subs = self._subscriptions.get(key, [])
+        persistent = self._persistent.get(key, [])
 
-        if not subs:
+        if not subs and not persistent:
             return 0
 
-        # Filter subscriptions by namespace and semantic filter (Level 0)
+        # Filter subscriptions by namespace and semantic filter cascade.
         matching = []
         for sub in subs:
             if not sub.enabled:
                 continue
-
-            # Namespace scope check
-            if sub.filter and sub.filter.namespace_id:
-                if event.namespace_id != sub.filter.namespace_id:
-                    continue
-
-            # Level 0: entity_type / relationship_type pre-filter
-            if sub.filter and not self._passes_type_filter(event, sub.filter):
+            if not await self._passes_filter_cascade(event, sub.filter):
                 continue
-
-            # Level 1: embedding similarity pre-screen (Phase 2)
-            if sub.filter and sub.filter.embedding is not None:
-                entity_embedding = event.data.get("embedding")
-                if entity_embedding is not None:
-                    passes, _score = self._embedding_cache.passes_embedding_gate(
-                        entity_embedding,
-                        sub.filter,
-                    )
-                    if not passes:
-                        continue
-
-            # Level 2: nano-LLM yes/no (Issue #576 Phase 1, Item 7).
-            # Only engages when:
-            #   - operator opted in via KHORA_HOOKS_LLM_EVALUATION_ENABLED
-            #   - filter supplied positive examples (anchors the prompt)
-            # Fails open on any infrastructure trouble — Level 1 already
-            # cosine-matched, so a flaky nano tier must not drop the match.
-            if self._config is not None and self._config.llm_evaluation_enabled and sub.filter and sub.filter.examples:
-                if self._llm_evaluator is None:
-                    from .llm_evaluator import LLMFilterEvaluator
-
-                    self._llm_evaluator = LLMFilterEvaluator(self._config)
-                passes_llm = await self._llm_evaluator.evaluate(event, sub.filter)
-                if not passes_llm:
-                    continue
-
             matching.append(sub)
+
+        # Phase 3 (#599): persistent subscriptions take the same cascade,
+        # then hand off to the delivery sink (the worker path) instead of an
+        # in-process callback.
+        if persistent:
+            await self._dispatch_persistent(event, key, persistent)
 
         if not matching:
             return 0
@@ -302,6 +495,99 @@ class HookDispatcher:
                     )
 
         await asyncio.gather(*[_safe_invoke(sub) for sub in matching])
+        return len(matching)
+
+    async def _passes_filter_cascade(self, event: MemoryEvent, filter: SemanticFilter | None) -> bool:
+        """Run the Level 0/1/2 filter cascade for one subscription.
+
+        Shared by the in-process callback path and the Phase-3 persistent
+        path so both honor identical namespace / type / embedding / LLM
+        gating. ``None`` filter = match everything for the event type.
+        """
+        if filter is None:
+            return True
+
+        # Namespace scope check
+        if filter.namespace_id and event.namespace_id != filter.namespace_id:
+            return False
+
+        # Level 0: entity_type / relationship_type pre-filter
+        if not self._passes_type_filter(event, filter):
+            return False
+
+        # Level 1: embedding similarity pre-screen (Phase 2)
+        if filter.embedding is not None:
+            entity_embedding = event.data.get("embedding")
+            if entity_embedding is not None:
+                passes, _score = self._embedding_cache.passes_embedding_gate(entity_embedding, filter)
+                if not passes:
+                    return False
+
+        # Level 2: nano-LLM yes/no (Issue #576 Phase 1, Item 7). Only
+        # engages when opted in and the filter supplied positive examples.
+        # Fails open on infrastructure trouble.
+        if self._config is not None and self._config.llm_evaluation_enabled and filter.examples:
+            if self._llm_evaluator is None:
+                from .llm_evaluator import LLMFilterEvaluator
+
+                self._llm_evaluator = LLMFilterEvaluator(self._config)
+            if not await self._llm_evaluator.evaluate(event, filter):
+                return False
+
+        return True
+
+    async def _dispatch_persistent(self, event: MemoryEvent, key: str, subs: list[PersistentSubscription]) -> int:
+        """Match persistent subscriptions and hand off to the delivery sink.
+
+        The actual webhook/queue worker is out of scope for #599; the
+        dispatcher matches and routes to ``delivery_sink`` when one is wired
+        (the test harness supplies a stub; production wires the worker). When
+        no sink is configured, matches are logged at DEBUG and dropped — the
+        durable rows still exist for a worker to drain on its own schedule.
+        """
+        matching = []
+        for sub in subs:
+            if sub.paused_at is not None:
+                continue
+            # Namespace isolation (independent of the filter). A subscription
+            # scoped to a namespace must never see another namespace's events,
+            # even when it carries no filter — the filter cascade returns True
+            # for ``filter is None``, so the scope check cannot live there.
+            if sub.namespace_id is not None and event.namespace_id != sub.namespace_id:
+                continue
+            if not await self._passes_filter_cascade(event, sub.filter):
+                continue
+            matching.append(sub)
+
+        if not matching:
+            return 0
+
+        if self._delivery_sink is None:
+            logger.debug(
+                "{} persistent hook subscription(s) matched {} but no delivery_sink is wired; "
+                "a worker must drain them from storage.",
+                len(matching),
+                key,
+            )
+            return len(matching)
+
+        async def _safe_deliver(sub: PersistentSubscription) -> None:
+            async with self._semaphore:
+                try:
+                    await asyncio.wait_for(
+                        self._delivery_sink(sub, event),
+                        timeout=self._callback_timeout_seconds,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Persistent hook delivery failed for subscription {} on event {}.{}",
+                        sub.id,
+                        key,
+                        event.resource_id,
+                        exc_info=True,
+                    )
+
+        await asyncio.gather(*[_safe_deliver(sub) for sub in matching])
         return len(matching)
 
     # ------------------------------------------------------------------

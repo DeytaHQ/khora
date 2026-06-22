@@ -34,13 +34,16 @@ from .dispatcher import HookDispatcher
 from .embedding_filter import EmbeddingFilterCache, cosine_similarity
 from .llm_evaluator import LLMFilterEvaluator
 from .models import FilterMatch, HookSubscription, SemanticFilter, SemanticHooksConfig
+from .subscription_store import HookSubscriptionStore, PersistentSubscription
 
 __all__ = [
     "EmbeddingFilterCache",
     "FilterMatch",
     "HookDispatcher",
     "HookSubscription",
+    "HookSubscriptionStore",
     "LLMFilterEvaluator",
+    "PersistentSubscription",
     "SemanticFilter",
     "SemanticHooksConfig",
     "cosine_similarity",

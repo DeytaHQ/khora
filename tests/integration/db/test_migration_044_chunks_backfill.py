@@ -93,7 +93,7 @@ pytestmark = pytest.mark.integration
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "src" / "khora" / "db" / "migrations"
 
 _PREV_REVISION = "043_khora_chunks_metadata_backfill"
-_HEAD_REVISION = "048_dream_conflicts_reconcile"
+_HEAD_REVISION = "049_hook_subscriptions"
 
 _TSV_TRIGGER = "khora_chunks_content_tsv_update"
 

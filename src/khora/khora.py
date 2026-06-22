@@ -747,6 +747,32 @@ class Khora:
             except (AttributeError, TypeError):
                 pass  # Mock or non-standard engine — hooks won't fire
 
+        # Wire durable hook subscriptions (#599). When the coordinator
+        # exposes a SQL session factory, give the dispatcher a store and
+        # reload any persisted subscriptions so events delivered after a
+        # restart still find their subscriber. Always attaches the store
+        # post-connect (so a later subscribe_persistent() has somewhere to
+        # write) — no-op on stacks without a SQL backend (e.g.
+        # SurrealDB-unified) and never raises into connect.
+        if storage is not None:
+            try:
+                await self._wire_persistent_hooks(storage)
+            except Exception as exc:  # pragma: no cover - defensive
+                # ADR-001: durable reload is disabled but connect() lives on -
+                # record a Degradation on the dispatcher (when it exists) so
+                # the fallback isn't silent.
+                if hasattr(self, "_hook_dispatcher"):
+                    self._hook_dispatcher._last_persist_degradation = {
+                        "component": "hooks.subscription_store",
+                        "reason": "wire_failed",
+                        "detail": None,
+                        "exception": repr(exc),
+                    }
+                logger.warning(
+                    "Failed to wire persistent hook subscriptions; persistent hooks are disabled.",
+                    exc_info=True,
+                )
+
         # Drain any hook filters that were registered with a description
         # but no precomputed embedding (Issue #576 Phase 1, Item 2). After
         # this, operators who wrote SemanticFilter(description="...") per
@@ -2899,6 +2925,58 @@ class Khora:
         Returns True if found and removed, False otherwise.
         """
         return self._get_hook_dispatcher().unsubscribe(subscription_id)
+
+    async def subscribe_persistent(
+        self,
+        event_type: Any,
+        delivery: dict[str, Any],
+        *,
+        filter: Any = None,
+        namespace_id: UUID | None = None,
+    ) -> UUID:
+        """Register a durable hook subscription (#599).
+
+        Unlike :meth:`subscribe` (an in-process callback that dies with the
+        process), a persistent subscription records its ``delivery`` config
+        (webhook URL / queue identifier) to PostgreSQL so it survives a
+        restart. Requires the durable store wired at ``connect()`` (any SQL
+        backend); raises ``RuntimeError`` on a store-less stack.
+
+        Returns the subscription UUID.
+        """
+        return await self._get_hook_dispatcher().register_persistent(
+            event_type,
+            delivery,
+            filter=filter,
+            namespace_id=namespace_id,
+        )
+
+    async def unsubscribe_persistent(self, subscription_id: UUID) -> bool:
+        """Remove a persistent hook subscription from memory and storage (#599)."""
+        return await self._get_hook_dispatcher().unregister_persistent(subscription_id)
+
+    async def _wire_persistent_hooks(self, storage: Any) -> None:
+        """Attach a durable subscription store to the dispatcher and reload.
+
+        Resolves a SQL session factory from the coordinator (mirrors
+        ``coordinator.transaction()``'s factory resolution). When none is
+        available (no SQL backend), persistent hooks stay disabled.
+        """
+        factory = None
+        for attr in ("_relational", "_vector", "_event_store"):
+            backend = getattr(storage, attr, None)
+            sf = getattr(backend, "_session_factory", None)
+            if sf is not None:
+                factory = sf
+                break
+        if factory is None:
+            return
+
+        from khora.hooks.subscription_store import HookSubscriptionStore
+
+        dispatcher = self._get_hook_dispatcher()
+        dispatcher._subscription_store = HookSubscriptionStore(factory)
+        await dispatcher.load_persistent()
 
     def _get_hook_dispatcher(self) -> Any:
         """Lazy-initialize the hook dispatcher."""
