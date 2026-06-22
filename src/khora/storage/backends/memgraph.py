@@ -585,8 +585,8 @@ class MemgraphBackend(GraphBackendBase):
         # updates the single existing edge in place rather than appending a
         # duplicate, mirroring the Neo4j backend (issue #921).
         query = f"""
-        MATCH (source:Entity {{id: $source_id}})
-        MATCH (target:Entity {{id: $target_id}})
+        MATCH (source:Entity {{id: $source_id, namespace_id: $namespace_id}})
+        MATCH (target:Entity {{id: $target_id, namespace_id: $namespace_id}})
         MERGE (source)-[r:{rel_type} {{namespace_id: $namespace_id}}]->(target)
         ON CREATE SET
             r.id = $id,

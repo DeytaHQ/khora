@@ -1814,6 +1814,10 @@ class Neo4jBackend(GraphBackendBase):
         ent_doc_max = self._entity_source_document_ids_max
         ent_chunk_max = self._entity_source_chunk_ids_max
 
+        # Dedupe set scoped to the full caller batch, not per sub-batch, so
+        # duplicates split across sub-batches are still de-duped (#1329).
+        seen_entity_merge_keys: set[tuple[str, str, str]] = set()
+
         for start in range(0, len(sorted_entities), batch_size):
             batch = sorted_entities[start : start + batch_size]
             rows = [_entity_to_cypher_params(e) for e in batch]
@@ -1996,9 +2000,9 @@ class Neo4jBackend(GraphBackendBase):
             # Also dedupe by MERGE key (namespace_id, name, entity_type): when
             # the caller submits duplicate entities in one batch the MERGE stores
             # a single node, so only the first occurrence of each key is reported
-            # (#1329 - prevents hook over-fire).
+            # (#1329 - prevents hook over-fire). ``seen_entity_merge_keys`` is
+            # declared above the sub-batch loop so it spans all sub-batches.
             seen_input_ids: set[str] = set()
-            seen_entity_merge_keys: set[tuple[str, str, str]] = set()
             for record in records:
                 input_id = record["input_id"]
                 if input_id in seen_input_ids:
@@ -2655,8 +2659,8 @@ RETURN count(r) AS updated
             # straight concatenation; both are clipped against the configured
             # tail length.
             query = f"""
-            MATCH (source:Entity {{id: $source_id}})
-            MATCH (target:Entity {{id: $target_id}})
+            MATCH (source:Entity {{id: $source_id, namespace_id: $namespace_id}})
+            MATCH (target:Entity {{id: $target_id, namespace_id: $namespace_id}})
             OPTIONAL MATCH (source)-[pre_r:{rel_type} {{namespace_id: $namespace_id}}]->(target)
             WITH source, target,
                  CASE WHEN pre_r IS NULL
