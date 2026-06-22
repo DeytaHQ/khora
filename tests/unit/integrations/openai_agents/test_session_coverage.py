@@ -50,7 +50,7 @@ def _make_kb() -> Any:
     kb = AsyncMock(spec=Khora)
     kb.storage = MagicMock()
     kb.remember.side_effect = lambda *_a, **_kw: _RememberResultStub()
-    kb._resolve_namespace.side_effect = lambda ns: ns
+    kb.storage.resolve_namespace = AsyncMock(side_effect=lambda ns: ns)
     return kb
 
 
@@ -274,10 +274,10 @@ async def test_clear_session_continues_when_forget_raises() -> None:
 
 
 async def test_resolved_namespace_is_cached_across_calls() -> None:
-    """``_resolved_namespace`` calls ``Khora._resolve_namespace`` exactly once."""
+    """``_resolved_namespace`` calls ``kb.storage.resolve_namespace`` exactly once."""
     kb = _make_kb()
     row_id = uuid4()
-    kb._resolve_namespace = AsyncMock(return_value=row_id)
+    kb.storage.resolve_namespace = AsyncMock(return_value=row_id)
     session = _make_session(kb)
 
     # Two consecutive empty list_documents calls; both go through _resolved_namespace.
@@ -286,5 +286,5 @@ async def test_resolved_namespace_is_cached_across_calls() -> None:
     await session.get_items()
 
     # Should be exactly one call — the row id is cached on the session.
-    assert kb._resolve_namespace.await_count == 1
+    assert kb.storage.resolve_namespace.await_count == 1
     assert session._row_namespace_id == row_id
