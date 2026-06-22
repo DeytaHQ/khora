@@ -19,6 +19,7 @@ from tenacity import (
 )
 
 from khora.config.llm import DEFAULT_LLM_TIMEOUT_S, get_shared_session, llm_call_timeout
+from khora.core.diagnostics import Degradation
 from khora.extraction.embedders._request_telemetry import (
     parse_rate_limit_headers,
     set_connector_attributes,
@@ -295,6 +296,34 @@ Guidelines:
 - Do NOT repeat relationships that are obvious from the text — focus on non-obvious connections
 
 Return ONLY valid JSON, no other text."""
+
+
+# finish_reason values that mean the model hit its output-token cap and the
+# JSON is truncated. OpenAI/Anthropic use "length"; Gemini/Vertex use
+# "MAX_TOKENS". Compared case-insensitively.
+_TRUNCATION_FINISH_REASONS = frozenset({"length", "max_tokens"})
+
+# "Thinking" models spend a large slice of their output budget on hidden
+# reasoning tokens before emitting JSON. With the default budget (12288) that
+# can leave too little room for the extraction output, guaranteeing truncation.
+# For these prefixes we floor the first-attempt budget so extraction has room.
+_THINKING_MODEL_PREFIXES = (
+    "gemini/gemini-2.5",
+    "gemini-2.5",
+    "vertex_ai/gemini-2.5",
+    "o1",
+    "o3",
+)
+_THINKING_MODEL_MIN_MAX_TOKENS = 32768
+
+
+def _is_truncation_finish_reason(finish_reason: str) -> bool:
+    return str(finish_reason).lower() in _TRUNCATION_FINISH_REASONS
+
+
+def _is_thinking_model(model: str) -> bool:
+    lowered = model.lower()
+    return any(lowered.startswith(p) for p in _THINKING_MODEL_PREFIXES)
 
 
 class LLMEntityExtractor(EntityExtractor):
@@ -885,6 +914,78 @@ class LLMEntityExtractor(EntityExtractor):
             self._abandon_task(task)
             raise
 
+    async def _run_extraction_completion(
+        self,
+        litellm: Any,
+        *,
+        system_prompt: str,
+        extraction_prompt: str,
+        max_tokens: int,
+    ) -> tuple[Any, str, Any]:
+        """Run one single-doc extraction completion and record telemetry.
+
+        Returns ``(content, finish_reason, response)``. Factored out so the
+        truncation handler in ``extract`` can re-run the call with a larger
+        ``max_tokens`` budget without duplicating the telemetry plumbing.
+        """
+        import time as _time
+
+        from khora.telemetry import get_collector, trace_span
+
+        _t0 = _time.perf_counter()
+        with trace_span("khora.extraction.llm_call", model=self._model, call_type="single") as llm_span:
+            set_connector_attributes(llm_span, get_shared_session())
+            response = await self._bounded_acompletion(
+                litellm.acompletion(
+                    model=self._model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": extraction_prompt},
+                    ],
+                    temperature=self._temperature,
+                    max_tokens=max_tokens,
+                    timeout=self._timeout,
+                    num_retries=0,
+                    response_format=self._get_response_format(),
+                    shared_session=get_shared_session(),
+                ),
+                llm_call_timeout(self._timeout),
+            )
+            set_rate_limit_attributes(llm_span, response)
+        _latency = (_time.perf_counter() - _t0) * 1000
+        self._log_rate_limit_headers(response)
+
+        usage = getattr(response, "usage", None)
+        _pt = getattr(usage, "prompt_tokens", 0) or 0
+        _ct = getattr(usage, "completion_tokens", 0) or 0
+        _tt = getattr(usage, "total_tokens", 0) or 0
+        get_collector().record_llm_call(
+            operation="entity_extraction",
+            model=self._model,
+            prompt_tokens=_pt,
+            completion_tokens=_ct,
+            total_tokens=_tt,
+            latency_ms=_latency,
+        )
+
+        from khora.khora import LLMUsage
+        from khora.telemetry.context import record_usage
+
+        record_usage(
+            LLMUsage(
+                operation="entity_extraction",
+                model=self._model,
+                prompt_tokens=_pt,
+                completion_tokens=_ct,
+                total_tokens=_tt,
+                latency_ms=_latency,
+            )
+        )
+
+        content = response.choices[0].message.content
+        finish_reason = getattr(response.choices[0], "finish_reason", "unknown")
+        return content, finish_reason, response
+
     async def extract(
         self,
         text: str,
@@ -951,77 +1052,61 @@ class LLMEntityExtractor(EntityExtractor):
             ):
                 with attempt:
                     async with self._acquire_slot():
-                        import time as _time
+                        # Thinking models (Gemini 2.5, o1/o3) spend much of their
+                        # output budget on hidden reasoning before emitting JSON, so
+                        # floor the first-attempt budget to leave room for output.
+                        first_budget = self._max_tokens
+                        if _is_thinking_model(self._model):
+                            first_budget = max(first_budget, _THINKING_MODEL_MIN_MAX_TOKENS)
 
-                        from khora.telemetry import get_collector, trace_span
-
-                        _t0 = _time.perf_counter()
-                        # Don't cap below the configured max_tokens — JSON structure overhead
-                        # is constant regardless of input size. Let the model use its full budget.
-                        effective_max_tokens = self._max_tokens
-
-                        with trace_span("khora.extraction.llm_call", model=self._model, call_type="single") as llm_span:
-                            set_connector_attributes(llm_span, get_shared_session())
-                            response = await self._bounded_acompletion(
-                                litellm.acompletion(
-                                    model=self._model,
-                                    messages=[
-                                        {"role": "system", "content": system_prompt},
-                                        {"role": "user", "content": extraction_prompt},
-                                    ],
-                                    temperature=self._temperature,
-                                    max_tokens=effective_max_tokens,
-                                    timeout=self._timeout,
-                                    num_retries=0,
-                                    response_format=self._get_response_format(),
-                                    shared_session=get_shared_session(),
-                                ),
-                                llm_call_timeout(self._timeout),
-                            )
-                            set_rate_limit_attributes(llm_span, response)
-                        _latency = (_time.perf_counter() - _t0) * 1000
-                        self._log_rate_limit_headers(response)
-
-                        # Record telemetry
-                        usage = getattr(response, "usage", None)
-                        _pt = getattr(usage, "prompt_tokens", 0) or 0
-                        _ct = getattr(usage, "completion_tokens", 0) or 0
-                        _tt = getattr(usage, "total_tokens", 0) or 0
-                        get_collector().record_llm_call(
-                            operation="entity_extraction",
-                            model=self._model,
-                            prompt_tokens=_pt,
-                            completion_tokens=_ct,
-                            total_tokens=_tt,
-                            latency_ms=_latency,
+                        content, finish_reason, response = await self._run_extraction_completion(
+                            litellm,
+                            system_prompt=system_prompt,
+                            extraction_prompt=extraction_prompt,
+                            max_tokens=first_budget,
                         )
 
-                        from khora.khora import LLMUsage
-                        from khora.telemetry.context import record_usage
-
-                        record_usage(
-                            LLMUsage(
-                                operation="entity_extraction",
-                                model=self._model,
-                                prompt_tokens=_pt,
-                                completion_tokens=_ct,
-                                total_tokens=_tt,
-                                latency_ms=_latency,
+                        # On truncation, retry once with a doubled budget before
+                        # giving up — corpus-/model-agnostic recovery for outputs
+                        # that just needed more room than the configured cap.
+                        if _is_truncation_finish_reason(finish_reason):
+                            retry_budget = first_budget * 2
+                            logger.warning(
+                                "LLM response truncated (finish_reason={}) in extraction. "
+                                "Model: {}. Retrying once with max_tokens={}.",
+                                finish_reason,
+                                getattr(response, "model", self._model),
+                                retry_budget,
                             )
-                        )
+                            content, finish_reason, response = await self._run_extraction_completion(
+                                litellm,
+                                system_prompt=system_prompt,
+                                extraction_prompt=extraction_prompt,
+                                max_tokens=retry_budget,
+                            )
 
-                    content = response.choices[0].message.content
-                    finish_reason = getattr(response.choices[0], "finish_reason", "unknown")
-
-                    # Check for truncated response (hit max_tokens limit)
-                    if finish_reason == "length":
+                    # Persistent truncation after the doubled-budget retry: this is
+                    # not a silent zero-entity success — surface it loudly (ERROR +
+                    # ADR-001 degradation) so the caller can see extraction failed.
+                    if _is_truncation_finish_reason(finish_reason):
                         model_used = getattr(response, "model", self._model)
-                        logger.warning(
-                            f"LLM response truncated (finish_reason=length) in extraction. "
-                            f"Model: {model_used}. Consider increasing max_tokens."
+                        logger.error(
+                            "LLM response still truncated (finish_reason={}) after doubled-budget "
+                            "retry in extraction. Model: {}. Increase max_tokens or shorten input.",
+                            finish_reason,
+                            model_used,
                         )
+                        degradation: Degradation = {
+                            "component": "extraction.llm",
+                            "reason": "truncated_response",
+                            "detail": f"finish_reason={finish_reason}, model={model_used}",
+                        }
                         return ExtractionResult(
-                            metadata={"error": "truncated_response", "finish_reason": finish_reason}
+                            metadata={
+                                "error": "truncated_response",
+                                "finish_reason": finish_reason,
+                                "degradations": [degradation],
+                            }
                         )
 
                     result = self._parse_response(content)
@@ -1990,10 +2075,11 @@ Return ONLY valid JSON, no other text."""
                             for _ in texts
                         ]
 
-                    # Check for truncated response (hit max_tokens limit)
-                    if finish_reason == "length":
+                    # Check for truncated response (hit max_tokens limit). Covers
+                    # OpenAI/Anthropic "length" and Gemini/Vertex "MAX_TOKENS".
+                    if _is_truncation_finish_reason(finish_reason):
                         logger.warning(
-                            f"LLM response truncated (finish_reason=length) in batch extraction. "
+                            f"LLM response truncated (finish_reason={finish_reason}) in batch extraction. "
                             f"Model: {model_used}, batch_size: {len(texts)}. "
                             f"Consider increasing max_tokens or reducing batch size."
                         )
