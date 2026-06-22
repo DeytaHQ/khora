@@ -1289,6 +1289,14 @@ class QuerySettings(BaseSettings):
     graph_weight: float = Field(default=0.3, ge=0.0, le=1.0, description="Weight for graph search in fusion")
     keyword_weight: float = Field(default=0.2, ge=0.0, le=1.0, description="Weight for keyword search in fusion")
 
+    # Independent lexical (BM25 full-text) channel fused alongside vector + graph
+    # via RRF. Default OFF (unchanged). Exposing it here (#1330) makes the
+    # channel operable from public config via KHORA_QUERY_ENABLE_BM25_CHANNEL;
+    # it previously lived only on VectorCypherConfig and was unreachable.
+    enable_bm25_channel: bool = Field(
+        default=False, description="Enable the independent BM25 lexical channel in fusion"
+    )
+
     # Coherence re-rank: a small post-fusion nudge that demotes word-shuffled /
     # disfluent confounders. Applied to [0,1]-normalized fused scores so it acts
     # as a true ~w nudge (#1056). Set to 0.0 to disable

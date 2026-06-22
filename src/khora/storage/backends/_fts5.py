@@ -35,8 +35,18 @@ def escape_fts5_query(query_text: str) -> str:
     """Convert free-form text into a safe FTS5 ``MATCH`` expression.
 
     Tokenises on whitespace, wraps each token in a quoted FTS5 phrase, doubles
-    any embedded ``"``, and joins with spaces (implicit AND). Result preserves
-    bag-of-words BM25 recall semantics while neutralising operator characters.
+    any embedded ``"``, and joins with ``OR``. Result preserves bag-of-words
+    BM25 recall semantics while neutralising operator characters.
+
+    OR (not the implicit-AND space join) is the default so a natural-language
+    query that embeds an exact token still matches the chunk holding that token:
+    ``"What is the status of ticket MER-0001?"`` no longer requires *every* word
+    to co-occur in one chunk (which sank ID-bearing queries to zero rows, issue
+    #1330). The SQLite callers already ``ORDER BY bm25(...)`` so the most
+    relevant chunk still ranks first under OR. This aligns the SQLite FTS5 path
+    with the pgvector backend, which already OR's its terms and ranks by
+    ``ts_rank_cd`` for exactly this reason (see ``storage/temporal/pgvector.py``
+    ``_bm25_search``).
 
     The porter / unicode61 tokenisers strip non-alphanumeric characters at both
     index and query time, so a token like ``"win?"`` matches the indexed token
@@ -47,9 +57,11 @@ def escape_fts5_query(query_text: str) -> str:
     because we don't strip; callers should treat an empty return as "skip the
     FTS query, fall back to vector-only" rather than send empty MATCH).
 
-    Example: ``"What did Curie win?"`` becomes ``"What" "did" "Curie" "win?"``.
-    Embedded quotes are doubled: ``'say "hello"'`` becomes
-    ``"say" \\"\\"\\"hello\\"\\"\\"``. Whitespace-only input returns ``""``.
+    Example: ``"What did Curie win?"`` becomes
+    ``"What" OR "did" OR "Curie" OR "win?"``. Embedded quotes are doubled
+    (so ``'say "hello"'`` yields a phrase like ``"say" OR ...hello... OR
+    "world"`` with the interior ``"`` written as ``""``).
+    Whitespace-only input returns ``""``.
     """
     tokens = _TOKEN_RE.findall(query_text)
     if not tokens:
@@ -62,4 +74,4 @@ def escape_fts5_query(query_text: str) -> str:
             _MAX_TOKENS,
         )
         tokens = tokens[:_MAX_TOKENS]
-    return " ".join('"' + t.replace('"', '""') + '"' for t in tokens)
+    return " OR ".join('"' + t.replace('"', '""') + '"' for t in tokens)

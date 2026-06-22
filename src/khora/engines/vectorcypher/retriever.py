@@ -190,10 +190,13 @@ _BM25_DEGRADED_COUNTER = metric_counter(
     unit="1",
     description=(
         "Issue #1158 (ADR-001). VectorCypher BM25 channel silent fallbacks. "
-        "Incremented when the full-text search raises and the channel returns "
-        "[], dropping the lexical contribution from RRF fusion. The same event "
-        "is also appended to RecallResult.engine_info['degradations']. Labels: "
-        "reason (channel_exception). NO namespace_id label - cardinality rule."
+        "Incremented when the full-text search raises (reason=channel_exception) "
+        "or when a >=2-token keyword query matches 0 rows "
+        "(reason=empty_multitoken_channel, #1330), dropping the lexical "
+        "contribution from RRF fusion. The same event is also appended to "
+        "RecallResult.engine_info['degradations']. Labels: reason "
+        "(channel_exception, empty_multitoken_channel). NO namespace_id label - "
+        "cardinality rule."
     ),
 )
 
@@ -4102,6 +4105,27 @@ class VectorCypherRetriever:
                 span.set_attribute("source", source)
                 if not results:
                     self._warn_bm25_empty_once(namespace_id)
+                    # ADR-001 (issue #1330): a >=2-token keyword query that
+                    # returns 0 BM25 rows silently drops the lexical channel
+                    # from RRF without raising. Now that escape_fts5_query OR's
+                    # its tokens, an empty multi-token channel is the residual
+                    # failure mode worth surfacing. (A single-token / bare-ID
+                    # query that finds nothing is expected, not a degradation.)
+                    # Gate to the unfiltered path: under a deterministic
+                    # ``filter_ast`` an empty result is a legitimate filtered
+                    # miss (the predicate excluded every candidate), not a
+                    # broken lexical channel - flagging it would inflate the
+                    # public degraded_total counter with benign events.
+                    if filter_ast is None and len(query.split()) >= 2:
+                        _BM25_DEGRADED_COUNTER.add(1, attributes={"reason": "empty_multitoken_channel"})
+                        if degradations is not None:
+                            degradations.append(
+                                Degradation(
+                                    component="vectorcypher.bm25",
+                                    reason="empty_multitoken_channel",
+                                    detail="multi-token keyword query matched 0 chunks",
+                                )
+                            )
                 logger.debug(f"BM25 channel returned {len(results)} chunks via {source}")
                 return [
                     (

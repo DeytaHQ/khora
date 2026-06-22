@@ -1137,9 +1137,9 @@
       "unit": "1",
       "owner": "vectorcypher",
       "labels": [
-        {"name": "reason", "values": ["channel_exception"], "_comment": "Low-cardinality enum; extend when adding new BM25 channel fallback paths."}
+        {"name": "reason", "values": ["channel_exception", "empty_multitoken_channel"], "_comment": "Low-cardinality enum; extend when adding new BM25 channel fallback paths. empty_multitoken_channel (#1330): a >=2-token keyword query matched 0 rows, dropping the lexical channel without raising."}
       ],
-      "description": "Issue #1158 (ADR-001). VectorCypher BM25 channel silent fallback - incremented when _bm25_search_chunks catches an exception and returns [], dropping the independent lexical channel from RRF fusion. The same event is also appended to RecallResult.engine_info['degradations']. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
+      "description": "Issue #1158 (ADR-001). VectorCypher BM25 channel silent fallback - incremented when _bm25_search_chunks catches an exception (reason=channel_exception) or when a >=2-token keyword query returns 0 rows (reason=empty_multitoken_channel, #1330), dropping the independent lexical channel from RRF fusion. The same event is also appended to RecallResult.engine_info['degradations']. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
     },
     {
       "name": "khora.vectorcypher.recency_channel.degraded_total",
