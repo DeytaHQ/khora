@@ -985,3 +985,99 @@ class TestDenormFieldsReconciliation:
         await store.connect()
 
         collection.config.add_property.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# search_fulltext
+# ---------------------------------------------------------------------------
+
+
+async def _store_with_bm25(
+    monkeypatch: pytest.MonkeyPatch, objects: list[Any]
+) -> tuple[WeaviateTemporalStore, MagicMock]:
+    """A connected store whose tenant-scoped ``query.bm25`` returns ``objects``."""
+    _weaviate, client = _install_fake_weaviate(monkeypatch)
+    _install_query_filter(monkeypatch)
+
+    collection = _reconcile_noop_collection()
+    collection.tenants.create = AsyncMock()
+    tenant_scoped = MagicMock(name="TenantScopedCollection")
+    tenant_scoped.query.bm25 = AsyncMock(return_value=SimpleNamespace(objects=objects))
+    collection.with_tenant = MagicMock(return_value=tenant_scoped)
+    client.collections.get = MagicMock(return_value=collection)
+
+    store = _build_store("http://localhost:8090")
+    await store.connect()
+    return store, tenant_scoped
+
+
+def _fake_bm25_object(content: str = "hello world", score: float = 0.42) -> Any:
+    """Minimal Weaviate object returned by a BM25 query."""
+    ns_id = uuid4()
+    doc_id = uuid4()
+    return SimpleNamespace(
+        uuid=uuid4(),
+        properties={
+            "content": content,
+            "document_id": str(doc_id),
+            "namespace_id": str(ns_id),
+            "occurred_at": None,
+            "created_at": datetime(2026, 1, 1, tzinfo=UTC).isoformat(),
+            "source_system": None,
+            "author": None,
+            "channel": None,
+            "tags": [],
+            "confidence": 1.0,
+            "metadata_json": "{}",
+        },
+        metadata=SimpleNamespace(score=score, distance=None),
+        vector=None,
+    )
+
+
+@pytest.mark.unit
+class TestSearchFulltextWeaviate:
+    """Unit tests for WeaviateTemporalStore.search_fulltext."""
+
+    def test_search_fulltext_is_overridden(self) -> None:
+        """WeaviateTemporalStore must override search_fulltext (not inherit the []
+        default from TemporalVectorStore)."""
+        from khora.storage.temporal import TemporalVectorStore
+
+        assert WeaviateTemporalStore.search_fulltext is not TemporalVectorStore.search_fulltext
+
+    @pytest.mark.asyncio
+    async def test_empty_query_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        store, tenant_scoped = await _store_with_bm25(monkeypatch, [])
+        result = await store.search_fulltext(uuid4(), "")
+        assert result == []
+        tenant_scoped.query.bm25.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_returns_chunks_with_scores(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        objs = [_fake_bm25_object("foo bar", score=0.9), _fake_bm25_object("baz", score=0.5)]
+        store, tenant_scoped = await _store_with_bm25(monkeypatch, objs)
+
+        ns_id = uuid4()
+        results = await store.search_fulltext(ns_id, "foo", limit=5)
+
+        assert len(results) == 2
+        chunk0, score0 = results[0]
+        assert score0 == pytest.approx(0.9)
+        assert "foo bar" in chunk0.content
+        tenant_scoped.query.bm25.assert_awaited_once()
+        kwargs = tenant_scoped.query.bm25.call_args.kwargs
+        assert kwargs["query"] == "foo"
+        assert kwargs["limit"] == 5
+
+    @pytest.mark.asyncio
+    async def test_passes_created_after_as_filter(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        objs = [_fake_bm25_object()]
+        store, tenant_scoped = await _store_with_bm25(monkeypatch, objs)
+
+        cutoff = datetime(2026, 1, 1, tzinfo=UTC)
+        await store.search_fulltext(uuid4(), "query", created_after=cutoff)
+
+        kwargs = tenant_scoped.query.bm25.call_args.kwargs
+        # A date filter was pushed down
+        assert kwargs["filters"] is not None

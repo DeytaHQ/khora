@@ -43,10 +43,12 @@ from uuid import UUID, uuid4
 from loguru import logger
 from pydantic import SecretStr
 
+from khora.core.models.document import Chunk
 from khora.core.temporal import (
     ChunkTemporalFilter,
     TemporalChunk,
     TemporalSearchResult,
+    temporal_chunk_to_chunk,
 )
 from khora.filter.report import ChannelPlan
 from khora.storage._log_safe import _safe_url_for_log
@@ -696,6 +698,102 @@ class WeaviateTemporalStore(TemporalVectorStore):
             title=props.get("title"),
             source_timestamp=_coerce_datetime(props.get("source_timestamp")),
         )
+
+    async def search_fulltext(
+        self,
+        namespace_id: UUID,
+        query_text: str,
+        *,
+        limit: int = 10,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+        filter_ast: FilterNode | None = None,
+        filter_plan_out: list[ChannelPlan] | None = None,
+    ) -> list[tuple[Chunk, float]]:
+        """BM25 keyword search over the Weaviate ``KhoraChunk`` collection.
+
+        Uses Weaviate's native BM25 query path (``collection.query.bm25``).
+        Applies the same date-push-down + Python post-filter strategy as
+        :meth:`search` so filter semantics are consistent across modes.
+
+        Returns ``(Chunk, score)`` tuples where ``score`` is the BM25
+        relevance score from Weaviate's ``MetadataQuery(score=True)``.
+        """
+        from weaviate.classes.query import Filter, MetadataQuery
+
+        if not query_text or not query_text.strip():
+            return []
+
+        collection = await self._get_collection(namespace_id)
+
+        # Build temporal filter from created_after / created_before
+        weaviate_filter = None
+        date_clauses = []
+        if created_after is not None:
+            date_clauses.append(Filter.by_property("created_at").greater_or_equal(created_after.isoformat()))
+        if created_before is not None:
+            date_clauses.append(Filter.by_property("created_at").less_or_equal(created_before.isoformat()))
+        if date_clauses:
+            weaviate_filter = date_clauses[0]
+            for extra in date_clauses[1:]:
+                weaviate_filter = weaviate_filter & extra
+
+        # Deterministic recall-filter AST: same split strategy as search()
+        post_filter = None
+        plan = ChannelPlan()
+        if filter_ast is not None:
+            from khora.filter import CompileContext
+            from khora.filter.compilers.python import compile_python
+            from khora.filter.compilers.weaviate import compile_weaviate
+            from khora.filter.execute import filter_leaf_keys
+
+            compiled = compile_weaviate(
+                filter_ast,
+                CompileContext(
+                    backend_target=COLLECTION_NAME,
+                    on_unsupported="split",
+                    field_mapping={"occurred_at": "occurred_at", "created_at": "created_at"},
+                ),
+            )
+            if compiled.predicate is not None:
+                weaviate_filter = (
+                    compiled.predicate if weaviate_filter is None else weaviate_filter & compiled.predicate
+                )
+            post_filter = compile_python(
+                filter_ast,
+                CompileContext(backend_target=COLLECTION_NAME, on_unsupported="split"),
+            ).predicate
+            consumed = compiled.consumed_keys
+            plan = ChannelPlan(
+                pushed_keys=consumed,
+                post_filtered_keys=filter_leaf_keys(filter_ast) - consumed,
+                defensive_recheck=bool(filter_ast.children),
+            )
+
+        if filter_plan_out is not None:
+            filter_plan_out.append(plan)
+
+        fetch_limit = limit * _FILTER_OVERFETCH if post_filter is not None else limit
+
+        result = await collection.query.bm25(
+            query=query_text,
+            filters=weaviate_filter,
+            limit=fetch_limit,
+            return_metadata=MetadataQuery(score=True),
+        )
+
+        chunks_with_scores: list[tuple[Any, float]] = []
+        for obj in result.objects:
+            chunk = self._object_to_chunk(obj, namespace_id)
+            if post_filter is not None and not post_filter(chunk):
+                continue
+            score = float(obj.metadata.score) if obj.metadata and obj.metadata.score is not None else 0.0
+            chunks_with_scores.append((temporal_chunk_to_chunk(chunk), score))
+
+        if post_filter is not None:
+            chunks_with_scores = chunks_with_scores[:limit]
+
+        return chunks_with_scores
 
     async def health_check(self) -> dict[str, Any]:
         """Check backend health."""

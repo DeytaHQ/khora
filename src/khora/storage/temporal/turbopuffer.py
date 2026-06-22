@@ -46,10 +46,12 @@ from uuid import UUID, uuid4
 from loguru import logger
 from pydantic import SecretStr
 
+from khora.core.models.document import Chunk
 from khora.core.temporal import (
     ChunkTemporalFilter,
     TemporalChunk,
     TemporalSearchResult,
+    temporal_chunk_to_chunk,
 )
 from khora.filter import RecallFilterUnsupportedError
 from khora.filter.report import ChannelPlan
@@ -435,6 +437,67 @@ class TurbopufferTemporalStore(TemporalVectorStore):
                 )
             )
         return search_results
+
+    async def search_fulltext(
+        self,
+        namespace_id: UUID,
+        query_text: str,
+        *,
+        limit: int = 10,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+        filter_ast: FilterNode | None = None,
+        filter_plan_out: list[ChannelPlan] | None = None,
+    ) -> list[tuple[Chunk, float]]:
+        """BM25 keyword search over the turbopuffer namespace.
+
+        Uses turbopuffer's native BM25 path
+        (``rank_by=("content", "BM25", query_text)``).
+
+        A ``filter_ast`` with real constraints raises
+        :class:`RecallFilterUnsupportedError`, mirroring the ``search()``
+        contract: turbopuffer does not support the deterministic recall-filter
+        AST. An empty / constraint-free filter is a no-op and passes through.
+
+        ``created_after`` / ``created_before`` translate to turbopuffer
+        ``created_at`` range filters using the same grammar as ``search()``.
+        """
+        if filter_ast is not None and filter_ast.children:
+            raise RecallFilterUnsupportedError(
+                "filter_ast",
+                "the turbopuffer backend does not support deterministic recall filters; filter_ast must be None",
+            )
+
+        if filter_plan_out is not None:
+            filter_plan_out.append(ChannelPlan())
+
+        if not query_text or not query_text.strip():
+            return []
+
+        # Build a date-only temporal filter for created_after / created_before
+        date_filter: ChunkTemporalFilter | None = None
+        if created_after is not None or created_before is not None:
+            date_filter = ChunkTemporalFilter(
+                created_after=created_after,
+                created_before=created_before,
+            )
+        tp_filter = _build_turbopuffer_filter(date_filter)
+
+        ns = self._namespace(namespace_id)
+        result = await ns.query(
+            rank_by=("content", "BM25", query_text),
+            top_k=limit,
+            filters=tp_filter,
+            include_attributes=_INCLUDE_ATTRS,
+        )
+        rows = getattr(result, "rows", None) or []
+        chunks_with_scores: list[tuple[Chunk, float]] = []
+        for row in rows:
+            bm25_score = _row_get(row, "$bm25_score")
+            score = float(bm25_score) if bm25_score is not None else 0.0
+            chunk = _row_to_chunk(row, namespace_id)
+            chunks_with_scores.append((temporal_chunk_to_chunk(chunk), score))
+        return chunks_with_scores
 
     # ------------------------------------------------------------------
     # Health
