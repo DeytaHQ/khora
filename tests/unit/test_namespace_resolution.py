@@ -589,6 +589,20 @@ class TestCoordinatorReadMethodsResolveNamespace:
         assert graph.get_entity_relationships.await_args.kwargs["namespace_id"] == row_id
 
     @pytest.mark.asyncio
+    async def test_get_neighborhoods_batch_resolves_and_forwards_row_id(self) -> None:
+        stable_id = uuid4()
+        row_id = uuid4()
+        entity_id = uuid4()
+        graph = MagicMock()
+        graph.get_neighborhoods_batch = AsyncMock(return_value={})
+        coord, rel = self._coord_with_relational(row_id, graph)
+
+        await coord.get_neighborhoods_batch([entity_id], namespace_id=stable_id)
+
+        rel.resolve_namespace.assert_awaited_once_with(stable_id)
+        assert graph.get_neighborhoods_batch.await_args.kwargs["namespace_id"] == row_id
+
+    @pytest.mark.asyncio
     async def test_read_without_relational_backend_is_noop(self) -> None:
         """Graph-only stacks have no namespace table; the id passes through."""
         ns_id = uuid4()

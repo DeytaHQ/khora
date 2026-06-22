@@ -1919,6 +1919,7 @@ class StorageCoordinator:
         """
         if not names:
             return {}
+        namespace_id = await self._resolve_read_namespace(namespace_id)
         if self._vector and hasattr(self._vector, "get_entities_by_names_batch"):
             return await self._vector.get_entities_by_names_batch(namespace_id, names)
         return {}
@@ -2014,6 +2015,7 @@ class StorageCoordinator:
         """
         if not entity_ids:
             return {}
+        namespace_id = await self._resolve_read_namespace(namespace_id)
         if self._graph:
             kwargs: dict[str, Any] = {
                 "namespace_id": namespace_id,
