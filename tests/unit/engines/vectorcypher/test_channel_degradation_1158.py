@@ -206,6 +206,39 @@ async def test_bm25_empty_singletoken_does_not_degrade() -> None:
     assert degradations == []
 
 
+async def test_bm25_empty_multitoken_under_filter_does_not_degrade() -> None:
+    """Under a deterministic filter_ast, a 0-row multitoken result is a
+    legitimate filtered miss (the predicate excluded every candidate), NOT a
+    broken lexical channel. Flagging it would inflate the public counter with
+    benign events (CodeRabbit on PR #1332)."""
+    from khora.filter.ast import FilterNode, FilterOp
+
+    storage = MagicMock()
+    storage.search_fulltext_chunks = AsyncMock(return_value=[])
+    vector_store = MagicMock()
+    # Filtered path goes through the temporal store's search_fulltext, which
+    # honors the predicate and legitimately returns 0 rows.
+    vector_store.search_fulltext = AsyncMock(return_value=[])
+    retriever = VectorCypherRetriever(
+        vector_store=vector_store,
+        neo4j_driver=None,
+        embedder=AsyncMock(),
+        config=RetrieverConfig(),
+        storage=storage,
+    )
+
+    degradations: list[Degradation] = []
+    results = await retriever._bm25_search_chunks(
+        query="status of MER-0001",
+        namespace_id=uuid4(),
+        limit=10,
+        filter_ast=FilterNode(op=FilterOp.AND),
+        degradations=degradations,
+    )
+    assert results == []
+    assert degradations == []
+
+
 # ---------------------------------------------------------------------------
 # Full retrieve() tests (degradation surfaces on the result, recall survives)
 # ---------------------------------------------------------------------------

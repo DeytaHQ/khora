@@ -4111,7 +4111,12 @@ class VectorCypherRetriever:
                     # its tokens, an empty multi-token channel is the residual
                     # failure mode worth surfacing. (A single-token / bare-ID
                     # query that finds nothing is expected, not a degradation.)
-                    if len(query.split()) >= 2:
+                    # Gate to the unfiltered path: under a deterministic
+                    # ``filter_ast`` an empty result is a legitimate filtered
+                    # miss (the predicate excluded every candidate), not a
+                    # broken lexical channel - flagging it would inflate the
+                    # public degraded_total counter with benign events.
+                    if filter_ast is None and len(query.split()) >= 2:
                         _BM25_DEGRADED_COUNTER.add(1, attributes={"reason": "empty_multitoken_channel"})
                         if degradations is not None:
                             degradations.append(
