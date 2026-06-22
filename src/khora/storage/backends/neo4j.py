@@ -1814,6 +1814,10 @@ class Neo4jBackend(GraphBackendBase):
         ent_doc_max = self._entity_source_document_ids_max
         ent_chunk_max = self._entity_source_chunk_ids_max
 
+        # Dedupe set scoped to the full caller batch, not per sub-batch, so
+        # duplicates split across sub-batches are still de-duped (#1329).
+        seen_entity_merge_keys: set[tuple[str, str, str]] = set()
+
         for start in range(0, len(sorted_entities), batch_size):
             batch = sorted_entities[start : start + batch_size]
             rows = [_entity_to_cypher_params(e) for e in batch]
@@ -1993,6 +1997,11 @@ class Neo4jBackend(GraphBackendBase):
             # De-duplicate: MERGE can match multiple nodes if duplicates exist
             # in the DB (no unique constraint on the MERGE key). Keep only the
             # first result per input entity.
+            # Also dedupe by MERGE key (namespace_id, name, entity_type): when
+            # the caller submits duplicate entities in one batch the MERGE stores
+            # a single node, so only the first occurrence of each key is reported
+            # (#1329 - prevents hook over-fire). ``seen_entity_merge_keys`` is
+            # declared above the sub-batch loop so it spans all sub-batches.
             seen_input_ids: set[str] = set()
             for record in records:
                 input_id = record["input_id"]
@@ -2001,6 +2010,10 @@ class Neo4jBackend(GraphBackendBase):
                 seen_input_ids.add(input_id)
                 entity = input_id_to_entity.get(input_id)
                 if entity is not None:
+                    merge_key = (str(entity.namespace_id), entity.name, entity.entity_type)
+                    if merge_key in seen_entity_merge_keys:
+                        continue
+                    seen_entity_merge_keys.add(merge_key)
                     neo4j_id = record["id"]
                     if neo4j_id != input_id:
                         entity.id = UUID(neo4j_id)
@@ -2318,8 +2331,8 @@ RETURN count(r) AS updated
                 # index lookup per row; negligible vs the MERGE itself.
                 query = f"""
                 UNWIND $rows AS row
-                MATCH (source:Entity {{id: row.source_id}})
-                MATCH (target:Entity {{id: row.target_id}})
+                MATCH (source:Entity {{id: row.source_id, namespace_id: row.namespace_id}})
+                MATCH (target:Entity {{id: row.target_id, namespace_id: row.namespace_id}})
                 OPTIONAL MATCH (source)-[pre_r:{rel_type} {{namespace_id: row.namespace_id}}]->(target)
                 WITH row, source, target,
                      pre_r IS NULL AS is_new,
@@ -2534,13 +2547,28 @@ RETURN count(r) AS updated
         # merge - so the semantic-hook dispatch reports the stored id, never the
         # submitted one. Rows whose endpoints failed to MATCH are absent from
         # ``edge_map`` and dropped (not persisted, so not reported).
+        #
+        # Dedupe by MERGE key (namespace_id, source, target, type): when the
+        # caller submits duplicate relationships in one batch the MERGE stores a
+        # single edge, so only the first occurrence of each key is reported
+        # (#1329 Part 2 - prevents hook over-fire).
         results_out: list[tuple[Relationship, bool]] = []
+        seen_merge_keys: set[tuple[str, str, str, str]] = set()
         for rel in relationships:
             mapped = edge_map.get(str(rel.id))
             if mapped is None:
                 continue
             stored_id, is_new = mapped
             rel.id = UUID(stored_id)
+            merge_key = (
+                str(rel.namespace_id),
+                str(rel.source_entity_id),
+                str(rel.target_entity_id),
+                rel.relationship_type,
+            )
+            if merge_key in seen_merge_keys:
+                continue
+            seen_merge_keys.add(merge_key)
             results_out.append((rel, is_new))
         return results_out
 
@@ -2631,8 +2659,8 @@ RETURN count(r) AS updated
             # straight concatenation; both are clipped against the configured
             # tail length.
             query = f"""
-            MATCH (source:Entity {{id: $source_id}})
-            MATCH (target:Entity {{id: $target_id}})
+            MATCH (source:Entity {{id: $source_id, namespace_id: $namespace_id}})
+            MATCH (target:Entity {{id: $target_id, namespace_id: $namespace_id}})
             OPTIONAL MATCH (source)-[pre_r:{rel_type} {{namespace_id: $namespace_id}}]->(target)
             WITH source, target,
                  CASE WHEN pre_r IS NULL
