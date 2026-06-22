@@ -504,6 +504,26 @@ class StorageCoordinator:
             raise RuntimeError("Relational backend not configured")
         return await self._relational.resolve_namespace(namespace_id)
 
+    async def _resolve_read_namespace(self, namespace_id: UUID) -> UUID:
+        """Resolve a stable namespace_id to the row id for a backend read.
+
+        ``memory_namespaces`` carries two UUIDs: ``id`` (the row PK every
+        child FK and the graph ``(:Entity {namespace_id})`` store reference)
+        and ``namespace_id`` (the stable id ``create_namespace`` returns and
+        ``MemoryNamespace`` documents as the external identifier). Public
+        ``StorageCoordinator`` read methods accept either, so resolve to the
+        row id before forwarding to a backend; otherwise a stable id matches
+        zero rows and the read silently returns empty.
+
+        Idempotent on row ids (``resolve_namespace`` matches on
+        ``namespace_id`` OR ``id``). No-op when no relational backend is
+        configured (graph- or vector-only stacks have no namespace table to
+        resolve against), preserving the pre-resolution behavior there.
+        """
+        if not self._relational:
+            return namespace_id
+        return await self._relational.resolve_namespace(namespace_id)
+
     async def create_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
         """Create a new memory namespace."""
         if not self._relational:
@@ -1257,6 +1277,7 @@ class StorageCoordinator:
         Falls back to the vector backend only when no graph backend exists
         (PostgreSQL-only chronicle stacks).
         """
+        namespace_id = await self._resolve_read_namespace(namespace_id)
         graph_impl = getattr(self._graph, "count_entities", None) if self._graph else None
         if graph_impl is not None:
             return await graph_impl(namespace_id)
@@ -1273,6 +1294,7 @@ class StorageCoordinator:
         exists (PostgreSQL-only chronicle stacks, #1066) so the count matches
         what ``create_relationships_batch`` persisted there.
         """
+        namespace_id = await self._resolve_read_namespace(namespace_id)
         if self._graph:
             return await self._graph.count_relationships(namespace_id)
         vector_impl = getattr(self._vector, "count_relationships", None) if self._vector else None
@@ -1334,6 +1356,7 @@ class StorageCoordinator:
         ``namespace_id`` is required to prevent cross-tenant IDOR — the graph
         backend's underlying ``get_entity`` only filters by ID.
         """
+        namespace_id = await self._resolve_read_namespace(namespace_id)
         if self._graph:
             # Backend now filters at the Cypher/SQL layer (IDOR family). Keep the
             # post-fetch check as defense-in-depth in case a backend's filter
@@ -1346,6 +1369,7 @@ class StorageCoordinator:
 
     async def get_entity_by_name(self, namespace_id: UUID, name: str, entity_type: str) -> Entity | None:
         """Get an entity by name and type."""
+        namespace_id = await self._resolve_read_namespace(namespace_id)
         if self._graph:
             return await self._graph.get_entity_by_name(namespace_id, name, entity_type)
         return None
@@ -1417,6 +1441,7 @@ class StorageCoordinator:
         the vector backend, which owns the entities table on PostgreSQL-only
         stacks (e.g. chronicle engine without Neo4j).
         """
+        namespace_id = await self._resolve_read_namespace(namespace_id)
         if self._graph:
             return await self._graph.list_entities(namespace_id, entity_type=entity_type, limit=limit, offset=offset)
         if self._vector and hasattr(self._vector, "list_entities"):
@@ -1465,6 +1490,7 @@ class StorageCoordinator:
         """Search for similar entities."""
         if not self._vector:
             raise RuntimeError("Vector backend not configured")
+        namespace_id = await self._resolve_read_namespace(namespace_id)
         return await self._vector.search_similar_entities(
             namespace_id,
             query_embedding,
@@ -1662,6 +1688,7 @@ class StorageCoordinator:
         Returns ``None`` when the relationship belongs to a different
         namespace. ``namespace_id`` is required to prevent cross-tenant IDOR.
         """
+        namespace_id = await self._resolve_read_namespace(namespace_id)
         if self._graph:
             rel = await self._graph.get_relationship(relationship_id, namespace_id=namespace_id)
             if rel is None or rel.namespace_id != namespace_id:
@@ -1690,6 +1717,7 @@ class StorageCoordinator:
         namespace. Edges that cross into other namespaces are excluded
         (IDOR family).
         """
+        namespace_id = await self._resolve_read_namespace(namespace_id)
         if self._graph:
             return await self._graph.get_entity_relationships(
                 entity_id,
@@ -1715,6 +1743,7 @@ class StorageCoordinator:
         receive an empty list (chronicle on PG-only does not currently write
         the relationships table).
         """
+        namespace_id = await self._resolve_read_namespace(namespace_id)
         if self._graph:
             return await self._graph.list_relationships(
                 namespace_id, relationship_type=relationship_type, limit=limit, offset=offset
@@ -1742,6 +1771,7 @@ class StorageCoordinator:
         community_summary mirror (#1276); a stack without a graph backend (or
         without materialized communities) returns an empty list.
         """
+        namespace_id = await self._resolve_read_namespace(namespace_id)
         if self._graph and hasattr(self._graph, "get_communities"):
             return await self._graph.get_communities(namespace_id, limit=limit, offset=offset)
         return []
@@ -1757,6 +1787,7 @@ class StorageCoordinator:
         The entity-anchored leg of the community recall reader (#1276): map a
         recall hit's entity set to the community summaries they belong to.
         """
+        namespace_id = await self._resolve_read_namespace(namespace_id)
         if self._graph and hasattr(self._graph, "get_entity_communities"):
             return await self._graph.get_entity_communities(entity_ids, namespace_id=namespace_id)
         return []
@@ -1777,6 +1808,7 @@ class StorageCoordinator:
         Returns ``None`` when the episode belongs to a different namespace.
         ``namespace_id`` is required to prevent cross-tenant IDOR.
         """
+        namespace_id = await self._resolve_read_namespace(namespace_id)
         if self._graph:
             ep = await self._graph.get_episode(episode_id, namespace_id=namespace_id)
             if ep is None or ep.namespace_id != namespace_id:
@@ -1793,6 +1825,7 @@ class StorageCoordinator:
         limit: int = 100,
     ) -> list[Episode]:
         """List episodes in a time range."""
+        namespace_id = await self._resolve_read_namespace(namespace_id)
         if self._graph:
             return await self._graph.list_episodes(namespace_id, start_time=start_time, end_time=end_time, limit=limit)
         return []
@@ -1811,6 +1844,7 @@ class StorageCoordinator:
         relationship_types: list[str] | None = None,
     ) -> list[list[dict[str, Any]]]:
         """Find paths between two entities."""
+        namespace_id = await self._resolve_read_namespace(namespace_id)
         if self._graph:
             return await self._graph.find_paths(
                 source_entity_id,
@@ -1836,6 +1870,7 @@ class StorageCoordinator:
         belongs to a different namespace. Traversal never crosses namespace
         boundaries (IDOR family).
         """
+        namespace_id = await self._resolve_read_namespace(namespace_id)
         if self._graph:
             return await self._graph.get_neighborhood(
                 entity_id,
@@ -1865,6 +1900,7 @@ class StorageCoordinator:
         """
         if not entity_ids:
             return {}
+        namespace_id = await self._resolve_read_namespace(namespace_id)
         if self._graph:
             return await self._graph.get_entities_batch(entity_ids, namespace_id=namespace_id)
         # Fallback to pgvector for engines without graph backend (e.g., Chronicle)
@@ -1883,6 +1919,7 @@ class StorageCoordinator:
         """
         if not names:
             return {}
+        namespace_id = await self._resolve_read_namespace(namespace_id)
         if self._vector and hasattr(self._vector, "get_entities_by_names_batch"):
             return await self._vector.get_entities_by_names_batch(namespace_id, names)
         return {}
@@ -1978,6 +2015,7 @@ class StorageCoordinator:
         """
         if not entity_ids:
             return {}
+        namespace_id = await self._resolve_read_namespace(namespace_id)
         if self._graph:
             kwargs: dict[str, Any] = {
                 "namespace_id": namespace_id,

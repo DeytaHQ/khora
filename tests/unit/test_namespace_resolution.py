@@ -6,7 +6,7 @@ Tests (schema/model changes) and (resolution logic).
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -498,3 +498,118 @@ class TestPublicEntryPointsResolveNamespace:
             await sync_source(ns_id, "test-source", storage)
 
         storage.resolve_namespace.assert_awaited_once_with(ns_id)
+
+
+# ---------------------------------------------------------------------------
+# Coordinator read methods resolve stable -> row id internally
+# ---------------------------------------------------------------------------
+
+
+class TestCoordinatorReadMethodsResolveNamespace:
+    """The public read methods accept the stable namespace_id.
+
+    ``kb.storage`` is a public property and ``MemoryNamespace`` documents the
+    stable ``namespace_id`` as the external identifier. Child rows and the
+    graph store key on the row ``id``, so the coordinator must resolve
+    stable -> row at the top of every read method that forwards the id to a
+    backend; otherwise a stable id matches zero rows and the read silently
+    returns empty.
+    """
+
+    def _coord_with_relational(self, row_id: UUID, graph: MagicMock):
+        rel = MagicMock()
+        rel.resolve_namespace = AsyncMock(return_value=row_id)
+        return StorageCoordinator(relational=rel, graph=graph), rel
+
+    @pytest.mark.asyncio
+    async def test_list_entities_resolves_and_forwards_row_id(self) -> None:
+        stable_id = uuid4()
+        row_id = uuid4()
+        graph = MagicMock()
+        graph.list_entities = AsyncMock(return_value=[])
+        coord, rel = self._coord_with_relational(row_id, graph)
+
+        await coord.list_entities(stable_id)
+
+        rel.resolve_namespace.assert_awaited_once_with(stable_id)
+        # The backend is queried with the resolved row id, never the stable id.
+        assert graph.list_entities.await_args.args[0] == row_id
+
+    @pytest.mark.asyncio
+    async def test_list_relationships_resolves_and_forwards_row_id(self) -> None:
+        stable_id = uuid4()
+        row_id = uuid4()
+        graph = MagicMock()
+        graph.list_relationships = AsyncMock(return_value=[])
+        coord, rel = self._coord_with_relational(row_id, graph)
+
+        await coord.list_relationships(stable_id)
+
+        rel.resolve_namespace.assert_awaited_once_with(stable_id)
+        assert graph.list_relationships.await_args.args[0] == row_id
+
+    @pytest.mark.asyncio
+    async def test_count_entities_resolves_and_forwards_row_id(self) -> None:
+        stable_id = uuid4()
+        row_id = uuid4()
+        graph = MagicMock()
+        graph.count_entities = AsyncMock(return_value=0)
+        coord, rel = self._coord_with_relational(row_id, graph)
+
+        await coord.count_entities(stable_id)
+
+        rel.resolve_namespace.assert_awaited_once_with(stable_id)
+        graph.count_entities.assert_awaited_once_with(row_id)
+
+    @pytest.mark.asyncio
+    async def test_count_relationships_resolves_and_forwards_row_id(self) -> None:
+        stable_id = uuid4()
+        row_id = uuid4()
+        graph = MagicMock()
+        graph.count_relationships = AsyncMock(return_value=0)
+        coord, rel = self._coord_with_relational(row_id, graph)
+
+        await coord.count_relationships(stable_id)
+
+        rel.resolve_namespace.assert_awaited_once_with(stable_id)
+        graph.count_relationships.assert_awaited_once_with(row_id)
+
+    @pytest.mark.asyncio
+    async def test_get_entity_relationships_resolves_and_forwards_row_id(self) -> None:
+        stable_id = uuid4()
+        row_id = uuid4()
+        entity_id = uuid4()
+        graph = MagicMock()
+        graph.get_entity_relationships = AsyncMock(return_value=[])
+        coord, rel = self._coord_with_relational(row_id, graph)
+
+        await coord.get_entity_relationships(entity_id, namespace_id=stable_id)
+
+        rel.resolve_namespace.assert_awaited_once_with(stable_id)
+        assert graph.get_entity_relationships.await_args.kwargs["namespace_id"] == row_id
+
+    @pytest.mark.asyncio
+    async def test_get_neighborhoods_batch_resolves_and_forwards_row_id(self) -> None:
+        stable_id = uuid4()
+        row_id = uuid4()
+        entity_id = uuid4()
+        graph = MagicMock()
+        graph.get_neighborhoods_batch = AsyncMock(return_value={})
+        coord, rel = self._coord_with_relational(row_id, graph)
+
+        await coord.get_neighborhoods_batch([entity_id], namespace_id=stable_id)
+
+        rel.resolve_namespace.assert_awaited_once_with(stable_id)
+        assert graph.get_neighborhoods_batch.await_args.kwargs["namespace_id"] == row_id
+
+    @pytest.mark.asyncio
+    async def test_read_without_relational_backend_is_noop(self) -> None:
+        """Graph-only stacks have no namespace table; the id passes through."""
+        ns_id = uuid4()
+        graph = MagicMock()
+        graph.list_entities = AsyncMock(return_value=[])
+        coord = StorageCoordinator(graph=graph)
+
+        await coord.list_entities(ns_id)
+
+        assert graph.list_entities.await_args.args[0] == ns_id

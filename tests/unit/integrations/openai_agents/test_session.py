@@ -49,10 +49,9 @@ def _make_kb() -> Any:
     # remember() is awaited; default return = a fresh RememberResult stub.
     kb.remember.side_effect = lambda *_a, **_kw: _RememberResultStub()
     # KhoraSession resolves the public namespace UUID to a row-level UUID
-    # via Khora._resolve_namespace. AsyncMock(spec=Khora) treats this as
-    # an async method; default it to identity so tests don't need to
-    # wire two distinct UUIDs.
-    kb._resolve_namespace.side_effect = lambda ns: ns
+    # via the public kb.storage.resolve_namespace. Default it to identity
+    # so tests don't need to wire two distinct UUIDs.
+    kb.storage.resolve_namespace = AsyncMock(side_effect=lambda ns: ns)
     return kb
 
 

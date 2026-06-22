@@ -246,13 +246,15 @@ class KhoraSession:
     async def _resolved_namespace(self) -> UUID:
         """Return the row-level namespace id (resolved once, cached).
 
-        ``kb.storage.*`` expects the row id, not the public
-        ``namespace_id``. We resolve through ``Khora._resolve_namespace``
-        (the same path ``kb.remember`` / ``kb.recall`` use) on first
-        access and cache for the lifetime of the session.
+        Document-level ``kb.storage.*`` reads (``list_documents`` /
+        ``get_document_by_external_id``) expect the row id, not the public
+        ``namespace_id``. We resolve through the public
+        ``kb.storage.resolve_namespace`` (idempotent on row ids) on first
+        access and cache for the lifetime of the session. ``namespace_id``
+        is validated as a ``UUID`` in ``__init__``.
         """
         if self._row_namespace_id is None:
-            self._row_namespace_id = await self.kb._resolve_namespace(self.namespace_id)
+            self._row_namespace_id = await self.kb.storage.resolve_namespace(self.namespace_id)
         return self._row_namespace_id
 
     async def _load_session_documents(self) -> list[tuple[int, Any]]:
