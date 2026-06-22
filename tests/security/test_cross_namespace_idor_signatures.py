@@ -270,3 +270,8 @@ def test_backend_registry_not_empty() -> None:
     names = {cls.__name__ for cls, _ in _ALL_BACKENDS}
     assert "PgVectorBackend" in names
     assert "PostgreSQLBackend" in names
+    # The legacy embedded ``sqlite`` backend ships with the base extras too
+    # (aiosqlite only, no lancedb); assert it so the IDOR coverage added for
+    # it can't silently disappear if its import ever starts failing.
+    assert "SQLiteRelationalBackend" in names
+    assert "SQLiteVectorBackend" in names
