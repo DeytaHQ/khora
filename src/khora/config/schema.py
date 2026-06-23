@@ -252,6 +252,20 @@ _ENV_ALIAS_PAIRS: tuple[tuple[str, str], ...] = (
     ("KHORA_STORAGE_SQLITE_LANCE_IVF_PARTITIONS", "KHORA_STORAGE__SQLITE_LANCE__IVF_PARTITIONS"),
     ("KHORA_STORAGE_SQLITE_LANCE_HNSW_M", "KHORA_STORAGE__SQLITE_LANCE__HNSW_M"),
     ("KHORA_STORAGE_SQLITE_LANCE_RETRAIN_FACTOR", "KHORA_STORAGE__SQLITE_LANCE__RETRAIN_FACTOR"),
+    # storage.weaviate
+    ("KHORA_STORAGE_WEAVIATE_URL", "KHORA_STORAGE__WEAVIATE__URL"),
+    ("KHORA_STORAGE_WEAVIATE_CLUSTER_URL", "KHORA_STORAGE__WEAVIATE__CLUSTER_URL"),
+    ("KHORA_STORAGE_WEAVIATE_API_KEY", "KHORA_STORAGE__WEAVIATE__API_KEY"),
+    ("KHORA_STORAGE_WEAVIATE_GRPC_PORT", "KHORA_STORAGE__WEAVIATE__GRPC_PORT"),
+    ("KHORA_STORAGE_WEAVIATE_HTTP_SECURE", "KHORA_STORAGE__WEAVIATE__HTTP_SECURE"),
+    ("KHORA_STORAGE_WEAVIATE_GRPC_SECURE", "KHORA_STORAGE__WEAVIATE__GRPC_SECURE"),
+    ("KHORA_STORAGE_WEAVIATE_SKIP_INIT_CHECKS", "KHORA_STORAGE__WEAVIATE__SKIP_INIT_CHECKS"),
+    # storage.turbopuffer
+    ("KHORA_STORAGE_TURBOPUFFER_API_KEY", "KHORA_STORAGE__TURBOPUFFER__API_KEY"),
+    ("KHORA_STORAGE_TURBOPUFFER_REGION", "KHORA_STORAGE__TURBOPUFFER__REGION"),
+    ("KHORA_STORAGE_TURBOPUFFER_BASE_URL", "KHORA_STORAGE__TURBOPUFFER__BASE_URL"),
+    ("KHORA_STORAGE_TURBOPUFFER_NAMESPACE_PREFIX", "KHORA_STORAGE__TURBOPUFFER__NAMESPACE_PREFIX"),
+    ("KHORA_STORAGE_TURBOPUFFER_ANN_DISTANCE_THRESHOLD", "KHORA_STORAGE__TURBOPUFFER__ANN_DISTANCE_THRESHOLD"),
 )
 
 
@@ -959,6 +973,140 @@ class SQLiteVectorConfig(BaseModel):
     )
 
 
+class WeaviateConfig(BaseModel):
+    """Weaviate temporal-store backend configuration.
+
+    Independent from the frozen-dataclass ``WeaviateBackendConfig`` in
+    ``khora.storage.temporal.weaviate`` (which pulls the optional weaviate
+    dep). The factory translates this into that backend config, unwrapping
+    the ``SecretStr`` URL fields at the construction boundary.
+
+    Set ``url`` for self-hosted Weaviate or ``cluster_url`` + ``api_key``
+    for Weaviate Cloud.
+    """
+
+    model_config = {"extra": "forbid", "populate_by_name": True}
+
+    url: SecretStr | None = Field(
+        default=None,
+        description="Self-hosted Weaviate HTTP endpoint (e.g. http://localhost:8090)",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_WEAVIATE_URL",
+            "KHORA_STORAGE__WEAVIATE__URL",
+        ),
+    )
+    cluster_url: SecretStr | None = Field(
+        default=None,
+        description="Weaviate Cloud cluster URL (e.g. https://my-cluster.weaviate.network)",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_WEAVIATE_CLUSTER_URL",
+            "KHORA_STORAGE__WEAVIATE__CLUSTER_URL",
+        ),
+    )
+    api_key: SecretStr | None = Field(
+        default=None,
+        description="Weaviate API key (required for cluster_url / Weaviate Cloud)",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_WEAVIATE_API_KEY",
+            "KHORA_STORAGE__WEAVIATE__API_KEY",
+        ),
+    )
+    grpc_port: int = Field(
+        default=50051,
+        description="gRPC port (self-hosted / custom only)",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_WEAVIATE_GRPC_PORT",
+            "KHORA_STORAGE__WEAVIATE__GRPC_PORT",
+        ),
+    )
+    http_secure: bool = Field(
+        default=False,
+        description="Use TLS for the HTTP channel (self-hosted only)",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_WEAVIATE_HTTP_SECURE",
+            "KHORA_STORAGE__WEAVIATE__HTTP_SECURE",
+        ),
+    )
+    grpc_secure: bool = Field(
+        default=False,
+        description="Use TLS for the gRPC channel (self-hosted only)",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_WEAVIATE_GRPC_SECURE",
+            "KHORA_STORAGE__WEAVIATE__GRPC_SECURE",
+        ),
+    )
+    skip_init_checks: bool = Field(
+        default=False,
+        description="Skip the client startup-readiness probe (slow-link clusters only)",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_WEAVIATE_SKIP_INIT_CHECKS",
+            "KHORA_STORAGE__WEAVIATE__SKIP_INIT_CHECKS",
+        ),
+    )
+    additional_headers: dict[str, str] | None = Field(
+        default=None,
+        description="Custom headers sent with every Weaviate request (e.g. forwarding vendor "
+        "credentials to Weaviate modules). Rarely needed. Code-settable only — not env-configurable.",
+    )
+
+
+class TurbopufferConfig(BaseModel):
+    """Turbopuffer temporal-store backend configuration.
+
+    Independent from the frozen-dataclass ``TurbopufferBackendConfig`` in
+    ``khora.storage.temporal.turbopuffer`` (which pulls the optional
+    turbopuffer dep). The factory translates this into that backend config,
+    unwrapping the ``SecretStr`` fields at the construction boundary.
+
+    ``api_key`` defaults to ``None`` so a bare ``TurbopufferConfig()`` does
+    not raise at construction; the factory raises a clear error if it is
+    missing at use time.
+    """
+
+    model_config = {"extra": "forbid", "populate_by_name": True}
+
+    api_key: SecretStr | None = Field(
+        default=None,
+        description="Turbopuffer API key (required at use time)",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_TURBOPUFFER_API_KEY",
+            "KHORA_STORAGE__TURBOPUFFER__API_KEY",
+        ),
+    )
+    region: str = Field(
+        default="gcp-us-central1",
+        description="Turbopuffer region slug (see https://turbopuffer.com/docs/regions)",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_TURBOPUFFER_REGION",
+            "KHORA_STORAGE__TURBOPUFFER__REGION",
+        ),
+    )
+    base_url: SecretStr | None = Field(
+        default=None,
+        description="Override the default API endpoint (mocking / self-routed proxies)",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_TURBOPUFFER_BASE_URL",
+            "KHORA_STORAGE__TURBOPUFFER__BASE_URL",
+        ),
+    )
+    namespace_prefix: str = Field(
+        default="khora_",
+        description="Prefix prepended to every turbopuffer namespace name",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_TURBOPUFFER_NAMESPACE_PREFIX",
+            "KHORA_STORAGE__TURBOPUFFER__NAMESPACE_PREFIX",
+        ),
+    )
+    ann_distance_threshold: float | None = Field(
+        default=None,
+        description="Max cosine distance below which a search result is kept (None disables)",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_TURBOPUFFER_ANN_DISTANCE_THRESHOLD",
+            "KHORA_STORAGE__TURBOPUFFER__ANN_DISTANCE_THRESHOLD",
+        ),
+    )
+
+
 def _vector_discriminator(v: Any) -> str:
     if isinstance(v, dict):
         return v.get("backend", "pgvector")
@@ -1006,6 +1154,12 @@ class StorageSettings(BaseSettings):
     sqlite_lance: SQLiteLanceConfig | None = Field(
         default=None,
         description="SQLite + LanceDB unified backend configuration (used when backend='sqlite_lance')",
+    )
+
+    # Temporal-store backends with no unified-backend role
+    weaviate: WeaviateConfig | None = Field(default=None, description="Weaviate temporal-store backend configuration.")
+    turbopuffer: TurbopufferConfig | None = Field(
+        default=None, description="Turbopuffer temporal-store backend configuration."
     )
 
     # PostgreSQL (relational)

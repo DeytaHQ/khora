@@ -39,7 +39,6 @@ def _build_engine_with_stubs() -> tuple[SkeletonConstructionEngine, AsyncMock, A
     engine = SkeletonConstructionEngine.__new__(SkeletonConstructionEngine)
     engine._config = cfg
     engine._backend_type = "pgvector"
-    engine._weaviate_url = None
     engine._storage_config = MagicMock()
     engine._connected = True
 

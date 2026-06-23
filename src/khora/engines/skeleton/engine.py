@@ -64,8 +64,9 @@ class SkeletonConstructionEngine:
         engine = SkeletonConstructionEngine(config)
         await engine.connect()
 
-        # Weaviate backend
-        engine = SkeletonConstructionEngine(config, backend="weaviate", weaviate_url="http://localhost:8080")
+        # Weaviate backend (configure via env or config.storage.weaviate first)
+        #   export KHORA_STORAGE_WEAVIATE_URL=http://localhost:8080
+        engine = SkeletonConstructionEngine(config, backend="weaviate")
         await engine.connect()
     """
 
@@ -85,8 +86,6 @@ class SkeletonConstructionEngine:
         *,
         storage_config: StorageConfig | None = None,
         backend: str = "pgvector",
-        weaviate_url: str | None = None,
-        turbopuffer_config: str | Any | None = None,
     ) -> None:
         """Initialize the Skeleton Construction engine.
 
@@ -94,11 +93,9 @@ class SkeletonConstructionEngine:
             config: KhoraConfig instance
             storage_config: Storage configuration (deprecated, derived from config)
             backend: Backend type ("pgvector", "weaviate", "turbopuffer",
-                "surrealdb", or "sqlite_lance")
-            weaviate_url: Weaviate URL or ``WeaviateBackendConfig`` (required
-                for weaviate backend).
-            turbopuffer_config: API-key string or ``TurbopufferBackendConfig``
-                (required for turbopuffer backend).
+                "surrealdb", or "sqlite_lance"). The ``weaviate`` and
+                ``turbopuffer`` backends read their connection details from
+                ``config.storage.weaviate`` / ``config.storage.turbopuffer``.
         """
         self._config = config
         # Auto-detect unified backends from config when not explicitly set
@@ -107,8 +104,6 @@ class SkeletonConstructionEngine:
         elif backend == "pgvector" and config.storage.backend == "sqlite_lance":
             backend = "sqlite_lance"
         self._backend_type = backend
-        self._weaviate_url = weaviate_url
-        self._turbopuffer_config = turbopuffer_config
 
         # Build storage config — skip graph backend (skeleton is vector + BM25 only)
         self._storage_config = storage_config or build_storage_config(config, skip_graph=True)
@@ -133,12 +128,7 @@ class SkeletonConstructionEngine:
         # per-backend shared resource (PG engine / EmbeddedStorageHandle /
         # SurrealDBConnection) so the store reuses existing connections, and
         # returns an already-connected store.
-        self._temporal_store = await self._storage.temporal_store(
-            self._backend_type,
-            self._config,
-            weaviate_url=self._weaviate_url,
-            turbopuffer_config=self._turbopuffer_config,
-        )
+        self._temporal_store = await self._storage.temporal_store(self._backend_type, self._config)
 
         # Create embedder
         llm_config = LiteLLMConfig(

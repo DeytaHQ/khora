@@ -271,23 +271,26 @@ class TestCreateTemporalStore:
         assert isinstance(store, PgVectorTemporalStore)
 
     def test_create_weaviate_store(self):
-        """Test creating weaviate store."""
+        """Test creating weaviate store from config.storage.weaviate."""
+        from khora.config.schema import WeaviateConfig
         from khora.storage.temporal import create_temporal_store
         from khora.storage.temporal.weaviate import WeaviateTemporalStore
 
         config = MagicMock()
         config.llm.embedding_dimension = 1536
+        config.storage.weaviate = WeaviateConfig(url="http://localhost:8080")
 
-        store = create_temporal_store("weaviate", config, weaviate_url="http://localhost:8080")
+        store = create_temporal_store("weaviate", config)
         assert isinstance(store, WeaviateTemporalStore)
 
-    def test_create_weaviate_store_requires_url(self):
-        """Test that weaviate store requires URL."""
+    def test_create_weaviate_store_requires_config(self):
+        """Test that weaviate store requires storage.weaviate config."""
         from khora.storage.temporal import create_temporal_store
 
         config = MagicMock()
+        config.storage.weaviate = None
 
-        with pytest.raises(ValueError, match="weaviate_url is required"):
+        with pytest.raises(ValueError, match="requires storage.weaviate config"):
             create_temporal_store("weaviate", config)
 
     def test_create_unknown_backend_raises(self):

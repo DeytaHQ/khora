@@ -281,44 +281,47 @@ CREATE INDEX idx_chunks_content_tsv ON khora_chunks USING GIN (content_tsv);
 
 ### Weaviate (Advanced)
 
-For horizontal scaling and native multi-tenancy:
+For horizontal scaling and native multi-tenancy. The Weaviate connection
+is config-driven — set it via `config.storage.weaviate` or the
+`KHORA_STORAGE_WEAVIATE_*` env vars, then construct the engine with just
+the `backend` kwarg:
 
 ```python
+from khora.config.schema import WeaviateConfig
+
 # Self-hosted (compose.yaml `weaviate` profile)
-engine = SkeletonConstructionEngine(
-    config,
-    backend="weaviate",
-    weaviate_url="http://localhost:8090",
-)
+config.storage.weaviate = WeaviateConfig(url="http://localhost:8090")
+engine = SkeletonConstructionEngine(config, backend="weaviate")
 ```
 
-**Auth and Weaviate Cloud** (issue #783). The
-backend accepts a `WeaviateBackendConfig` in place of the URL string
-for cloud, authenticated, or custom-port deployments:
+Equivalently, set `KHORA_STORAGE_WEAVIATE_URL=http://localhost:8090` in
+the environment before loading `config`.
+
+**Auth and Weaviate Cloud** (issue #783). Populate the same
+`WeaviateConfig` for cloud, authenticated, or custom-port deployments:
 
 ```python
-from khora.storage.temporal.weaviate import WeaviateBackendConfig
+from khora.config.schema import WeaviateConfig
 
 # Weaviate Cloud
-cloud_config = WeaviateBackendConfig(
+config.storage.weaviate = WeaviateConfig(
     cluster_url="https://my-cluster.weaviate.network",
-    api_key="...",  # SecretStr also accepted
+    api_key="...",  # SecretStr
 )
-engine = SkeletonConstructionEngine(config, backend="weaviate", weaviate_url=cloud_config)
+engine = SkeletonConstructionEngine(config, backend="weaviate")
 
 # Self-hosted with API-key auth + non-default gRPC port
-local_auth = WeaviateBackendConfig(
+config.storage.weaviate = WeaviateConfig(
     url="http://localhost:8090",
     api_key="local-key",
     grpc_port=50061,            # compose.yaml offset
 )
-engine = SkeletonConstructionEngine(config, backend="weaviate", weaviate_url=local_auth)
+engine = SkeletonConstructionEngine(config, backend="weaviate")
 ```
 
 `url` and `cluster_url` are mutually exclusive; `cluster_url` requires
-`api_key`. The `weaviate_url` constructor argument keeps the legacy
-string-only contract for back-compat (wraps into a default
-`WeaviateBackendConfig(url=...)`).
+`api_key`. Both URL fields are `SecretStr` on `WeaviateConfig`; the
+factory unwraps them at the backend-construction boundary.
 
 **Async client.** The backend uses `weaviate.use_async_with_local /
 use_async_with_custom / use_async_with_weaviate_cloud` under the hood
@@ -345,21 +348,19 @@ Pitched at scale tiers above what pgvector / self-hosted Weaviate
 make economical (2.5T vectors in production at Cursor, Notion):
 
 ```python
-from khora.storage.temporal.turbopuffer import TurbopufferBackendConfig
+from khora.config.schema import TurbopufferConfig
 
-cfg = TurbopufferBackendConfig(
-    api_key="tpuf_...",            # str or SecretStr
+config.storage.turbopuffer = TurbopufferConfig(
+    api_key="tpuf_...",            # SecretStr
     region="gcp-us-central1",      # see https://turbopuffer.com/docs/regions
 )
-engine = SkeletonConstructionEngine(
-    config,
-    backend="turbopuffer",
-    turbopuffer_config=cfg,
-)
+engine = SkeletonConstructionEngine(config, backend="turbopuffer")
 ```
 
-The constructor also accepts a bare API-key string for back-compat with
-the other backends' shape.
+Equivalently, set `KHORA_STORAGE_TURBOPUFFER_API_KEY` (and optionally
+`KHORA_STORAGE_TURBOPUFFER_REGION`, etc.) in the environment before
+loading `config`. The `api_key` field is `SecretStr`; the factory
+unwraps it at the backend-construction boundary.
 
 **Mapping:** one turbopuffer namespace per khora `namespace_id`, named
 `f"khora_{namespace_id.hex}"`. The `khora_` prefix lets

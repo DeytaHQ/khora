@@ -420,9 +420,6 @@ class StorageCoordinator:
         self,
         backend: str,
         config: KhoraConfig,
-        *,
-        weaviate_url: str | Any | None = None,
-        turbopuffer_config: str | Any | None = None,
     ) -> TemporalVectorStore:
         """Build a connected ``TemporalVectorStore`` for ``backend``.
 
@@ -445,10 +442,10 @@ class StorageCoordinator:
           directory, so a second connection would fail on first write.
         - ``sqlite_lance``: shares the vector adapter's
           ``EmbeddedStorageHandle`` (single aiosqlite + LanceDB pair).
-        - ``weaviate`` / ``turbopuffer``: pass through the caller-supplied
-          connection config. ``weaviate``/``turbopuffer`` require their
-          respective config kwarg; the factory raises ``ValueError`` if it
-          is missing.
+        - ``weaviate`` / ``turbopuffer``: read their connection details
+          from ``config.storage.weaviate`` / ``config.storage.turbopuffer``.
+          The factory raises ``ValueError`` if the required config is
+          missing.
         """
         from khora.storage.temporal import create_temporal_store
 
@@ -474,8 +471,6 @@ class StorageCoordinator:
         store = create_temporal_store(
             backend,
             config,
-            weaviate_url=weaviate_url,
-            turbopuffer_config=turbopuffer_config,
             surrealdb_config=config.storage.surrealdb if backend == "surrealdb" else None,
             surrealdb_connection=surrealdb_connection,
             engine=shared_pg_engine,

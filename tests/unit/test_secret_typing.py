@@ -31,6 +31,8 @@ from khora.config.schema import (
     StorageSettings,
     SurrealDBConfig,
     SurrealDBVectorConfig,
+    TurbopufferConfig,
+    WeaviateConfig,
 )
 from khora.telemetry.config import TelemetryConfig
 
@@ -158,6 +160,72 @@ class TestSecretStrFieldTypes:
                 f"LLMSettings.{name} is typed as SecretStr — update this guard "
                 "test (it is now in-scope and must be enumerated explicitly)."
             )
+
+
+@pytest.mark.unit
+class TestWeaviateTurbopufferSecretTyping:
+    """The new temporal-store config models type every secret field as SecretStr.
+
+    ``WeaviateConfig`` and ``TurbopufferConfig`` are the operator-facing config
+    layer (the factory unwraps them into the frozen backend configs at the
+    construction boundary). Their credential / credential-bearing-URL fields are
+    in-scope for the secret-typing rule and must be ``SecretStr``.
+    """
+
+    def test_weaviate_url_is_secretstr(self) -> None:
+        cfg = WeaviateConfig(url="http://localhost:8090")
+        assert isinstance(cfg.url, SecretStr)
+        assert cfg.url.get_secret_value() == "http://localhost:8090"
+
+    def test_weaviate_cluster_url_is_secretstr(self) -> None:
+        cfg = WeaviateConfig(cluster_url="https://c.weaviate.network")
+        assert isinstance(cfg.cluster_url, SecretStr)
+        assert cfg.cluster_url.get_secret_value() == "https://c.weaviate.network"
+
+    def test_weaviate_api_key_is_secretstr(self) -> None:
+        cfg = WeaviateConfig(api_key="wv-secret")
+        assert isinstance(cfg.api_key, SecretStr)
+        assert cfg.api_key.get_secret_value() == "wv-secret"
+
+    def test_turbopuffer_api_key_is_secretstr(self) -> None:
+        cfg = TurbopufferConfig(api_key="tpuf-secret")
+        assert isinstance(cfg.api_key, SecretStr)
+        assert cfg.api_key.get_secret_value() == "tpuf-secret"
+
+    def test_turbopuffer_base_url_is_secretstr(self) -> None:
+        cfg = TurbopufferConfig(api_key="tpuf-secret", base_url="https://proxy.example.com")
+        assert isinstance(cfg.base_url, SecretStr)
+        assert cfg.base_url.get_secret_value() == "https://proxy.example.com"
+
+    def test_weaviate_repr_redacts_every_secret(self) -> None:
+        cfg = WeaviateConfig(
+            url="http://localhost:8090",
+            cluster_url="https://c.weaviate.network",
+            api_key="wv-secret",
+        )
+        rendered = repr(cfg)
+        assert "wv-secret" not in rendered
+        assert "localhost:8090" not in rendered
+        assert "c.weaviate.network" not in rendered
+        assert "**********" in rendered
+
+    def test_turbopuffer_repr_redacts_every_secret(self) -> None:
+        cfg = TurbopufferConfig(api_key="tpuf-secret", base_url="https://proxy.example.com")
+        rendered = repr(cfg)
+        assert "tpuf-secret" not in rendered
+        assert "proxy.example.com" not in rendered
+        assert "**********" in rendered
+
+    def test_weaviate_json_dump_redacts(self) -> None:
+        cfg = WeaviateConfig(url="http://localhost:8090", api_key="wv-secret")
+        dumped = json.loads(cfg.model_dump_json())
+        assert dumped["url"] != "http://localhost:8090"
+        assert dumped["api_key"] != "wv-secret"
+
+    def test_turbopuffer_json_dump_redacts(self) -> None:
+        cfg = TurbopufferConfig(api_key="tpuf-secret")
+        dumped = json.loads(cfg.model_dump_json())
+        assert dumped["api_key"] != "tpuf-secret"
 
 
 @pytest.mark.unit

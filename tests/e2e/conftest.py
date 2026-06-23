@@ -244,7 +244,8 @@ async def chronicle_kb(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Khora]:
 # memory mode); two are live (pgvector / weaviate) and self-skip without Postgres
 # (and Weaviate). The Skeleton backend auto-detects sqlite_lance / surrealdb from
 # ``config.storage.backend`` (engine.py); pgvector is the default; weaviate is
-# selected via the ``backend`` + ``weaviate_url`` engine kwargs.
+# selected via the ``backend`` engine kwarg with the connection read from
+# ``config.storage.weaviate``.
 # --------------------------------------------------------------------------- #
 
 
@@ -335,24 +336,27 @@ async def skeleton_weaviate_kb(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator
 
     The Skeleton-Weaviate backend keeps vectors in Weaviate and documents /
     namespaces in Postgres (the relational coordinator falls through to the PG
-    path), so dim is 1536 (the PG pgvector column constraint applies). ``backend``
-    + ``weaviate_url`` are forwarded to the Skeleton engine constructor.
-    ``WEAVIATE_URL`` is read from env into a local str (no Pydantic field, so no
-    ``SecretStr`` obligation — it is a service endpoint, not a credential). The
+    path), so dim is 1536 (the PG pgvector column constraint applies). The
+    Weaviate connection is now config-driven: ``WEAVIATE_URL`` is read from env
+    into ``config.storage.weaviate`` (a :class:`WeaviateConfig`) and only the
+    ``backend`` kwarg is forwarded to the Skeleton engine constructor. The
     module that uses this fixture self-skips when Postgres or Weaviate is down.
     """
+    from khora.config.schema import WeaviateConfig
+
     stub_llm(monkeypatch, dim=PG_EMBED_DIM)
 
     config = KhoraConfig(database_url=_database_url())
     config.llm.embedding_dimension = PG_EMBED_DIM
     config.storage.embedding_dimension = PG_EMBED_DIM
+    config.storage.weaviate = WeaviateConfig(url=os.environ["WEAVIATE_URL"])
     _apply_deterministic_query(config)
 
     kb = Khora(
         config,
         engine="skeleton",
         run_migrations=False,
-        engine_kwargs={"backend": "weaviate", "weaviate_url": os.environ["WEAVIATE_URL"]},
+        engine_kwargs={"backend": "weaviate"},
     )
     await kb.connect()
     _lower_entity_floor(kb)
