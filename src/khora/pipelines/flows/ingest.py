@@ -698,8 +698,10 @@ async def stage_documents_batch(
         total_dups = sum(len(idxs) for idxs in dup_groups.values())
         logger.debug(f"Intra-batch dedup: {total_dups} duplicate(s) across {len(dup_groups)} identity key(s)")
 
-    # Single batch query for existing documents — query only unique checksums
-    unique_checksums = list({checksums[i] for i in range(len(doc_inputs))})
+    # Single batch query for existing documents — query only unique checksums.
+    # dict.fromkeys preserves insertion order so the argument order to
+    # get_documents_by_checksums is deterministic (not hash-seed dependent).
+    unique_checksums = list(dict.fromkeys(checksums))
     existing = await storage.get_documents_by_checksums(namespace_id, unique_checksums)
 
     results: list[Document | None] = [None] * len(doc_inputs)
