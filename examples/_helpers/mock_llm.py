@@ -4,8 +4,9 @@ Patches ``litellm.acompletion`` and ``litellm.aembedding`` so the
 examples-smoke job does not need an OpenAI key. Embeddings are
 hash-derived (SHA1 → numpy seed → L2-normalised float vector) so the
 same text always produces the same embedding across runs. Completions
-cycle through a configurable response list (default ``["stub
-response"]``).
+cycle through a configurable response list (default: a valid empty
+extraction JSON envelope so the extractor returns zero entities with no
+tenacity retries).
 
 Usage in an ``example.py``::
 
@@ -114,8 +115,14 @@ class _StubEmbedding:
 class MockLLM:
     """Cycles through stub completions and produces hashed embeddings."""
 
+    # Valid empty extraction payload — both single-text extraction
+    # (_parse_response reads entities/relationships/events at top level)
+    # and batch extraction (reads data["sections"][0]) treat this as a
+    # successful zero-entity result, so no tenacity retries fire.
+    _EMPTY_EXTRACTION = '{"sections": [{"entities": [], "relationships": [], "events": []}]}'
+
     def __init__(self, responses: Sequence[str] | None = None, dim: int = 1536) -> None:
-        self._responses: list[str] = list(responses) if responses else ["stub response"]
+        self._responses: list[str] = list(responses) if responses else [self._EMPTY_EXTRACTION]
         if not self._responses:
             raise ValueError("MockLLM requires at least one response")
         self._dim = dim
@@ -177,8 +184,8 @@ def install_mock_llm(
         monkeypatch: pytest ``MonkeyPatch`` fixture. If provided, patches
             are scoped to the test. If ``None``, patches are applied
             globally (suitable for ``example.py`` scripts).
-        responses: completion strings to cycle through. Default ``["stub
-            response"]``.
+        responses: completion strings to cycle through. Default: a valid
+            empty extraction JSON envelope (zero entities, no retries).
         dim: embedding dimension. Default 1536 (matches text-embedding-3-small).
 
     Returns:
@@ -198,17 +205,27 @@ def install_mock_llm(
         monkeypatch.setattr(litellm, "completion", mock.completion)
         monkeypatch.setattr(litellm, "embedding", mock.embedding)
     else:
+        # Capture originals BEFORE overwriting the litellm module attributes
+        # so the identity sweep below can find held references in other modules.
+        _syms = ("acompletion", "aembedding", "completion", "embedding")
+        originals = {sym: getattr(litellm, sym) for sym in _syms}
+
         litellm.acompletion = mock.acompletion  # type: ignore[assignment]
         litellm.aembedding = mock.aembedding  # type: ignore[assignment]
         litellm.completion = mock.completion  # type: ignore[assignment]
         litellm.embedding = mock.embedding  # type: ignore[assignment]
-        # Some khora call sites import these as module-level symbols; refresh.
+        # Patch every module (khora.* and litellm.*) that holds a reference to
+        # the original litellm function by object identity. CrewAI and other
+        # adapters capture a reference at import time (e.g. ``from litellm
+        # import completion``); without this sweep those held refs go unpatched
+        # and produce "OPENAI_API_KEY is required" errors at runtime.
         for module_name in list(sys.modules):
             module = sys.modules[module_name]
             if module is None or not module_name.startswith(("khora.", "litellm")):
                 continue
-            for sym in ("acompletion", "aembedding", "completion", "embedding"):
-                if getattr(module, sym, None) is not None and module_name.startswith("litellm"):
+            for sym in _syms:
+                current = getattr(module, sym, None)
+                if current is not None and current is originals[sym]:
                     setattr(module, sym, getattr(mock, sym))
 
     return mock

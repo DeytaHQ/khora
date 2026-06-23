@@ -129,8 +129,7 @@ adapter exposes directly: ``KhoraSession`` (SessionABC contract),
 (RunHooks-shaped). Each is what an ``Agent`` would call into.
 
 Kept deliberately small (single ``add_items`` write) so it finishes
-well under the 30s CI smoke budget - every khora write triggers a full
-extraction pipeline that retries 3x on the mock LLM's non-JSON output.
+well under the 30s CI smoke budget.
 """
 
 from __future__ import annotations
@@ -166,17 +165,20 @@ async def main() -> None:
         session = KhoraSession(kb=kb, namespace=ns_id, session_id="example-conv-1")
         await session.add_items([{"role": "user", "content": "We picked PostgreSQL for the user DB."}])
         items = await session.get_items()
+        assert len(items) > 0, "session returned no items after add_items"
         print(f"Session has {len(items)} item(s); latest: {items[-1]['content']!r}")
 
         # 2) Recall tool - closes over (kb, namespace, top_k). Construction
         #    is pure Python; no LLM I/O. An Agent would invoke it later.
         tool = khora_recall_tool(kb=kb, namespace=ns_id, top_k=3)
+        assert tool.name == "recall_memory", f"unexpected tool name: {tool.name!r}"
         print(f"Built recall tool: name={tool.name!r}")
 
         # 3) Memory hooks - construct only. ``on_tool_end`` would normally
         #    fire from inside ``Runner.run(...)`` and persist the tool
         #    output. We skip the live call here to keep the example fast.
         hooks = KhoraMemoryHooks(kb=kb, namespace=ns_id, app_id="example")
+        assert hooks.app_id == "example", f"unexpected app_id: {hooks.app_id!r}"
         print(f"Built memory hooks: app_id={hooks.app_id!r}")
 
 

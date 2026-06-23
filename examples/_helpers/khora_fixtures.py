@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from khora import Khora
-from khora.config.schema import KhoraConfig, SQLiteLanceConfig
+from khora.config.schema import KhoraConfig, QuerySettings, SQLiteLanceConfig
 
 
 @asynccontextmanager
@@ -49,6 +49,9 @@ async def embedded_khora(
             embedding_dimension=embedding_dimension,
         )
         config.llm.embedding_dimension = embedding_dimension
+        # Disable cross-encoder reranking in examples — the BAAI/bge-reranker-v2-m3
+        # model is ~2.3 GB and hits HF rate limits (429) on shared CI runners.
+        config.query = QuerySettings(enable_reranking=False)
 
         kb = Khora(config, engine=engine, run_migrations=True)
         await kb.connect()

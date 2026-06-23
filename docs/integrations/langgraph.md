@@ -135,9 +135,11 @@ async def main() -> None:
 
         item = await store.aget(("memories",), "note-1")
         assert item is not None
+        assert item.value["text"] == "the sky is blue today"
         print(f"Stored memory: {item.value['text']!r}")
 
         namespaces = await store.alist_namespaces()
+        assert len(namespaces) > 0
         print(f"Namespaces in store: {namespaces}")
 
 
