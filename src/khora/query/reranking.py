@@ -281,20 +281,23 @@ class CrossEncoderReranker(Reranker):
             scores = await asyncio.to_thread(model.predict, pairs, batch_size=self._batch_size)
             _latency = (_time.perf_counter() - _t0) * 1000
 
-            from khora.khora import LLMUsage
-            from khora.telemetry.context import record_usage
+            try:
+                from khora.khora import LLMUsage
+                from khora.telemetry.context import record_usage
 
-            record_usage(
-                LLMUsage(
-                    operation="cross_encoder_rerank",
-                    model=self._model_name,
-                    prompt_tokens=0,
-                    completion_tokens=0,
-                    total_tokens=0,
-                    latency_ms=_latency,
-                    batch_size=len(pairs),
+                record_usage(
+                    LLMUsage(
+                        operation="cross_encoder_rerank",
+                        model=self._model_name,
+                        prompt_tokens=0,
+                        completion_tokens=0,
+                        total_tokens=0,
+                        latency_ms=_latency,
+                        batch_size=len(pairs),
+                    )
                 )
-            )
+            except Exception:
+                pass
 
             # Convert all scores to floats for normalization
             # Cross-encoders output logits (roughly -3 to 3), we need to normalize
