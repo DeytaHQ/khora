@@ -186,14 +186,14 @@ class TestEmbed:
         mock_response.usage = MagicMock(prompt_tokens=10, total_tokens=10)
 
         with (
-            patch("litellm.aembedding", new_callable=AsyncMock, return_value=mock_response),
+            patch("litellm.aembedding", new_callable=AsyncMock, return_value=mock_response) as mock_api,
             patch("khora.telemetry.get_collector") as mock_telem,
         ):
             mock_telem.return_value.record_llm_call = MagicMock()
             await embedder.embed("some text")
-
-        # Second call must be a cache hit with no further API calls
-        result2 = await embedder.embed("some text")
+            # Second call must be a cache hit with no further API calls
+            result2 = await embedder.embed("some text")
+            assert mock_api.await_count == 1
         assert result2 == expected
         stats = embedder.cache_stats
         assert stats["misses"] == 1
