@@ -618,6 +618,142 @@ class TestLLMFilterEvaluatorSubscriptionBudget:
 
 
 # ---------------------------------------------------------------------------
+# Subscription budget rollback on namespace-cap rejection (Issue #1224)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestLLMFilterEvaluatorSubscriptionBudgetRollback:
+    async def test_namespace_cap_rejection_does_not_drain_subscription_budget(self) -> None:
+        """When the namespace cap rejects an evaluation, the per-subscription
+        budget must NOT be decremented — no LLM call was made.
+
+        Setup: namespace cap is exhausted (cap=1) but subscription cap has room
+        (cap=10_000). The namespace-cap rejection must leave the subscription
+        bucket untouched so a subsequent eval under a different namespace (or
+        after the namespace window resets) still has its full subscription budget.
+        """
+        cfg = SemanticHooksConfig(
+            llm_evaluation_enabled=True,
+            llm_cache_size=0,
+            llm_max_tokens_per_namespace_per_hour=1,  # immediately exhausted
+            llm_max_tokens_per_subscription_per_hour=10_000,  # plenty of room
+        )
+        evaluator = LLMFilterEvaluator(cfg, batch_flush_ms=10.0)
+        filt = _make_filter()
+
+        # First eval: namespace cap rejects (fails open). Subscription bucket
+        # must remain at 0 tokens used.
+        with patch("khora.config.llm.acompletion", new=AsyncMock(return_value=_llm_response(match=True))):
+            rejected = await evaluator.evaluate(_make_event(name="Rejected"), filt)
+        assert rejected is True  # fail-open from namespace cap
+
+        # Subscription bucket should still be empty — no charge for a phantom call.
+        sub_bucket = evaluator._subscription_budgets.get(filt.id)
+        assert sub_bucket is None or sub_bucket.tokens_used == 0, (
+            f"subscription bucket was charged despite namespace rejection: "
+            f"tokens_used={sub_bucket.tokens_used if sub_bucket else 'N/A'}"
+        )
+
+    async def test_both_caps_pass_charges_both_buckets(self) -> None:
+        """Normal path: when both caps have room, both buckets are charged."""
+        cfg = SemanticHooksConfig(
+            llm_evaluation_enabled=True,
+            llm_cache_size=0,
+            llm_max_tokens_per_namespace_per_hour=10_000,
+            llm_max_tokens_per_subscription_per_hour=10_000,
+        )
+        evaluator = LLMFilterEvaluator(cfg, batch_flush_ms=10.0)
+        filt = _make_filter()
+        event = _make_event()
+
+        with patch(
+            "khora.config.llm.acompletion",
+            new=AsyncMock(return_value=_llm_response(match=True, confidence=0.9)),
+        ):
+            result = await evaluator.evaluate(event, filt)
+
+        assert result is True
+
+        # Both buckets should have been charged (tokens_used > 0).
+        ns_bucket = evaluator._budgets.get(event.namespace_id)
+        sub_bucket = evaluator._subscription_budgets.get(filt.id)
+        assert ns_bucket is not None and ns_bucket.tokens_used > 0, (
+            "namespace bucket should be charged when both caps have room"
+        )
+        assert sub_bucket is not None and sub_bucket.tokens_used > 0, (
+            "subscription bucket should be charged when both caps have room"
+        )
+
+    async def test_repeated_namespace_rejections_do_not_exhaust_subscription_budget(self) -> None:
+        """Multiple namespace-cap rejections must not exhaust the subscription budget.
+
+        We size the subscription cap to hold exactly one real LLM call (~200 tokens).
+        Pre-fix, each namespace-cap rejection also decremented the subscription bucket;
+        after three phantom charges the 200-token cap would be exhausted and the filter
+        would be throttled even after namespace pressure clears. Post-fix, the
+        subscription bucket stays at 0 so the eventual real call still goes through.
+
+        Part 1 asserts the subscription bucket is uncharged after three rejections.
+        Part 2 verifies the actual LLM call succeeds once namespace pressure is lifted
+        by swapping to a generous namespace config on a second evaluator that inherits
+        the same subscription budget state.
+        """
+        sub_cap = 200  # holds one real call (~150 tokens) but not three
+        cfg_tight = SemanticHooksConfig(
+            llm_evaluation_enabled=True,
+            llm_cache_size=0,
+            llm_max_tokens_per_namespace_per_hour=1,  # every namespace immediately exhausted
+            llm_max_tokens_per_subscription_per_hour=sub_cap,
+        )
+        evaluator = LLMFilterEvaluator(cfg_tight, batch_flush_ms=10.0)
+        filt = _make_filter()
+
+        mock_call = AsyncMock(return_value=_llm_response(match=False, confidence=0.1))
+
+        with patch("khora.config.llm.acompletion", new=mock_call):
+            # Part 1: three evals rejected by namespace cap.
+            for name in ("R1", "R2", "R3"):
+                ev = _make_event(name=name)
+                result = await evaluator.evaluate(ev, filt)
+                assert result is True  # all fail-open from namespace cap
+
+        # Subscription bucket must still have 0 tokens — no phantom charges.
+        sub_bucket = evaluator._subscription_budgets.get(filt.id)
+        assert sub_bucket is None or sub_bucket.tokens_used == 0, (
+            f"subscription budget was drained by phantom namespace-cap rejections: "
+            f"tokens_used={sub_bucket.tokens_used if sub_bucket else 'N/A'} "
+            f"(three phantom charges of ~150 tokens would exhaust the {sub_cap}-token cap)"
+        )
+
+        # Part 2: confirm the real LLM call still goes through once namespace
+        # pressure is gone. Use a second evaluator with a generous namespace cap
+        # but inherit the subscription budget dict so any pre-fix phantom charges
+        # would show up as throttling here.
+        cfg_generous = SemanticHooksConfig(
+            llm_evaluation_enabled=True,
+            llm_cache_size=0,
+            llm_max_tokens_per_namespace_per_hour=10_000,
+            llm_max_tokens_per_subscription_per_hour=sub_cap,
+        )
+        evaluator2 = LLMFilterEvaluator(cfg_generous, batch_flush_ms=10.0)
+        # Inject the subscription budget state from the tight evaluator so any
+        # phantom drain from Part 1 is visible here.
+        evaluator2._subscription_budgets = evaluator._subscription_budgets
+
+        mock_call2 = AsyncMock(return_value=_llm_response(match=False, confidence=0.1))
+        with patch("khora.config.llm.acompletion", new=mock_call2):
+            real_result = await evaluator2.evaluate(_make_event(name="Good"), filt)
+
+        assert real_result is False, (
+            "LLM call should have reached the mock (returned False) once namespace "
+            "cap was lifted — got fail-open True, which means the subscription budget "
+            "was incorrectly drained by the three phantom rejections in Part 1"
+        )
+        mock_call2.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
 # Intra-batch coalescing (Issue #608)
 # ---------------------------------------------------------------------------
 

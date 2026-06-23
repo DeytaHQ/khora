@@ -475,31 +475,65 @@ class LLMFilterEvaluator:
         Per-subscription budget (Issue #601) is enforced in addition to the
         namespace cap so one noisy filter cannot drain the namespace's hourly
         allowance. The namespace cap remains the global backstop.
+
+        Both caps are checked before either is charged (#1224): a namespace-cap
+        rejection must not consume the per-subscription budget for a call that
+        never happens.
         """
         total_charge = input_tokens + output_tokens
         ns_cap = self._config.llm_max_tokens_per_namespace_per_hour
         sub_cap = self._config.llm_max_tokens_per_subscription_per_hour
 
-        # Per-subscription check first (cheaper to evict a single noisy filter).
-        if sub_cap > 0 and subscription_id is not None:
-            if not self._charge_bucket(
+        has_sub_cap = sub_cap > 0 and subscription_id is not None
+        has_ns_cap = ns_cap > 0
+
+        # Check both caps before charging either. If either would breach, bail
+        # out without touching any bucket (prevents phantom charges on the
+        # subscription budget when the namespace cap is the one that rejects).
+        if has_sub_cap and not self._would_fit_bucket(
+            self._subscription_budgets, subscription_id, total_charge, sub_cap
+        ):
+            # Emit the warning via _charge_bucket (it sets warned_in_window).
+            self._charge_bucket(
                 self._subscription_budgets,
                 subscription_id,
                 total_charge,
                 sub_cap,
                 label="subscription",
-            ):
-                return False
+            )
+            return False
 
-        if ns_cap <= 0:
-            return True
-        return self._charge_bucket(
-            self._budgets,
-            namespace_id,
-            total_charge,
-            ns_cap,
-            label="namespace",
-        )
+        if has_ns_cap and not self._would_fit_bucket(self._budgets, namespace_id, total_charge, ns_cap):
+            self._charge_bucket(self._budgets, namespace_id, total_charge, ns_cap, label="namespace")
+            return False
+
+        # Both caps have room — charge them.
+        if has_sub_cap:
+            self._charge_bucket(
+                self._subscription_budgets,
+                subscription_id,
+                total_charge,
+                sub_cap,
+                label="subscription",
+            )
+        if has_ns_cap:
+            self._charge_bucket(
+                self._budgets,
+                namespace_id,
+                total_charge,
+                ns_cap,
+                label="namespace",
+            )
+        return True
+
+    @staticmethod
+    def _would_fit_bucket(store: dict, key, charge: int, cap: int) -> bool:
+        """Return True if ``charge`` fits within the bucket without modifying it."""
+        now = time.monotonic()
+        bucket = store.get(key)
+        if bucket is None or (now - bucket.window_started_at) >= _BUDGET_WINDOW_SECONDS:
+            return charge <= cap
+        return (bucket.tokens_used + charge) <= cap
 
     @staticmethod
     def _charge_bucket(
