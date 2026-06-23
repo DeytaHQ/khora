@@ -54,6 +54,10 @@ pipelines:
   chunk_overlap: 50
 
   # Entity extraction
+  # Global switch for the entity graph. false skips ALL entity/relationship
+  # extraction at ingest: vector + keyword search still work, but the graph
+  # stays empty and graph/Cypher/multi-hop retrieval returns nothing
+  # (list_entities() == 0). Only disable for a deliberately graph-less store.
   extract_entities: true
   entity_types:
     - PERSON

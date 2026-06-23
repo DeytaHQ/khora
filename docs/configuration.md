@@ -239,6 +239,8 @@ Prefix: `KHORA_PIPELINES_`.
 | `KHORA_PIPELINES_SKIP_EMBEDDING_ENTITY_TYPES` | `DATE,URL,EMAIL` | Skip embeddings for these types when `mention_count` is low. |
 | `KHORA_PIPELINES_SKIP_EMBEDDING_MENTION_THRESHOLD` | `1` | Skip embedding for rare-mention entities of the above types. |
 
+> **`extract_entities` gates the entire entity graph.** With `KHORA_PIPELINES_EXTRACT_ENTITIES=false` (or `pipeline.extract_entities=False` / `pipeline:\n  extract_entities: false` in YAML), khora skips *all* entity and relationship extraction at ingest. The vector + keyword store still works, but the graph stays empty: graph / Cypher / multi-hop / entity-neighborhood retrieval returns nothing, recall silently degrades to vector + keyword, and `kb.list_entities()` returns `0`. It is a global switch, not a per-call option - the `entity_types` / `relationship_types` `remember()` kwargs control *what* is extracted, not *whether*. Default `true`; only disable it if you intend a graph-less store.
+
 ## Query
 
 Prefix: `KHORA_QUERY_`. See [query-engine/retrieval-tuning.md](query-engine/retrieval-tuning.md) for guidance.
@@ -260,6 +262,21 @@ Prefix: `KHORA_QUERY_`. See [query-engine/retrieval-tuning.md](query-engine/retr
 | `KHORA_QUERY_ENABLE_RERANKING` | `true` | Cross-encoder reranking of top candidates. |
 | `KHORA_QUERY_TEMPORAL_SQL_PUSHDOWN` | `true` | Push relative-date filters into SQL WHERE clauses. |
 | `KHORA_QUERY_METADATA_OVERFETCH_MULTIPLIER` | `3` | Over-fetch multiplier (2–10) for the VectorCypher graph chunk channel when a caller filter has a metadata predicate that can't push down to Cypher and must be post-filtered in memory. The graph fetch widens to `min(limit * multiplier, 200)` so fusion still has candidates after filtering; no effect for no-filter or system-key-only filters. |
+| `KHORA_QUERY_ENABLE_BM25_CHANNEL` | `false` | **Opt-in.** Add an independent BM25 lexical channel to fusion (alongside vector + graph), so exact keyword matches surface even when semantic similarity is weak. |
+
+### Abstention signals
+
+Passive confidence signals attached to `RecallResult` (`engine_info["abstention_signals"]`) for downstream answer-generation. They never change what recall returns; they only flag low-confidence results. See [chronicle-engine.md](engines/chronicle-engine.md).
+
+| Variable | Default | Description |
+|---|---|---|
+| `KHORA_QUERY_ABSTENTION_MODE` | `cosine_floor` | `should_abstain` rule. `cosine_floor` abstains when the topicality floor fires (`top_score_low`) or retrieval is genuinely empty (`chunks_empty AND entities_empty`). `weighted` is the legacy rule: `combined_score >= abstention_combined_threshold`. |
+| `KHORA_QUERY_ABSTENTION_MIN_TOP_SCORE` | `0.3` | Raw top-chunk cosine below which `top_score_low` fires (the topicality floor; OpenAI-embedding-tuned, model/corpus-specific). |
+| `KHORA_QUERY_ABSTENTION_MIN_CHUNKS` | `1` | Chunk count below which `chunks_below_min` fires. |
+| `KHORA_QUERY_ABSTENTION_COMBINED_THRESHOLD` | `0.5` | In `weighted` mode, `combined_score` at/above which `should_abstain` is true. |
+| `KHORA_QUERY_ABSTENTION_WEIGHT_ENTITIES_EMPTY` | `0.3` | Weight of `entities_empty` in the `weighted`-mode `combined_score`. |
+| `KHORA_QUERY_ABSTENTION_WEIGHT_CHUNKS_BELOW_MIN` | `0.4` | Weight of `chunks_below_min` in the `weighted`-mode `combined_score`. |
+| `KHORA_QUERY_ABSTENTION_WEIGHT_TOP_SCORE_LOW` | `0.3` | Weight of `top_score_low` in the `weighted`-mode `combined_score`. The three weights must sum to ≤ 1.0. |
 
 ## Tenancy
 

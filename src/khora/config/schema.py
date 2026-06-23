@@ -1201,7 +1201,14 @@ class PipelineSettings(BaseSettings):
     )
 
     # Extraction settings
-    extract_entities: bool = Field(default=True, description="Extract entities from documents")
+    extract_entities: bool = Field(
+        default=True,
+        description=(
+            "Global switch for entity/relationship extraction at ingest. False "
+            "leaves the entity graph empty (vector + keyword search still work, but "
+            "graph/Cypher/multi-hop retrieval returns nothing and list_entities() is 0)."
+        ),
+    )
     entity_types: list[str] = Field(
         default=["PERSON", "ORGANIZATION", "CONCEPT", "LOCATION"],
         description="Entity types to extract",
