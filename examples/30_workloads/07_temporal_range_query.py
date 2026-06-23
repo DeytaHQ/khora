@@ -2,10 +2,11 @@
 
 Khora's Chronicle engine is **event-shaped**: every chunk carries an
 ``occurred_at`` timestamp distinct from when it was ingested. That
-distinction lets ``Khora.recall(..., start_time=..., end_time=...)``
-answer questions like "what happened between February and April?" by
-filtering at the SQL/Cypher layer before semantic ranking — much
-cheaper than post-filtering a vector hit-list.
+distinction lets a recall filter on ``occurred_at`` —
+``filter={"occurred_at": {"$gte": ..., "$lt": ...}}`` — answer questions
+like "what happened between February and April?" by filtering at the
+SQL/Cypher layer before semantic ranking, much cheaper than
+post-filtering a vector hit-list.
 
 This example seeds ~30 events spanning six simulated months, then
 runs increasingly specific time-bounded queries:
@@ -20,9 +21,10 @@ runs increasingly specific time-bounded queries:
 
 Pattern from Cognee's ``temporal_awareness_example.py`` ported to
 khora's primitives. Cognee uses ``SearchType.TEMPORAL``; khora's
-equivalent is the ``start_time`` / ``end_time`` kwargs on
-``Khora.recall()`` — applied via SQL pushdown so the time filter
-doesn't pay for embeddings outside the window.
+equivalent is an ``occurred_at`` recall filter on ``Khora.recall()`` —
+applied via SQL pushdown so the time filter doesn't pay for embeddings
+outside the window. (The older ``start_time`` / ``end_time`` kwargs do
+the same thing but are deprecated in favor of this filter.)
 
 Why Chronicle (engine="chronicle"):
 The bi-temporal model is the whole point. VectorCypher honors temporal
@@ -148,7 +150,7 @@ async def _seed(kb: Khora, namespace_id: UUID) -> None:
 
     ``source_timestamp=`` is the load-bearing kwarg — Chronicle reads it,
     writes it to ``chunk.occurred_at``, and indexes it for the
-    ``start_time`` / ``end_time`` filter pushdown. The ``metadata`` dict
+    ``occurred_at`` recall-filter pushdown. The ``metadata`` dict
     is opaque storage that the engine never consults; stuffing the
     timestamp there silently leaves every chunk with ``occurred_at=None``
     and breaks every windowed query that doesn't happen to span the
@@ -175,12 +177,24 @@ async def _query(
     start_time: datetime | None = None,
     end_time: datetime | None = None,
 ) -> None:
-    """Run a recall, print the top hits with their occurred_at."""
+    """Run a recall, print the top hits with their occurred_at.
+
+    The time window is expressed as a recall filter on the event-time
+    axis — ``filter={"occurred_at": {"$gte": start, "$lt": end}}``, lower
+    bound inclusive and upper bound exclusive. It pushes down to SQL, so
+    chunks outside the window never reach semantic ranking.
+    """
+    occurred_at: dict[str, datetime] = {}
+    if start_time is not None:
+        occurred_at["$gte"] = start_time
+    if end_time is not None:
+        occurred_at["$lt"] = end_time
+    time_filter = {"occurred_at": occurred_at} if occurred_at else None
+
     result = await kb.recall(
         question,
         namespace=namespace_id,
-        start_time=start_time,
-        end_time=end_time,
+        filter=time_filter,
         limit=4,
     )
     window = ""

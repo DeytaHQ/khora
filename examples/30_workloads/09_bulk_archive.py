@@ -208,20 +208,19 @@ async def main() -> None:
         # spend on a single ingest.
 
         # ── Time-filtered recall ──────────────────────────────────
-        # Ask about events in the last 3 days — a natural-language
-        # temporal query. recall() takes explicit start_time/end_time
-        # so we bypass NLP detection for predictability. The filter
-        # gets pushed into the SQL WHERE clause (`temporal_sql_pushdown`,
-        # default on) instead of fetching everything then filtering in
-        # Python — that's what makes this scale.
+        # Ask about events in the last 3 days. Rather than rely on NLP
+        # temporal detection, pass an explicit recall filter on the
+        # event-time axis — filter={"occurred_at": {"$gte": ..., "$lt": ...}}
+        # (lower bound inclusive, upper bound exclusive). It's deterministic
+        # and pushes down into the SQL WHERE clause instead of fetching
+        # everything then filtering in Python — that's what makes this scale.
         window_start = anchor - timedelta(days=3)
         print("\nQ (time-filtered): What happened in the last 3 days?")
         print(f"   window = [{window_start.isoformat()}, {anchor.isoformat()}]")
         result = await kb.recall(
             "What happened in the last 3 days?",
             namespace=ns_id,
-            start_time=window_start,
-            end_time=anchor,
+            filter={"occurred_at": {"$gte": window_start, "$lt": anchor}},
             limit=5,
         )
         for chunk in result.chunks[:5]:

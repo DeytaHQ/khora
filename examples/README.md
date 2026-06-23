@@ -74,7 +74,7 @@ Start here if Khora is new to you. Each is self-contained and under ~150 LOC.
 
 ## `10_core_apis/` — the API surface
 
-The everyday calls, one concept at a time. Most run on VectorCypher (the default); image ingestion (06) uses skeleton.
+The everyday calls, one concept at a time. Most run on VectorCypher (the default); image ingestion (07) uses skeleton.
 
 - [`01_remember_batch.py`](10_core_apis/01_remember_batch.py) —
   Bulk ingestion with `remember_batch` and `on_progress` (uses `data/support_tickets.jsonl`).
@@ -92,6 +92,9 @@ The everyday calls, one concept at a time. Most run on VectorCypher (the default
   Image ingestion: describe a set of figures with a vision model, remember the
   descriptions, then answer one question that spans several images (uses
   `OPENAI_API_KEY`).
+- [`08_recall_with_metadata_filters.py`](10_core_apis/08_recall_with_metadata_filters.py) —
+  `remember()` with custom metadata and provenance, then `recall(filter=...)` deterministic
+  filtering on system keys and `metadata.<path>`, printing the `engine_info["filter"]` pushdown report.
 
 ## `20_integrations/` — framework adapters
 
@@ -172,7 +175,9 @@ examples/
 │   ├── 03_ontology_config.py
 │   ├── 04_recall_entities_and_relationships.py
 │   ├── 05_find_related_entities.py
-│   └── 06_image_ingestion.py
+│   ├── 06_expertise_config.py
+│   ├── 07_image_ingestion.py
+│   └── 08_recall_with_metadata_filters.py
 ├── 20_integrations/                # framework adapter tutorials
 │   ├── 01_langgraph.py
 │   ├── 02_openai_agents.py
