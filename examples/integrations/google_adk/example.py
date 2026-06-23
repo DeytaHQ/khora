@@ -56,7 +56,7 @@ async def main() -> None:
         # Build a session with a couple of conversational turns. In a real
         # ADK app this Session is produced by SessionService - here we
         # synthesise it so the example stays self-contained.
-        stored_text = "Remember that the launch is in March 2026."
+        stored_text = "We decided to use PostgreSQL for the user database."
         now = time.time()
         session = Session(
             id="example-session-1",
