@@ -540,6 +540,21 @@ def compute_checksum(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def _checksum_dedup_applies(existing: Any, *, external_id: str | None, session_id: UUID | None) -> bool:
+    """Whether a checksum hit on *existing* counts as a duplicate (#1139/#1171).
+
+    Content checksum alone conflates distinct logical documents: a caller that
+    supplies a new ``external_id`` or ``session_id`` must get a new document.
+    Dedup applies only when every caller-supplied identity matches the existing
+    row; callers that supply neither keep the checksum-only behavior.
+    """
+    if external_id is not None and existing.external_id != external_id:
+        return False
+    if session_id is not None and existing.session_id != session_id:
+        return False
+    return True
+
+
 def _coerce_session_id(value: Any) -> UUID | None:
     """Coerce a session_id value from custom metadata to a UUID.
 
@@ -595,14 +610,18 @@ async def stage_document(
     content = doc_input.get("content", "")
     checksum = compute_checksum(content)
 
-    # Check for existing document - skip if any document with same checksum exists
+    # Check for existing document - skip only when the caller-supplied identity
+    # also matches the existing row (#1139/#1171): a new external_id or
+    # session_id means this is a distinct logical document, not a duplicate.
+    custom_metadata = doc_input.get("metadata", {})
     existing = await storage.get_document_by_checksum(namespace_id, checksum)
-    if existing:
+    if existing and _checksum_dedup_applies(
+        existing,
+        external_id=doc_input.get("external_id"),
+        session_id=_coerce_session_id(custom_metadata.get("session_id")),
+    ):
         logger.debug(f"Document unchanged (checksum={checksum[:8]}..., status={existing.status})")
         return None
-
-    # Extract custom metadata
-    custom_metadata = doc_input.get("metadata", {})
 
     # Explicit doc_input["source_timestamp"] wins; otherwise fall back to the
     # metadata-derived value (sent_at / occurred_at / created_at / ...).
@@ -630,6 +649,7 @@ async def stage_document(
         metadata=dict(custom_metadata),
         source_timestamp=source_timestamp,
         session_id=session_id,
+        external_id=doc_input.get("external_id"),
     )
 
     return await storage.create_document(document)
@@ -656,33 +676,48 @@ async def stage_documents_batch(
     # Compute all checksums upfront
     checksums = [compute_checksum(doc.get("content", "")) for doc in doc_inputs]
 
-    # Intra-batch dedup: only process first occurrence of each checksum
-    canonical_idx: dict[str, int] = {}
-    dup_groups: dict[str, list[int]] = {}
-    for i, checksum in enumerate(checksums):
-        if checksum not in canonical_idx:
-            canonical_idx[checksum] = i
+    # Intra-batch dedup keyed by (checksum, external_id, session_id) so two
+    # same-content docs with different identities both proceed (#1171).
+    IdentityKey = tuple[str, str | None, str | None]
+
+    def _identity_key(i: int) -> IdentityKey:
+        doc = doc_inputs[i]
+        sid = _coerce_session_id(doc.get("metadata", {}).get("session_id"))
+        return (checksums[i], doc.get("external_id"), str(sid) if sid else None)
+
+    canonical_idx: dict[IdentityKey, int] = {}
+    dup_groups: dict[IdentityKey, list[int]] = {}
+    for i in range(len(doc_inputs)):
+        key = _identity_key(i)
+        if key not in canonical_idx:
+            canonical_idx[key] = i
         else:
-            dup_groups.setdefault(checksum, []).append(i)
+            dup_groups.setdefault(key, []).append(i)
 
     if dup_groups:
         total_dups = sum(len(idxs) for idxs in dup_groups.values())
-        logger.debug(f"Intra-batch dedup: {total_dups} duplicate(s) across {len(dup_groups)} checksum(s)")
+        logger.debug(f"Intra-batch dedup: {total_dups} duplicate(s) across {len(dup_groups)} identity key(s)")
 
     # Single batch query for existing documents — query only unique checksums
-    unique_checksums = list(canonical_idx.keys())
+    unique_checksums = list({checksums[i] for i in range(len(doc_inputs))})
     existing = await storage.get_documents_by_checksums(namespace_id, unique_checksums)
 
     results: list[Document | None] = [None] * len(doc_inputs)
     stage_sem = asyncio.Semaphore(10)
 
     async def _create_one(idx: int, doc_input: dict[str, Any], checksum: str) -> None:
-        if checksum in existing:
+        custom_metadata = doc_input.get("metadata", {})
+        # Identity-scoped dedup (#1171): skip only when the caller-supplied
+        # external_id/session_id also matches the existing row.
+        if checksum in existing and _checksum_dedup_applies(
+            existing[checksum],
+            external_id=doc_input.get("external_id"),
+            session_id=_coerce_session_id(custom_metadata.get("session_id")),
+        ):
             logger.debug(f"Document unchanged (checksum={checksum[:8]}..., status={existing[checksum].status})")
             return
 
         content = doc_input.get("content", "")
-        custom_metadata = doc_input.get("metadata", {})
 
         # Explicit doc_input["source_timestamp"] wins; otherwise fall back to
         # the metadata-derived value (sent_at / occurred_at / created_at / ...).
@@ -720,15 +755,12 @@ async def stage_documents_batch(
 
     # Only create documents for canonical (first-occurrence) indices
     await asyncio.gather(
-        *[
-            _create_one(canonical_idx[checksum], doc_inputs[canonical_idx[checksum]], checksum)
-            for checksum in canonical_idx
-        ]
+        *[_create_one(canonical_idx[key], doc_inputs[canonical_idx[key]], key[0]) for key in canonical_idx]
     )
 
     # Copy results from canonical indices to their intra-batch duplicates
-    for checksum, dup_idxs in dup_groups.items():
-        canonical_result = results[canonical_idx[checksum]]
+    for key, dup_idxs in dup_groups.items():
+        canonical_result = results[canonical_idx[key]]
         for dup_idx in dup_idxs:
             results[dup_idx] = canonical_result
 

@@ -309,6 +309,61 @@ class TestStageDocument:
         assert doc is not None
         assert doc.content_type is None
 
+    async def test_new_session_id_creates_document_despite_checksum_hit(self):
+        """#1171: same content + new session_id must not be dropped by stage_document."""
+        ns = uuid4()
+        session_b = uuid4()
+        existing = MagicMock(status="completed", external_id=None, session_id=uuid4())
+        storage = _make_storage(get_document_by_checksum=AsyncMock(return_value=existing))
+        doc = await stage_document(
+            {"content": "same", "metadata": {"session_id": str(session_b)}},
+            ns,
+            storage,
+        )
+        assert doc is not None, "New session_id must create a new document, not be dropped"
+        assert doc.session_id == session_b
+        storage.create_document.assert_awaited_once()
+
+    async def test_new_external_id_creates_document_despite_checksum_hit(self):
+        """#1171: same content + new external_id must not be dropped by stage_document."""
+        ns = uuid4()
+        existing = MagicMock(status="completed", external_id="ext-a", session_id=None)
+        storage = _make_storage(get_document_by_checksum=AsyncMock(return_value=existing))
+        doc = await stage_document(
+            {"content": "same", "external_id": "ext-b"},
+            ns,
+            storage,
+        )
+        assert doc is not None, "New external_id must create a new document, not be dropped"
+        storage.create_document.assert_awaited_once()
+
+    async def test_same_session_id_still_dedups_in_stage_document(self):
+        """#1171: same content + same session_id is still a duplicate in stage_document."""
+        ns = uuid4()
+        session = uuid4()
+        existing = MagicMock(status="completed", external_id=None, session_id=session)
+        storage = _make_storage(get_document_by_checksum=AsyncMock(return_value=existing))
+        result = await stage_document(
+            {"content": "same", "metadata": {"session_id": str(session)}},
+            ns,
+            storage,
+        )
+        assert result is None, "Same session_id + same checksum must still be a duplicate"
+        storage.create_document.assert_not_called()
+
+    async def test_same_external_id_still_dedups_in_stage_document(self):
+        """#1171: same content + same external_id is still a duplicate in stage_document."""
+        ns = uuid4()
+        existing = MagicMock(status="completed", external_id="ext-1", session_id=None)
+        storage = _make_storage(get_document_by_checksum=AsyncMock(return_value=existing))
+        result = await stage_document(
+            {"content": "same", "external_id": "ext-1"},
+            ns,
+            storage,
+        )
+        assert result is None, "Same external_id + same checksum must still be a duplicate"
+        storage.create_document.assert_not_called()
+
 
 @pytest.mark.unit
 @pytest.mark.asyncio
