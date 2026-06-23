@@ -239,6 +239,8 @@ Prefix: `KHORA_PIPELINES_`.
 | `KHORA_PIPELINES_SKIP_EMBEDDING_ENTITY_TYPES` | `DATE,URL,EMAIL` | Skip embeddings for these types when `mention_count` is low. |
 | `KHORA_PIPELINES_SKIP_EMBEDDING_MENTION_THRESHOLD` | `1` | Skip embedding for rare-mention entities of the above types. |
 
+> **`extract_entities` gates the entire entity graph.** With `KHORA_PIPELINES_EXTRACT_ENTITIES=false` (or `pipeline.extract_entities=False` / `pipeline:\n  extract_entities: false` in YAML), khora skips *all* entity and relationship extraction at ingest. The vector + keyword store still works, but the graph stays empty: graph / Cypher / multi-hop / entity-neighborhood retrieval returns nothing, recall silently degrades to vector + keyword, and `kb.list_entities()` returns `0`. It is a global switch, not a per-call option - the `entity_types` / `relationship_types` `remember()` kwargs control *what* is extracted, not *whether*. Default `true`; only disable it if you intend a graph-less store.
+
 ## Query
 
 Prefix: `KHORA_QUERY_`. See [query-engine/retrieval-tuning.md](query-engine/retrieval-tuning.md) for guidance.
