@@ -24,6 +24,7 @@ from uuid import uuid4
 import pytest
 
 from khora.engines.skeleton.engine import SkeletonConstructionEngine
+from tests.test_helpers.diagnostics import assert_no_silent_degradation
 
 
 def _mock_config(*, backend: str = "pgvector") -> MagicMock:
@@ -394,6 +395,8 @@ class TestStats:
         assert out.entities == 0
         assert out.relationships == 0
         assert out.last_activity_at == ts
+        # Happy path must not have recorded any silent degradation (#1070).
+        assert_no_silent_degradation(out)
 
     @pytest.mark.asyncio
     async def test_missing_methods_degrade_to_zero(self) -> None:
