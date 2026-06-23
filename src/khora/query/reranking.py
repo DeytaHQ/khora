@@ -297,7 +297,7 @@ class CrossEncoderReranker(Reranker):
                     )
                 )
             except Exception:
-                pass
+                logger.debug("Cross-encoder usage recording failed", exc_info=True)
 
             # Convert all scores to floats for normalization
             # Cross-encoders output logits (roughly -3 to 3), we need to normalize
