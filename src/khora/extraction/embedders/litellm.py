@@ -235,9 +235,9 @@ class LiteLLMEmbedder(Embedder):
         Returns:
             Embedding vector
         """
-        cached = self._cache_get(text)
-        if cached is not None:
-            return cached
+        # Delegate entirely to embed_batch so cache accounting (hits/misses) happens
+        # in exactly one place.  A direct _cache_get call here would double-count
+        # misses: once here and once inside embed_batch's cache loop (#1231).
         embeddings = await self.embed_batch([text])
         return embeddings[0]
 

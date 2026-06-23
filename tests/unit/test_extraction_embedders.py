@@ -136,6 +136,69 @@ class TestEmbed:
         result = await embedder.embed("hello")
         assert result == [0.1, 0.2]
 
+    @pytest.mark.asyncio
+    async def test_cache_miss_counts_exactly_once(self) -> None:
+        """A single cache miss via embed() increments cache_stats['misses'] by exactly 1 (#1231).
+
+        Previously embed() called _cache_get (miss +1) then delegated to embed_batch which
+        called _cache_get again (miss +1), doubling the miss count.
+        """
+        embedder = LiteLLMEmbedder(model="test-model", dimension=3, max_retries=1)
+        expected = [0.0, 0.0, 1.0]
+
+        mock_response = MagicMock()
+        mock_response.data = [{"embedding": expected}]
+        mock_response.usage = MagicMock(prompt_tokens=10, total_tokens=10)
+
+        with (
+            patch("litellm.aembedding", new_callable=AsyncMock, return_value=mock_response),
+            patch("khora.telemetry.get_collector") as mock_telem,
+        ):
+            mock_telem.return_value.record_llm_call = MagicMock()
+            result = await embedder.embed("never-seen-text")
+
+        assert result == expected
+        stats = embedder.cache_stats
+        assert stats["misses"] == 1, f"Expected exactly 1 miss, got {stats['misses']}"
+        assert stats["hits"] == 0
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_counts_once_no_miss(self) -> None:
+        """A cache hit via embed() increments hits by 1 and misses by 0 (#1231)."""
+        embedder = LiteLLMEmbedder()
+        embedder._cache_put("hello", [0.1, 0.2])
+
+        result = await embedder.embed("hello")
+
+        assert result == [0.1, 0.2]
+        stats = embedder.cache_stats
+        assert stats["hits"] == 1
+        assert stats["misses"] == 0
+
+    @pytest.mark.asyncio
+    async def test_embed_miss_cached_for_subsequent_call(self) -> None:
+        """After a miss, the result is cached so a second embed() call hits (#1231)."""
+        embedder = LiteLLMEmbedder(model="test-model", dimension=3, max_retries=1)
+        expected = [0.0, 0.0, 1.0]
+
+        mock_response = MagicMock()
+        mock_response.data = [{"embedding": expected}]
+        mock_response.usage = MagicMock(prompt_tokens=10, total_tokens=10)
+
+        with (
+            patch("litellm.aembedding", new_callable=AsyncMock, return_value=mock_response) as mock_api,
+            patch("khora.telemetry.get_collector") as mock_telem,
+        ):
+            mock_telem.return_value.record_llm_call = MagicMock()
+            await embedder.embed("some text")
+            # Second call must be a cache hit with no further API calls
+            result2 = await embedder.embed("some text")
+            assert mock_api.await_count == 1
+        assert result2 == expected
+        stats = embedder.cache_stats
+        assert stats["misses"] == 1
+        assert stats["hits"] == 1
+
 
 class TestEmbedBatch:
     """Tests for embed_batch method."""
