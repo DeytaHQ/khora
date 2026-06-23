@@ -18,12 +18,17 @@ repos:
 
   - repo: local
     hooks:
+      # Diff-aware locally (scans only the staged src/ python files) so commits
+      # stay fast and never trigger semgrep-core's full-tree eio/io_uring hang
+      # on recent kernels (#1347). CI runs the full `semgrep ... src/` scan for
+      # comprehensive coverage; both are warn-mode (no --error → exit 0 on
+      # findings), so this only narrows LOCAL scope, not enforcement.
       - id: secret-typing
-        name: secret typing (warn-mode)
-        entry: uvx semgrep --config .semgrep.yml src/
+        name: secret typing (warn-mode, diff-aware)
+        entry: uvx semgrep --config .semgrep.yml
         language: system
-        pass_filenames: false
-        types: [python]
+        pass_filenames: true
+        files: ^src/.*\.py$
 
       - id: ty
         name: ty
