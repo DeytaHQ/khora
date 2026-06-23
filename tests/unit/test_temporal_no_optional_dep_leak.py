@@ -37,8 +37,11 @@ the LanceDB / Weaviate / Turbopuffer assertions above.
 
 from __future__ import annotations
 
+import importlib.util
 import subprocess
 import sys
+
+import pytest
 
 # Top-level package names of the genuinely-lazy backend dependencies. Each is
 # imported only inside the corresponding backend impl module, which
@@ -48,7 +51,32 @@ _FORBIDDEN_TOP_LEVEL = ("lancedb", "weaviate", "turbopuffer")
 
 
 def test_import_does_not_leak_optional_backend_deps() -> None:
-    """A clean ``import khora.storage.temporal`` loads no lazy backend SDK."""
+    """A clean ``import khora.storage.temporal`` loads no lazy backend SDK.
+
+    The leak assertion only bites for SDKs that are actually installed — an
+    absent package can never appear in ``sys.modules`` regardless of whether the
+    impl modules import it lazily or eagerly, so asserting its absence would be
+    vacuous. To avoid a silent vacuous pass (the anti-pattern of "skipped but
+    looks green"), we (a) require the headline dep ``lancedb`` — always present
+    wherever the embedded stack runs — to be installed, skipping loudly with a
+    reason otherwise, and (b) surface the installed-vs-absent split so CI logs
+    show exactly which assertions were meaningful. An *eager* impl-module import
+    of an absent SDK is still caught independently: it would raise ImportError
+    at ``import khora.storage.temporal`` and trip the non-zero-exit assertion.
+    """
+    installed = [p for p in _FORBIDDEN_TOP_LEVEL if importlib.util.find_spec(p) is not None]
+    if "lancedb" not in installed:
+        pytest.skip(
+            "lancedb is not installed, so the lazy-import guard would be vacuous "
+            "(no backend SDK present to leak). Install the embedded extra to run it."
+        )
+    absent = [p for p in _FORBIDDEN_TOP_LEVEL if p not in installed]
+    # Loud visibility (shows in -s / on failure): which forbidden SDKs the leak
+    # assertion actually exercised vs. which were absent (assertion vacuous).
+    print(
+        f"lazy-import guard — installed (asserted absent-after-import): {installed}; not installed (vacuous): {absent}"
+    )
+
     forbidden = repr(_FORBIDDEN_TOP_LEVEL)
     script = (
         "import sys\n"
