@@ -398,6 +398,19 @@ class PgVectorTemporalStore(TemporalVectorStore):
 
         return result.rowcount  # type: ignore[unresolved-attribute]
 
+    async def count_chunks(self, namespace_id: UUID) -> int:
+        """Count chunks in ``khora_chunks`` for the given namespace (#1070).
+
+        Skeleton writes chunks to this table, not the relational ``chunks``
+        table, so callers that want the real Skeleton chunk count use this
+        method.
+        """
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(func.count(khora_chunks_table.c.id)).where(khora_chunks_table.c.namespace_id == namespace_id)
+            )
+            return result.scalar_one()
+
     async def search(
         self,
         namespace_id: UUID,

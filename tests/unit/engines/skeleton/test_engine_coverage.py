@@ -24,6 +24,7 @@ from uuid import uuid4
 import pytest
 
 from khora.engines.skeleton.engine import SkeletonConstructionEngine
+from tests.test_helpers.diagnostics import assert_no_silent_degradation
 
 
 def _mock_config(*, backend: str = "pgvector") -> MagicMock:
@@ -379,30 +380,30 @@ class TestRememberBatch:
 class TestStats:
     @pytest.mark.asyncio
     async def test_all_metrics_collected(self) -> None:
+        # Skeleton routes chunk count through the temporal store (#1070).
+        # Entity/relationship counts are always 0 — Skeleton skips graph extraction.
         eng = _connected()
         ns = uuid4()
         ts = datetime(2024, 1, 1, tzinfo=UTC)
         eng._storage.get_document_stats = AsyncMock(return_value=(10, ts))
-        eng._storage.count_chunks = AsyncMock(return_value=42)
-        eng._storage.count_entities = AsyncMock(return_value=5)
-        eng._storage.count_relationships = AsyncMock(return_value=7)
+        eng._temporal_store.count_chunks = AsyncMock(return_value=42)
 
         out = await eng.stats(ns)
 
         assert out.documents == 10
         assert out.chunks == 42
-        assert out.entities == 5
-        assert out.relationships == 7
+        assert out.entities == 0
+        assert out.relationships == 0
         assert out.last_activity_at == ts
+        # Happy path must not have recorded any silent degradation (#1070).
+        assert_no_silent_degradation(out)
 
     @pytest.mark.asyncio
     async def test_missing_methods_degrade_to_zero(self) -> None:
-        """Each metric branch independently swallows AttributeError/NotImplementedError."""
+        """Temporal-store count_chunks failure degrades gracefully to 0."""
         eng = _connected()
         eng._storage.get_document_stats = AsyncMock(side_effect=NotImplementedError())
-        eng._storage.count_chunks = AsyncMock(side_effect=AttributeError())
-        eng._storage.count_entities = AsyncMock(side_effect=NotImplementedError())
-        eng._storage.count_relationships = AsyncMock(side_effect=AttributeError())
+        eng._temporal_store.count_chunks = AsyncMock(side_effect=RuntimeError("db error"))
 
         out = await eng.stats(uuid4())
         assert out.documents == 0

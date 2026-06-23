@@ -33,7 +33,6 @@ from khora.core.temporal import (
     TemporalChunk,
     document_denorm_fields,
 )
-from khora.engines._stats import gather_counts
 from khora.engines._storage_config import build_storage_config
 from khora.exceptions import EngineCapabilityError, UnsupportedEngineKwargError
 from khora.extraction.embedders import LiteLLMEmbedder
@@ -1196,7 +1195,13 @@ class SkeletonConstructionEngine:
         )
 
     async def stats(self, namespace_id: UUID) -> Stats:
-        """Get document/chunk/entity/relationship counts for a namespace."""
+        """Get document/chunk/entity/relationship counts for a namespace.
+
+        Skeleton writes chunks to the temporal store's ``khora_chunks`` table,
+        NOT the relational ``chunks`` table, so chunk counting is routed to the
+        temporal store's ``count_chunks`` method when available (#1070).
+        Entity/relationship counts are always 0 (Skeleton skips graph extraction).
+        """
         storage = self._get_storage()
 
         doc_count = 0
@@ -1207,15 +1212,38 @@ class SkeletonConstructionEngine:
         except (AttributeError, NotImplementedError):
             pass
 
-        chunk_count, entity_count, relationship_count, metadata = await gather_counts(
-            storage, namespace_id, engine="skeleton"
-        )
+        # Route chunk count through the temporal store when it exposes count_chunks.
+        # Skeleton writes to ``khora_chunks``, not the relational ``chunks`` table,
+        # so the coordinator's count_chunks (which reads ``chunks``) returns 0 (#1070).
+        chunk_count = 0
+        metadata: dict[str, Any] = {}
+        temporal_store = self._temporal_store
+        temporal_count_fn = getattr(temporal_store, "count_chunks", None) if temporal_store else None
+        if temporal_count_fn is not None:
+            try:
+                chunk_count = await temporal_count_fn(namespace_id)
+            except Exception as exc:  # noqa: BLE001
+                from khora.telemetry.metrics import metric_counter
+
+                logger.warning("stats: skeleton.count_chunks (temporal) failed, reporting 0", exc_info=True)
+                metric_counter(
+                    "khora.stats.counter_failed_total",
+                    description="stats() counters that could not run.",
+                ).add(1, attributes={"engine": "skeleton", "counter": "chunks"})
+                metadata["errors"] = [
+                    {
+                        "component": "skeleton.stats.count_chunks",
+                        "reason": "counter_unavailable",
+                        "exception": type(exc).__name__,
+                        "detail": str(exc) or None,
+                    }
+                ]
 
         return Stats(
             documents=doc_count,
             chunks=chunk_count,
-            entities=entity_count,
-            relationships=relationship_count,
+            entities=0,
+            relationships=0,
             last_activity_at=last_activity_at,
             metadata=metadata,
         )

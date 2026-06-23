@@ -153,7 +153,9 @@ class TestSkeletonStats:
         engine = SkeletonConstructionEngine(config)
         engine._connected = True
         engine._storage = storage
+        # Skeleton counts chunks via the temporal store, not storage.count_chunks (#1070).
         engine._temporal_store = AsyncMock()
+        engine._temporal_store.count_chunks = AsyncMock(return_value=20)
         return engine
 
     @pytest.mark.asyncio
@@ -187,8 +189,9 @@ class TestSkeletonStats:
     async def test_stats_count_chunks_fallback(self) -> None:
         """stats() handles count_chunks failure gracefully."""
         storage = _make_mock_storage()
-        storage.count_chunks = AsyncMock(side_effect=NotImplementedError)
         engine = self._make_engine(storage)
+        # Skeleton counts chunks via the temporal store (#1070); simulate it failing.
+        engine._temporal_store.count_chunks = AsyncMock(side_effect=NotImplementedError)
 
         result = await engine.stats(uuid4())
 

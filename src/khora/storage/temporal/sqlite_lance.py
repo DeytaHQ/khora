@@ -25,6 +25,7 @@ Hybrid mode fuses ranks via RRF (same constants as the PG backend).
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -137,7 +138,20 @@ def _khora_chunks_vec_schema(dim: int, use_halfvec: bool) -> pa.Schema:
 
 
 def _dt_to_iso(dt: datetime | None) -> str | None:
-    return None if dt is None else dt.isoformat()
+    """Serialize a datetime to UTC ISO-8601 for lexicographic SQLite comparisons.
+
+    Tz-aware datetimes are converted to UTC so stored TEXT values are always in
+    the canonical ``...+00:00`` form. Naive datetimes are treated as UTC (same
+    policy as ``_normalize_recall_bound`` in khora.py). The recall bounds
+    produced by ``_normalize_recall_bound`` are also UTC, so TEXT comparisons
+    are accurate for any input timezone (#1068).
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        # Treat naive as UTC (matches _normalize_recall_bound in khora.py).
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC).isoformat()
 
 
 def _parse_dt(val: str | None) -> datetime | None:
@@ -918,6 +932,119 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
             source=row["source"],
             title=row["title"],
         )
+
+    # ------------------------------------------------------------------
+    # Count helpers (#1070)
+    # ------------------------------------------------------------------
+
+    async def count_chunks(self, namespace_id: UUID) -> int:
+        """Count chunks in ``khora_chunks`` for the given namespace (#1070).
+
+        The Skeleton engine writes chunks to this table, NOT the relational
+        ``chunks`` table — so callers that want the Skeleton chunk count must
+        call this method rather than the sqlite_lance vector adapter's
+        ``count_chunks`` (which reads ``chunks`` and returns 0 on Skeleton
+        stacks).
+        """
+        cur = await self._sqlite.execute(
+            "SELECT COUNT(*) AS cnt FROM khora_chunks WHERE namespace_id = ?",
+            (uuid_to_text(namespace_id),),
+        )
+        row = await cur.fetchone()
+        return int(row["cnt"]) if row else 0
+
+    # ------------------------------------------------------------------
+    # Recency channel (#1182)
+    # ------------------------------------------------------------------
+
+    async def search_recent_chunks(
+        self,
+        namespace_id: UUID,
+        limit: int,
+        *,
+        created_after: datetime | None = None,
+        filter_ast: FilterNode | None = None,
+        filter_plan_out: list[ChannelPlan] | None = None,
+    ) -> list[tuple[Chunk, float | None]]:
+        """Return the ``limit`` most-recent chunks ordered by recency (#1182).
+
+        Mirrors the pgvector ``search_recent_chunks`` contract:
+        - Recency axis: ``COALESCE(occurred_at, source_timestamp, created_at)``
+          (event-time → producer-time → ingest-time), narrowed from above by
+          the optional ``created_after`` bound on the same axis.
+        - All values stored as UTC ISO-8601 so the ``>=`` bound comparison is
+          lexicographically correct (#1068).
+        - Returns ``(Chunk, None)`` tuples; ``None`` signals "no cosine score
+          yet" — the caller (VectorCypher recency channel) fills it via
+          ``batch_cosine_similarity``. ``Chunk.embedding`` is populated from
+          the LanceDB ``khora_chunks_vec`` table so the cosine gate works.
+        - ``filter_ast`` is compiled and pushed via ``_build_ast_clause`` in
+          the same split mode the other search paths use.
+        """
+        ns_text = uuid_to_text(namespace_id)
+        # Build recency ORDER BY expression: COALESCE(occurred_at, source_timestamp, created_at)
+        recency_expr = "COALESCE(occurred_at, source_timestamp, created_at)"
+
+        sql_parts = [
+            "SELECT * FROM khora_chunks WHERE namespace_id = ?"  # noqa: S608
+        ]
+        params: list[Any] = [ns_text]
+
+        if created_after is not None:
+            sql_parts.append(f"AND {recency_expr} >= ?")
+            params.append(_dt_to_iso(created_after))
+
+        ast_sql, ast_params = self._build_ast_clause(filter_ast, alias=None)
+        if ast_sql:
+            sql_parts.append(f"AND {ast_sql}")
+            params.extend(ast_params)
+
+        # Honest filter-pushdown plan (mirrors _search_inner / search_fulltext).
+        if filter_plan_out is not None:
+            if filter_ast is not None and filter_ast.children:
+                from khora.filter.compilers.lance import compile_lance
+                from khora.filter.execute import filter_leaf_keys
+
+                consumed = compile_lance(filter_ast, self._filter_compile_ctx(None)).consumed_keys
+                filter_plan_out.append(
+                    ChannelPlan(
+                        pushed_keys=consumed,
+                        post_filtered_keys=filter_leaf_keys(filter_ast) - consumed,
+                        defensive_recheck=True,
+                    )
+                )
+            else:
+                filter_plan_out.append(ChannelPlan())
+
+        sql_parts.append(f"ORDER BY {recency_expr} DESC LIMIT ?")
+        params.append(limit)
+
+        cur = await self._sqlite.execute(" ".join(sql_parts), params)
+        rows = await cur.fetchall()
+        if not rows:
+            return []
+
+        # Attach embeddings from LanceDB so the cosine gate in the caller works.
+        row_ids = [row["id"] for row in rows]
+        tbl = await self._vec_table()
+        id_list = ", ".join(f"'{rid}'" for rid in row_ids)
+        # Use tbl.query().where() for a filter-only (non-ANN) scan.
+        vec_rows = await tbl.query().where(f"id IN ({id_list})").to_list()
+        emb_by_id: dict[str, list[float]] = {r["id"]: list(r["vector"]) for r in vec_rows}
+
+        post_filter = self._ast_post_filter(filter_ast)
+        out: list[tuple[Chunk, float | None]] = []
+        for row in rows:
+            chunk = self._row_to_chunk(row)
+            if not post_filter(chunk):
+                continue
+            # Attach embedding from LanceDB (None if vector is missing — caller
+            # filters out embedding-less chunks before the cosine gate).
+            emb = emb_by_id.get(row["id"])
+            if emb is not None:
+                chunk = dataclasses.replace(chunk, embedding=emb)
+            out.append((temporal_chunk_to_chunk(chunk), None))
+        return out
 
     # ------------------------------------------------------------------
     # Health
