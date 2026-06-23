@@ -397,10 +397,13 @@ class TestStageDocumentsBatch:
     async def test_existing_checksum_skipped(self):
         ns = uuid4()
         existing_doc = MagicMock(status="completed")
+        # Key off the actual "skip-me" checksum, not a positional index:
+        # stage_documents_batch queries `list({...})` (set-derived, order
+        # unspecified), so `checksums[0]` is not deterministically "skip-me".
+        skip_checksum = compute_checksum("skip-me")
 
         async def fake_get(ns_, checksums):
-            # Mark the first input's checksum as already present.
-            return {checksums[0]: existing_doc}
+            return {skip_checksum: existing_doc}
 
         storage = _make_storage(get_documents_by_checksums=AsyncMock(side_effect=fake_get))
         inputs = [{"content": "skip-me"}, {"content": "new-one"}]
