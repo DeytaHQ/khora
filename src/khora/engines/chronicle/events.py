@@ -233,14 +233,34 @@ class EventExtractor:
 
         _latency = (_time.perf_counter() - _t0) * 1000
         usage = getattr(response, "usage", None)
+        _pt = getattr(usage, "prompt_tokens", 0) or 0
+        _ct = getattr(usage, "completion_tokens", 0) or 0
+        _tt = getattr(usage, "total_tokens", 0) or 0
+
+        from khora.khora import LLMUsage, _safe_completion_cost
+        from khora.telemetry.context import record_usage
+
+        _cost = _safe_completion_cost(response, model=self._model)
         get_collector().record_llm_call(
             operation="event_extraction",
             model=self._model,
-            prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-            completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
-            total_tokens=getattr(usage, "total_tokens", 0) or 0,
+            prompt_tokens=_pt,
+            completion_tokens=_ct,
+            total_tokens=_tt,
             latency_ms=_latency,
             namespace_id=namespace_id,
+            cost_usd=_cost,
+        )
+        record_usage(
+            LLMUsage(
+                operation="event_extraction",
+                model=self._model,
+                prompt_tokens=_pt,
+                completion_tokens=_ct,
+                total_tokens=_tt,
+                latency_ms=_latency,
+                cost_usd=_cost,
+            )
         )
 
         events = []

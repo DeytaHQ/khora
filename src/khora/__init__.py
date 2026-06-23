@@ -75,6 +75,7 @@ from .khora import (
     RecallResult,
     RememberResult,
     Stats,
+    UsageSummary,
 )
 from .search_mode import SearchMode
 
@@ -85,6 +86,7 @@ __all__ = [
     "KhoraError",
     "Khora",
     "LLMUsage",
+    "UsageSummary",
     "RememberResult",
     "RecallResult",
     "DocumentProjection",

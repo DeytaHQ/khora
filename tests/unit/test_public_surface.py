@@ -61,6 +61,7 @@ EXPECTED_PUBLIC_SURFACE = frozenset(
         "SearchMode",
         "SemanticFilter",
         "Stats",
+        "UsageSummary",
         "StringOps",
         "context_text",
         "create_engine",

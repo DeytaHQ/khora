@@ -136,7 +136,7 @@ class RecallResult:
     chunks: list[RecallChunk]
     entities: list[RecallEntity]
     relationships: list[RecallRelationship]
-    usage: list[LLMUsage] = field(default_factory=list)
+    llm_usage: list[LLMUsage] = field(default_factory=list)
     engine_info: dict[str, Any] = field(default_factory=dict)
     communities: list[CommunityNode] = field(default_factory=list)
 

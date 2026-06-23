@@ -438,6 +438,9 @@ class LiteLLMEmbedder(Embedder):
                     req_span.set_attribute("prompt_tokens", prompt_tokens)
                     req_span.set_attribute("total_tokens", total_tokens)
 
+                    from khora.khora import LLMUsage, _safe_completion_cost
+
+                    _cost = _safe_completion_cost(response, model=self._model, call_type="aembedding")
                     get_collector().record_llm_call(
                         operation="embedding",
                         model=self._model,
@@ -446,9 +449,9 @@ class LiteLLMEmbedder(Embedder):
                         latency_ms=_latency,
                         batch_size=len(texts),
                         cache_hit=False,
+                        cost_usd=_cost,
                     )
 
-                    from khora.khora import LLMUsage
                     from khora.telemetry.context import record_usage
 
                     record_usage(
@@ -460,6 +463,7 @@ class LiteLLMEmbedder(Embedder):
                             total_tokens=total_tokens,
                             latency_ms=_latency,
                             batch_size=len(texts),
+                            cost_usd=_cost,
                         )
                     )
 

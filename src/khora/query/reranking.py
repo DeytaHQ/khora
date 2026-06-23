@@ -275,7 +275,29 @@ class CrossEncoderReranker(Reranker):
             # Score in batches
             # Offload synchronous PyTorch inference to a thread to avoid
             # blocking the event loop during cross-encoder scoring.
+            import time as _time
+
+            _t0 = _time.perf_counter()
             scores = await asyncio.to_thread(model.predict, pairs, batch_size=self._batch_size)
+            _latency = (_time.perf_counter() - _t0) * 1000
+
+            try:
+                from khora.khora import LLMUsage
+                from khora.telemetry.context import record_usage
+
+                record_usage(
+                    LLMUsage(
+                        operation="cross_encoder_rerank",
+                        model=self._model_name,
+                        prompt_tokens=0,
+                        completion_tokens=0,
+                        total_tokens=0,
+                        latency_ms=_latency,
+                        batch_size=len(pairs),
+                    )
+                )
+            except Exception:
+                logger.debug("Cross-encoder usage recording failed", exc_info=True)
 
             # Convert all scores to floats for normalization
             # Cross-encoders output logits (roughly -3 to 3), we need to normalize
