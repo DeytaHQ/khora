@@ -961,6 +961,10 @@ class LLMEntityExtractor(EntityExtractor):
         _pt = getattr(usage, "prompt_tokens", 0) or 0
         _ct = getattr(usage, "completion_tokens", 0) or 0
         _tt = getattr(usage, "total_tokens", 0) or 0
+
+        from khora.khora import LLMUsage, _safe_completion_cost
+
+        _cost = _safe_completion_cost(response, model=self._model)
         get_collector().record_llm_call(
             operation="entity_extraction",
             model=self._model,
@@ -968,9 +972,9 @@ class LLMEntityExtractor(EntityExtractor):
             completion_tokens=_ct,
             total_tokens=_tt,
             latency_ms=_latency,
+            cost_usd=_cost,
         )
 
-        from khora.khora import LLMUsage
         from khora.telemetry.context import record_usage
 
         record_usage(
@@ -981,6 +985,7 @@ class LLMEntityExtractor(EntityExtractor):
                 completion_tokens=_ct,
                 total_tokens=_tt,
                 latency_ms=_latency,
+                cost_usd=_cost,
             )
         )
 
@@ -1227,6 +1232,10 @@ class LLMEntityExtractor(EntityExtractor):
                 _pt = getattr(usage, "prompt_tokens", 0) or 0
                 _ct = getattr(usage, "completion_tokens", 0) or 0
                 _tt = getattr(usage, "total_tokens", 0) or 0
+
+                from khora.khora import LLMUsage, _safe_completion_cost
+
+                _cost = _safe_completion_cost(response, model=self._model)
                 get_collector().record_llm_call(
                     operation="relationship_extraction_second_pass",
                     model=self._model,
@@ -1234,9 +1243,9 @@ class LLMEntityExtractor(EntityExtractor):
                     completion_tokens=_ct,
                     total_tokens=_tt,
                     latency_ms=_latency,
+                    cost_usd=_cost,
                 )
 
-                from khora.khora import LLMUsage
                 from khora.telemetry.context import record_usage
 
                 record_usage(
@@ -1247,6 +1256,7 @@ class LLMEntityExtractor(EntityExtractor):
                         completion_tokens=_ct,
                         total_tokens=_tt,
                         latency_ms=_latency,
+                        cost_usd=_cost,
                     )
                 )
 
@@ -2036,6 +2046,10 @@ Return ONLY valid JSON, no other text."""
                             _pt,
                             _ct,
                         )
+
+                        from khora.khora import LLMUsage, _safe_completion_cost
+
+                        _cost = _safe_completion_cost(response, model=self._model)
                         get_collector().record_llm_call(
                             operation="entity_extraction_multi",
                             model=self._model,
@@ -2044,9 +2058,9 @@ Return ONLY valid JSON, no other text."""
                             total_tokens=_tt,
                             latency_ms=_latency,
                             metadata={"batch_size": len(texts)},
+                            cost_usd=_cost,
                         )
 
-                        from khora.khora import LLMUsage
                         from khora.telemetry.context import record_usage
 
                         record_usage(
@@ -2058,6 +2072,7 @@ Return ONLY valid JSON, no other text."""
                                 total_tokens=_tt,
                                 latency_ms=_latency,
                                 batch_size=len(texts),
+                                cost_usd=_cost,
                             )
                         )
 

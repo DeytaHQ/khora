@@ -103,7 +103,7 @@ class TestResultLLMUsageField:
             entities=[],
             relationships=[],
         )
-        assert r.usage == []
+        assert r.llm_usage == []
 
     def test_remember_result_with_usage(self) -> None:
         usage = [

@@ -560,6 +560,10 @@ async def acompletion(
     _prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
     _completion_tokens = getattr(usage, "completion_tokens", 0) or 0
     _total_tokens = getattr(usage, "total_tokens", 0) or 0
+
+    from khora.khora import LLMUsage, _safe_completion_cost
+
+    _cost = _safe_completion_cost(response, model=config.model)
     get_collector().record_llm_call(
         operation=_operation,
         model=config.model,
@@ -567,12 +571,9 @@ async def acompletion(
         completion_tokens=_completion_tokens,
         total_tokens=_total_tokens,
         latency_ms=_latency,
+        cost_usd=_cost,
     )
 
-    # Extractors call litellm.acompletion() directly, not this helper.
-    # If they switch to this helper, remove their own record_usage() calls to
-    # avoid double-counting.
-    from khora.khora import LLMUsage
     from khora.telemetry.context import record_usage
 
     record_usage(
@@ -583,6 +584,7 @@ async def acompletion(
             completion_tokens=_completion_tokens,
             total_tokens=_total_tokens,
             latency_ms=_latency,
+            cost_usd=_cost,
         )
     )
 
@@ -633,6 +635,10 @@ async def aembedding(
     usage = getattr(response, "usage", None)
     _prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
     _total_tokens = getattr(usage, "total_tokens", 0) or 0
+
+    from khora.khora import LLMUsage, _safe_completion_cost
+
+    _cost = _safe_completion_cost(response, model=config.embedding_model, call_type="aembedding")
     get_collector().record_llm_call(
         operation="embedding",
         model=config.embedding_model,
@@ -640,12 +646,9 @@ async def aembedding(
         total_tokens=_total_tokens,
         latency_ms=_latency,
         metadata={"batch_size": len(text)},
+        cost_usd=_cost,
     )
 
-    # Embedders call litellm.aembedding() directly, not this helper.
-    # If they switch to this helper, remove their own record_usage() calls to
-    # avoid double-counting.
-    from khora.khora import LLMUsage
     from khora.telemetry.context import record_usage
 
     record_usage(
@@ -657,6 +660,7 @@ async def aembedding(
             total_tokens=_total_tokens,
             latency_ms=_latency,
             batch_size=len(text),
+            cost_usd=_cost,
         )
     )
 

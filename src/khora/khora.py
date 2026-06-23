@@ -13,7 +13,7 @@ import asyncio
 import hashlib
 import os
 import warnings
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -211,6 +211,91 @@ class LLMUsage:
     latency_ms: float
     batch_size: int = 1
     """>1 for embedding batches."""
+    cost_usd: float = 0.0
+    """Estimated USD cost via litellm pricing tables. 0.0 when unknown."""
+
+
+def _safe_completion_cost(
+    response: Any = None,
+    *,
+    model: str = "",
+    call_type: str = "acompletion",
+) -> float:
+    """Best-effort USD cost from litellm pricing tables.
+
+    Returns 0.0 on any failure (unknown model, missing litellm, etc.).
+    """
+    try:
+        import litellm
+
+        return float(
+            litellm.completion_cost(
+                completion_response=response,
+                model=model,
+                call_type=call_type,
+            )
+        )
+    except Exception:
+        return 0.0
+
+
+@dataclass(slots=True, frozen=True)
+class _OperationUsage:
+    """Per-operation aggregate."""
+
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    cost_usd: float
+    call_count: int
+
+
+@dataclass(slots=True, frozen=True)
+class UsageSummary:
+    """Aggregate view over a list of :class:`LLMUsage` entries."""
+
+    total_prompt_tokens: int
+    total_completion_tokens: int
+    total_tokens: int
+    total_cost_usd: float
+    total_latency_ms: float
+    by_operation: dict[str, _OperationUsage]
+    by_model: dict[str, _OperationUsage]
+
+    @staticmethod
+    def from_usage(entries: Iterable[LLMUsage]) -> UsageSummary:
+        """Build a summary from LLMUsage entries."""
+        prompt = comp = total = 0
+        cost = latency = 0.0
+        ops: dict[str, list[LLMUsage]] = {}
+        models: dict[str, list[LLMUsage]] = {}
+        for u in entries:
+            prompt += u.prompt_tokens
+            comp += u.completion_tokens
+            total += u.total_tokens
+            cost += u.cost_usd
+            latency += u.latency_ms
+            ops.setdefault(u.operation, []).append(u)
+            models.setdefault(u.model, []).append(u)
+
+        def _agg(items: list[LLMUsage]) -> _OperationUsage:
+            return _OperationUsage(
+                prompt_tokens=sum(i.prompt_tokens for i in items),
+                completion_tokens=sum(i.completion_tokens for i in items),
+                total_tokens=sum(i.total_tokens for i in items),
+                cost_usd=sum(i.cost_usd for i in items),
+                call_count=len(items),
+            )
+
+        return UsageSummary(
+            total_prompt_tokens=prompt,
+            total_completion_tokens=comp,
+            total_tokens=total,
+            total_cost_usd=cost,
+            total_latency_ms=latency,
+            by_operation={k: _agg(v) for k, v in ops.items()},
+            by_model={k: _agg(v) for k, v in models.items()},
+        )
 
 
 @dataclass(slots=True, frozen=True)
@@ -2254,7 +2339,7 @@ class Khora:
                 except Exception as exc:  # pragma: no cover - defensive
                     logger.warning("Hook dispatch failed for {}: {}", EventType.RECALL_RESULTS_READY.value, exc)
 
-                packaged = replace(result, usage=collect_usage())
+                packaged = replace(result, llm_usage=collect_usage())
 
                 # Emit RECALL_COMPLETED with end-to-end timing.
                 try:
