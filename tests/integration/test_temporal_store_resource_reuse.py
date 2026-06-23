@@ -203,6 +203,7 @@ class TestSurrealDBResourceReuse:
         await conn.connect()
         relational = SurrealDBRelationalAdapter(conn)
         coord = StorageCoordinator(relational=relational, vector=None)
+        await coord.connect()
         try:
             assert coord._relational._conn is conn
 
