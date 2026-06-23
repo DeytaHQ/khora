@@ -17,9 +17,7 @@ Lifecycle exercised: ``initialize`` → ``queue_prefetch`` → ``sync_turn``
 ``handle_tool_call("memory_search")`` (blocking dispatch, real result)
 → ``on_pre_compress`` → ``on_session_end`` (drain) → ``shutdown``.
 
-Kept light (3 turns) to fit the 30s CI smoke budget - every
-``sync_turn`` triggers a full extraction pipeline that retries 3× on
-the mock LLM's non-JSON output.
+Kept light (3 turns) to fit the 30s CI smoke budget.
 """
 
 from __future__ import annotations
@@ -79,6 +77,7 @@ async def main() -> None:
             hermes_home=hermes_home,
             platform="cli",
         )
+        assert provider.namespace_id is not None, "namespace_id should be set after initialize"
         print(f"Provider bound to namespace_id={provider.namespace_id}")
 
         # 3) Warm the prefetch cache for the next turn. Fire-and-forget;
@@ -117,6 +116,7 @@ async def main() -> None:
             "memory_search",
             {"query": "Phoenix database", "top_k": 3},
         )
+        assert isinstance(result, str) and len(result) > 0, "tool call returned empty result"
         print("--- memory_search tool call (blocking dispatch) ---")
         print(result.strip())
 

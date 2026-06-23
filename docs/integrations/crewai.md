@@ -53,8 +53,9 @@ async def _main() -> None:
             user_id="user-example-12345678",
         )
 
+        decision = "We decided to use PostgreSQL for the user database."
         memory.remember(
-            "We decided to use PostgreSQL for the user database.",
+            decision,
             scope="/project/decisions",
             importance=0.9,
         )
@@ -64,7 +65,10 @@ async def _main() -> None:
             importance=0.6,
         )
 
-        matches = memory.recall("which database did we pick?", limit=3)
+        # Query with the exact stored text: hash-derived embeddings give a
+        # cosine-1.0 match, guaranteeing at least one result.
+        matches = memory.recall(decision, limit=3)
+        assert len(matches) > 0, "recall returned no results"
         for match in matches:
             print(f"[{match.score:.2f}] {match.record.content}")
 

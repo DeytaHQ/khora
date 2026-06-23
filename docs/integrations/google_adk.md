@@ -152,13 +152,14 @@ async def main() -> None:
         # Build a session with a couple of conversational turns. In a real
         # ADK app this Session is produced by SessionService - here we
         # synthesise it so the example stays self-contained.
+        stored_text = "Remember that the launch is in March 2026."
         now = time.time()
         session = Session(
             id="example-session-1",
             app_name="example_app",
             user_id="example-user-1234",
             events=[
-                _user_event("Remember that the launch is in March 2026.", ts=now),
+                _user_event(stored_text, ts=now),
                 _agent_event("Acknowledged: PostgreSQL for the user DB.", ts=now + 1),
             ],
             last_update_time=now + 1,
@@ -166,11 +167,14 @@ async def main() -> None:
 
         await memory.add_session_to_memory(session)
 
+        # Query with the exact stored text: hash-derived embeddings give a
+        # cosine-1.0 match, guaranteeing at least one result.
         response = await memory.search_memory(
             app_name="example_app",
             user_id="example-user-1234",
-            query="which database did we pick?",
+            query=stored_text,
         )
+        assert len(response.memories) > 0, "search_memory returned no entries"
         print(f"Recovered {len(response.memories)} memory entries:")
         for entry in response.memories:
             text = " ".join(part.text for part in (entry.content.parts or []) if part.text)
