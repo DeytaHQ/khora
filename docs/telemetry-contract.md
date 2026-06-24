@@ -15,9 +15,13 @@ telemetry public surface. It is enforced by
   field is breaking.
 - **`collector_methods`** - the recording surface
   (`record_llm_call`, `record_storage_op`, `record_pipeline_stage`).
-- **`spans`** - every `trace_span("…")` call site in the codebase. Names
-  marked `stability: public` are part of the API; downstream dashboards may
-  query by these names. Names marked `internal` may be renamed.
+- **`spans`** - every literal `trace_span("…")` call site whose argument is
+  a string constant. Names marked `stability: public` are part of the API;
+  downstream dashboards may query by these names. Names marked `internal` may
+  be renamed. Spans emitted via the `@trace` decorator (where the span name is
+  derived from a variable at call time) and spans built from f-strings (e.g.
+  `khora.storage.{operation}` in `coordinator.py`) are internal and are NOT
+  enumerated here.
 - **`pipeline_stages`** - every `(pipeline, stage)` pair passed to
   `pipeline_stage(...)` or `record_pipeline_stage(stage=…)`. Currently all
   marked `internal`.

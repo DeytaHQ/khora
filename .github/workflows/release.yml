@@ -20,9 +20,9 @@
 #
 # Version lockstep: khora and khora-accel are released at identical versions.
 #   - khora-accel: `Set version from tag` seds rust/khora-accel/Cargo.toml.
-#   - khora: hatch-vcs derives version from the git tag automatically, and
-#     `Pin khora-accel to release version` seds pyproject.toml so the
-#     published khora wheel hard-requires khora-accel == ${tag-version}.
+#   - khora: hatch-vcs derives version from the git tag automatically.
+#     pyproject.toml's `rust` extra already pins khora-accel == X.Y.Z —
+#     this pin is committed in the release PR, not rewritten at build time.
 #
 # Publish order: accel first, then khora. Serializing prevents the skew where
 # `khora==X.Y.Z` lands on PyPI but its `khora-accel==X.Y.Z` dependency hasn't
@@ -178,8 +178,8 @@ jobs:
   # also resolve its khora-accel==X.Y.Z dep.
   #
   # hatch-vcs derives khora's version from the git tag automatically.
-  # The `Pin khora-accel to release version` step rewrites pyproject.toml so
-  # the published wheel/sdist hard-pins khora-accel==X.Y.Z (lockstep contract).
+  # pyproject.toml's `rust` extra already pins khora-accel==X.Y.Z at commit
+  # time (same PR that bumps Cargo.toml) — no rewrite step at build time.
   # ============================================================================
   publish-khora:
     needs: publish-accel

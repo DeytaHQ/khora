@@ -21,7 +21,7 @@ NumPy cannot help for string-heavy operations.
 - **Zero-copy NumPy access** - `PyReadonlyArray1` / `PyReadonlyArray2`
   borrow the underlying numpy buffer without copying data across the
   FFI boundary.
-- **GIL release** - `py.allow_threads(|| { ... })` frees the GIL so
+- **GIL release** - `py.detach(|| { ... })` frees the GIL so
   Python async tasks and other threads continue while Rust computes.
 - **Rayon parallelism** - `.into_par_iter()` and `.par_iter()` provide
   work-stealing thread-pool parallelism across all available CPU cores.
@@ -92,7 +92,7 @@ batch dot product, and embedding normalization.
 
 **Rust techniques:**
 - **NumPy zero-copy** - `PyReadonlyArray1` / `PyReadonlyArray2` borrow numpy buffers directly; owned copies are made only to release the GIL.
-- **GIL release** - `py.allow_threads(|| { ... })` for batch and pairwise ops.
+- **GIL release** - `py.detach(|| { ... })` for batch and pairwise ops.
 - **Rayon parallel** - `(0..n).into_par_iter()` distributes row-level work across the thread pool for batch operations; `flat_map` parallelises the outer loop for pairwise.
 - **Pre-computed norms** - Query norm and per-row norms computed once, avoiding redundant sqrt calls.
 
@@ -119,7 +119,7 @@ Greedy Maximal Marginal Relevance for diversity-aware result selection.
 - **Safe iterator dot product** - inner `dot_f32` function uses `a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()`, a safe iterator chain that the compiler auto-vectorizes on x86-64 with SSE/AVX. Replaced a previous `unsafe get_unchecked` implementation to eliminate undefined-behavior risk while preserving equivalent codegen.
 
 **Rust techniques:**
-- **GIL release** - `py.allow_threads(|| { ... })` during the entire selection loop.
+- **GIL release** - `py.detach(|| { ... })` during the entire selection loop.
 - **NumPy zero-copy** - `PyReadonlyArray2` borrows the embedding matrix; owned copy made once before GIL release.
 - **Early exit** - returns immediately if k >= n or no candidates available.
 
@@ -143,7 +143,7 @@ Batch datetime comparison, recency scoring, and temporal query detection.
 
 **Rust techniques:**
 - **Rayon parallel** - `batch_temporal_filter` and `batch_recency_scores` use `par_iter()` for large input batches.
-- **GIL release** - `py.allow_threads(|| { ... })` during batch computation.
+- **GIL release** - `py.detach(|| { ... })` during batch computation (pyo3 0.29 API).
 - **No datetime parsing** - timestamps arrive as pre-computed Unix epoch floats, avoiding chrono/datetime overhead.
 - **Aho-Corasick automaton** - `detect_temporal_category` uses a `LazyLock<(AhoCorasick, Vec<u8>)>` compiled from ~200 categorised patterns with `ascii_case_insensitive` matching. Single-pass multi-pattern search replaces sequential substring checks.
 - **LazyLock regex** - `detect_temporal_keywords` compiles its regex once via `LazyLock<Regex>` and reuses it across all calls.
@@ -152,7 +152,7 @@ Batch datetime comparison, recency scoring, and temporal query detection.
 - `khora._accel.batch_temporal_filter` - used by temporal query pipeline
 - `khora._accel.batch_recency_scores` - used for recency-biased ranking
 - `khora._accel.detect_temporal_category` - used by temporal query classification to route queries to the appropriate temporal handling strategy
-- `khora._accel.detect_temporal_keywords` - fast pre-filter to check if a query has any temporal intent before full classification
+- `khora_accel.detect_temporal_keywords` (raw only, not re-exported through `khora._accel`) - fast pre-filter to check if a query has any temporal intent before full classification
 
 ---
 
@@ -172,7 +172,7 @@ Levenshtein and sequence-match similarity with batch variants.
 **Rust techniques:**
 - **strsim crate** - Provides optimised `normalized_levenshtein` and `jaro_winkler` implementations in pure Rust.
 - **Conditional Rayon batch** - batch functions use `par_iter()` when `candidates.len() >= 512`; smaller batches use sequential iteration to avoid thread-pool overhead that dominates at small scale.
-- **GIL release** - `py.allow_threads(|| { ... })` for both batch functions.
+- **GIL release** - `py.detach(|| { ... })` for both batch functions.
 - **Early exit** - Short-circuit returns for equal strings (→ 1.0) and empty strings (→ 0.0).
 
 **Python consumers:**
@@ -204,7 +204,7 @@ A complete BM25 ranking index as a `#[pyclass]`, mirroring the Python
 - **Suffix stemming** - `basic_stem()` strips common English suffixes (`-ing`, `-ed`, `-tion`, `-ness`, `-ment`, `-able`, `-ible`, `-ful`, `-less`, `-ly`, `-er`, `-est`, `-es`, `-s`) when `use_stemming=true`, requiring the stem to be at least 3 characters.
 - **Stopword removal** - 90+ English stopwords compiled into a `hashbrown::HashSet` via `LazyLock` for zero-allocation lookups.
 - **IDF formula** - `ln((N - df + 0.5) / (df + 0.5) + 1.0)` (standard BM25 IDF).
-- **GIL release** - The `search()` method releases the GIL during the candidate scoring loop via `py.allow_threads()`.
+- **GIL release** - The `search()` method releases the GIL during the candidate scoring loop via `py.detach()`.
 - **Candidate pruning** - Only documents containing at least one query term (via inverted index lookup) are scored, avoiding full-corpus scans.
 
 **Rust techniques:**
@@ -227,7 +227,7 @@ Weighted PageRank for skeleton indexing (where ~10% of chunks are identified as 
 | `build_chunk_edges` | `(py, n_chunks: usize, keyword_chunk_ids: Vec<Vec<usize>>, idf_scores: Vec<f64>) -> Vec<(usize, usize, f64)>` | Build chunk-to-chunk co-occurrence graph. For each keyword, creates bidirectional edges among all chunks sharing that keyword, weighted by IDF score. |
 
 **Rust techniques:**
-- **GIL release** - Both functions run their entire computation inside `py.allow_threads()`.
+- **GIL release** - Both functions run their entire computation inside `py.detach()`.
 - **Adjacency list** - `Vec<Vec<(usize, f64)>>` for incoming edges, `Vec<f64>` for out-degree - cache-friendly iteration.
 - **Convergence check** - Absolute diff sum checked each iteration for early termination.
 
@@ -304,7 +304,7 @@ Louvain-style modularity optimization for detecting entity communities in the kn
 - Stops when no node changes community or max_iter passes complete.
 
 **Rust techniques:**
-- **GIL release** - `py.allow_threads()` during optimization.
+- **GIL release** - `py.detach()` during optimization.
 - **hashbrown::HashMap** - Fast community membership tracking.
 
 **Python consumers:**
@@ -328,10 +328,10 @@ Batch entity matching with a 3-stage cascade.
 
 **Rust techniques:**
 - **HashMap O(1) lookups** - Exact and alias stages build `HashMap<String, usize>` indexes from the existing names/aliases during pre-processing, replacing the previous O(n) linear scans. This reduces stages 1 and 2 from O(new × existing) to O(new + existing).
-- **Pre-lowercasing** - All existing names and aliases are lowercased once before the hot loop, outside `allow_threads`.
+- **Pre-lowercasing** - All existing names and aliases are lowercased once before the hot loop, outside `detach`.
 - **Rayon parallel** - `new_names.par_iter().map(...)` parallelises resolution across all new names.
 - **Rayon threshold** - Parallelism is only engaged when `new_names.len() >= 512`; smaller batches use sequential iteration to avoid thread-pool overhead.
-- **GIL release** - `py.allow_threads()` wraps the entire parallel resolution.
+- **GIL release** - `py.detach()` wraps the entire parallel resolution.
 - **Early exit** - Each name short-circuits at the first matching stage.
 
 **Python consumers:**
@@ -352,7 +352,7 @@ Mirrors the `_extract_keywords` method in `SkeletonIndexer`.
 - **LazyLock statics** - Compiled regex (`KEYWORD_RE`) and stopword set (`SKELETON_STOPWORDS`) are initialised once via `LazyLock` and shared across all invocations.
 - **hashbrown::HashSet** - Fast deduplication of keywords with insertion-order preserved via separate `Vec`.
 - **Rayon parallel** - `contents.par_iter().map(...)` in batch mode.
-- **GIL release** - `py.allow_threads()` for batch extraction.
+- **GIL release** - `py.detach()` for batch extraction.
 
 **Python consumers:**
 - `khora._accel.extract_keywords` - used by skeleton indexing for per-chunk keyword extraction
@@ -478,8 +478,8 @@ All dependencies are declared in `rust/khora-accel/Cargo.toml`:
 
 | Crate | Version | Purpose |
 |-------|---------|---------|
-| **pyo3** | 0.28 | Python ↔ Rust FFI, `#[pyfunction]`/`#[pyclass]` macros, `extension-module` feature for building as a Python extension |
-| **numpy** | 0.28 | Zero-copy access to NumPy arrays via `PyReadonlyArray1`/`PyReadonlyArray2` - avoids copying embedding matrices across FFI |
+| **pyo3** | 0.29 | Python ↔ Rust FFI, `#[pyfunction]`/`#[pyclass]` macros, `extension-module` feature for building as a Python extension |
+| **numpy** | 0.29 | Zero-copy access to NumPy arrays via `PyReadonlyArray1`/`PyReadonlyArray2` - avoids copying embedding matrices across FFI |
 | **ndarray** | 0.17 | N-dimensional array type used internally with numpy crate for row/column access (`Array2`, `ArrayView`) |
 | **rayon** | 1.10 | Work-stealing thread-pool parallelism: `par_iter()`, `into_par_iter()`, `flat_map()` for batch operations |
 | **strsim** | 0.11 | String similarity algorithms: `normalized_levenshtein`, `jaro_winkler` - pure Rust, no C dependencies |

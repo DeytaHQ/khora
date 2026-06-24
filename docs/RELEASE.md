@@ -48,7 +48,7 @@ PyPI Trusted Publishing via GitHub OIDC - no API tokens, no secrets in the repo.
    |------|---------|-------------|
    | `verify-ci-green` | - | Confirms ci.yml passed for the tagged SHA |
    | `publish-accel` | `khora-accel` | `maturin sdist` → publish to PyPI |
-   | `publish-khora` | `khora` | Pins `khora-accel == ${tag}` in pyproject.toml, then `python -m build` (wheel + sdist) → publish to PyPI |
+   | `publish-khora` | `khora` | `python -m build` (wheel + sdist) → publish to PyPI |
 
    Publish order is **accel first, then khora** so that the moment `khora==X.Y.Z` appears on PyPI, its `khora-accel==X.Y.Z` dependency is already resolvable.
 
@@ -58,9 +58,11 @@ The workflow supports `workflow_dispatch` for manual re-runs from the GitHub Act
 
 ## Version Lockstep
 
-khora's `pyproject.toml` declares `khora-accel >= X.Y.Z` (a loose floor) in the `rust` extra. At release time, the `Pin khora-accel to release version` step in `release.yml` rewrites this to `khora-accel == ${tag}` before building the khora wheel. Consequence: the published khora wheel always hard-pins khora-accel to the exact same version.
+khora's `pyproject.toml` declares `khora-accel == X.Y.Z` (an exact pin) in the `rust` extra. This pin is bumped **manually in the same PR** that updates `rust/khora-accel/Cargo.toml`. The published wheel carries the pin that is already committed in source - the release workflow does NOT rewrite pyproject.toml at build time (doing so would dirty the working tree and cause hatch-vcs to emit a `.devN` version instead of the tag version).
 
-If you ever need to break this lockstep (e.g. ship a khora hotfix that uses an older khora-accel), edit pyproject.toml on the release branch and remove or override the sed step in release.yml for that release.
+See `CLAUDE.md → Version Bumps` for the full checklist. In short: bump Cargo.toml, pyproject.toml `rust` extra, and Cargo.lock in one PR; merge; then push the tag.
+
+If you ever need to break this lockstep (e.g. ship a khora hotfix that uses an older khora-accel), bump the pin in pyproject.toml to the older khora-accel version in that release PR.
 
 ## Verification
 

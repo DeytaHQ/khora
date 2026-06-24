@@ -89,12 +89,15 @@ PR otherwise).
 
 ### #871 - storage partial-failure counter
 
-Pgvector / SurrealDB upsert paths emit
-`khora.storage.entity.upsert.partial_failure_total{kind, field}` when
-a batched entity upsert truncates provenance lists silently. The
-metric is the only signal that the truncation happened; the per-row
-data is still written, so callers see "success" without knowing the
-provenance arrays were capped.
+The coordinator's cross-store write helpers emit per-operation
+`partial_failure` counters when one backend succeeds and another
+fails (cross-store divergence), so callers see "success" but the
+stores are not in sync. Four counters cover the four write paths:
+
+- `khora.storage.create_entity.partial_failure` - entity creation
+- `khora.storage.update_entity.partial_failure` - entity update
+- `khora.storage.upsert_entities_batch.partial_failure` - batch upsert
+- `khora.storage.replace_document.partial_failure` - document replace
 
 ### #880 - `DreamResult.metadata["skip_reasons"]`
 
@@ -104,7 +107,8 @@ engine plugin's `dream_capabilities`. Each entry is shaped
 `{"op_kind", "reason", "detail"}` - the original prior art for the
 `SkipReason` TypedDict. Reasons used today: `op_not_supported_by_engine`,
 `no_candidates`, `op_disabled_at_runtime`, `guardrail_tripped:<which>`,
-`backend_unsupported`.
+`backend_unsupported`, `schema_drift` (vectorcypher schema drift op skipped),
+`abstention_drift` (chronicle abstention drift op skipped).
 
 ### #901 + #906 - chronicle channel-failure observability (this PR)
 
@@ -112,22 +116,51 @@ engine plugin's `dream_capabilities`. Each entry is shaped
 threads it through `_temporal_channel` and `_temporal_channel_chunks_fallback`,
 and attaches the populated list to `RecallResult.engine_info["degradations"]`.
 
-Eight call sites record entries:
+There are ~25 `_record_channel_degradation` call sites across eight component
+groups. The shared counter is `khora.chronicle.channel.degraded_total{channel, reason}`.
 
-| Site                                      | `component`                     | `reason`                       |
-| ----------------------------------------- | ------------------------------- | ------------------------------ |
-| BM25 task `RuntimeError`                  | `chronicle.bm25`                | `fulltext_backend_unavailable` |
-| BM25 task other exception                 | `chronicle.bm25`                | `channel_exception`            |
-| Semantic/temporal/entity gather exception | `chronicle.<channel>`           | `channel_exception`            |
-| `query_events` raised                     | `chronicle.temporal_channel`    | `events_query_failed`          |
-| Cosine batch raised                       | `chronicle.temporal_channel`    | `cosine_batch_failed`          |
-| `get_chunks_batch` raised                 | `chronicle.temporal_channel`    | `chunk_fetch_failed`           |
-| Chunk-fallback `search_similar_chunks` raised | `chronicle.temporal_channel` | `chunk_fallback_failed`       |
-| Events exist but no usable scores         | `chronicle.temporal_channel`    | `events_no_usable_signal`      |
+| Component group                 | `component` prefix              | Representative reasons                                  |
+| ------------------------------- | ------------------------------- | ------------------------------------------------------- |
+| Events channel                  | `chronicle.events`              | `channel_exception`                                     |
+| Facts channel                   | `chronicle.facts`               | `channel_exception`                                     |
+| BM25 channel                    | `chronicle.bm25`                | `fulltext_backend_unavailable`, `channel_exception`     |
+| Temporal channel                | `chronicle.temporal_channel`    | `events_query_failed`, `cosine_batch_failed`, `chunk_fetch_failed`, `chunk_fallback_failed`, `events_no_usable_signal` |
+| Entity channel                  | `chronicle.entity`              | `channel_exception`                                     |
+| Cross-session channel           | `chronicle.cross_session`       | `channel_exception`                                     |
+| Doc hydration                   | `chronicle.doc_hydration`       | `channel_exception`                                     |
+| Namespace overrides             | `chronicle.namespace_overrides` | `channel_exception`                                     |
 
-Each site also bumps `khora.chronicle.channel.degraded_total{channel, reason}`.
 The "no events yet" path is deliberately NOT recorded - that is the
 expected cold-start condition for a namespace, not a degradation.
+
+## Live degradation channel inventory
+
+All channels that currently emit `degraded_total` counters or attach
+`Degradation` entries to results, as of v0.20. Update this table when
+adding a new channel.
+
+| Counter / channel                                      | Attach point                           | Notes                                           |
+| ------------------------------------------------------ | -------------------------------------- | ----------------------------------------------- |
+| `khora.chronicle.channel.degraded_total`               | `RecallResult.engine_info`             | All chronicle channel failures (8 groups above) |
+| `khora.vectorcypher.recency_channel.degraded_total`    | `RecallResult.engine_info`             |                                                 |
+| `khora.vectorcypher.version_filter.degraded_total`     | `RecallResult.engine_info`             | Embedded PIT recall degrades here               |
+| `khora.vectorcypher.rel_fetch.degraded_total`          | `RecallResult.engine_info`             |                                                 |
+| `khora.vectorcypher.cypher_expand.degraded_total`      | `RecallResult.engine_info`             |                                                 |
+| `khora.vectorcypher.entity_vector_search.degraded_total` | `RecallResult.engine_info`           |                                                 |
+| `khora.vectorcypher.bm25.degraded_total`               | `RecallResult.engine_info`             |                                                 |
+| `khora.vectorcypher.community_projection.degraded_total` | `RecallResult.engine_info`           |                                                 |
+| `khora.vectorcypher.chunk_mirror.degraded_total`       | `RecallResult.engine_info`             |                                                 |
+| `khora.vectorcypher.temporal_semantic_fallback.degraded_total` | `RecallResult.engine_info`   |                                                 |
+| `khora.query.hyde.degraded_total`                      | `RecallResult.engine_info`             | HyDE expansion failures                         |
+| `khora.dream.graph_mirror.partial_failure`             | `DreamResult.metadata`                 | Post-commit Neo4j mirror failures               |
+| `khora.dream.graph_unmirror.partial_failure`           | `DreamResult.metadata`                 | Tombstone un-mirror failures                    |
+| `khora.forget.cascade.degraded_total`                  | `RememberResult.metadata` or log only  |                                                 |
+| `khora.documents.processor.degraded_total`             | `RememberResult.metadata`              |                                                 |
+| `khora.hooks.subscription.persist_degraded_total`      | log only                               | Hook dispatcher persist failures                |
+| `khora.storage.create_entity.partial_failure`          | counter only                           | Cross-store divergence on create                |
+| `khora.storage.update_entity.partial_failure`          | counter only                           | Cross-store divergence on update                |
+| `khora.storage.upsert_entities_batch.partial_failure`  | counter only                           | Cross-store divergence on batch upsert          |
+| `khora.storage.replace_document.partial_failure`       | counter only                           | Cross-store divergence on replace               |
 
 ## Where to attach the list
 
