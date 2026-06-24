@@ -1,11 +1,11 @@
 # Dream phase
 
-`khora.dream` is an **offline maintenance pass** for accumulated agentic memory. It runs against a single namespace on a schedule - cron, Temporal, k8s CronJob - auditing the graph, planning consolidation work, and (when called with `mode="apply"`) executing the plan with bi-temporal soft-delete + per-op snapshots written to `undo.json`. Apply currently mutates the relational store (PostgreSQL) only; the graph-store mirror lands in a future release (see [Postgres-only apply ops](#postgres-only-apply-ops)).
+`khora.dream` is an **offline maintenance pass** for accumulated agentic memory. It runs against a single namespace on a schedule - cron, Temporal, k8s CronJob - auditing the graph, planning consolidation work, and (when called with `mode="apply"`) executing the plan with bi-temporal soft-delete + per-op snapshots written to `undo.json`. Apply mutates the relational store (PostgreSQL) and mirrors soft-delete outcomes to the graph store post-commit: Neo4j and Memgraph receive an eventual-consistency mirror via `_mirror_dream_op`; AGE receives an atomic same-transaction mirror (no reconciler lag); SurrealDB-unified handles dream-apply in its own native path (no separate mirror needed); sqlite_lance is single-store (graph reads the same SQLite file). See [backend dream-apply notes](#backend-dream-apply-notes) in storage-backends.md and [Postgres-only apply ops](#postgres-only-apply-ops) for the dialect-gated subset.
 
 The naming follows the complementary learning systems framework from neuroscience: ingestion is the fast, episodic path (`Khora.remember`), dream phase is the slow, reorganizing path. Same store, different access regime, different objective function. See [Research & Prior Art](#research--prior-art) for the lineage.
 
 > **Status - read this before scheduling dream-apply in production.**
-> Fourteen ops are live: five Phase-1 audits (read-only, no side effects) and nine planner / mutation ops (planning + apply), including the four Phase-5 ops (community summary, contradiction detect, prune edges, normalize schema). Apply mode mutates the relational store through bi-temporal soft-delete and one hard-delete path (`fact_compaction` on already-tombstoned rows past retention); the graph-store mirror for the five vectorcypher mutation ops is deferred to a future release. Five guardrails protect the apply path: hard 7-day retention floor, `KHORA_DREAM_DISABLE_APPLY` env-var kill-switch, advisory-lock-held-through-apply, `chunk_id` runtime assertion, snapshot-before-mutate undo records. Default config is `enabled=False`; nothing happens until you opt in.
+> Fifteen ops are live: five Phase-1 audits (read-only, no side effects) and ten planner / mutation ops (planning + apply), including the five Phase-5 ops (community summary, contradiction detect, contradiction reconcile, prune edges, normalize schema). Apply mode mutates the relational store through bi-temporal soft-delete and one hard-delete path (`fact_compaction` on already-tombstoned rows past retention); the graph-store mirror is live on all capable backends (Neo4j/Memgraph post-commit eventual-consistency; AGE in-transaction atomic; SurrealDB-unified native; sqlite_lance single-store - no mirror needed). Five guardrails protect the apply path: hard 7-day retention floor, `KHORA_DREAM_DISABLE_APPLY` env-var kill-switch, advisory-lock-held-through-apply, `chunk_id` runtime assertion, snapshot-before-mutate undo records. Default config is `enabled=False`; nothing happens until you opt in.
 
 ## When to use it
 
@@ -248,10 +248,15 @@ Functional equivalents live at `khora.dream.api.{dream, dream_status, dream_hist
 | `community_summary_max_members_per_prompt` | `20` | Per-community cap on member ids carried into the LLM prompt |
 | `normalize_schema_enabled` | `False` | Master toggle for the schema-drift normalization op |
 | `normalize_schema_mapping` | `{}` | Operator-supplied `old_type -> new_type` rename mapping; empty = op refuses to run |
+| `contradiction_reconcile_enabled` | `False` | Master switch for the two-LLM contradiction-reconcile op (#1281); promotes the report-only detect op into a mutating op that soft-deletes judge-agreed losing edges |
+| `contradiction_reconcile_model` | `"gpt-4o-mini"` | LiteLLM model id for the first judge (verifier); mirrors `dedupe_verifier_model` |
+| `contradiction_reconcile_auditor_model` | `"claude-haiku-4.5"` | LiteLLM model id for the second judge (auditor, distinct family); both judges must agree before the losing edge is invalidated |
+| `contradiction_reconcile_timeout_seconds` | `10` | Per-judge LLM timeout; a timeout / transport error degrades the joint verdict to `defer` (no mutation) |
+| `contradiction_reconcile_min_confidence` | `0.6` | Confidence floor each judge must report when voting `invalidate`; below-floor degrades to `defer` |
 
 ### Op kinds
 
-`khora.dream.plan.OpKind` is a `StrEnum`. The *set* of values may grow during Phase 0; existing values are append-only.
+`khora.dream.plan.OpKind` is a `StrEnum`. The *set* of values may grow; existing values are append-only.
 
 | Member | Value | Phase | Apply mode |
 |---|---|---|---|
@@ -267,23 +272,23 @@ Functional equivalents live at `khora.dream.api.{dream, dream_status, dream_hist
 | `CHRONICLE_EVENT_CLUSTERING` | `chronicle_event_clustering` | 2 (planner) | `apply_chronicle_event_clustering` - bi-temporal soft-merge via `merged_into_event_id` (migration 034). |
 | `VECTORCYPHER_PRUNE_EDGES` | `vectorcypher_prune_edges` | 5.2 (planner + apply) | `apply_vectorcypher_prune_edges` - stamps `valid_to = NOW()` on low-confidence / orphaned edges (bi-temporal soft-delete). Postgres-only. Idempotent. Gated by `prune_edges_enabled`. |
 | `VECTORCYPHER_CONTRADICTION_DETECT` | `vectorcypher_contradiction_detect` | 5.3 (planner + apply) | `apply_vectorcypher_contradiction_detect` - **report only**; never touches `relationships`. Inserts findings into `dream_conflicts` (`ON CONFLICT DO NOTHING`). Gated by `contradiction_detect_enabled`. |
+| `VECTORCYPHER_CONTRADICTION_RECONCILE` | `vectorcypher_contradiction_reconcile` | 5.3b (planner + apply) | `apply_vectorcypher_contradiction_reconcile` - **two-LLM judge** (verifier + auditor, both must agree); soft-deletes the losing edge of a judge-agreed contradiction, writes triage row to `dream_conflicts` for defer/keep outcomes, mirrors to capable graph backends. Postgres-only. LLM-budget-gated. Gated by `contradiction_reconcile_enabled`. |
 | `VECTORCYPHER_COMMUNITY_SUMMARY` | `vectorcypher_community_summary` | 5.1 (planner + apply) | `apply_vectorcypher_community_summary` - **first LLM-using op**; one `acompletion` call per community, writes grounded summary to `khora_dream_communities`. Postgres-only. Gated by `community_summary_enabled`. |
 | `VECTORCYPHER_NORMALIZE_SCHEMA` | `vectorcypher_normalize_schema` | 5.4 (planner + apply) | `apply_vectorcypher_normalize_schema` - operator-supplied `old_type -> new_type` mapping; rewrites `entity_type` / `relationship_type` and emits one `ENTITY_UPDATED` / `RELATIONSHIP_UPDATED` event per row. Refuses to run on empty mapping. **Consumer-contract impact:** type names are part of the public stability contract - see [consumers.md](consumers.md). |
 
 #### Postgres-only apply ops
 
-Four vectorcypher mutation handlers bind raw `uuid.UUID` values into `session.execute`, which only PostgreSQL handles natively. On any other dialect (notably SQLite via the `sqlite_lance` test stack) the bind raises `sqlite3.ProgrammingError: type 'UUID' is not supported`. The orchestrator catches this up front via a dialect gate in `_apply_one_op`: if `session.bind.dialect.name != "postgresql"` for one of the listed op kinds, it raises `DreamBackendUnsupported`, logs a warning, advances the run checkpoint, and continues. The op is reported as `skipped` in `DreamResult.ops`; no `sqlite3.ProgrammingError` leaks.
+Three vectorcypher mutation handlers bind raw `uuid.UUID` values into `session.execute` in ways that only PostgreSQL handles natively. On any other dialect (notably SQLite via the `sqlite_lance` test stack) the bind raises `sqlite3.ProgrammingError: type 'UUID' is not supported`. The orchestrator catches this up front via a dialect gate in `_apply_one_op` (`_POSTGRES_ONLY_OP_KINDS`): if `session.bind.dialect.name != "postgresql"` for one of the listed op kinds, it raises `DreamBackendUnsupported`, logs a warning, advances the run checkpoint, and continues. The op is reported as `skipped` in `DreamResult.ops`; no `sqlite3.ProgrammingError` leaks.
 
-The four gated op kinds are:
+The three gated op kinds are:
 
-- `vectorcypher_dedupe_entities`
 - `vectorcypher_centroid_recompute`
-- `vectorcypher_prune_edges`
 - `vectorcypher_source_chunk_ids_gc`
+- `vectorcypher_contradiction_reconcile`
 
-`vectorcypher_source_chunk_ids_gc` has a dialect-aware planner that supports SQLite for the read side, but the apply handler still binds UUIDs and is therefore gated here.
+`vectorcypher_source_chunk_ids_gc` has a dialect-aware planner that supports SQLite for the read side, but the apply handler still binds UUIDs and is therefore gated here. `vectorcypher_dedupe_entities` and `vectorcypher_prune_edges` run on sqlite_lance as of #1277/#1299 and are no longer gated.
 
-These handlers mutate the relational store inside the apply transaction. For the soft-delete shapes (`vectorcypher_prune_edges` and the `vectorcypher_dedupe_entities` self-loop / absorbed-entity tombstones), a **post-commit Neo4j tombstone-mirror** (#1272, `DreamOrchestrator._mirror_dream_op`) then folds the three PG soft-delete columns (`valid_to`, `invalidated_at`, `entities.valid_until`) onto the graph's single `valid_until` via the #1271 capability-gated verbs - so the graph recall live-set stays byte-identical to PostgreSQL. The mirror runs OUTSIDE the apply transaction (eventual consistency); a failure after the PG commit increments `khora.dream.graph_mirror.partial_failure`, appends a `Degradation` to `DreamResult.metadata`, and queues the op in `khora_dream_runs.graph_mirror_pending` for the reconciler (`_drain_graph_mirror_pending`, run at apply start) to re-attempt. The checkpoint advances inside the PG commit before the mirror, so the reconciler - not resume - is what heals a crash in that window. The entity-merge endpoint-rewrite leg (re-pointing incident edges) and the `normalize_schema` relabel are NOT mirrored here (#1273 / deferred); for those op kinds a backend that does not advertise the op via `supports_dream_mirror()` records a structured skip instead of a silent divergence.
+These handlers mutate the relational store inside the apply transaction. For the soft-delete shapes (`vectorcypher_prune_edges`, the `vectorcypher_dedupe_entities` self-loop / absorbed-entity tombstones, and the `vectorcypher_contradiction_reconcile` losing-edge invalidation), a **post-commit graph mirror** (`DreamOrchestrator._mirror_dream_op`) folds the PG soft-delete columns onto the graph's single `valid_until` via the #1271 capability-gated verbs - so the graph recall live-set stays byte-identical to PostgreSQL. The entity-merge endpoint-rewrite leg (re-pointing incident edges via `rewrite_relationship_endpoints_batch`) is also mirrored as part of `apply_mirror_targets` (#1293). The mirror runs OUTSIDE the apply transaction (eventual consistency); a failure after the PG commit increments `khora.dream.graph_mirror.partial_failure`, appends a `Degradation` to `DreamResult.metadata`, and queues the op in `khora_dream_runs.graph_mirror_pending` for the reconciler (`_drain_graph_mirror_pending`, run at apply start) to re-attempt. The checkpoint advances inside the PG commit before the mirror, so the reconciler - not resume - is what heals a crash in that window. The `normalize_schema` relabel is NOT mirrored; a backend that does not advertise the op via `supports_dream_mirror()` records a structured skip instead of a silent divergence.
 
 ### Plan / scope / result dataclasses
 
@@ -406,7 +411,21 @@ Adds three NULLable columns to both `relationships` and `memory_facts`:
 
 Plus Postgres-only partial composite indexes `ix_relationships_live` and `ix_memory_facts_live` over `WHERE invalidated_at IS NULL`. Query paths filtering on the `memory_facts.is_active` flag and the new `invalidated_at`-based filter coexist - the flag is deprecated but kept working for backwards compatibility.
 
-These columns are unused by Phase 1 audit and Phase 2 planner ops. They're in place because future apply paths need them, and migrations land best ahead of the code that depends on them.
+The live-filter read paths (`_entity_live_filter`, `_relationship_live_filter`) activate once the graph mirror (#1272) is live; prior to that activation these columns were reserved write-only scaffolding.
+
+### Migration 035 - `khora_dream_communities` (#670)
+
+Postgres-only. Creates the `khora_dream_communities` table for Phase 5.1 community-summary persistence. Deterministic UUID5 PK of `(namespace_id, sorted member ids)` ensures idempotent replay. Columns: `id`, `namespace_id`, `op_id`, `member_ids UUID[]`, `payload JSONB`, `summary_depth INTEGER`, `valid_from`, `valid_to` (bi-temporal), `created_at`, `updated_at`. Indexes: `ix_khora_dream_communities_ns_live` `(namespace_id, valid_to) WHERE valid_to IS NULL` and `ix_khora_dream_communities_op` on `op_id`. No-op on SQLite.
+
+### Migrations 036 / 048 - `dream_conflicts` + reconcile columns (#672 / #1281)
+
+Migration **036** (Postgres-only) creates the `dream_conflicts` table used by the contradiction-detection op to persist per-pair findings. 15 columns including `relationship_a_id`, `relationship_b_id`, `similarity`, `reason`, `detected_by_op_id`, bi-temporal `valid_from`; UNIQUE on `(namespace_id, relationship_a_id, relationship_b_id)` for idempotent replay via `ON CONFLICT DO NOTHING`. No-op on SQLite.
+
+Migration **048** (Postgres-only, revises 047) extends `dream_conflicts` with reconcile outcome columns for the two-LLM contradiction-reconcile op (#1281): `resolution VARCHAR(16)` (default `'detected'`, one of `detected / invalidated / deferred / kept`), `loser_relationship_id UUID`, `winner_relationship_id UUID`, `judge_rationale_hash VARCHAR(16)`, `resolved_by_op_id UUID`, `resolved_at TIMESTAMPTZ`. The reconcile apply handler issues `ON CONFLICT DO UPDATE` so a report-only detection row is upgraded in place to its resolved state idempotently. No-op on SQLite (migration 036 never creates the table there).
+
+### Migration 047 - `graph_mirror_pending` on `khora_dream_runs` (#1274)
+
+Dialect-portable (PostgreSQL `JSONB`, SQLite `JSON`). Adds nullable `graph_mirror_pending JSONB` to `khora_dream_runs`. Holds a JSON array of pending op entries `{"op_seq", "op_id", "op_type", "payload"}` for ops whose PG commit succeeded but whose post-commit graph mirror failed. NULL = no ops awaiting mirror. The reconciler (`_drain_graph_mirror_pending`, run at apply start) drains this column and retries failed mirrors.
 
 ## Concurrency
 
@@ -489,8 +508,7 @@ Dream phase does not solve memory drift. It provides the substrate to detect dri
 Tracked under the umbrella [#649](https://github.com/DeytaHQ/khora/issues/649).
 
 - **`apply_vectorcypher_centroid_recompute` on SQLite-LanceDB.** The handler is Postgres-only because the embedded vector backend's `update_entity_embedding` commits out-of-band, violating the caller-owned-transaction contract. The SQLite path needs a session-aware vector-backend write API first.
-- **`apply_vectorcypher_dedupe_entities` Neo4j re-target.** The Postgres `relationships` rewrite ships today. The Neo4j edge re-target + archived-node path needs a different transactional shape (no shared session with PG) and is deferred.
 - **Auto-chaining of dedupe → centroid_recompute.** Today `centroid_recompute` in the default plan dispatch receives `merge_clusters=[]` and emits no DreamOps. Real centroid plans require direct invocation with clusters from a prior dedupe run, or manual operator stitching via `resume_from`.
 - **Planner `mode="apply"` cleanup.** Two of the Phase 2 planners (`plan_vectorcypher_dedupe_entities`, `plan_vectorcypher_source_chunk_ids_gc`, `plan_vectorcypher_centroid_recompute`) still accept a `mode="apply"` kwarg that raises `NotImplementedError`. The orchestrator never sets this kwarg - the dedicated `apply_<op>` functions are the real apply entry point. The raise path is dead code reachable only from direct callers; removing the kwarg is a follow-up cleanup.
 
-Phases 4 and 5 have shipped. The four Phase-5 advanced ops (#670, #671, #672, #673) - community detection + LLM-generated summaries (GraphRAG-style; the first dream-phase ops to actually call an LLM, gated by the existing `llm_max_tokens_per_run` budget), edge pruning by weight × recency, contradiction detection across live relationships, and schema-drift normalization with an operator-supplied mapping - are registered with plan + apply handlers and gated behind `community_summary_enabled` / `prune_edges_enabled` / `contradiction_detect_enabled` / `normalize_schema_enabled` (all default off). The kill-criterion telemetry remains `khora.dream.runs_total` - it distinguishes `mode="dry-run"` vs `mode="apply"` via the `outcome` label.
+Phases 4 and 5 have shipped. The five Phase-5 advanced ops (#670, #671, #672, #673, #1281) - community detection + LLM-generated summaries (GraphRAG-style; the first dream-phase ops to actually call an LLM, gated by the existing `llm_max_tokens_per_run` budget), edge pruning by weight × recency, contradiction detection across live relationships, contradiction reconciliation (two-LLM judge, soft-deletes losing edge), and schema-drift normalization with an operator-supplied mapping - are registered with plan + apply handlers and gated behind `community_summary_enabled` / `prune_edges_enabled` / `contradiction_detect_enabled` / `contradiction_reconcile_enabled` / `normalize_schema_enabled` (all default off). The kill-criterion telemetry remains `khora.dream.runs_total` - it distinguishes `mode="dry-run"` vs `mode="apply"` via the `outcome` label.
