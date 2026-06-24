@@ -323,6 +323,9 @@ async with Khora() as kb:
     )
 
     for chunk in results.chunks:
+        # chunk.score is an ABSOLUTE relevance score (0.0–1.0), not the raw RRF
+        # value. RRF / coherence / reranking determine ORDER; attach_relevance_scores
+        # replaces the internal RRF value with a calibrated absolute score (#811).
         print(f"[{chunk.score:.4f}] {chunk.content[:80]}...")
 ```
 

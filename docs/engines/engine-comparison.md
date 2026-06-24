@@ -29,7 +29,7 @@ The embedded path (SQLite + LanceDB) has a documented scale ceiling: **~1M chunk
 | **LLM Cost** | Medium (~700 calls/1000 docs) at default; ~1000 at `skeleton_core_ratio=1.0` | Lower (~100 calls/1000 docs) | Higher (~1000 calls/1000 docs, full extraction) |
 | **Graph Backend** | Required (Neo4j/Neptune/AGE) | Not required | Not required |
 | **Search Modes** | Vector + Cypher + BM25 + RRF | Vector + BM25 Hybrid | 4-channel: Semantic + BM25 + Temporal + Entity |
-| **Point-in-time queries** | Production-only (PG+Neo4j); not supported on the embedded `sqlite_lance` backend | n/a | n/a |
+| **Point-in-time queries** | Production-only (PG+Neo4j); on the embedded `sqlite_lance` backend, degrades to current-state entity recall + records a Degradation; occurred-bounds chunk filtering (`start_time`/`end_time`) still applies | n/a | n/a |
 | **Best For** | Complex multi-hop queries, knowledge bases | Chat history, logs, events | Temporal queries, long conversations |
 
 ## Detailed Comparison

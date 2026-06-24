@@ -49,11 +49,11 @@ A dictionary of ~200 categorized keyword patterns is matched against the query u
 - RECENCY: "most recent", "newest", "recently"
 - CHANGE: "changed", "used to", "no longer", "still", "switched"
 
-**Tier 2: Model2Vec Embedding Centroid (~40–50μs)** *(planned, not yet implemented)*
-For queries that slip past the dictionary, a pre-trained Model2Vec centroid will detect implicit temporal intent via embedding similarity. When implemented, queries above a similarity threshold will be classified as `STATE_QUERY` by default.
+**Tier 2: Semantic LLM fallback** *(opt-in, default OFF)*
+When `KHORA_QUERY_TEMPORAL_SEMANTIC_FALLBACK_ENABLED=true`, queries the keyword tier classifies as NONE are routed to a small LLM classifier that resolves multilingual and paraphrased temporal intent (e.g., German temporal expressions) into the correct `TemporalCategory`. Any LLM failure or timeout degrades back to the keyword result (NONE) and records a `Degradation` on the result. Zero LLM cost by default.
 
-**Tier 3: LLM-based Query Understanding** *(existing, separate path)*
-The full query understanding pipeline can extract temporal references via LLM. This tier is not invoked in the VectorCypher raw retrieval path but is available for complex query planning.
+**Tier 3: LLM disambiguation** *(opt-in, default OFF)*
+When `KHORA_QUERY_TEMPORAL_LLM_DISAMBIGUATION_ENABLED=true`, queries that fire `RECENCY` or `CHANGE` in the keyword tier AND contain ambiguity-trigger tokens (`"would"`, `"if"`, `"previously"`, etc.) are routed to an LLM classifier that distinguishes RECENT / HISTORICAL / COUNTERFACTUAL / NEUTRAL intent. The synthetic date floor is vetoed for non-RECENT outputs, preventing false recency bias on counterfactual queries. Results are cached per-query. Any LLM failure degrades to the keyword result.
 
 ### TemporalSignal
 
@@ -283,7 +283,7 @@ results = await kb.recall("How many times has the team restructured?", namespace
 # → AGGREGATE: no recency, broad recall
 
 results = await kb.recall("What's the latest deployment status?", namespace=ns_id)
-# → RECENCY: high recency, 7-day decay window
+# → RECENCY: high recency, 3-day decay, 30-day window
 
 results = await kb.recall("Did Alice switch teams?", namespace=ns_id)
 # → CHANGE: moderate recency, temporal sort
@@ -341,8 +341,9 @@ results = await kb.recall(
 ```
 
 `kb.recall()` accepts `mode`, `limit`, `min_similarity`, `start_time`,
-and `end_time` directly. Fusion weights and recency knobs are global;
-configure them via `KhoraConfig.query` at construction time.
+`end_time`, and `filter` (a `RecallFilter` or equivalent dict) directly.
+Fusion weights and recency knobs are global; configure them via
+`KhoraConfig.query` at construction time.
 
 ## Result Metadata
 
