@@ -3709,10 +3709,12 @@ class VectorCypherEngine:
         self,
         *,
         config_overrides: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> MemoryNamespace:
         """Create a new memory namespace."""
         namespace = MemoryNamespace(
             config_overrides=config_overrides or {},
+            metadata=metadata or {},
         )
         return await self._get_storage().create_namespace(namespace)
 
