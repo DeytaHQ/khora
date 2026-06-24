@@ -358,6 +358,10 @@ The coordinator's public `coordinator.{relational,vector,graph,event_store}` att
 
 The public `coordinator.{relational,vector,graph,event_store}` attributes are deprecated; call the coordinator's facade methods instead. Internal coordinator code uses `self._{role}` directly.
 
+### Graph-less fallback for list_entities / list_relationships
+
+When no graph backend is configured (PostgreSQL-only chronicle stacks), `StorageCoordinator.list_entities` and `list_relationships` fall back to the pgvector backend (`PgvectorBackend.list_entities` / `list_relationships`) rather than raising. This path was introduced in #587 to prevent `AttributeError` crashes in the expansion pipeline on graph-less stacks. The relationships fallback returns `[]` because the relationships table on a PG-only stack receives no writes from the ingest pipeline.
+
 A structural signature gate (`tests/security/test_cross_namespace_idor_signatures.py`) walks every concrete backend at collection time and asserts that every `get_*` / `entity_exists` / `find_paths` / `get_neighborhood*` / `delete_*` / `update_entity*` / `supersede_*` method with a required id-typed parameter declares `*, namespace_id: UUID` kwarg-only. A new method that violates this contract fails CI at collection time. See `docs/architecture/multi-tenancy.md` for the structural invariant rationale.
 
 ### Health Checking
@@ -395,7 +399,7 @@ This reduces the total number of database connections from 3× pool size to 1× 
 
 ## Transactions
 
-`StorageCoordinator.transaction()` provides atomic multi-backend writes through a single database transaction:
+`StorageCoordinator.transaction()` provides atomic writes scoped to the shared PostgreSQL backends (relational, pgvector, event store) through a single `AsyncSession`. Neo4j and embedded LanceDB are NOT participants in this session - writes to those backends during the same block are not rolled back if the SQL transaction rolls back:
 
 ```python
 async with coordinator.transaction() as txn:
@@ -435,7 +439,10 @@ results = await coordinator.upsert_entities_batch(
     entities,
     batch_size=50,
 )
-# Returns: list of (entity, is_new) tuples
+# Returns: list of (entity, is_new) tuples, one per unique MERGE key.
+# Duplicate entities in the caller-supplied list that share the same
+# (namespace_id, name, entity_type) MERGE key collapse to a single
+# result tuple - hooks fire once, not once per input (#1329).
 ```
 
 **Neo4j implementation** uses `UNWIND + MERGE`:
@@ -460,11 +467,14 @@ results = await coordinator.create_relationships_batch(
     relationships,
     batch_size=50,
 )
-# Returns: list[(relationship, is_new)] - one tuple per persisted edge,
+# Returns: list[(relationship, is_new)] - one tuple per unique MERGE key,
 # mirroring upsert_entities_batch's (entity, is_new) contract (#1320).
 # Each relationship's `id` is synced in place to the canonical stored
 # edge id; `is_new` is True for a genuine create, False for a dedup-merge.
-# len(results) is the number of relationships written.
+# Duplicate relationships in the caller-supplied list that share the same
+# (namespace_id, source, target, type) MERGE key collapse to a single
+# result tuple - hooks fire once, not once per input (#1329 Part 2).
+# len(results) may be less than len(relationships) when duplicates are present.
 ```
 
 **Neo4j implementation** groups relationships by type and uses `UNWIND + MERGE` (matched on source/target + namespace) with dynamic relationship types.
@@ -684,11 +694,11 @@ The coordinator's `StorageCoordinator.transaction()` remains session-shaped (SQL
 
 ## Bi-temporal columns are ACTIVE on read (#888 -> #970 -> #1272)
 
-Migrations 033 and 034 added bi-temporal columns to the PostgreSQL schema - `valid_to`, `invalidated_at`, `invalidated_by` on `entities`, `relationships`, `memory_facts`, and `chronicle_events` - plus partial indexes `WHERE invalidated_at IS NULL`. Through #888 these were **reserved scaffolding** (written by dream-apply, never filtered on read) because there was no Neo4j tombstone-mirror; a pg-only read filter would have diverged PostgreSQL reads from graph reads of the same data.
+Migrations 033 and 034 added bi-temporal columns to the PostgreSQL schema. Migration 033 adds `valid_to`, `invalidated_at`, `invalidated_by` to `relationships` and `memory_facts` (not `entities`) plus partial indexes `WHERE invalidated_at IS NULL`. Migration 034 adds the same three columns to `chronicle_events`. The `entities` table carries only `valid_from` / `valid_until` (no `invalidated_at` / `invalidated_by`); entities are live-filtered via `_entity_live_filter()` on the `valid_until` window alone. Through #888 these columns were **reserved scaffolding** (written by dream-apply, never filtered on read) because there was no Neo4j tombstone-mirror; a pg-only read filter would have diverged PostgreSQL reads from graph reads of the same data.
 
 The Neo4j tombstone-mirror landed in **#1272 (the #970 definition-of-done)**, so the read filter is now **live on both stores in lockstep**:
 
-- **Written by dream-apply, pg-side, then mirrored to the graph.** Dedupe, prune, fact compaction, and event clustering set the PG soft-delete columns (`valid_to` on a pruned edge, `invalidated_at` on a dedupe self-loop, `valid_until` on the absorbed entity). A post-commit step (`DreamOrchestrator._mirror_dream_op`, modeled on `replace_document_extraction`) then folds those three PG columns onto the graph's single `valid_until` via the #1271 capability-gated verbs (`soft_invalidate_relationships_batch`, `soft_retire_entities_batch`). The mirror runs OUTSIDE the apply transaction (eventual consistency); a failure after the PG commit increments `khora.dream.graph_mirror.partial_failure`, records a `Degradation` on `DreamResult.metadata`, and queues the op in `khora_dream_runs.graph_mirror_pending` for the reconciler to re-attempt. The checkpoint advances inside the PG commit before the mirror runs, so resume alone cannot heal a failed mirror - the reconciler (`_drain_graph_mirror_pending`, run at apply start) is the only path that converges the two stores.
+- **Written by dream-apply, pg-side, then mirrored to the graph.** Dedupe, prune, fact compaction, and event clustering set the PG soft-delete columns (`valid_to` on a pruned edge, `invalidated_at` on a dedupe self-loop, `valid_until` on the absorbed entity). A post-commit step (`DreamOrchestrator._mirror_dream_op`, modeled on `replace_document_extraction`) then folds those three PG columns onto the graph's single `valid_until` via the #1271 capability-gated verbs (`soft_invalidate_relationships_batch`, `soft_retire_entities_batch`, `rewrite_relationship_endpoints_batch` for incident-edge re-point, #1273). The mirror runs OUTSIDE the apply transaction (eventual consistency); a failure after the PG commit increments `khora.dream.graph_mirror.partial_failure`, records a `Degradation` on `DreamResult.metadata`, and queues the op in `khora_dream_runs.graph_mirror_pending` for the reconciler to re-attempt. The checkpoint advances inside the PG commit before the mirror runs, so resume alone cannot heal a failed mirror - the reconciler (`_drain_graph_mirror_pending`, run at apply start) is the only path that converges the two stores.
 - **Filtered on read, both stores.** The pgvector recall list paths apply `_entity_live_filter()` (`valid_until IS NULL OR valid_until > now()`) and `_relationship_live_filter()` (`valid_to IS NULL AND invalidated_at IS NULL AND valid_until window open`); the Neo4j `list_entities` / `list_relationships` paths filter `valid_until` unconditionally. Pruned / merged-self-loop rows are now invisible to recall on a pg+Neo4j stack, byte-identically across both stores.
 
 The cross-store live-set invariant is guarded by `tests/integration/dream/test_neo4j_dream_mirror_integration.py` (a real pg+Neo4j stack); the old reserved-columns tripwire (`tests/unit/test_bitemporal_columns_reserved.py`) was widened to cover `valid_to` + the Neo4j filter, then inverted to assert the filters are now present.
@@ -710,6 +720,20 @@ Each forward mirror verb has a matching reverse on `GraphBackendProtocol` (Neo4j
 - `rewrite_relationship_endpoints_batch` → `restore_relationship_endpoints_batch` (re-points incident edges back from canonical → absorbed, using the PRE-rewrite endpoints recorded in `previous_relationships`)
 
 After the PG reverse commits, `dream_undo` runs `_unmirror_dream_op` (post-commit, eventual-consistency, the same shape as the forward `_mirror_dream_op`): it reuses `extract_mirror_targets` to know exactly which entities / self-loops / edges the forward mirror touched, then inverts each leg via `unmirror_targets`. The reverse verbs are idempotent by id (a second undo matches nothing and does not re-diverge the graph). A reverse-mirror failure does **not** roll back the committed PG reverse; it increments `khora.dream.graph_unmirror.partial_failure` and logs an ADR-001 degradation so the divergence is observable. Guarded by `tests/integration/dream/test_neo4j_dream_undo_integration.py` (live pg+Neo4j) plus the reverse-extraction / verb unit cases in `tests/unit/dream/test_dream_graph_mirror.py` and `tests/unit/dream/test_dream_undo.py`.
+
+### Backend dream-apply notes
+
+Dream-apply behavior varies by graph backend:
+
+- **Neo4j / Memgraph (default stack).** All PG soft-delete outcomes are mirrored post-commit via `DreamOrchestrator._mirror_dream_op` (eventual-consistency). A failed mirror queues the op in `khora_dream_runs.graph_mirror_pending`; the reconciler (`_drain_graph_mirror_pending`, run at apply start) retries. Mirror verbs: `soft_invalidate_relationships_batch` (prune/reconcile), `soft_retire_entities_batch` (dedupe), `rewrite_relationship_endpoints_batch` (incident-edge re-point, #1293), `materialize_communities_batch` (community summary). Undo mirrors via `_unmirror_dream_op` (same eventual-consistency shape).
+
+- **AGE (PostgreSQL extension).** Same capability set as Neo4j for flat soft-delete ops (`prune_edges`, `contradiction_reconcile`) - see `age.supports_dream_mirror()`. Crucially, AGE lives inside PostgreSQL, so since #1307/#1310 the orchestrator folds the mirror into the same apply transaction (`mirror_in_transaction()` returns `True`): no `graph_mirror_pending` reconciler lag, no eventual-consistency window. Entity-version ops (`dedupe_entities`) and relabel (`normalize_schema`) are not supported on AGE (no versioning primitive); those op kinds are recorded as a structured skip.
+
+- **Neptune.** Capability-gated mirror for `prune_edges` and `contradiction_reconcile` via `soft_invalidate_relationships_batch` (Bolt protocol SET by id, #1279/#1298). Entity-version ops (`dedupe_entities`, `normalize_schema`) are not supported (no versioning primitive); structured skip recorded. Mirror is post-commit eventual-consistency (same reconciler path as Neo4j).
+
+- **SurrealDB-unified.** Dream-apply runs via `_apply_one_op_surrealdb` in the orchestrator (#1280/#1300). The unified store is its own mirror - no separate post-commit graph mirror is dispatched. Incident-edge re-point (`rewrite_relationship_endpoints_batch`) is handled within the SurrealDB apply path (#1304).
+
+- **sqlite_lance (embedded / test stack).** Single-store: the graph layer reads the same SQLite file, so no mirror is needed. `vectorcypher_dedupe_entities` and `vectorcypher_prune_edges` run on this path as of #1277/#1299. Postgres-only ops (`centroid_recompute`, `source_chunk_ids_gc`, `contradiction_reconcile`) are skipped via `_POSTGRES_ONLY_OP_KINDS` gate.
 
 ### When to Use SurrealDB
 
