@@ -282,7 +282,7 @@ expertise = ExpertiseConfig(
 
 ## Concurrency Control
 
-Extraction uses a semaphore for rate limiting:
+Extraction uses a semaphore for rate limiting. Slot acquisition is wall-clock-bounded via `_acquire_slot()` to prevent a wedged LLM call from parking all other extraction coroutines indefinitely:
 
 ```python
 class LLMEntityExtractor:
@@ -290,10 +290,12 @@ class LLMEntityExtractor:
         self._semaphore = asyncio.Semaphore(max_concurrent)
 
     async def extract(self, text: str, ...):
-        async with self._semaphore:
+        async with self._acquire_slot():  # wall-clock-bounded acquire
             # LLM call here
             ...
 ```
+
+Batch size is adaptive based on the model's context window. For unknown models the default multiplier is 3x `max_tokens` for input budget; known large-context models (gpt-4o, claude-3-opus) use up to 8x. `extract_multi` uses this budget to group texts greedily, so the effective batch size varies with input length rather than being fixed at 5.
 
 ## Batch Extraction
 
@@ -347,7 +349,7 @@ def _parse_response(self, content: str) -> ExtractionResult:
 
 ## Error Handling
 
-Extraction uses retry with exponential backoff, driven by `tenacity`'s `AsyncRetrying`. Retries stop after `max_retries` attempts or 180 seconds total (`stop_after_attempt(self._max_retries) | stop_after_delay(180)`), with `wait_exponential` backoff between attempts:
+Extraction uses retry with exponential backoff, driven by `tenacity`'s `AsyncRetrying`. Retries stop after `max_retries` attempts or 180 seconds total (`stop_after_attempt(self._max_retries) | stop_after_delay(180)`), with `wait_exponential(multiplier=retry_wait, min=retry_wait, max=10)` backoff (default `retry_wait=1.0`):
 
 ```python
 from tenacity import AsyncRetrying, stop_after_attempt, stop_after_delay, wait_exponential
@@ -357,13 +359,36 @@ async for attempt in AsyncRetrying(
     wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
 ):
     with attempt:
-        response = await litellm.acompletion(
-            model=self._model,
-            messages=messages,
-            response_format={"type": "json_object"},
-        )
-        result = self._parse_response(response.choices[0].message.content)
+        async with self._acquire_slot():
+            response = await litellm.acompletion(
+                model=self._model,
+                messages=messages,
+                response_format={"type": "json_object"},
+            )
+            result = self._parse_response(response.choices[0].message.content)
 ```
+
+### Thinking-Model Budget Floor
+
+Thinking models (Gemini 2.5, o1, o3) spend a large portion of their output budget on hidden reasoning tokens before emitting JSON. With the default budget, that leaves too little room for extraction output. For these models the first-attempt `max_tokens` is floored at 32768 regardless of the configured value.
+
+### Truncation Auto-Retry
+
+When the response `finish_reason` is `length` or `MAX_TOKENS`, the extractor automatically retries once with double the `max_tokens` budget. If the response is still truncated after the doubled-budget retry, the call is not silently treated as an empty-extraction success - it returns an `ExtractionResult` with a structured ADR-001 `Degradation` attached:
+
+```python
+degradation: Degradation = {
+    "component": "extraction.llm",
+    "reason": "truncated_response",
+    "detail": f"finish_reason={finish_reason}, model={model_used}",
+}
+```
+
+This is logged at `ERROR` level and included in `ExtractionResult.metadata["degradations"]`.
+
+### Non-Retryable Auth Failures
+
+`litellm.AuthenticationError` and `litellm.PermissionDeniedError` are never retried -- they represent deterministic failures that will not resolve with backoff. Missing-credentials errors surfaced as `InternalServerError` (e.g. "Missing credentials. Please pass an api_key...") are also detected and fast-failed. `asyncio.CancelledError` and `TimeoutError` are similarly non-retryable.
 
 ## API Usage
 
@@ -373,7 +398,8 @@ async for attempt in AsyncRetrying(
 result = await kb.remember(
     content,
     namespace=ns.namespace_id,
-    skill_name="general_entities",
+    expertise=expertise,            # preferred: ExpertiseConfig or name string
+    # skill_name="general_entities" is legacy and ignored when expertise= is provided
     entity_types=["PERSON", "ORG"],
     relationship_types=["WORKS_AT"],
 )
@@ -390,8 +416,7 @@ from khora.pipelines.tasks import extract_entities
 
 entities, relationships = await extract_entities(
     chunks,
-    skill_name="general_entities",
-    expertise=expertise,
+    expertise=expertise,            # preferred; skill_name= is legacy and ignored when expertise= is set
     model="gpt-4o-mini",
     max_concurrent=10,
 )

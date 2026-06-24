@@ -403,34 +403,24 @@ result = await extractor.extract(
 
 ## Built-in Skills
 
-Khora includes built-in extraction skills:
+Khora ships YAML-defined built-in skills. Load them with `load_expertise("builtin:<name>")`:
 
 ```python
-from khora.extraction.skills import ExtractionSkill
+from khora.extraction.skills import load_expertise
 
 # General entities
-skill = ExtractionSkill.general_entities()
+expertise = load_expertise("builtin:general_entities")
 # Types: PERSON, ORGANIZATION, CONCEPT, LOCATION
 
-# Technical documentation
-skill = ExtractionSkill.technical_docs()
-# Types: TECHNOLOGY, CONCEPT, PRODUCT, ORGANIZATION
-
-# Business intelligence
-skill = ExtractionSkill.business_intel()
-# Types: PERSON, ORGANIZATION, PRODUCT, EVENT, LOCATION
-
-# Research papers
-skill = ExtractionSkill.research_papers()
-# Types: PERSON, ORGANIZATION, CONCEPT, TECHNOLOGY, EVENT
-
 # Slack messages
-skill = load_expertise("builtin:slack")
+expertise = load_expertise("builtin:slack")
 # Types: PERSON, CHANNEL, TEAM, TOPIC, PROJECT, DECISION
 # Extracts DM recipients, conversation threads, and team dynamics
 ```
 
 The Slack skill (`extraction/skills/builtin/slack.yaml`) is designed for ingesting Slack workspace exports and DM histories. It includes correlation rules for matching users by Slack handle, and inference rules for team membership and collaboration patterns.
+
+> **Legacy:** `ExtractionSkill.general_entities()`, `ExtractionSkill.technical_docs()`, `ExtractionSkill.business_intel()`, and `ExtractionSkill.research_papers()` are legacy classmethods that return a simpler `ExtractionSkill` object without expansion or confidence configuration. Prefer `load_expertise("builtin:...")` for new code. Retirement is tracked in issue #982.
 
 ## API Usage
 
