@@ -253,7 +253,7 @@ MemoryEvent(
 )
 ```
 
-**Event types span the lifecycle:**
+**Common event type families** (see [Events](events.md) for the full enum including `recall.*`, `dream.*`, and sync events):
 
 | Category | Event Types |
 |----------|-------------|

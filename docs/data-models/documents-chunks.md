@@ -328,6 +328,7 @@ CREATE TABLE documents (
     external_id VARCHAR(512),      -- Caller-supplied source identity
     status VARCHAR(20) DEFAULT 'pending',
     metadata JSONB,
+    checksum VARCHAR(64),          -- SHA-256 for deduplication
     chunk_count INTEGER DEFAULT 0,
     entity_count INTEGER DEFAULT 0,
     created_at TIMESTAMPTZ DEFAULT NOW(),
