@@ -182,7 +182,7 @@ Documented scale ceiling - performance and recall degrade noticeably above these
 Known gaps and warts:
 
 - **Partial atomicity in `coordinator.transaction()`** - only the SQL session is enrolled; LanceDB writes happen post-commit with compensating-delete-on-failure. A crash between SQLite commit and Lance write can leave orphaned vectors or missing embeddings; reconciliation runs on the next ingest.
-- **Point-in-time queries are not supported** on the embedded stack - `target_date` queries raise `NotImplementedError`. The bi-temporal entity versioning that powers them lives in Neo4j (`version_valid_from` / `version_valid_to` on `:Entity` / `:EntityVersion` nodes), which `sqlite_lance` has no equivalent of.
+- **Point-in-time queries degrade (they no longer raise) on the embedded stack** - a `target_date` query no longer raises `NotImplementedError`; `_version_filter_entities` returns current-state entities unfiltered, records a structured `Degradation` on `RecallResult.engine_info["degradations"]` (`reason="embedded_no_version_columns"`), and increments `khora.vectorcypher.version_filter.degraded_total`. Occurred-bounds (`start_time`/`end_time` → `occurred_at`) still narrow chunks normally - only entity-version narrowing is skipped. The bi-temporal entity versioning that powers true point-in-time lives in Neo4j (`version_valid_from` / `version_valid_to` on `:Entity` / `:EntityVersion` nodes), which `sqlite_lance` has no equivalent of.
 - **FTS5 covers chunks only** - entity-anchored recall falls back to `LIKE` / JSON-equality. Recommend the PostgreSQL stack for entity-heavy corpora.
 - **Install footprint** is ~130–180 MB unpacked (pyarrow + lancedb native + Arrow C++ runtime). "Embedded" means "no server", not "no native deps".
 - **IVF-PQ retraining** is automatic when the corpus grows past `retrain_factor × (rows at last training)`. Tune via `KHORA_STORAGE_SQLITE_LANCE_RETRAIN_FACTOR`.
@@ -218,6 +218,11 @@ Prefix: `KHORA_LLM_`. LiteLLM handles the provider dispatch.
 | `KHORA_LLM_EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model. |
 | `KHORA_LLM_EMBEDDING_DIMENSION` | `1536` | Must match your DB schema. |
 | `KHORA_LLM_EXTRACTION_MODEL` | - | Override extraction model (falls back to `model`). Haiku / Gemini Flash work well here. |
+| `KHORA_LLM_MAX_TOTAL_CONNECTIONS` | `200` | Shared aiohttp connector pool size (advanced tuning). |
+| `KHORA_LLM_MAX_CONNECTIONS_PER_HOST` | `0` | Per-host connection cap (`0` = unlimited). |
+| `KHORA_LLM_KEEPALIVE_TIMEOUT_S` | `30.0` | aiohttp keep-alive timeout. |
+
+> **`api_key_env` auto-derives from the model prefix (#1337).** If you set `KHORA_LLM_MODEL` to a non-OpenAI provider (e.g. `gemini/…`, `claude-*`, `anthropic/…`, `vertex_ai/…`) and leave `api_key_env` at its `OPENAI_API_KEY` default, khora re-points it to the conventional env var for that provider (e.g. `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`). Set `KHORA_LLM_API_KEY_ENV` explicitly to override the derivation.
 
 ## Pipeline (extraction)
 
@@ -277,6 +282,45 @@ Passive confidence signals attached to `RecallResult` (`engine_info["abstention_
 | `KHORA_QUERY_ABSTENTION_WEIGHT_ENTITIES_EMPTY` | `0.3` | Weight of `entities_empty` in the `weighted`-mode `combined_score`. |
 | `KHORA_QUERY_ABSTENTION_WEIGHT_CHUNKS_BELOW_MIN` | `0.4` | Weight of `chunks_below_min` in the `weighted`-mode `combined_score`. |
 | `KHORA_QUERY_ABSTENTION_WEIGHT_TOP_SCORE_LOW` | `0.3` | Weight of `top_score_low` in the `weighted`-mode `combined_score`. The three weights must sum to ≤ 1.0. |
+
+### Temporal detection (opt-in LLM tiers)
+
+The temporal-category detector is Aho-Corasick keyword matching by default. Two opt-in LLM tiers refine it for multilingual / paraphrased / ambiguous queries; both default OFF and degrade to the keyword result on any failure. See [query-engine/temporal-queries.md](query-engine/temporal-queries.md).
+
+| Variable | Default | Description |
+|---|---|---|
+| `KHORA_QUERY_TEMPORAL_SEMANTIC_FALLBACK_ENABLED` | `false` | Opt-in LLM semantic fallback when keyword detection is inconclusive (#981/#1318). |
+| `KHORA_QUERY_TEMPORAL_SEMANTIC_FALLBACK_MODEL` | - | Model for the semantic fallback (falls back to `llm.model`). |
+| `KHORA_QUERY_TEMPORAL_LLM_DISAMBIGUATION_ENABLED` | `false` | Opt-in LLM disambiguation for counterfactual/ambiguous temporal phrasing (#571). |
+| `KHORA_QUERY_TEMPORAL_LLM_DISAMBIGUATION_MODEL` | - | Model for disambiguation (falls back to `llm.model`). |
+
+The recency channel, multi-stage ranking, PPR, entity-linking, and per-source decay knobs also live under `KHORA_QUERY_*`; see the [`KHORA_QUERY_*` table in nested-env-vars.md](nested-env-vars.md) for the full set.
+
+## Hooks
+
+Prefix: `KHORA_HOOKS_`. Semantic hook subscriptions (`kb.subscribe(...)` / `kb.subscribe_persistent(...)`). The Level-2 LLM evaluator is **default-OFF** and gated by rolling-hour token budgets.
+
+| Variable | Default | Description |
+|---|---|---|
+| `KHORA_HOOKS_LLM_EVALUATION_ENABLED` | `false` | Enable the Level-2 LLM filter evaluator (in addition to the always-on embedding pre-filter). |
+| `KHORA_HOOKS_LLM_MAX_TOKENS_PER_NAMESPACE_PER_HOUR` | `10000` | Rolling-hour LLM-token budget per namespace; a breach fails open and fires `khora.hooks.llm.throttled_total`. |
+| `KHORA_HOOKS_LLM_MAX_TOKENS_PER_SUBSCRIPTION_PER_HOUR` | `0` | Per-subscription rolling-hour budget (`0` = disabled). |
+| `KHORA_HOOKS_LLM_CACHE_SIZE` | `1000` | Cross-batch decision-cache capacity. |
+| `KHORA_HOOKS_LLM_CACHE_TTL_SECONDS` | `3600` | Decision-cache TTL. |
+
+See [hooks/semantic-hooks.md](hooks/semantic-hooks.md) for the filter API, persistent subscriptions, and the remaining `KHORA_HOOKS_*` knobs.
+
+## Dream phase
+
+Prefix: `KHORA_DREAM_`. Background consolidation (entity dedup, edge prune, contradiction reconcile, community detection, schema drift). All ops are individually toggleable.
+
+| Variable | Default | Description |
+|---|---|---|
+| `KHORA_DREAM_ENABLED` | `false` | Master switch for the dream phase. |
+| `KHORA_DREAM_DEFAULT_MODE` | `report` | Default `DreamMode` when `kb.dream()` is called without one (e.g. `report` / `apply`). |
+| `KHORA_DREAM_CONTRADICTION_RECONCILE_ENABLED` | `false` | Opt-in two-LLM-judged contradiction reconciliation that soft-deletes the losing edge (#1281). |
+
+Dream has a large flat `KHORA_DREAM_*` surface (per-op toggles, the two LLM-token budgets, retention, report sinks, `redact_text`). See [dream-phase.md](dream-phase.md) for the full configuration table, per-op knobs, and defaults.
 
 ## Tenancy
 
