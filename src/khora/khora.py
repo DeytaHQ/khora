@@ -1453,17 +1453,20 @@ class Khora:
         self,
         *,
         config_overrides: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> MemoryNamespace:
         """Create a new memory namespace.
 
         Args:
             config_overrides: Optional configuration overrides
+            metadata: Optional namespace metadata
 
         Returns:
             Created MemoryNamespace
         """
         return await self._get_engine().create_namespace(
             config_overrides=config_overrides,
+            metadata=metadata,
         )
 
     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
