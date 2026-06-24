@@ -116,7 +116,7 @@ Each returned `NodeWithScore`'s `node.metadata` carries:
 | `chunk_id` / `entity_id` | Source object's khora UUID. |
 | `document_id` | Parent document UUID (chunk nodes only). |
 | `namespace_id` | Khora namespace this node came from. |
-| `khora_should_abstain` | Boolean - `True` when khora's chronicle abstention signals say the recall is low-confidence. Surfaced on **every** returned node so a downstream postprocessor / response synthesizer can short-circuit answer generation. |
+| `khora_should_abstain` | Boolean - `True` when khora's chronicle abstention signals say the recall is low-confidence. Present only when the recall result carries abstention signals (chronicle path); absent on vectorcypher/skeleton paths. |
 
 ### Sync is not implemented
 
@@ -207,9 +207,10 @@ memory = ChatMemoryBuffer.from_defaults(
 ```
 
 All seven `BaseChatStore` abstract sync methods are implemented and
-bridged through `khora.integrations._sync.run_sync` (which **rejects
-calls made from inside a running event loop** - see "Sync is not
-implemented" above for the same reasoning).
+bridged through `khora.integrations._sync.run_sync` (which runs the
+coroutine on a daemon-thread loop and blocks the caller - calling from
+inside an `async def` will stall the calling event loop; see "Sync is
+not implemented" above for the same reasoning).
 
 `get_keys()` and the per-key list-by-index operations scan documents in
 the bound namespace and filter on metadata client-side

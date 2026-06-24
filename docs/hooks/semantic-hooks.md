@@ -45,12 +45,33 @@ Hooks use a cost-efficient cascade - each level is only evaluated if the previou
 
 ### Level 0: Type Filter
 
-Filters by entity type or relationship type. No computation required:
+Filters by entity type, relationship type, dream op type, or dream
+decision. No computation required:
 
 ```python
 SemanticFilter(
     name="people_only",
     entity_types=["PERSON"],
+)
+```
+
+Dream-phase pre-filters narrow on `dream.op.decided` events only:
+
+```python
+SemanticFilter(
+    name="merge_ops",
+    dream_op_types=["merge"],        # op_type in event.data
+    dream_decisions=["apply"],       # decision in event.data
+)
+```
+
+To scope any filter to a single namespace, set `namespace_id`:
+
+```python
+SemanticFilter(
+    name="tenant_scoped",
+    entity_types=["PERSON"],
+    namespace_id=some_uuid,  # None (default) = all namespaces
 )
 ```
 
@@ -145,6 +166,9 @@ Subscribe to any of these event types. Names are stable strings - the `EventType
 | `namespace.created` / `namespace.updated` / `namespace.deleted` | Namespace lifecycle | - |
 | `sync.started` / `sync.completed` / `sync.failed` / `sync.checkpoint` | Connector sync lifecycle (Phase B) | - |
 | `recall.requested` / `recall.results_ready` / `recall.completed` | Recall pipeline (query-side hooks) | `query`, result counts |
+| `dream.run.started` / `dream.run.completed` / `dream.run.failed` | Dream run lifecycle | `run_id`, phase counts / error |
+| `dream.phase.started` / `dream.phase.completed` | Dream phase boundary | `phase`, `run_id` |
+| `dream.op.decided` | Dream orchestrator committed one memory op | `op_type`, `decision`, `run_id`, `entity_id` |
 
 `chunk.entities_resolved` is the event to subscribe to for **co-occurrence filtering** - see [Co-occurrence example](#co-occurrence-filtering) below.
 
@@ -212,6 +236,40 @@ Remove a subscription.
 ### `kb.hooks`
 
 Access the underlying `HookDispatcher` for advanced usage (e.g., `kb.hooks.clear()`).
+
+### Persistent subscriptions
+
+In-process callbacks (`kb.subscribe`) live only for the duration of
+the process. For subscriptions that must survive restarts, use the
+persistent API. Persistent subscriptions store their delivery
+configuration in PostgreSQL (`khora_hook_subscriptions` table, added
+in migration 049) and are reloaded automatically on the next
+`Khora.connect()` via `_wire_persistent_hooks`.
+
+```python
+sub_id = await kb.subscribe_persistent(
+    "entity.created",
+    delivery={"type": "webhook", "url": "https://my-service/hooks"},
+    filter=SemanticFilter(name="strategic", description="strategic events"),
+    namespace_id=my_ns_id,  # optional - scope to one namespace
+)
+
+# Later, to remove:
+await kb.unsubscribe_persistent(sub_id)
+```
+
+Key points:
+
+- Requires a SQL backend (any PostgreSQL-backed stack). Raises
+  `RuntimeError` on store-less stacks.
+- Delivery targets are opaque dicts; interpreting them is the
+  responsibility of the hook dispatcher's delivery backend (webhook
+  dispatch, queue publish, etc.).
+- The `filter` and `namespace_id` arguments follow the same semantics
+  as `kb.subscribe`.
+- On restart, khora reloads persistent subscriptions before the first
+  `remember` / `recall` call, so no events are missed after a clean
+  reconnect.
 
 ## Co-occurrence filtering
 

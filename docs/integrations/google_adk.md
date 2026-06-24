@@ -67,8 +67,9 @@ no sync bridging is involved.
 - `add_events_to_memory(*, app_name, user_id, events, session_id, custom_metadata)`
   - incremental delta of events for an existing namespace. Same
   deduplication contract as `add_session_to_memory`.
-  `custom_metadata` is merged into every event's
-  `Document.metadata`.
+  `custom_metadata` is merged into every event's `Document.metadata`;
+  adapter-owned `adk_*` keys always take precedence over any
+  same-named keys in `custom_metadata`.
 - `search_memory(*, app_name, user_id, query)` - `Khora.recall`
   against the resolved namespace. Returns `SearchMemoryResponse` with
   one `MemoryEntry` per matched event (chunks belonging to the same
