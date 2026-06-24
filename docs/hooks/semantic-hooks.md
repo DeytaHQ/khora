@@ -260,8 +260,8 @@ await kb.unsubscribe_persistent(sub_id)
 
 Key points:
 
-- Requires a SQL backend (any PostgreSQL-backed stack). Raises
-  `RuntimeError` on store-less stacks.
+- `subscribe_persistent(...)` requires a SQL-backed subscription store
+  (PostgreSQL-backed stack) and raises `RuntimeError` on store-less stacks.
 - Delivery targets are opaque dicts; interpreting them is the
   responsibility of the hook dispatcher's delivery backend (webhook
   dispatch, queue publish, etc.).
