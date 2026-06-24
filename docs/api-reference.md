@@ -471,7 +471,7 @@ Prior to #1069 the skeleton engine derived `pushed_down` from a hardcoded `backe
 
 ### `UsageSummary`
 
-`UsageSummary` is a stable public export (`from khora import UsageSummary`). It aggregates a `list[LLMUsage]` into totals and per-operation / per-model breakdowns. See `Khora.recall()`'s return value or build one directly with `UsageSummary.from_usages(usages)`.
+`UsageSummary` is a stable public export (`from khora import UsageSummary`). It aggregates a `list[LLMUsage]` into totals and per-operation / per-model breakdowns. See `Khora.recall()`'s return value or build one directly with `UsageSummary.from_usage(usages)`.
 
 | Field | Type | Description |
 |---|---|---|
@@ -574,19 +574,27 @@ from khora.diagnostics import compute_graph_stats, GraphStats  # PPR decision-ga
 The `RecallFilter` DSL provides deterministic, pre-retrieval filtering of recall results. It is a stable public export.
 
 ```python
+from datetime import datetime, timezone
 from khora import RecallFilter, StringOps, DateOps, Op, SYSTEM_KEYS
 from khora import RecallFilterValidationError, RecallFilterUnsupportedError
 
-# Match documents from a specific source
-f = RecallFilter({"source_name": {StringOps.EQ: "slack"}})
+# Match documents from a specific source (kwargs form, recommended)
+f = RecallFilter(source_name="slack")
 
-# Date range filter
-f = RecallFilter({"occurred_at": {DateOps.GTE: "2024-01-01", DateOps.LT: "2024-07-01"}})
+# Operator form - exclude a source_type
+f = RecallFilter(source_name=StringOps(**{"$ne": "internal"}))
+
+# Date range filter using DateOps
+f = RecallFilter(occurred_at=DateOps(**{"$gte": datetime(2024, 1, 1, tzinfo=timezone.utc),
+                                        "$lt": datetime(2024, 7, 1, tzinfo=timezone.utc)}))
+
+# Wire/dict form (useful when deserializing HTTP bodies or YAML configs)
+f = RecallFilter.model_validate({"source_name": "slack", "source_type": {"$ne": "internal"}})
 
 result = await kb.recall("query", namespace=ns_id, filter=f)
 ```
 
-Pass a `RecallFilter` (or a raw `dict` that will be coerced to one) to `recall(filter=...)`. The engine reports what it enforced in `engine_info["filter"]` as a [`FilterPushdownReport`](#recallresult) (see above). Validation errors raise `RecallFilterValidationError`; unsupported operations on the active backend raise `RecallFilterUnsupportedError`. `SYSTEM_KEYS` is a frozenset of reserved dotted key names that map to indexed columns.
+Pass a `RecallFilter` (or a raw `dict` that will be coerced to one) to `recall(filter=...)`. The recommended form is Pydantic kwargs (`RecallFilter(source_name="slack")`); the wire form (`RecallFilter.model_validate({...})`) is useful for deserializing HTTP bodies or YAML configs. The engine reports what it enforced in `engine_info["filter"]` as a [`FilterPushdownReport`](#recallresult) (see above). Validation errors raise `RecallFilterValidationError`; unsupported operations on the active backend raise `RecallFilterUnsupportedError`. `SYSTEM_KEYS` is a frozenset of the ten filterable system keys (`occurred_at`, `created_at`, `source_timestamp`, `source_type`, `source_name`, `source_url`, `external_id`, `content_type`, `source`, `title`).
 
 ## Dream phase
 
