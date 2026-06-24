@@ -52,7 +52,7 @@ Content arrives
          Skip it              Create Document record
 ```
 
-**Why this matters**: If you accidentally upload the same file twice, Khora recognizes it and skips the duplicate. The checksum is computed from the content itself, so even if the filename changes, duplicates are caught.
+**Why this matters**: If you accidentally upload the same file twice with the same identity (same `external_id` and `session_id`), Khora recognizes it and skips the duplicate. The checksum is computed from the content itself, so even if the filename changes, duplicates are caught. Note that the same content with a different `external_id` or `session_id` is treated as a new document -- identity is part of the dedup key.
 
 Staging runs in parallel with controlled concurrency - you can ingest thousands of documents without overwhelming your system.
 
