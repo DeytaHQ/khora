@@ -79,7 +79,7 @@ if __name__ == "__main__":
 
 ## Public surface
 
-- `KhoraMemory(kb, namespace, *, user_id, app_id="crewai", scope_root="/", **memory_kwargs)`
+- `KhoraMemory(*, kb, namespace, user_id, app_id="crewai", scope_root="/", **memory_kwargs)`
   - factory returning a `crewai.Memory` wired against khora.
 - `KhoraStorageBackend` - the duck-typed `crewai.memory.storage.backend.StorageBackend`
   implementation. Exposed for advanced users who want to construct the
@@ -165,7 +165,8 @@ your `Khora()` config.
 ### Sync entry point only - no async loops above the adapter
 
 `KhoraStorageBackend` is a sync class. Every async call into khora is
-dispatched through `khora.integrations._sync.run_sync`, which refuses
-to run from inside an existing asyncio loop (deadlock surface). Do not
+dispatched through `khora.integrations._sync.run_sync`, which runs the
+coroutine on a daemon-thread loop and blocks the caller. Calling it
+from inside an `async def` will stall the calling event loop. Do not
 call `KhoraMemory(...)` or any of its methods from inside an `async
 def` - call it from a sync entry point or a worker thread.

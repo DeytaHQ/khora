@@ -51,9 +51,11 @@ without any explicit registration.
 
 All 6 async methods are first-class. Sync variants (`put`, `get`,
 `search`, `delete`, `list_namespaces`, `batch`) bridge through
-`khora.integrations._sync.run_sync`, which **rejects calls made from
-inside a running event loop**. From inside a graph node, use the async
-methods. From a notebook or sync script, use the sync ones.
+`khora.integrations._sync.run_sync`, which runs the coroutine on a
+daemon-thread loop and blocks the caller. Calling the sync variants
+from inside an `async def` will stall the calling event loop - from
+inside a graph node, use the async methods. From a notebook or sync
+script, use the sync ones.
 
 - `aput` → `Khora.remember` with `external_id` derived from
   `(flat_namespace, key)`. Overwriting an existing item deletes the

@@ -86,10 +86,10 @@ framework adapter:
   group in `pyproject.toml`, or call `khora.integrations.register()` for
   test-only registration.
 - Use `khora.integrations._sync.run_sync` if you need to bridge a sync
-  framework callback into khora's async API - it raises if invoked
-  from inside a running event loop, surfacing the deadlock surface
-  loudly rather than hanging.
+  framework callback into khora's async API - it runs the coroutine on
+  a dedicated daemon-thread loop and blocks the caller. Do not call
+  from inside an `async def` because that will stall the calling event
+  loop while waiting for the daemon loop.
 
 See any of the six shipped adapters for a working template - they
-range from ~150 LOC (CrewAI) to ~600 LOC (OpenAI Agents) and exercise
-every part of the foundation.
+exercise every part of the foundation.
