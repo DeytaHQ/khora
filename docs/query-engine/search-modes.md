@@ -10,8 +10,8 @@ from khora import SearchMode
 SearchMode.VECTOR    # Semantic similarity - "What's conceptually related?"
 SearchMode.GRAPH     # Relationship traversal - "What's connected to what?"
 SearchMode.KEYWORD   # Exact matching - "Where do these words appear?"
-SearchMode.HYBRID    # Vector + Graph + Keyword combined (default)
-SearchMode.ALL       # All three methods
+SearchMode.HYBRID    # Vector + Graph combined (default); keyword is engine-gated
+SearchMode.ALL       # Vector + Graph + Keyword
 ```
 
 ## Vector Search

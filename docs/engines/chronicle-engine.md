@@ -200,15 +200,15 @@ print(signals["chunks_empty"])         # No chunks returned
 print(signals["chunks_below_min"])     # Fewer than abstention_min_chunks
 print(signals["top_score_low"])        # Top chunk score below abstention_min_top_score
 
-print(signals["combined_score"])       # 0.0 = high confidence, 1.0 = should abstain
+print(signals["combined_score"])       # 0.0–1.0 weighted abstention-risk signal (higher = riskier)
 print(signals["should_abstain"])       # Convenience bool
 
 confidence = result.engine_info["confidence"]  # 0.0–1.0 calibrated score
 ```
 
-The `should_abstain` flag is passive - Chronicle still returns chunks even when it trips. Use it to suppress LLM answer generation when retrieval quality is too low.
+The `should_abstain` flag is passive - Chronicle still returns chunks even when it trips. Use it to suppress LLM answer generation when retrieval quality is too low. In the default `cosine_floor` mode, `should_abstain` fires when `top_score_low` trips on its own OR retrieval came back genuinely empty (`chunks_empty AND entities_empty`); it is NOT thresholded from `combined_score`. The `combined_score` is a weighted risk indicator that only directly drives the decision in the legacy `weighted` mode (`combined_score >= abstention_combined_threshold`).
 
-The confidence score is calibrated: `0.8 * clip01(top_cosine / target_cosine) + 0.2 * clip01(top_score_gap / target_gap)`. The default abstention mode is `cosine_floor`.
+The confidence score is calibrated: `0.8 * clip01(top_cosine / target_cosine) + 0.2 * clip01(top_score_gap / target_gap)`.
 
 Thresholds are tunable via `ChronicleEngine` kwargs: `abstention_min_chunks`, `abstention_min_top_score`, `abstention_combined_threshold`.
 
