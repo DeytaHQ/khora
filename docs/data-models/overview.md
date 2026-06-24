@@ -61,6 +61,9 @@ Document(
     status=DocumentStatus.COMPLETED,
     chunk_count=5,
     entity_count=12,
+    relationship_count=3,
+    source_timestamp=datetime(2024, 1, 10),   # when the source event occurred
+    session_id=UUID("..."),                    # agentic-framework session
     created_at=datetime(2024, 1, 15, 10, 30),
 )
 ```
@@ -79,6 +82,8 @@ PENDING        Just created, waiting for processing
 PROCESSING     Being chunked, embedded, extracted
     |
     +---> COMPLETED    Successfully processed
+    |         |
+    |         +---> ARCHIVED   Retained but no longer actively used
     |
     +---> FAILED       Error occurred (message in metadata)
 ```
@@ -99,6 +104,8 @@ Chunk(
     start_char=1024,            # Character offset
     end_char=1536,
     token_count=512,
+    occurred_at=datetime(2024, 1, 10),  # event time (if known)
+    session_id=UUID("..."),             # propagated from parent document
     created_at=datetime(2024, 1, 15, 10, 31)
 )
 ```
@@ -134,15 +141,14 @@ Entity(
 )
 ```
 
-**Built-in entity types:**
+**Example entity types** (entity types are plain strings - define your own ontology):
 - `PERSON` - People
 - `ORGANIZATION` - Companies, institutions
 - `LOCATION` - Places
 - `PRODUCT` - Products, services
-- `CONCEPT` - Abstract ideas
+- `CONCEPT` - Abstract ideas (default)
 - `EVENT` - Named events
 - `TECHNOLOGY` - Technologies, tools
-- `CUSTOM` - Your own types
 
 **Temporal validity**: Entities can have time bounds. Albert Einstein is valid from birth to death. A company's name might change. This enables temporal queries.
 
@@ -169,11 +175,11 @@ Relationship(
 )
 ```
 
-**Built-in relationship types:**
+**Example relationship types** (relationship types are plain strings - define your own ontology):
 - `WORKS_FOR` - Employment
 - `KNOWS` - Personal connection
 - `PART_OF` - Membership, containment
-- `RELATED_TO` - General association
+- `RELATES_TO` - General association (default)
 - `CREATED` - Authorship, invention
 - `LOCATED_IN` - Physical location
 - `OWNS` - Ownership
@@ -251,11 +257,11 @@ MemoryEvent(
 
 | Category | Event Types |
 |----------|-------------|
-| Document | `document.created`, `document.updated`, `document.deleted`, `document.processing_started`, `document.processing_completed`, `document.processing_failed` |
-| Chunk | `chunk.created`, `chunk.deleted`, `chunk.embedding_generated` |
+| Document | `document.created`, `document.updated`, `document.deleted`, `document.processed`, `document.failed` |
+| Chunk | `chunk.created`, `chunk.deleted`, `chunk.embedded`, `chunk.entities_resolved` |
 | Entity | `entity.created`, `entity.updated`, `entity.deleted`, `entity.merged` |
-| Relationship | `relationship.created`, `relationship.updated`, `relationship.deleted`, `relationship.inferred` |
-| Namespace | `namespace.created`, `namespace.activated`, `namespace.archived` |
+| Relationship | `relationship.created`, `relationship.updated`, `relationship.deleted` |
+| Namespace | `namespace.created`, `namespace.updated`, `namespace.deleted` |
 
 **Correlation IDs** link related events. When you call `remember()`, a single correlation ID ties together all the events it generates.
 
