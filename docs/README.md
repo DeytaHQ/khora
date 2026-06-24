@@ -65,6 +65,23 @@ Pluggable retrieval strategies that implement `MemoryEngineProtocol`.
 
 - [Semantic hooks](hooks/semantic-hooks.md) - subscribe to extraction events with 3-level semantic filtering.
 
+## Dream phase
+
+Background knowledge-consolidation cycle that runs between recalls to deduplicate entities, resolve contradictions, summarize communities, and compact facts.
+
+- [Dream phase](dream-phase.md) - architecture, ops, orchestration, and configuration.
+
+## Integrations
+
+Adapters for agentic frameworks. Install the matching extra, then import from `khora.integrations.<name>`.
+
+- [CrewAI](integrations/crewai.md) - `KhoraMemory` for CrewAI agents (`khora[crewai]`).
+- [LangGraph](integrations/langgraph.md) - `KhoraStore` semantic long-term memory for LangGraph (`khora[langgraph]`).
+- [Google ADK](integrations/google_adk.md) - `KhoraMemoryService` for Google Agent Development Kit (`khora[google-adk]`).
+- [OpenAI Agents SDK](integrations/openai_agents.md) - `KhoraSession`, `khora_recall_tool`, `KhoraMemoryHooks` (`khora[openai-agents]`).
+- [LlamaIndex](integrations/llamaindex.md) - `KhoraRetriever`, `KhoraMemoryBlock`, `KhoraChatStore` (`khora[llamaindex]`).
+- [Hermes](integrations/hermes.md) - event-bus adapter for Hermes-compatible message brokers (`khora[hermes]`).
+
 ## Process
 
 - [Release process](RELEASE.md) - how versions are tagged and published.

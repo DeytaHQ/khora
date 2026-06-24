@@ -81,6 +81,16 @@ Current dialect-gated migrations:
 - **`037_recall_response_format`** - Cross-dialect. Adds `documents.source_name VARCHAR(64)` (backfilled from `nango://<provider>/...` patterns in `source`), `documents.source_url VARCHAR(2048)`, and `chunks.chunker_info JSONB NOT NULL DEFAULT '{}'::jsonb`. Also flips six `documents` columns (`source`, `content_type`, `title`, `author`, `language`, `checksum`) to nullable-with-no-default; legacy `create_tables()`-created rows that were `NOT NULL DEFAULT ''` need their `NOT NULL` dropped before the empty-string normalisation runs (see PR #819).
 - **`038_khora_chunks_chunker_info`** - Mirrors 037's `chunker_info` onto the vectorcypher temporal-store table `khora_chunks`. Postgres-specific: asserts `server_version_num >= 110000` so the fast `ADD COLUMN NOT NULL DEFAULT` path is available (avoids a multi-hour table rewrite on PG < 11), and issues `SET lock_timeout = '5s'` before DDL so the `AccessExclusiveLock` acquisition is bounded; on lock-timeout, logs `khora.migration.applied` with `lock_timeout_tripped=True` and SQLSTATE `55P03` for dashboard correlation.
 - **`039_khora_chunks_content_tsv_gin`** - Postgres-only. Adds a GIN index on `khora_chunks.content_tsv` (BM25 / `ts_rank` queries against vectorcypher's temporal-store chunks) via `CREATE INDEX CONCURRENTLY ... IF NOT EXISTS` in an autocommit block. Converges cleanly with the runtime `CREATE INDEX IF NOT EXISTS` in `PgVectorTemporalStore.connect()` - whichever runs first wins. SQLite uses an FTS5 virtual table instead.
+- **`040_chunks_last_accessed_at`** - Cross-dialect. Adds a nullable `last_accessed_at TIMESTAMPTZ` column to the `chunks` table. Stamped by the engine when `KHORA_QUERY_CHRONICLE_ENABLE_RECALL_REINFORCEMENT=true`; the temporal-decay path reads `max(source_timestamp, last_accessed_at)` so frequently-recalled chunks stay fresh. The partial index skips NULL rows on both dialects (`postgresql_where` / `sqlite_where`).
+- **`041_khora_chunks_denormalized_columns`** - Cross-dialect. Adds eight nullable denormalized document columns to the `khora_chunks` temporal-store table (`source_type`, `source_name`, `source_url`, `source_timestamp`, `external_id`, `content_type`, `source`, `title`). Enables recall-filter pushdown directly on chunk rows without a join.
+- **`042_widen_khora_chunks_source_external_id`** - Postgres-only DDL; cross-dialect schema notes. Widens `khora_chunks.external_id` and related VARCHAR columns.
+- **`043_khora_chunks_metadata_backfill`** - Cross-dialect. Backfills the denormalized columns (migration 041) from the parent `documents` row for all existing chunks.
+- **`044_khora_chunks_backfill_denormalized`** - Postgres-only. Adds supplemental backfill covering document-level columns not caught by migration 043.
+- **`045_khora_try_timestamptz`** - Postgres-only. Adds the PL/pgSQL function `khora_try_timestamptz(text)` - a safe `text → TIMESTAMPTZ` cast that returns `NULL` rather than aborting the query on a malformed value. Used by the recall-filter `$date` operator. Skips silently on SQLite.
+- **`046_chunks_occurred_at`** - Cross-dialect. Adds a nullable `occurred_at TIMESTAMPTZ` column to the `chunks` table for real-world event time, distinct from ingestion `created_at`. Enables time-bounded session recall and temporal-filter pushdown.
+- **`047_dream_runs_graph_mirror_pending`** - Cross-dialect. Adds a nullable `graph_mirror_pending JSONB` column to `khora_dream_runs`. Holds the pending-ops list for the post-commit dream-on-graph mirror reconciler (#1274). NULL = no ops awaiting mirror; existing rows are untouched.
+- **`048_dream_conflicts_reconcile`** - Cross-dialect. Extends `dream_conflicts` (migration 036) with reconcile-outcome columns: `resolution VARCHAR(16)`, `loser_relationship_id UUID`, `winner_relationship_id UUID`, `judge_rationale_hash VARCHAR(16)`, `resolved_by_op_id UUID`. The contradiction-detection op can now record soft-delete judgements (#1281) alongside detection findings.
+- **`049_hook_subscriptions`** - Cross-dialect. Adds `khora_hook_subscriptions` for durable semantic-hook persistence (#599). Nine columns including `id`, `namespace_id`, `event_type`, `filter (JSONB)`, `delivery (JSONB)`, `created_at`, `last_delivered_at`. Enables `HookDispatcher.register_persistent` / `load_persistent` so subscriptions survive restarts.
 
 ## SurrealDB
 
@@ -120,7 +130,7 @@ ent = await kb.storage.get_entity(entity_id, namespace_id=ns_id)  # via coordina
 await kb.storage.delete_document(doc_id, namespace_id=ns_id)      # coordinator method
 ```
 
-Code paths that already routed through the `Khora` facade are unaffected - none touch `kb.storage.{relational,vector,graph,event_store}` directly. Code paths that reach into `kb.storage.<role>` will see the `DeprecationWarning` in v0.16.x and the `AttributeError` in v0.17.
+Code paths that already routed through the `Khora` facade are unaffected - none touch `kb.storage.{relational,vector,graph,event_store}` directly. Code paths that reach into `kb.storage.<role>` will see a `DeprecationWarning` on first access per role per process; calling a method without `namespace_id=` raises `TypeError`. Migrate to coordinator-level methods at your earliest convenience - the proxy wrappers (`NamespaceRequiredProxy`) are currently deprecated and will be removed in a future major release.
 
 ## Replacing the removed GraphRAG engine
 
@@ -164,5 +174,7 @@ The one piece of CLI functionality available inside the library today is binary-
 ```python
 from khora.extraction.binary_readers import extract_if_needed
 ```
+
+**Failure contract:** `extract_if_needed` raises `ExtractionError` on genuine parse/open failures (xlsx, docx, parquet). Passing a `.pdf` path raises `NotImplementedError` - preprocess PDFs upstream or use `khora-cli`'s PDF preprocessing.
 
 Old `from khora.discovery …` and `from khora.cli …` imports have no in-library replacement - call the public `khora` API instead.
