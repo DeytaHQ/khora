@@ -10,8 +10,8 @@ from khora import SearchMode
 SearchMode.VECTOR    # Semantic similarity - "What's conceptually related?"
 SearchMode.GRAPH     # Relationship traversal - "What's connected to what?"
 SearchMode.KEYWORD   # Exact matching - "Where do these words appear?"
-SearchMode.HYBRID    # Vector + Graph combined (default)
-SearchMode.ALL       # All three methods
+SearchMode.HYBRID    # Vector + Graph combined (default); keyword is engine-gated
+SearchMode.ALL       # Vector + Graph + Keyword
 ```
 
 ## Vector Search
@@ -64,8 +64,8 @@ results = await kb.recall(
     namespace=ns_id,
     mode=SearchMode.GRAPH,
 )
-# Note: per-call graph depth isn't exposed; configure max_graph_depth
-# globally via KhoraConfig.query at construction time.
+# Note: VectorCypher uses adaptive depth automatically. There is no
+# per-call graph depth knob; depth is driven by entry-entity count.
 ```
 
 **Why it works**: If Alice works at Acme and Bob also works at Acme, graph search can infer they're colleagues - even if no document explicitly says so.
@@ -132,7 +132,7 @@ Default weights:
 - Graph: 30% (relationships add important context)
 - Keyword: 20% (catches exact terms, proper nouns, dates)
 
-> **Note**: HYBRID includes keyword search alongside vector + graph. [Benchmark analysis](retrieval-tuning.md) showed that without the keyword fallback, 25% of descriptive queries returned zero results. You can disable keyword search with `enable_keyword_search=False`.
+> **Note**: HYBRID includes keyword search alongside vector + graph. [Benchmark analysis](retrieval-tuning.md) showed that without the keyword fallback, 25% of descriptive queries returned zero results. `enable_keyword_search` gates keyword search inside `HybridQueryEngine`. On the default `kb.recall()` (VectorCypher) path it is inert; use `SearchMode.KEYWORD` for pure keyword recall or `KHORA_QUERY_ENABLE_BM25_CHANNEL=true` to add a BM25 channel alongside vector+graph in VectorCypher.
 
 ## All Sources
 
@@ -219,8 +219,10 @@ results = await kb.recall(
 
 ### With Graph Constraints
 
-Graph depth is configured globally (`KhoraConfig.query.max_graph_depth`)
-rather than per-call - there's no `config=` kwarg on `kb.recall()`:
+VectorCypher uses adaptive graph depth automatically - there is no
+`max_graph_depth` knob on `KhoraConfig.query` or `kb.recall()` for the
+default VectorCypher path. Depth is driven by entry-entity count (see
+[Adaptive Depth](../engines/vectorcypher-engine.md#adaptive-depth)):
 
 ```python
 results = await kb.recall(
