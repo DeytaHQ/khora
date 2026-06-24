@@ -1307,7 +1307,7 @@ class QuerySettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="KHORA_QUERY_", case_sensitive=False)
 
     # Basic search settings
-    default_mode: str = Field(default="hybrid", description="Default search mode: vector, graph, hybrid, all")
+    default_mode: str = Field(default="hybrid", description="Default search mode: vector, graph, hybrid, keyword, all")
     min_chunk_similarity: float = Field(default=0.05, ge=0.0, le=1.0, description="Minimum chunk similarity threshold")
     min_entity_similarity: float = Field(
         default=0.05, ge=0.0, le=1.0, description="Minimum entity similarity threshold"
