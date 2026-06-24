@@ -29,16 +29,15 @@ class Entity:
     entity_type: str = "CONCEPT"
     description: str = ""
 
-    # Attributes and aliases
+    # Attributes from extraction
     attributes: dict[str, Any] = field(default_factory=dict)
-    aliases: list[str] = field(default_factory=list)
 
     # Embedding for similarity matching (stored in pgvector)
     embedding: list[float] | None = None
     embedding_model: str = ""
 
     # Confidence and mentions
-    confidence: float = 0.5
+    confidence: float = 1.0
     mention_count: int = 1
 
     # Source tracking
@@ -79,7 +78,6 @@ entity = Entity(
         "birth_year": 1879,
         "nationality": "German-American",
     },
-    aliases=["A. Einstein", "Einstein"],
 )
 ```
 
@@ -89,37 +87,31 @@ When duplicate entities are detected, they are merged:
 
 ```python
 def merge_with(self, other: Entity) -> None:
-    """Merge another entity into this one."""
-    # Increase mention count
-    self.mention_count += other.mention_count
-
-    # Average confidences
-    self.confidence = (self.confidence + other.confidence) / 2
-
-    # Merge attributes (other's values take precedence if non-empty)
-    for key, value in other.attributes.items():
-        if value and (key not in self.attributes or not self.attributes[key]):
-            self.attributes[key] = value
-
-    # Combine aliases
-    for alias in other.aliases:
-        if alias not in self.aliases and alias != self.name:
-            self.aliases.append(alias)
-
+    """Merge another entity into this one (deduplication)."""
     # Combine source references
     for doc_id in other.source_document_ids:
         if doc_id not in self.source_document_ids:
             self.source_document_ids.append(doc_id)
-
     for chunk_id in other.source_chunk_ids:
         if chunk_id not in self.source_chunk_ids:
             self.source_chunk_ids.append(chunk_id)
 
-    # Expand temporal validity
-    if other.valid_from and (not self.valid_from or other.valid_from < self.valid_from):
-        self.valid_from = other.valid_from
-    if other.valid_until and (not self.valid_until or other.valid_until > self.valid_until):
-        self.valid_until = other.valid_until
+    # Update mention count
+    self.mention_count += other.mention_count
+
+    # Merge attributes (prefer existing; only fill in missing keys)
+    for key, value in other.attributes.items():
+        if key not in self.attributes:
+            self.attributes[key] = value
+
+    # Update confidence (take max)
+    self.confidence = max(self.confidence, other.confidence)
+
+    # Update description if empty
+    if not self.description and other.description:
+        self.description = other.description
+
+    self.updated_at = datetime.now(UTC)
 ```
 
 ### Temporal Validity
@@ -194,7 +186,7 @@ class Relationship:
     valid_until: datetime | None = None
 
     # Metadata
-    confidence: float = 0.5
+    confidence: float = 1.0
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 ```
@@ -250,9 +242,14 @@ class Episode:
     source_document_ids: list[UUID] = field(default_factory=list)
     source_chunk_ids: list[UUID] = field(default_factory=list)
 
+    # Embedding for similarity search
+    embedding: list[float] | None = None
+    embedding_model: str = ""
+
     # Metadata
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 ```
 
 ### Episode Examples

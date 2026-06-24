@@ -49,6 +49,9 @@ class EventType(str, Enum):
     CHUNK_CREATED = "chunk.created"
     CHUNK_EMBEDDED = "chunk.embedded"
     CHUNK_DELETED = "chunk.deleted"
+    # Fired after all entity events for a chunk are dispatched.
+    # Carries the per-chunk entity set for co-occurrence filters.
+    CHUNK_ENTITIES_RESOLVED = "chunk.entities_resolved"
 
     # Entity operations
     ENTITY_CREATED = "entity.created"
@@ -79,6 +82,19 @@ class EventType(str, Enum):
 
     # Query tracking
     QUERY_EXECUTED = "query.executed"
+
+    # Recall/search events
+    RECALL_REQUESTED = "recall.requested"
+    RECALL_RESULTS_READY = "recall.results_ready"
+    RECALL_COMPLETED = "recall.completed"
+
+    # Dream-phase events — emitted by the dream orchestrator
+    DREAM_RUN_STARTED = "dream.run.started"
+    DREAM_PHASE_STARTED = "dream.phase.started"
+    DREAM_OP_DECIDED = "dream.op.decided"
+    DREAM_PHASE_COMPLETED = "dream.phase.completed"
+    DREAM_RUN_COMPLETED = "dream.run.completed"
+    DREAM_RUN_FAILED = "dream.run.failed"
 ```
 
 ## Resource Types
