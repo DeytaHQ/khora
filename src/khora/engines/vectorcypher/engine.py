@@ -3558,6 +3558,10 @@ class VectorCypherEngine:
                 if identity_key in identities_in_flight:
                     async with results_lock:
                         results["skipped"] += 1
+                    if on_progress:
+                        async with progress_lock:
+                            progress_count += 1
+                            on_progress(progress_count, total)
                     return
                 identities_in_flight.add(identity_key)
             # DB-side dedup is identity-scoped too: a checksum hit stored under a

@@ -1838,6 +1838,10 @@ class TestVectorCypherEngineLegacyBatchDedupScope:
         legacy_engine._storage.get_documents_by_checksums = AsyncMock(return_value={})  # nothing in DB
         legacy_engine.remember = AsyncMock(side_effect=lambda *a, **k: self._fake_remember_result())
 
+        # Progress must be reported for the in-flight skip too, or callbacks
+        # undercount completed items for batches with intra-batch duplicates.
+        progress_calls: list[tuple[int, int]] = []
+
         result = await legacy_engine.remember_batch(
             [
                 {"content": content, "external_id": "ext-a"},
@@ -1846,11 +1850,15 @@ class TestVectorCypherEngineLegacyBatchDedupScope:
             namespace_id,
             entity_types=["PERSON"],
             relationship_types=["KNOWS"],
+            on_progress=lambda done, total: progress_calls.append((done, total)),
         )
 
         assert result.skipped == 1, "Same external_id + same content is an intra-batch duplicate"
         assert result.processed == 1
         assert legacy_engine.remember.await_count == 1
+        # Both docs (the processed one and the skipped duplicate) must report progress.
+        assert len(progress_calls) == 2, "Intra-batch skip must still fire on_progress"
+        assert max(done for done, _ in progress_calls) == 2, "Progress must reach total=2"
 
 
 @pytest.mark.unit
