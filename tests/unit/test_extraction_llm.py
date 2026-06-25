@@ -538,8 +538,8 @@ class TestWaveSize:
     """#1374: extract_multi() dispatches batches in configurable waves."""
 
     def test_default_wave_size(self) -> None:
-        """Default wave_size is 8."""
-        assert LLMEntityExtractor()._wave_size == 8
+        """Default wave_size is 20 (matches issue #1374)."""
+        assert LLMEntityExtractor()._wave_size == 20
 
     def test_wave_size_stored(self) -> None:
         """Constructor kwarg is stored on the instance."""

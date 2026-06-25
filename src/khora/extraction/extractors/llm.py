@@ -406,7 +406,7 @@ class LLMEntityExtractor(EntityExtractor):
         timeout: int = 60,
         max_retries: int = 3,
         max_concurrent: int = 10,
-        wave_size: int = 8,
+        wave_size: int = 20,
         retry_wait: float = 1.0,
     ) -> None:
         """Initialize the LLM entity extractor.

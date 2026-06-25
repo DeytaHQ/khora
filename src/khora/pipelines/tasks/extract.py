@@ -59,7 +59,7 @@ async def extract_entities(
     expertise: ExpertiseConfig | str | None = None,
     model: str = "gpt-4o-mini",
     max_concurrent: int = 10,
-    wave_size: int = 8,
+    wave_size: int = 20,
     context: dict[str, Any] | None = None,
     timeout: int = 60,
     max_retries: int = 3,

@@ -1128,7 +1128,7 @@ class LLMSettings(BaseSettings):
     max_retries: int = Field(default=3, description="Maximum retries on failure")
     max_concurrent_llm_calls: int = Field(default=10, description="Maximum concurrent LLM calls")
     extraction_wave_size: int = Field(
-        default=8,
+        default=20,
         ge=1,
         description=(
             "Number of extraction batches dispatched concurrently per wave in "

@@ -22,8 +22,8 @@ pytestmark = pytest.mark.unit
 
 
 def test_default_extraction_wave_size() -> None:
-    """Default config value is 8."""
-    assert KhoraConfig().llm.extraction_wave_size == 8
+    """Default config value is 20 (matches issue #1374)."""
+    assert KhoraConfig().llm.extraction_wave_size == 20
 
 
 def test_extraction_wave_size_env_var(monkeypatch: pytest.MonkeyPatch) -> None:

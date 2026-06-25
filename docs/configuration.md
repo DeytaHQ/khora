@@ -215,7 +215,7 @@ Prefix: `KHORA_LLM_`. LiteLLM handles the provider dispatch.
 | `KHORA_LLM_TIMEOUT` | `30` | Request timeout in seconds. |
 | `KHORA_LLM_MAX_RETRIES` | `3` | Retry budget on failure. |
 | `KHORA_LLM_MAX_CONCURRENT_LLM_CALLS` | `10` | Cap on concurrent in-flight LLM requests. |
-| `KHORA_LLM_EXTRACTION_WAVE_SIZE` | `8` | Extraction batches dispatched concurrently per wave in `extract_multi()`. Raising it above `max_concurrent_llm_calls` has no effect (the per-call semaphore is the binding limit); raising both increases throughput but also the worst-case doomed-call count when the circuit breaker trips. |
+| `KHORA_LLM_EXTRACTION_WAVE_SIZE` | `20` | Extraction batches dispatched concurrently per wave in `extract_multi()`. Note: raising it above `max_concurrent_llm_calls` has no effect (the per-call semaphore is the binding limit); raising both increases throughput but also the worst-case doomed-call count when the circuit breaker trips. |
 | `KHORA_LLM_EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model. |
 | `KHORA_LLM_EMBEDDING_DIMENSION` | `1536` | Must match your DB schema. |
 | `KHORA_LLM_EXTRACTION_MODEL` | - | Override extraction model (falls back to `model`). Haiku / Gemini Flash work well here. |
