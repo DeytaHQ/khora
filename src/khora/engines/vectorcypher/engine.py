@@ -3542,19 +3542,41 @@ class VectorCypherEngine:
         existing_docs: dict[str, Any] = {}
         if deduplicate:
             existing_docs = await storage.get_documents_by_checksums(namespace_id, doc_checksums)
-        checksums_in_flight: set[str] = set()
-        checksums_lock = asyncio.Lock()
+        identities_in_flight: set[tuple[str, str | None, str | None]] = set()
+        identities_lock = asyncio.Lock()
         semaphore = asyncio.Semaphore(max_concurrent)
 
         async def process_document(doc_data: dict[str, Any], checksum: str) -> None:
             nonlocal progress_count
-            async with checksums_lock:
-                if checksum in checksums_in_flight:
+            # Identity-scoped dedup (#1171): two same-content docs with different
+            # external_id/session_id must both proceed; only a true identity
+            # collision is an intra-batch duplicate (mirrors the streaming path).
+            doc_external_id = doc_data.get("external_id")
+            doc_session_id = _coerce_session_id_from_metadata(doc_data.get("metadata", {}))
+            identity_key = (checksum, doc_external_id, str(doc_session_id) if doc_session_id else None)
+            async with identities_lock:
+                if identity_key in identities_in_flight:
                     async with results_lock:
                         results["skipped"] += 1
+                    if on_progress:
+                        async with progress_lock:
+                            progress_count += 1
+                            on_progress(progress_count, total)
                     return
-                checksums_in_flight.add(checksum)
-            if deduplicate and checksum in existing_docs:
+                identities_in_flight.add(identity_key)
+            # DB-side dedup is identity-scoped too: a checksum hit stored under a
+            # different external_id/session_id is NOT a duplicate (#1139/#1171) —
+            # fall through to remember(), which creates a new doc or replaces by
+            # external_id as appropriate.
+            if (
+                deduplicate
+                and checksum in existing_docs
+                and _checksum_dedup_applies(
+                    existing_docs[checksum],
+                    external_id=doc_external_id,
+                    session_id=doc_session_id,
+                )
+            ):
                 async with results_lock:
                     results["skipped"] += 1
                 if on_progress:
