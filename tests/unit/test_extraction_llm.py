@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -531,6 +532,56 @@ class TestExtractMulti:
         assert len(results) == 2
         assert results[0].entities[0].name == "A"
         assert results[1].entities[0].name == "B"
+
+
+class TestWaveSize:
+    """#1374: extract_multi() dispatches batches in configurable waves."""
+
+    def test_default_wave_size(self) -> None:
+        """Default wave_size is 8."""
+        assert LLMEntityExtractor()._wave_size == 8
+
+    def test_wave_size_stored(self) -> None:
+        """Constructor kwarg is stored on the instance."""
+        assert LLMEntityExtractor(wave_size=3)._wave_size == 3
+
+    @pytest.mark.asyncio
+    async def test_extract_multi_honors_wave_size(self) -> None:
+        """extract_multi slices batches into waves of self._wave_size.
+
+        Set max_concurrent high so the semaphore is not the binding limit, then
+        assert the peak concurrent batch count never exceeds wave_size. With
+        batch_size=1 each text is its own batch.
+        """
+        wave_size = 2
+        extractor = LLMEntityExtractor(model="test-model", max_retries=1, max_concurrent=100, wave_size=wave_size)
+        texts = [f"text {i}" for i in range(6)]  # 6 batches → 3 waves of 2
+
+        in_flight = 0
+        peak = 0
+
+        async def fake_batch(batch, *args, **kwargs):
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            # Yield control so all batches in the same wave overlap.
+            await asyncio.sleep(0)
+            in_flight -= 1
+            return [
+                ExtractionResult(entities=[ExtractedEntity(name="E", entity_type="PERSON", confidence=0.9)])
+                for _ in batch
+            ]
+
+        with patch.object(extractor, "_extract_multi_batch", side_effect=fake_batch):
+            results = await extractor.extract_multi(
+                texts,
+                entity_types=["PERSON"],
+                tiered_extraction=False,
+                batch_size=1,
+            )
+
+        assert len(results) == len(texts)
+        assert peak == wave_size
 
 
 class TestMultiBatchSectionMismatch:

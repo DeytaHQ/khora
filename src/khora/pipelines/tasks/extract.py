@@ -59,6 +59,7 @@ async def extract_entities(
     expertise: ExpertiseConfig | str | None = None,
     model: str = "gpt-4o-mini",
     max_concurrent: int = 10,
+    wave_size: int = 8,
     context: dict[str, Any] | None = None,
     timeout: int = 60,
     max_retries: int = 3,
@@ -90,6 +91,7 @@ async def extract_entities(
         expertise: ExpertiseConfig, expertise name string, or file path
         model: LLM model for extraction
         max_concurrent: Maximum concurrent extractions
+        wave_size: Number of extraction batches dispatched concurrently per wave
         context: Optional context dict for prompt template rendering
         timeout: Request timeout in seconds
         max_retries: Maximum retries on failure
@@ -191,6 +193,7 @@ async def extract_entities(
         extractor_kwargs = dict(
             model=model,
             max_concurrent=max_concurrent,
+            wave_size=wave_size,
             timeout=timeout,
             max_retries=max_retries,
             retry_wait=retry_wait,

@@ -406,6 +406,7 @@ class LLMEntityExtractor(EntityExtractor):
         timeout: int = 60,
         max_retries: int = 3,
         max_concurrent: int = 10,
+        wave_size: int = 8,
         retry_wait: float = 1.0,
     ) -> None:
         """Initialize the LLM entity extractor.
@@ -417,6 +418,9 @@ class LLMEntityExtractor(EntityExtractor):
             timeout: Request timeout in seconds
             max_retries: Maximum retries on failure
             max_concurrent: Maximum concurrent extractions
+            wave_size: Number of extraction batches dispatched concurrently per
+                wave in extract_multi(); the circuit breaker is checked between
+                waves. Raising it above max_concurrent has no effect.
             retry_wait: Base wait time (seconds) for exponential backoff between retries
         """
         self._model = model
@@ -426,6 +430,7 @@ class LLMEntityExtractor(EntityExtractor):
         self._max_retries = max_retries
         self._retry_wait = retry_wait
         self._max_concurrent = max_concurrent
+        self._wave_size = wave_size
         self._semaphore = asyncio.Semaphore(max_concurrent)
         # Persists across extract_batch calls so the circuit breaker can actually trip
         self._consecutive_batch_failures = 0
@@ -1879,7 +1884,7 @@ class LLMEntityExtractor(EntityExtractor):
         # original asyncio.gather() while letting the breaker trip before the
         # next wave launches.  Worst-case waste: (wave_size - 1) extra doomed
         # API calls in the wave where the first failure occurs.
-        wave_size = 4
+        wave_size = self._wave_size
         for wave_start in range(0, len(batches), wave_size):
             if self._consecutive_batch_failures >= self._BATCH_FAILURE_THRESHOLD:
                 # Circuit breaker tripped between waves — remaining batches

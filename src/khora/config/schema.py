@@ -1127,6 +1127,18 @@ class LLMSettings(BaseSettings):
     timeout: int = Field(default=30, description="Request timeout in seconds")
     max_retries: int = Field(default=3, description="Maximum retries on failure")
     max_concurrent_llm_calls: int = Field(default=10, description="Maximum concurrent LLM calls")
+    extraction_wave_size: int = Field(
+        default=8,
+        ge=1,
+        description=(
+            "Number of extraction batches dispatched concurrently per wave in "
+            "LLMEntityExtractor.extract_multi(). The circuit breaker is checked "
+            "between waves. Raising this above max_concurrent_llm_calls has no "
+            "effect (the per-call semaphore is the binding limit); raising both "
+            "increases throughput but also the worst-case doomed-call count when "
+            "the circuit breaker trips."
+        ),
+    )
 
     # Embedding settings
     embedding_model: str = Field(default="text-embedding-3-small", description="Embedding model")
