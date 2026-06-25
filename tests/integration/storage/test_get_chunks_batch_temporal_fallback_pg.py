@@ -199,10 +199,7 @@ async def kb_vc(_migrations_once: None, _patch_llm: None) -> AsyncIterator[Khora
     try:
         yield instance
     finally:
-        try:
-            await instance.disconnect()
-        except Exception:
-            pass
+        await instance.disconnect()
 
 
 async def _khora_chunk_ids(namespace_id: UUID, document_id: UUID) -> list[UUID]:

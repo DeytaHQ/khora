@@ -520,6 +520,7 @@ class PgVectorBackend(AsyncSessionMixin):
             missing = [cid for cid in chunk_ids if cid not in out]
             if missing:
                 from khora.core.temporal import temporal_chunk_to_chunk
+                from khora.khora import _is_undefined_table_error
                 from khora.storage.temporal.pgvector import (
                     PgVectorTemporalStore,
                     khora_chunks_table,
@@ -533,8 +534,13 @@ class PgVectorBackend(AsyncSessionMixin):
                         )
                     )
                     t_rows = t_result.fetchall()
-                except Exception as exc:  # noqa: BLE001
-                    # Table absent on a chronicle-only stack — no temporal chunks.
+                except Exception as exc:
+                    # Only swallow the absent-``khora_chunks`` case (SQLSTATE
+                    # 42P01) of a chronicle-only stack. Re-raise everything else
+                    # (transient DB failures, decode bugs) so the batch never
+                    # silently returns partial results.
+                    if not _is_undefined_table_error(exc):
+                        raise
                     logger.debug("khora_chunks fallback skipped in get_chunks_batch: {}", exc)
                     t_rows = []
                 for row in t_rows:
