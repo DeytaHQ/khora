@@ -216,7 +216,7 @@ For higher precision, a neural reranker can reorder the top results:
 config = QueryConfig(enable_reranking=True)
 ```
 
-This uses a cross-encoder model that looks at query-document pairs together, catching nuances that initial retrieval might miss.
+This uses a cross-encoder model that looks at query-document pairs together, catching nuances that initial retrieval might miss. On the default VectorCypher engine reranking is **on by default** (model `BAAI/bge-reranker-v2-m3`) and configured via `KHORA_QUERY_RERANKING_*` / `config.query.reranking_*` — or a `VectorCypherConfig` for per-engine overrides. See [Reranking](retrieval-tuning.md#reranking) for the knobs, model selection, and how to disable or pick a lighter model.
 
 **Optional date-prefix experiment (opt-in).** `CrossEncoderReranker(include_date_prefix=True)` (or the `include_date_prefix=True` kwarg on `create_reranker`) prepends `[YYYY-MM-DD] ` to each candidate's content before scoring. Off-the-shelf cross-encoders tokenize ISO dates fine, so this gives them an explicit recency signal at negligible token cost. Date source priority: `metadata.custom.occurred_at` → `metadata.custom.sent_at` → `metadata.created_at`. Default **OFF** pending an A/B run on the corporate-shape benchmark (Issue #594, Phase D5).
 
