@@ -15,7 +15,9 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from khora.core.diagnostics import Degradation
 from khora.core.models import Chunk, Entity, Relationship
+from khora.engines.vectorcypher import ppr_retrieval
 from khora.engines.vectorcypher.ppr_retrieval import (
     build_personalization_vector,
     build_ppr_graph,
@@ -332,3 +334,244 @@ class TestPPRRetrieveChunks:
         assert [cid for cid, _, _ in results1] == [cid for cid, _, _ in results2]
         for eid in scores1:
             assert scores1[eid] == pytest.approx(scores2[eid])
+
+
+# ---------------------------------------------------------------------------
+# #1373 — seed-anchored augmentation above the slice cap
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestSeedAnchoredAugmentation:
+    @pytest.mark.asyncio
+    async def test_seeds_survive_when_namespace_exceeds_cap(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The #1373 invariant: when the global slice hits its cap and excludes
+        the query seeds, augmentation re-includes them so personalization is
+        non-zero and the graph channel returns chunks."""
+        # Tiny cap so the test is fast: 3 filler entities fill the entity slice.
+        monkeypatch.setattr(ppr_retrieval, "_MAX_ENTITIES_FOR_PPR", 3)
+        ns = uuid4()
+
+        # The slice is cap-many fillers — none of them are the seed.
+        fillers = [_make_entity(f"aaa_filler_{i}", []) for i in range(3)]
+
+        chunk = _make_chunk("Marie Curie discovered radium")
+        seed = _make_entity("marie curie", [chunk.id])
+        neighbor = _make_entity("radium", [chunk.id])
+        seed_rel = _make_relationship(seed.id, neighbor.id)
+
+        storage = _mock_storage(entities=fillers, relationships=[], chunks_map={chunk.id: chunk})
+        # Augmentation reaches for the seeds (pgvector fallback present) and the
+        # 1-hop neighborhood (graph backend).
+        storage.get_entities_batch = AsyncMock(return_value={seed.id: seed, neighbor.id: neighbor})
+        storage.get_entity_relationships = AsyncMock(return_value=[seed_rel])
+
+        degradations: list[Degradation] = []
+        results, entity_scores = await ppr_retrieve_chunks(
+            storage=storage,
+            namespace_id=ns,
+            entry_entities=[(seed.id, 1.0)],
+            damping=0.85,
+            max_iter=50,
+            tol=1e-5,
+            top_entities=10,
+            limit=10,
+            out_degradations=degradations,
+        )
+
+        # The seed survived into the graph → it carries PR mass → its chunk is
+        # returned. No degradation on the happy (augmented) path.
+        assert seed.id in entity_scores
+        assert entity_scores[seed.id] > 0.0
+        assert results
+        assert results[0][0] == chunk.id
+        assert degradations == []
+        storage.get_entities_batch.assert_awaited_once()
+        # One gather call per unique seed id.
+        storage.get_entity_relationships.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_below_cap_does_not_augment(self) -> None:
+        """Below the cap behavior is byte-identical to pre-#1373: no extra
+        round-trips (get_entities_batch / get_entity_relationships untouched)."""
+        ns = uuid4()
+        chunk = _make_chunk("Alice met Bob")
+        e_alice = _make_entity("Alice", [chunk.id])
+        e_bob = _make_entity("Bob", [chunk.id])
+        rels = [_make_relationship(e_alice.id, e_bob.id)]
+        storage = _mock_storage(
+            entities=[e_alice, e_bob],
+            relationships=rels,
+            chunks_map={chunk.id: chunk},
+        )
+        # Stub the augmentation primitives so an accidental call is detectable.
+        storage.get_entities_batch = AsyncMock(return_value={})
+        storage.get_entity_relationships = AsyncMock(return_value=[])
+
+        results, _ = await ppr_retrieve_chunks(
+            storage=storage,
+            namespace_id=ns,
+            entry_entities=[(e_alice.id, 1.0)],
+            damping=0.85,
+            max_iter=50,
+            tol=1e-5,
+            top_entities=10,
+            limit=10,
+        )
+        assert results
+        storage.get_entities_batch.assert_not_called()
+        storage.get_entity_relationships.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_seed_overlap_records_degradation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A genuine degenerate case above the cap (seeds vanished between
+        vector resolution and the graph read) records an ADR-001 Degradation."""
+        monkeypatch.setattr(ppr_retrieval, "_MAX_ENTITIES_FOR_PPR", 2)
+        ns = uuid4()
+        fillers = [_make_entity(f"f{i}", []) for i in range(2)]
+        storage = _mock_storage(entities=fillers, relationships=[], chunks_map={})
+        # Seeds no longer resolvable: batch returns nothing, neighborhood empty.
+        storage.get_entities_batch = AsyncMock(return_value={})
+        storage.get_entity_relationships = AsyncMock(return_value=[])
+
+        degradations: list[Degradation] = []
+        results, scores = await ppr_retrieve_chunks(
+            storage=storage,
+            namespace_id=ns,
+            entry_entities=[(uuid4(), 1.0)],  # not in the slice and not resolvable
+            damping=0.85,
+            max_iter=10,
+            tol=1e-5,
+            top_entities=10,
+            limit=10,
+            out_degradations=degradations,
+        )
+        assert results == []
+        assert scores == {}
+        assert len(degradations) == 1
+        assert degradations[0]["component"] == "vectorcypher.ppr"
+        assert degradations[0]["reason"] == "no_seed_overlap"
+
+    @pytest.mark.asyncio
+    async def test_empty_graph_channel_records_degradation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """PPR runs but no scored entity carries a source chunk (graph-less +
+        isolated seed) → empty_graph_channel degradation, not a silent drop."""
+        monkeypatch.setattr(ppr_retrieval, "_MAX_ENTITIES_FOR_PPR", 2)
+        ns = uuid4()
+        fillers = [_make_entity(f"f{i}", []) for i in range(2)]
+        # Seed resolves but has no source_chunk_ids and no neighborhood edges.
+        seed = _make_entity("isolated_seed", [])
+        storage = _mock_storage(entities=fillers, relationships=[], chunks_map={})
+        storage.get_entities_batch = AsyncMock(return_value={seed.id: seed})
+        storage.get_entity_relationships = AsyncMock(return_value=[])
+
+        degradations: list[Degradation] = []
+        results, scores = await ppr_retrieve_chunks(
+            storage=storage,
+            namespace_id=ns,
+            entry_entities=[(seed.id, 1.0)],
+            damping=0.85,
+            max_iter=10,
+            tol=1e-5,
+            top_entities=10,
+            limit=10,
+            out_degradations=degradations,
+        )
+        # Seed got PR mass (personalization non-zero) but no chunk to score.
+        assert seed.id in scores
+        assert results == []
+        assert len(degradations) == 1
+        assert degradations[0]["reason"] == "empty_graph_channel"
+
+    @pytest.mark.asyncio
+    async def test_seed_neighborhood_fetch_error_degrades_gracefully(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A transient get_entity_relationships error for a seed must not abort
+        recall — the augmentation skips that seed's edges and PPR still runs."""
+        monkeypatch.setattr(ppr_retrieval, "_MAX_ENTITIES_FOR_PPR", 2)
+        ns = uuid4()
+        fillers = [_make_entity(f"f{i}", []) for i in range(2)]
+        chunk = _make_chunk("Marie Curie discovered radium")
+        seed = _make_entity("marie curie", [chunk.id])
+        storage = _mock_storage(entities=fillers, relationships=[], chunks_map={chunk.id: chunk})
+        storage.get_entities_batch = AsyncMock(return_value={seed.id: seed})
+        # The seed's neighborhood fetch raises — must be swallowed per-seed.
+        storage.get_entity_relationships = AsyncMock(side_effect=RuntimeError("transient neo4j"))
+
+        results, entity_scores = await ppr_retrieve_chunks(
+            storage=storage,
+            namespace_id=ns,
+            entry_entities=[(seed.id, 1.0)],
+            damping=0.85,
+            max_iter=50,
+            tol=1e-5,
+            top_entities=10,
+            limit=10,
+        )
+        # No crash; the seed still survives (batch fetch) and carries its chunk.
+        assert seed.id in entity_scores
+        assert results
+        assert results[0][0] == chunk.id
+
+    @pytest.mark.asyncio
+    async def test_augmentation_never_shrinks_base_slice(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """max_neighborhood_entities below the slice size must NOT trim the base
+        slice — the effective bound is max(bound, len(slice)) (#1378 review)."""
+        monkeypatch.setattr(ppr_retrieval, "_MAX_ENTITIES_FOR_PPR", 5)
+        ns = uuid4()
+        chunk = _make_chunk("seed chunk")
+        # 5 filler slice entities (hits the cap) + 1 seed pulled in via batch.
+        fillers = [_make_entity(f"aaa_{i}", []) for i in range(5)]
+        seed = _make_entity("zzz_seed", [chunk.id])
+        storage = _mock_storage(entities=fillers, relationships=[], chunks_map={chunk.id: chunk})
+        storage.get_entities_batch = AsyncMock(return_value={seed.id: seed})
+        storage.get_entity_relationships = AsyncMock(return_value=[])
+
+        results, entity_scores = await ppr_retrieve_chunks(
+            storage=storage,
+            namespace_id=ns,
+            entry_entities=[(seed.id, 1.0)],
+            damping=0.85,
+            max_iter=50,
+            tol=1e-5,
+            top_entities=10,
+            limit=10,
+            # Bound below the slice size — must be clamped up to len(slice)=5.
+            max_neighborhood_entities=2,
+        )
+        # Effective bound = max(2, len(slice)=5) = 5, NOT 2: the base slice is
+        # never shrunk by augmentation. Seeds are kept first, so the seed always
+        # survives and 5 entities carry PR mass (vs. 2 under the buggy trim).
+        assert len(entity_scores) == 5
+        assert seed.id in entity_scores
+        assert results
+        assert results[0][0] == chunk.id
+
+    @pytest.mark.asyncio
+    async def test_chunk_hydration_empty_records_degradation(self) -> None:
+        """PPR scores chunk ids but get_chunks_batch returns nothing (chunk
+        store / entity-graph divergence, the #1372 symptom) → degradation."""
+        ns = uuid4()
+        chunk = _make_chunk("Alice met Bob")
+        e_alice = _make_entity("Alice", [chunk.id])
+        e_bob = _make_entity("Bob", [chunk.id])
+        rels = [_make_relationship(e_alice.id, e_bob.id)]
+        # get_chunks_batch returns {} despite chunk_ids being non-empty.
+        storage = _mock_storage(entities=[e_alice, e_bob], relationships=rels, chunks_map={})
+
+        degradations: list[Degradation] = []
+        results, scores = await ppr_retrieve_chunks(
+            storage=storage,
+            namespace_id=ns,
+            entry_entities=[(e_alice.id, 1.0)],
+            damping=0.85,
+            max_iter=50,
+            tol=1e-5,
+            top_entities=10,
+            limit=10,
+            out_degradations=degradations,
+        )
+        assert results == []
+        # Entity scores still returned (PPR ran), but the hydration was empty.
+        assert e_alice.id in scores
+        assert len(degradations) == 1
+        assert degradations[0]["reason"] == "chunk_hydration_empty"

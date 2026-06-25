@@ -1575,6 +1575,29 @@ class QuerySettings(BaseSettings):
         le=200,
         description="Number of top PR-scored entities used to score chunks in the PPR retrieval path.",
     )
+    ppr_neighborhood_per_seed_limit: int = Field(
+        default=64,
+        ge=1,
+        le=1000,
+        description=(
+            "When the PPR entity slice hits its cap (namespace larger than the "
+            "~5000-entity slice), augment it with each query seed's 1-hop "
+            "neighborhood, fetching at most this many relationships per seed so "
+            "the resolved seeds survive into the graph. Below the cap this is "
+            "inert (no extra round-trips). See khora#1373."
+        ),
+    )
+    ppr_max_neighborhood_entities: int = Field(
+        default=2000,
+        ge=1,
+        le=50_000,
+        description=(
+            "Upper bound on how far seed-anchored augmentation may grow the PPR "
+            "entity set above the global slice (khora#1373). The effective bound "
+            "is max(this, len(slice)), so the base slice (the multi-hop backbone) "
+            "is never shrunk; seeds are kept first when trimming."
+        ),
+    )
 
     @field_validator("enable_hyde", mode="before")
     @classmethod

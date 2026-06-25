@@ -456,6 +456,11 @@ class RetrieverConfig:
     ppr_max_iter: int = 50
     ppr_tol: float = 1e-5
     ppr_top_entities: int = 30
+    # #1373: when the global PPR slice hits its cap (namespace > ~5000
+    # entities), augment it with the query seeds + their 1-hop neighborhood so
+    # the resolved seeds survive into the graph. Below the cap these are inert.
+    ppr_neighborhood_per_seed_limit: int = 64
+    ppr_max_neighborhood_entities: int = 2000
 
     # Limits
     max_chunks: int = 50
@@ -1805,6 +1810,11 @@ class VectorCypherRetriever:
                 top_entities=self._config.ppr_top_entities,
                 chunk_similarity=chunk_similarity,
                 limit=graph_fetch_limit,
+                neighborhood_per_seed_limit=self._config.ppr_neighborhood_per_seed_limit,
+                max_neighborhood_entities=self._config.ppr_max_neighborhood_entities,
+                # ADR-001 (#1373): surface a Degradation on the engine_info list
+                # when the graph channel silently returns nothing.
+                out_degradations=degradations,
             )
             graph_chunks = ppr_chunks
             ppr_path_used = bool(ppr_chunks)
