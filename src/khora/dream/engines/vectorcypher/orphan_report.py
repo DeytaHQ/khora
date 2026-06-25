@@ -120,10 +120,15 @@ async def plan_vectorcypher_orphan_report(
         for rel in relationships:
             src_idx = index_by_id.get(rel.source_entity_id)
             tgt_idx = index_by_id.get(rel.target_entity_id)
-            if src_idx is None or tgt_idx is None:
+            if src_idx is None or tgt_idx is None or src_idx == tgt_idx:
                 continue
             weight = cooccurrence_edge_weight if rel.relationship_type.upper() == _COOCCURRENCE_REL_TYPE else 1.0
+            # Relationships in khora are conceptually undirected for ranking
+            # purposes (mirrors ``build_ppr_graph``): add both directions so
+            # archive-candidacy reflects connectivity, not edge direction, and
+            # the PR distribution conserves mass.
             edges.append((src_idx, tgt_idx, weight))
+            edges.append((tgt_idx, src_idx, weight))
 
         scores = _accel.pagerank(total_entities, edges)
 
