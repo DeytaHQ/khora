@@ -202,6 +202,11 @@ async def _augment_with_seed_neighborhood(
     present even on graph-less stacks); ``get_entity_relationships`` returns
     ``[]`` when no graph backend is wired — fine, the global slice still covers
     small/medium namespaces and isolated seeds get teleport mass.
+
+    ``max_neighborhood_entities`` bounds how far augmentation may *grow* the
+    set; the effective bound is ``max(max_neighborhood_entities, len(slice))``
+    so the base slice (the multi-hop backbone) is never shrunk below what PPR
+    would have walked without augmentation.
     """
     # Preserve order while de-duplicating seed ids.
     seed_ids = list(dict.fromkeys(eid for eid, _ in entry_entities))
@@ -212,7 +217,12 @@ async def _augment_with_seed_neighborhood(
     # neighborhood edge whose far end is outside the slice would otherwise be
     # dropped as dangling, isolating the seed (it would still get teleport mass,
     # but the 1-hop mass flow would be lost).
-    neighborhoods = await asyncio.gather(
+    #
+    # return_exceptions=True so a single seed's transient graph error degrades to
+    # "no neighborhood for that seed" rather than aborting the whole augmentation
+    # (and recall) — the seed still survives via the batch fetch below + teleport
+    # mass. Matches the module's "degrades, never crashes" contract.
+    gathered = await asyncio.gather(
         *(
             storage.get_entity_relationships(
                 sid,
@@ -221,8 +231,20 @@ async def _augment_with_seed_neighborhood(
                 limit=neighborhood_per_seed_limit,
             )
             for sid in seed_ids
-        )
+        ),
+        return_exceptions=True,
     )
+    neighborhoods: list[list[Relationship]] = []
+    for sid, result in zip(seed_ids, gathered, strict=True):
+        if isinstance(result, BaseException):
+            logger.warning(
+                "PPR seed neighborhood fetch failed for {} ({}); skipping its 1-hop edges",
+                sid,
+                type(result).__name__,
+            )
+            neighborhoods.append([])
+        else:
+            neighborhoods.append(result)
 
     # Entities to batch-fetch: the seeds (guarantees the #1373 invariant) plus the
     # far endpoints of their edges (so the neighborhood contributes to mass flow).
@@ -252,7 +274,13 @@ async def _augment_with_seed_neighborhood(
     for ent in entities:
         by_id.setdefault(ent.id, ent)
 
-    if len(by_id) > max_neighborhood_entities:
+    # Bound how far augmentation may grow the set, but never shrink it below the
+    # base slice — the global slice IS the multi-hop backbone, so re-capping it
+    # smaller than _MAX_ENTITIES_FOR_PPR would silently truncate PPR. The bound
+    # therefore only caps the *augmentation growth* (seeds + neighbors) on top of
+    # the slice; effective_bound >= len(slice) always.
+    effective_bound = max(max_neighborhood_entities, len(entities))
+    if len(by_id) > effective_bound:
         # Keep seeds first, then fill (fetched neighbors + slice) up to the bound.
         trimmed: dict[UUID, Entity] = {}
         for sid in seed_ids:
@@ -260,7 +288,7 @@ async def _augment_with_seed_neighborhood(
             if ent is not None:
                 trimmed[ent.id] = ent
         for eid, ent in by_id.items():
-            if len(trimmed) >= max_neighborhood_entities:
+            if len(trimmed) >= effective_bound:
                 break
             trimmed.setdefault(eid, ent)
         by_id = trimmed
@@ -321,8 +349,10 @@ async def ppr_retrieve_chunks(
     Args:
         neighborhood_per_seed_limit: Max relationships fetched per seed when
             augmenting an at-cap slice (``get_entity_relationships`` ``limit``).
-        max_neighborhood_entities: Upper bound on the augmented entity set;
-            seeds are kept first when trimming.
+        max_neighborhood_entities: Upper bound on how far augmentation may grow
+            the entity set; the effective bound is
+            ``max(max_neighborhood_entities, len(slice))`` so the base slice is
+            never shrunk. Seeds are kept first when trimming.
         out_degradations: When provided, a structured :class:`Degradation`
             (ADR-001) is appended whenever the graph channel returns nothing on
             a genuine degenerate condition (no seed overlap / still-empty graph

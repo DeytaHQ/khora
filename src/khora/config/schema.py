@@ -1580,8 +1580,10 @@ class QuerySettings(BaseSettings):
         ge=1,
         le=50_000,
         description=(
-            "Upper bound on the augmented PPR entity set when the global slice "
-            "is seed-anchored (khora#1373); seeds are kept first when trimming."
+            "Upper bound on how far seed-anchored augmentation may grow the PPR "
+            "entity set above the global slice (khora#1373). The effective bound "
+            "is max(this, len(slice)), so the base slice (the multi-hop backbone) "
+            "is never shrunk; seeds are kept first when trimming."
         ),
     )
 
