@@ -95,6 +95,46 @@ async def test_flags_bottom_5pct_pr_entities() -> None:
 
 
 @pytest.mark.asyncio
+async def test_archive_candidacy_ignores_relationship_direction() -> None:
+    """Identically-connected source-only and target-only leaves rank the same (#1376).
+
+    Mirrors the issue's repro: 1 hub + 50 source leaves (each ``S_i -> hub``)
+    + 50 sink leaves (each ``hub -> T_j``). Every leaf has mention_count=1 and
+    touches exactly one relationship — identical connectivity, only edge
+    direction differs. With a single directed edge per relationship the source
+    leaves sit at the PR floor and get flagged 50/50 while the sink leaves are
+    spared 0/50; building edges bidirectionally makes the two cohorts identical.
+    """
+    ns = uuid4()
+    hub = _make_entity(ns, "hub", mention_count=2)
+    sources = [_make_entity(ns, f"source-{i}", mention_count=1) for i in range(50)]
+    sinks = [_make_entity(ns, f"sink-{i}", mention_count=1) for i in range(50)]
+    entities = [hub, *sources, *sinks]
+    rels = [_rel(ns, s, hub) for s in sources] + [_rel(ns, hub, t) for t in sinks]
+
+    coord = _FakeCoordinator(entities=entities, relationships=rels)
+
+    op = await plan_vectorcypher_orphan_report(
+        ns, coordinator=coord, pr_percentile_threshold=5.0, cooccurrence_edge_weight=0.2
+    )
+
+    scores = {c["entity_id"]: c["pr_score"] for c in op.outputs}
+    flagged = scores.keys()
+    src_flagged = sum(1 for s in sources if str(s.id) in flagged)
+    sink_flagged = sum(1 for t in sinks if str(t.id) in flagged)
+
+    # Source and sink leaves have identical connectivity, so they must be
+    # flagged identically — not the 50/0 split a directed build produces.
+    assert src_flagged == sink_flagged
+
+    # And every flagged leaf carries the same PR score regardless of which
+    # direction its relationship happens to point.
+    flagged_leaf_scores = [score for leaf in (*sources, *sinks) if (score := scores.get(str(leaf.id))) is not None]
+    assert flagged_leaf_scores  # at least one leaf cohort is flagged
+    assert all(s == pytest.approx(flagged_leaf_scores[0], rel=1e-6) for s in flagged_leaf_scores)
+
+
+@pytest.mark.asyncio
 async def test_excludes_well_connected_low_mention_entities() -> None:
     """High-degree entities with mention_count=1 are NOT flagged."""
     ns = uuid4()
