@@ -11,21 +11,23 @@ conflicts = [[
 ]]
 
 [options]
-exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
+exclude-newer = "2026-06-18T10:14:34.65213Z"
 exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
-idna = { timestamp = "0001-01-01T00:00:00Z", span = "PT0S" }
-urllib3 = { timestamp = "0001-01-01T00:00:00Z", span = "PT0S" }
-litellm = { timestamp = "0001-01-01T00:00:00Z", span = "PT0S" }
-aiohttp = { timestamp = "0001-01-01T00:00:00Z", span = "PT0S" }
-pydantic-settings = { timestamp = "0001-01-01T00:00:00Z", span = "PT0S" }
-turbopuffer = { timestamp = "0001-01-01T00:00:00Z", span = "PT0S" }
+idna = { timestamp = "2026-06-25T10:14:34.652157Z", span = "PT0S" }
+urllib3 = { timestamp = "2026-06-25T10:14:34.652152Z", span = "PT0S" }
+litellm = { timestamp = "2026-06-25T10:14:34.652157Z", span = "PT0S" }
+aiohttp = { timestamp = "2026-06-25T10:14:34.652158Z", span = "PT0S" }
+langsmith = { timestamp = "2026-06-25T10:14:34.652159Z", span = "PT0S" }
+pydantic-settings = { timestamp = "2026-06-25T10:14:34.652158Z", span = "PT0S" }
+turbopuffer = { timestamp = "2026-06-25T10:14:34.652157Z", span = "PT0S" }
 
 [manifest]
 constraints = [
     { name = "aiohttp", specifier = ">=3.14.1" },
     { name = "cryptography", specifier = ">=48.0.1" },
+    { name = "langsmith", specifier = ">=0.8.18" },
     { name = "logfire", marker = "extra == 'crewai'", specifier = "<4.7" },
     { name = "logfire", marker = "extra != 'crewai'", specifier = ">=4.32.1" },
     { name = "pygments", specifier = ">=2.20.0" },
@@ -2824,9 +2826,11 @@ wheels = [
 
 [[package]]
 name = "langsmith"
-version = "0.8.3"
+version = "0.9.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
+    { name = "anyio" },
+    { name = "distro" },
     { name = "httpx" },
     { name = "orjson", marker = "platform_python_implementation != 'PyPy' or (extra == 'extra-5-khora-crewai' and extra == 'extra-5-khora-google-adk')" },
     { name = "packaging" },
@@ -2834,13 +2838,16 @@ dependencies = [
     { name = "pydantic", version = "2.13.4", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk' or extra != 'extra-5-khora-crewai'" },
     { name = "requests" },
     { name = "requests-toolbelt" },
+    { name = "sniffio" },
+    { name = "typing-extensions" },
     { name = "uuid-utils" },
+    { name = "websockets" },
     { name = "xxhash" },
     { name = "zstandard" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/de/8a/1e8ea5e8bab2a65fa95bd36229ef38e8723ec46e430e20ca2d953487a7f1/langsmith-0.8.3.tar.gz", hash = "sha256:767ff7a8d136ed42926bf99059ac631dc6883542d6e3104b32e71c7625e1fa05", size = 4460330, upload-time = "2026-05-07T19:56:56.18Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5b/26/b72987d947278f63ec1e85f01ce85ca7ab2621c7efc0845d4a3a8e5d5dfb/langsmith-0.9.1.tar.gz", hash = "sha256:e5eb905224d156bcece4985285c55b51fffcb06c9353b2c4adb42e1c48b0d05d", size = 4557557, upload-time = "2026-06-23T17:04:23.233Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/98/a9/51e644c1f1dbc3dd7d22dfd6412eab206d538c81e024e4f287373544bdcb/langsmith-0.8.3-py3-none-any.whl", hash = "sha256:b2e40e308222fa0beb2dccee3b4b30bfee9062d7a4f20a3e3e93df3c51a08ab4", size = 399048, upload-time = "2026-05-07T19:56:53.994Z" },
+    { url = "https://files.pythonhosted.org/packages/63/42/13c67eb24cddb368df2c8af13e319c86b1d270c90f5b8c9e8baed3593e04/langsmith-0.9.1-py3-none-any.whl", hash = "sha256:1160bf667af63d9bc081821f1df351cb84f7875740858f2a97ffef62b21800a9", size = 578856, upload-time = "2026-06-23T17:04:21.47Z" },
 ]
 
 [[package]]
