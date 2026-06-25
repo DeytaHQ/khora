@@ -904,7 +904,8 @@ class PgVectorTemporalStore(TemporalVectorStore):
         clause = FilterClause(path=("metadata", key), op=_LEGACY_RANGE_OPS[op], operand=val)
         return builder.compile_clause(clause)
 
-    def _row_to_chunk(self, row) -> TemporalChunk:
+    @staticmethod
+    def _row_to_chunk(row) -> TemporalChunk:
         """Convert a database row to a TemporalChunk."""
         return TemporalChunk(
             id=row.id,
