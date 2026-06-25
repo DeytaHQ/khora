@@ -505,7 +505,48 @@ class PgVectorBackend(AsyncSessionMixin):
                 )
             )
             models = result.scalars().all()
-            return {m.id: self._chunk_model_to_domain(m) for m in models}
+            out = {m.id: self._chunk_model_to_domain(m) for m in models}
+
+            # Fallback for the temporal engines (skeleton / vectorcypher), which
+            # write chunks to ``khora_chunks`` rather than ``chunks`` (#1372 —
+            # the storage-layer sibling of the sqlite_lance fallback added in
+            # #905). PPR scores chunk ids then hydrates them via this batch
+            # path; without the fallback the ids resolve to nothing and the
+            # graph channel silently collapses to vector-only. Only look up the
+            # ids ``chunks`` didn't satisfy, scoped to ``namespace_id``
+            # (IDOR-safe). A chronicle-only stack has no ``khora_chunks`` table,
+            # so swallow the missing-table error and return what ``chunks``
+            # yielded instead of crashing.
+            missing = [cid for cid in chunk_ids if cid not in out]
+            if missing:
+                from khora.core.temporal import temporal_chunk_to_chunk
+                from khora.khora import _is_undefined_table_error
+                from khora.storage.temporal.pgvector import (
+                    PgVectorTemporalStore,
+                    khora_chunks_table,
+                )
+
+                try:
+                    t_result = await session.execute(
+                        select(khora_chunks_table).where(
+                            khora_chunks_table.c.id.in_(missing),
+                            khora_chunks_table.c.namespace_id == namespace_id,
+                        )
+                    )
+                    t_rows = t_result.fetchall()
+                except Exception as exc:
+                    # Only swallow the absent-``khora_chunks`` case (SQLSTATE
+                    # 42P01) of a chronicle-only stack. Re-raise everything else
+                    # (transient DB failures, decode bugs) so the batch never
+                    # silently returns partial results.
+                    if not _is_undefined_table_error(exc):
+                        raise
+                    logger.debug("khora_chunks fallback skipped in get_chunks_batch: {}", exc)
+                    t_rows = []
+                for row in t_rows:
+                    chunk = temporal_chunk_to_chunk(PgVectorTemporalStore._row_to_chunk(row))
+                    out[chunk.id] = chunk
+            return out
 
     async def get_chunks_by_document(self, document_id: UUID, *, namespace_id: UUID) -> list[Chunk]:
         """Get all chunks for a document, filtered to the caller's ``namespace_id``."""
