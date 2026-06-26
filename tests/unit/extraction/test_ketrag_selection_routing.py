@@ -112,3 +112,39 @@ async def test_flag_on_uses_multilingual_tokenizer() -> None:
         )
 
     assert spy_core.call_args.kwargs["tokenizer"] is tokenize_multilingual
+
+
+def test_select_core_chunk_ids_forwards_tokenizer() -> None:
+    """select_core_chunk_ids forwards a custom tokenizer to select_core_chunks."""
+    from khora.core import ranking
+
+    chunks = _chunks(2)
+
+    def fake_tokenizer(_text: str) -> list[str]:  # pragma: no cover - patched out
+        return []
+
+    with patch.object(
+        ranking,
+        "select_core_chunks",
+        return_value=CoreSelection(core_ids=[chunks[0].id], scores={}),
+    ) as spy:
+        ranking.select_core_chunk_ids(chunks, 0.5, tokenizer=fake_tokenizer)
+
+    assert spy.call_args.kwargs["tokenizer"] is fake_tokenizer
+
+
+def test_engine_skeleton_tokenizer_gated_by_flag() -> None:
+    """VectorCypherEngine._skeleton_tokenizer returns the multilingual tokenizer iff flag on."""
+    from unittest.mock import MagicMock
+
+    from khora.engines.vectorcypher.engine import VectorCypherEngine
+    from khora.extraction.tokenize import tokenize_multilingual
+
+    engine = VectorCypherEngine.__new__(VectorCypherEngine)
+
+    engine._config = MagicMock()
+    engine._config.pipeline.ketrag_skeleton_channel = False
+    assert engine._skeleton_tokenizer() is None
+
+    engine._config.pipeline.ketrag_skeleton_channel = True
+    assert engine._skeleton_tokenizer() is tokenize_multilingual

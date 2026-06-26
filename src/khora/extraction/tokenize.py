@@ -13,6 +13,13 @@ flag-on KET-RAG skeleton path; the ASCII tokenizers keep their behavior.
 Stopword handling: only a small English stopword set is stripped (the same set
 ``_accel.extract_keywords`` uses), so non-English tokens are *never* silently
 killed. Words in other languages pass through untouched.
+
+Known limitation: CJK (Han/Kana) text has no whitespace word boundaries, so a
+run of CJK characters becomes a single token. This is still a strict
+improvement over the ASCII tokenizers (which extract nothing from CJK), but
+real CJK segmentation (jieba / MeCab) or character n-grams would give better
+cross-chunk keyword overlap. Deferred to a follow-up to avoid pulling a heavy
+segmentation dependency into this leaf module.
 """
 
 from __future__ import annotations
