@@ -123,8 +123,16 @@ def tokenize(text: str, use_stemming: bool = True, remove_stopwords: bool = True
     Returns:
         List of tokens
     """
-    # Lowercase and split on non-alphanumeric
-    tokens = re.findall(r"\b[a-zA-Z0-9]+\b", text.lower())
+    # Lowercase and split into word runs. ``[^\W_]+`` is the Unicode-aware
+    # equivalent of ``[a-zA-Z0-9]+``: it matches runs of letters/digits in ANY
+    # script (Cyrillic, accented Latin, Greek, ...) while excluding underscore.
+    # On pure-ASCII text it yields byte-identical tokens to the old pattern, so
+    # English ranking is unchanged; non-Latin text — which the old ASCII-only
+    # pattern dropped to zero tokens (and thus zero keyword recall) — now
+    # tokenizes. CJK scripts have no inter-word spaces, so a Han/Kana run still
+    # collapses to one token here; real CJK segmentation (jieba/MeCab or
+    # character n-grams) is a separate, heavier follow-up.
+    tokens = re.findall(r"[^\W_]+", text.lower())
 
     # Remove stopwords
     if remove_stopwords:

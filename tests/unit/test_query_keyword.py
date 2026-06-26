@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from unittest.mock import MagicMock
 from uuid import uuid4
 
@@ -55,6 +56,45 @@ class TestTokenize:
         """Numbers are tokenized."""
         tokens = tokenize("version 3000 release", remove_stopwords=False, use_stemming=False)
         assert "3000" in tokens
+
+    def test_ascii_tokenization_unchanged(self) -> None:
+        """The Unicode tokenizer is byte-identical to the old ASCII pattern on ASCII text.
+
+        This is the safety guarantee for the multilingual switch: English ranking
+        must not move. Digits and word order are preserved exactly.
+        """
+        text = "Marie Curie discovered radium element 1898"
+        tokens = tokenize(text, use_stemming=False, remove_stopwords=False)
+        assert tokens == ["marie", "curie", "discovered", "radium", "element", "1898"]
+        # ...and that matches what the previous ASCII-only pattern produced.
+        legacy = [t for t in re.findall(r"\b[a-zA-Z0-9]+\b", text.lower()) if len(t) > 2]
+        assert tokens == legacy
+
+    def test_cyrillic_now_tokenizes(self) -> None:
+        """Cyrillic text tokenizes (the old ASCII pattern returned zero tokens → zero recall)."""
+        text = "Марија Кири открила радијум"
+        tokens = tokenize(text, use_stemming=False, remove_stopwords=False)
+        assert tokens == ["марија", "кири", "открила", "радијум"]
+        # Anti-vacuity: the old ASCII-only pattern dropped all of this to nothing.
+        assert re.findall(r"\b[a-zA-Z0-9]+\b", text.lower()) == []
+
+    def test_accented_latin_kept_whole(self) -> None:
+        """Accented Latin words are kept whole, not split at the accent."""
+        tokens = tokenize("café Zürich naïve", use_stemming=False, remove_stopwords=False)
+        assert "café" in tokens
+        assert "zürich" in tokens
+        # The old pattern would have split "café" into "caf" (dropping the é).
+        assert "caf" not in tokens
+
+    def test_cjk_collapses_to_single_run(self) -> None:
+        """Known limitation: a CJK run has no inter-word spaces, so it stays one token.
+
+        Still strictly better than the old ASCII pattern (which returned nothing);
+        real CJK segmentation is a separate, heavier follow-up.
+        """
+        tokens = tokenize("玛丽居里发现了镭元素", use_stemming=False, remove_stopwords=False)
+        assert tokens == ["玛丽居里发现了镭元素"]
+        assert re.findall(r"\b[a-zA-Z0-9]+\b", "玛丽居里发现了镭元素") == []
 
 
 class TestBasicStem:
