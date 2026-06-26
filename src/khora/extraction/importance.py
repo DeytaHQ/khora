@@ -30,6 +30,16 @@ class ChunkImportanceScorer:
     - Information density: unique word ratio (type-token ratio)
     - Position: first and last chunks in a document are typically more important
     - Length: very short chunks are low-value; medium-length chunks are ideal
+
+    .. deprecated::
+        Prefer the keyword-PageRank scorer
+        (``khora.core.ranking.select_core_chunks`` /
+        ``select_core_chunk_ids``) for core-chunk selection. It is the
+        KET-RAG-faithful path and, with the multilingual tokenizer
+        (``khora.extraction.tokenize.tokenize_multilingual``), works on
+        non-Latin scripts where these ASCII-only heuristics extract nothing.
+        This scorer is retained for the default (flag-off) selective-extraction
+        path; see the ``ketrag_skeleton_channel`` config flag.
     """
 
     def __init__(

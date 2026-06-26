@@ -12,6 +12,7 @@ from ``khora.engines`` — the engines depend on this util, not the reverse.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -43,6 +44,7 @@ def select_core_chunks(
     damping_factor: float = 0.85,
     max_iterations: int = 100,
     convergence_threshold: float = 1e-6,
+    tokenizer: Callable[[str], list[str]] | None = None,
 ) -> CoreSelection:
     """Select core chunks via a keyword-chunk PageRank graph.
 
@@ -57,6 +59,9 @@ def select_core_chunks(
         damping_factor: PageRank damping factor.
         max_iterations: Maximum PageRank iterations.
         convergence_threshold: PageRank convergence threshold.
+        tokenizer: Optional keyword tokenizer ``(text) -> list[str]``. Defaults
+            to ``khora._accel.extract_keywords`` (ASCII-only). Pass a
+            multilingual tokenizer to make selection work on non-Latin scripts.
 
     Returns:
         A :class:`CoreSelection` with the core IDs (score-descending) and the
@@ -67,12 +72,14 @@ def select_core_chunks(
 
     from khora._accel import build_chunk_edges, extract_keywords, pagerank
 
+    extract_kw = tokenizer if tokenizer is not None else extract_keywords
+
     # Build the keyword -> chunk-ids map in first-seen order; each keyword
     # accumulates the chunk ids it appears in. Mirrors the original
     # SkeletonIndexer.add_chunk insertion semantics.
     keywords: dict[str, list[UUID]] = {}
     for chunk in chunks:
-        kw_set = set(extract_keywords(chunk.content))
+        kw_set = set(extract_kw(chunk.content))
         for keyword in kw_set:
             if keyword not in keywords:
                 keywords[keyword] = []
@@ -112,6 +119,7 @@ def select_core_chunk_ids(
     damping_factor: float = 0.85,
     max_iterations: int = 100,
     convergence_threshold: float = 1e-6,
+    tokenizer: Callable[[str], list[str]] | None = None,
 ) -> list[UUID]:
     """Return just the core chunk IDs (thin wrapper over :func:`select_core_chunks`)."""
     return select_core_chunks(
@@ -120,6 +128,7 @@ def select_core_chunk_ids(
         damping_factor=damping_factor,
         max_iterations=max_iterations,
         convergence_threshold=convergence_threshold,
+        tokenizer=tokenizer,
     ).core_ids
 
 

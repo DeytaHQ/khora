@@ -1249,6 +1249,12 @@ class PipelineSettings(BaseSettings):
         description="Minimum importance score threshold. Chunks scoring above this are always "
         "sent to LLM extraction regardless of the ratio cutoff.",
     )
+    ketrag_skeleton_channel: bool = Field(
+        default=False,
+        description="Opt-in KET-RAG-faithful skeleton: multilingual keyword tokenizer + "
+        "keyword-PageRank chunk selection + (later) a separate keyword-chunk retrieval channel "
+        "kept out of the entity graph. Default off; no behavior change when off.",
+    )
 
     # Entity embedding skip rules — skip embedding generation for low-value entity types
     skip_embedding_entity_types: list[str] = Field(

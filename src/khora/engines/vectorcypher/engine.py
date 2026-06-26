@@ -1444,6 +1444,7 @@ class VectorCypherEngine:
                 entity_types=entity_types,
                 relationship_types=relationship_types,
                 store_events=self._vc_config.store_events,
+                ketrag_skeleton_channel=self._config.pipeline.ketrag_skeleton_channel,
                 out_diagnostics=out_diagnostics,
             )
 
@@ -1676,6 +1677,7 @@ class VectorCypherEngine:
             entity_types=entity_types,
             relationship_types=relationship_types,
             store_events=self._vc_config.store_events,
+            ketrag_skeleton_channel=self._config.pipeline.ketrag_skeleton_channel,
         )
 
         if not entities:
@@ -1857,6 +1859,7 @@ class VectorCypherEngine:
                     entity_types=entity_types,
                     relationship_types=relationship_types,
                     store_events=self._vc_config.store_events,
+                    ketrag_skeleton_channel=self._config.pipeline.ketrag_skeleton_channel,
                 )
 
                 if extracted_entities:
@@ -3277,6 +3280,7 @@ class VectorCypherEngine:
                                     entity_types=entity_types,
                                     relationship_types=relationship_types,
                                     store_events=self._vc_config.store_events,
+                                    ketrag_skeleton_channel=self._config.pipeline.ketrag_skeleton_channel,
                                 )
 
                         extraction_results = await asyncio.gather(
@@ -3308,6 +3312,7 @@ class VectorCypherEngine:
                             entity_types=entity_types,
                             relationship_types=relationship_types,
                             store_events=self._vc_config.store_events,
+                            ketrag_skeleton_channel=self._config.pipeline.ketrag_skeleton_channel,
                         )
 
                     if entities:

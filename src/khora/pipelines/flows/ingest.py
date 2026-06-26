@@ -865,6 +865,7 @@ async def process_document(
     selective_extraction: bool = True,
     extraction_importance_ratio: float = 0.7,
     extraction_min_importance: float = 0.2,
+    ketrag_skeleton_channel: bool = False,
     bulk_mode: bool = False,
 ) -> dict[str, Any]:
     """Process a document through the enrichment pipeline.
@@ -901,6 +902,8 @@ async def process_document(
         selective_extraction: Enable importance-based selective extraction
         extraction_importance_ratio: Fraction of chunks to send to LLM
         extraction_min_importance: Minimum importance score threshold
+        ketrag_skeleton_channel: Route core-chunk selection through the
+            keyword-PageRank scorer (multilingual). Default off.
     """
     from ..tasks import chunk_document, embed_chunks, extract_entities
 
@@ -992,6 +995,7 @@ async def process_document(
                     selective_extraction=selective_extraction,
                     extraction_importance_ratio=extraction_importance_ratio,
                     extraction_min_importance=extraction_min_importance,
+                    ketrag_skeleton_channel=ketrag_skeleton_channel,
                     shared_extractor=shared_extractor,
                 )
 
@@ -1641,6 +1645,7 @@ async def ingest_documents(
     selective_extraction: bool = True,
     extraction_importance_ratio: float = 0.7,
     extraction_min_importance: float = 0.2,
+    ketrag_skeleton_channel: bool = False,
     skip_checksum_dedup: bool = False,
     **kwargs,
 ) -> dict[str, Any]:
@@ -1673,6 +1678,8 @@ async def ingest_documents(
         selective_extraction: Enable importance-based selective extraction
         extraction_importance_ratio: Fraction of chunks to send to LLM
         extraction_min_importance: Minimum importance score threshold
+        ketrag_skeleton_channel: Route core-chunk selection through the
+            keyword-PageRank scorer (multilingual). Default off.
 
     Returns:
         Summary of ingestion results
@@ -1807,6 +1814,7 @@ async def ingest_documents(
                 selective_extraction=selective_extraction,
                 extraction_importance_ratio=extraction_importance_ratio,
                 extraction_min_importance=extraction_min_importance,
+                ketrag_skeleton_channel=ketrag_skeleton_channel,
                 bulk_mode=skip_checksum_dedup,
             )
 
