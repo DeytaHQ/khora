@@ -148,3 +148,63 @@ def test_engine_skeleton_tokenizer_gated_by_flag() -> None:
 
     engine._config.pipeline.ketrag_skeleton_channel = True
     assert engine._skeleton_tokenizer() is tokenize_multilingual
+
+
+@pytest.mark.asyncio
+async def test_flag_on_skips_lightweight_skeleton_edges() -> None:
+    """Move 2: flag on => no CONCEPT entities / CO_OCCURS_WITH edges from skipped chunks.
+
+    The LLM mock returns nothing, so the only entities/relationships that could
+    appear are the synthetic co-occurrence skeleton from the lightweight chunk -
+    which the flag must suppress, keeping the entity graph LLM-ontology-only.
+    """
+    chunks = _chunks(3)
+    mock_extractor = AsyncMock()
+    mock_extractor.extract_multi = AsyncMock(return_value=[ExtractionResult(entities=[], relationships=[])] * 3)
+
+    # Force chunk[2] (which carries capitalized "Marija"/"Kiri") to the lightweight set.
+    selection = CoreSelection(core_ids=[chunks[0].id, chunks[1].id], scores={c.id: 1.0 for c in chunks})
+    with patch("khora.core.ranking.select_core_chunks", return_value=selection):
+        entities, relationships = await extract_entities(
+            chunks,
+            entity_types=["PERSON"],
+            relationship_types=["RELATES_TO"],
+            selective_extraction=True,
+            ketrag_skeleton_channel=True,
+            shared_extractor=mock_extractor,
+        )
+
+    assert all(e.entity_type != "CONCEPT" for e in entities)
+    assert all(r.relationship_type != "CO_OCCURS_WITH" for r in relationships)
+    # LLM gave nothing + skeleton skipped => the entity graph stays empty here.
+    assert entities == []
+    assert relationships == []
+
+
+@pytest.mark.asyncio
+async def test_flag_off_writes_lightweight_skeleton_edges() -> None:
+    """Move 2 control: flag off (default) still synthesizes the co-occurrence skeleton.
+
+    Proves the suppression above is the flag's effect, not an artifact - the same
+    lightweight chunk DOES produce CONCEPT entities + a CO_OCCURS_WITH edge when
+    the flag is off.
+    """
+    chunks = _chunks(3)
+    mock_extractor = AsyncMock()
+    mock_extractor.extract_multi = AsyncMock(return_value=[ExtractionResult(entities=[], relationships=[])] * 3)
+
+    with patch(
+        "khora.extraction.importance.ChunkImportanceScorer.select_for_extraction",
+        return_value=(chunks[:2], chunks[2:]),
+    ):
+        entities, relationships = await extract_entities(
+            chunks,
+            entity_types=["PERSON"],
+            relationship_types=["RELATES_TO"],
+            selective_extraction=True,
+            ketrag_skeleton_channel=False,
+            shared_extractor=mock_extractor,
+        )
+
+    assert any(e.entity_type == "CONCEPT" for e in entities)
+    assert any(r.relationship_type == "CO_OCCURS_WITH" for r in relationships)

@@ -513,7 +513,20 @@ async def extract_entities(
         logger.debug(f"Applied {state_changes_applied} STATE_CHANGE entities to affected entities")
 
     # --- Process lightweight chunks (selective extraction) ---
-    if lightweight_chunks:
+    # Move 2 (KET-RAG skeleton separation): when the skeleton-channel flag is on,
+    # do NOT synthesize CONCEPT entities / CO_OCCURS_WITH edges from the skipped
+    # ("lightweight") chunks. The entity graph then holds only LLM-extracted
+    # ontology; the skipped chunks stay fully retrievable through the vector and
+    # BM25 keyword channels (they are embedded + keyword-indexed at ingest
+    # regardless), so dropping the synthetic co-occurrence skeleton removes graph
+    # noise without losing chunk recall. An empirical spike found the
+    # keyword-cooccurrence graph adds ~no retrieval lift over BM25.
+    if lightweight_chunks and ketrag_skeleton_channel:
+        logger.debug(
+            "KET-RAG skeleton channel on: skipping co-occurrence edges for "
+            f"{len(lightweight_chunks)} lightweight chunks (served by vector + BM25)"
+        )
+    elif lightweight_chunks:
         from khora.extraction.importance import extract_lightweight_edges
 
         lightweight_edge_count = 0
