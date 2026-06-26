@@ -133,8 +133,11 @@ class StorageConfig:
     sqlite_lance_config: Any = field(default=None, repr=False)  # SQLiteLanceConfig from config/schema.py
 
     # HNSW build params for the SurrealDB unified backend's deferred vector
-    # indexes (#1386). Source of truth is StorageSettings.hnsw_*; threaded
-    # here so the connection sizes its DDL from config rather than 1536.
+    # indexes (#1386). The dimension is the real embedder output dimension
+    # (llm.embedding_dimension) so chunk/entity/episode and the temporal_chunk
+    # store size their HNSW indexes from a single source of truth; the HNSW
+    # build params come from StorageSettings.hnsw_*.
+    surrealdb_embedding_dimension: int = 1536
     surrealdb_hnsw_m: int = 24
     surrealdb_hnsw_ef_construction: int = 128
 
@@ -488,7 +491,7 @@ class StorageFactory:
                     user=getattr(surreal_config, "user", "root"),
                     password=surreal_password,
                     sync_data=getattr(surreal_config, "sync_data", True),
-                    embedding_dimension=getattr(surreal_config, "embedding_dimension", 1536),
+                    embedding_dimension=self.config.surrealdb_embedding_dimension,
                     hnsw_m=self.config.surrealdb_hnsw_m,
                     hnsw_ef_construction=self.config.surrealdb_hnsw_ef_construction,
                 )

@@ -136,3 +136,27 @@ async def test_ensure_search_indexes_uses_connection_dimension() -> None:
         await conn.execute("CREATE chunk SET content = 'x', embedding = $e;", {"e": [0.01] * 3072})
     finally:
         await conn.disconnect()
+
+
+def test_storage_config_sizes_surrealdb_index_from_llm_dimension() -> None:
+    """The factory config sizes every SurrealDB index from llm.embedding_dimension.
+
+    Single source of truth: the real embedder output dimension feeds both the
+    chunk/entity/episode index path (factory) and the temporal_chunk store,
+    so they cannot diverge from a stale storage-side mirror.
+    """
+    from khora.config import KhoraConfig
+    from khora.config.schema import SurrealDBConfig
+    from khora.engines._storage_config import build_storage_config
+
+    config = KhoraConfig()
+    config.storage.backend = "surrealdb"
+    config.storage.surrealdb = SurrealDBConfig(mode="memory")
+    config.llm.embedding_dimension = 3072
+    config.storage.hnsw_m = 32
+    config.storage.hnsw_ef_construction = 200
+
+    storage_config = build_storage_config(config)
+    assert storage_config.surrealdb_embedding_dimension == 3072
+    assert storage_config.surrealdb_hnsw_m == 32
+    assert storage_config.surrealdb_hnsw_ef_construction == 200

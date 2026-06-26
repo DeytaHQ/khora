@@ -37,8 +37,12 @@ def build_storage_config(config: KhoraConfig, *, skip_graph: bool = False) -> St
         return StorageConfig(
             backend="surrealdb",
             surrealdb_config=config.storage.surrealdb,
-            # HNSW build params for the unified backend's deferred vector
-            # indexes — source of truth is StorageSettings.hnsw_* (#1386).
+            # HNSW index params for the unified backend's deferred vector
+            # indexes (#1386). Dimension is the real embedder output
+            # (llm.embedding_dimension) so every SurrealDB table (chunk /
+            # entity / episode and the temporal_chunk store) sizes its index
+            # from one source of truth; build params from StorageSettings.
+            surrealdb_embedding_dimension=config.llm.embedding_dimension or 1536,
             surrealdb_hnsw_m=config.storage.hnsw_m,
             surrealdb_hnsw_ef_construction=config.storage.hnsw_ef_construction,
             # PostgreSQL fields are unused with SurrealDB but we still

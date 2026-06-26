@@ -384,6 +384,15 @@ def build_search_index_definitions(
     HNSW build params instead of a fixed string, so a non-1536 embedder
     (e.g. ``text-embedding-3-large`` at 3072) defines indexes that accept
     its vectors rather than rejecting every insert (#1386).
+
+    Note: the indexes use ``DEFINE INDEX IF NOT EXISTS``, which is
+    append-only in SurrealDB (same convention as the schema's ``DEFINE
+    FIELD``s). On a fresh database / new namespace the index is created at
+    the configured dimension. On an existing deployment that already built
+    an index at a different dimension, switching embedders requires a manual
+    ``REMOVE INDEX`` + redefine (and a reindex) — ``IF NOT EXISTS`` will not
+    silently re-shape a live index, so inserts at the new dimension would
+    still fail until the index is dropped and recreated.
     """
     hnsw = f"HNSW DIMENSION {embedding_dimension} DIST COSINE TYPE F32 EFC {hnsw_ef_construction} M {hnsw_m}"
     return f"""
