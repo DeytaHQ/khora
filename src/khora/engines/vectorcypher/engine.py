@@ -3238,7 +3238,12 @@ class VectorCypherEngine:
                         core_ids = {c.id for c in doc_chunks}
                     else:
                         effective_ratio = skeleton_ratio or self._vc_config.skeleton_core_ratio
-                        core_ids = await asyncio.to_thread(select_core_chunk_ids, doc_chunks, effective_ratio)
+                        core_ids = await asyncio.to_thread(
+                            select_core_chunk_ids,
+                            doc_chunks,
+                            effective_ratio,
+                            tokenizer=self._skeleton_tokenizer(),
+                        )
 
                     for tc in doc_chunks:
                         if tc.id in core_ids:
