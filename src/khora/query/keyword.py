@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -123,16 +124,27 @@ def tokenize(text: str, use_stemming: bool = True, remove_stopwords: bool = True
     Returns:
         List of tokens
     """
-    # Lowercase and split into word runs. ``[^\W_]+`` is the Unicode-aware
-    # equivalent of ``[a-zA-Z0-9]+``: it matches runs of letters/digits in ANY
-    # script (Cyrillic, accented Latin, Greek, ...) while excluding underscore.
-    # On pure-ASCII text it yields byte-identical tokens to the old pattern, so
-    # English ranking is unchanged; non-Latin text — which the old ASCII-only
-    # pattern dropped to zero tokens (and thus zero keyword recall) — now
-    # tokenizes. CJK scripts have no inter-word spaces, so a Han/Kana run still
-    # collapses to one token here; real CJK segmentation (jieba/MeCab or
-    # character n-grams) is a separate, heavier follow-up.
-    tokens = re.findall(r"[^\W_]+", text.lower())
+    # Lowercase, NFC-normalize, then split into word runs. NFC composes
+    # decomposed sequences (e.g. "e" + U+0301 -> precomposed "e-acute") so a
+    # base letter and its accent stay one token and a composed query matches a
+    # decomposed document. ``[^\W_]+`` is the Unicode-aware analog of
+    # ``[a-zA-Z0-9]+``: it matches runs of letters/digits in any script while
+    # excluding underscore. On pure-ASCII text it yields byte-identical tokens
+    # to the old pattern, so English ranking is unchanged; space-separated
+    # scripts whose words are runs of base letters (Cyrillic, Greek, (N)FC
+    # Latin) - which the old ASCII-only pattern dropped to zero tokens, i.e.
+    # zero keyword recall - now tokenize.
+    #
+    # Two scripts are still NOT handled (separate, heavier follow-up):
+    #   * CJK: no inter-word spaces, so a Han/Kana run collapses to one long
+    #     token. It survives the len filter and, since index and query tokenize
+    #     identically, exact matches still recall - a token-*quality* gap.
+    #   * Combining-mark scripts (Indic, etc.): ``\w`` does not match the
+    #     nonspacing/spacing marks (matras), so a word splits at every mark into
+    #     single base consonants, which the ``len > 2`` filter below then drops
+    #     entirely - still effectively zero recall, like the old pattern.
+    # Both need mark-aware classes / jieba / MeCab / character n-grams.
+    tokens = re.findall(r"[^\W_]+", unicodedata.normalize("NFC", text.lower()))
 
     # Remove stopwords
     if remove_stopwords:

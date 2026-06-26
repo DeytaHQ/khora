@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from unittest.mock import MagicMock
 from uuid import uuid4
 
@@ -95,6 +96,26 @@ class TestTokenize:
         tokens = tokenize("玛丽居里发现了镭元素", use_stemming=False, remove_stopwords=False)
         assert tokens == ["玛丽居里发现了镭元素"]
         assert re.findall(r"\b[a-zA-Z0-9]+\b", "玛丽居里发现了镭元素") == []
+
+    def test_decomposed_latin_normalized(self) -> None:
+        """NFC normalization keeps a base letter and a combining accent as one token."""
+        decomposed = "e\u0301cole"  # "e" + combining acute (U+0301) = NFD form of "ecole"
+        tokens = tokenize(decomposed, use_stemming=False, remove_stopwords=False)
+        assert tokens == [unicodedata.normalize("NFC", decomposed)]  # single composed token
+        # Without NFC the combining mark splits the word - the bug this guards against.
+        assert re.findall(r"[^\W_]+", decomposed) == ["e", "cole"]
+
+    def test_combining_mark_script_still_unsupported(self) -> None:
+        """Known limitation pinned: combining-mark scripts (Indic) are NOT fixed here.
+
+        ``\\w`` does not match the matras, so Devanagari splits at every mark into
+        single base consonants, which the ``len > 2`` filter then drops entirely -
+        still zero tokens, like the old ASCII pattern. (CJK, by contrast, collapses
+        to one long token that survives.) Proper support needs mark-aware
+        tokenization - a separate follow-up. Pinned so the gap is explicit.
+        """
+        text = "\u0939\u093f\u0928\u094d\u0926\u0940"  # Devanagari "Hindi"
+        assert tokenize(text, use_stemming=False, remove_stopwords=False) == []
 
 
 class TestBasicStem:
