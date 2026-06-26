@@ -37,6 +37,10 @@ def build_storage_config(config: KhoraConfig, *, skip_graph: bool = False) -> St
         return StorageConfig(
             backend="surrealdb",
             surrealdb_config=config.storage.surrealdb,
+            # HNSW build params for the unified backend's deferred vector
+            # indexes — source of truth is StorageSettings.hnsw_* (#1386).
+            surrealdb_hnsw_m=config.storage.hnsw_m,
+            surrealdb_hnsw_ef_construction=config.storage.hnsw_ef_construction,
             # PostgreSQL fields are unused with SurrealDB but we still
             # populate them so callers that inspect the config don't crash.
             postgresql_url=None,
