@@ -1355,6 +1355,19 @@ class VectorCypherEngine:
             except Exception as exc:
                 logger.warning(f"submit_batch cleanup: could not clear :Chunk nodes for document {document_id}: {exc}")
 
+    def _skeleton_tokenizer(self) -> Callable[[str], list[str]] | None:
+        """Keyword tokenizer for skeleton core-chunk selection.
+
+        Returns the multilingual tokenizer when the KET-RAG skeleton channel
+        flag is on (so non-Latin chunks are selected on real keyword signal),
+        otherwise ``None`` so ``select_core_chunk_ids`` uses its ASCII default.
+        """
+        if self._config.pipeline.ketrag_skeleton_channel:
+            from khora.extraction.tokenize import tokenize_multilingual
+
+            return tokenize_multilingual
+        return None
+
     async def _run_skeleton_extraction(
         self,
         chunks: list[TemporalChunk],
@@ -1403,7 +1416,10 @@ class VectorCypherEngine:
                     core_ratio=self._vc_config.skeleton_core_ratio,
                 ):
                     core_ids = await asyncio.to_thread(
-                        select_core_chunk_ids, chunks, self._vc_config.skeleton_core_ratio
+                        select_core_chunk_ids,
+                        chunks,
+                        self._vc_config.skeleton_core_ratio,
+                        tokenizer=self._skeleton_tokenizer(),
                     )
 
             logger.debug(f"Skeleton indexing: {len(core_ids)}/{len(chunks)} core chunks")
@@ -1444,6 +1460,7 @@ class VectorCypherEngine:
                 entity_types=entity_types,
                 relationship_types=relationship_types,
                 store_events=self._vc_config.store_events,
+                ketrag_skeleton_channel=self._config.pipeline.ketrag_skeleton_channel,
                 out_diagnostics=out_diagnostics,
             )
 
@@ -1642,7 +1659,12 @@ class VectorCypherEngine:
                 chunk_count=len(chunks),
                 core_ratio=effective_ratio,
             ):
-                core_ids = await asyncio.to_thread(select_core_chunk_ids, chunks, effective_ratio)
+                core_ids = await asyncio.to_thread(
+                    select_core_chunk_ids,
+                    chunks,
+                    effective_ratio,
+                    tokenizer=self._skeleton_tokenizer(),
+                )
 
         logger.debug(f"Skeleton indexing (deferred): {len(core_ids)}/{len(chunks)} core chunks")
 
@@ -1676,6 +1698,7 @@ class VectorCypherEngine:
             entity_types=entity_types,
             relationship_types=relationship_types,
             store_events=self._vc_config.store_events,
+            ketrag_skeleton_channel=self._config.pipeline.ketrag_skeleton_channel,
         )
 
         if not entities:
@@ -1838,7 +1861,10 @@ class VectorCypherEngine:
                     for c in new_chunks
                 ]
                 core_ids = await asyncio.to_thread(
-                    select_core_chunk_ids, skeleton_input, self._vc_config.skeleton_core_ratio
+                    select_core_chunk_ids,
+                    skeleton_input,
+                    self._vc_config.skeleton_core_ratio,
+                    tokenizer=self._skeleton_tokenizer(),
                 )
                 core_chunks = [c for c in new_chunks if c.id in core_ids]
 
@@ -1857,6 +1883,7 @@ class VectorCypherEngine:
                     entity_types=entity_types,
                     relationship_types=relationship_types,
                     store_events=self._vc_config.store_events,
+                    ketrag_skeleton_channel=self._config.pipeline.ketrag_skeleton_channel,
                 )
 
                 if extracted_entities:
@@ -3211,7 +3238,12 @@ class VectorCypherEngine:
                         core_ids = {c.id for c in doc_chunks}
                     else:
                         effective_ratio = skeleton_ratio or self._vc_config.skeleton_core_ratio
-                        core_ids = await asyncio.to_thread(select_core_chunk_ids, doc_chunks, effective_ratio)
+                        core_ids = await asyncio.to_thread(
+                            select_core_chunk_ids,
+                            doc_chunks,
+                            effective_ratio,
+                            tokenizer=self._skeleton_tokenizer(),
+                        )
 
                     for tc in doc_chunks:
                         if tc.id in core_ids:
@@ -3277,6 +3309,7 @@ class VectorCypherEngine:
                                     entity_types=entity_types,
                                     relationship_types=relationship_types,
                                     store_events=self._vc_config.store_events,
+                                    ketrag_skeleton_channel=self._config.pipeline.ketrag_skeleton_channel,
                                 )
 
                         extraction_results = await asyncio.gather(
@@ -3308,6 +3341,7 @@ class VectorCypherEngine:
                             entity_types=entity_types,
                             relationship_types=relationship_types,
                             store_events=self._vc_config.store_events,
+                            ketrag_skeleton_channel=self._config.pipeline.ketrag_skeleton_channel,
                         )
 
                     if entities:
