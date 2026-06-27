@@ -7,13 +7,13 @@ vector search.
 from __future__ import annotations
 
 import math
-import re
-import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from loguru import logger
+
+from khora.extraction.tokenize import is_cjk_token, tokenize_core
 
 if TYPE_CHECKING:
     from khora.core.models import Chunk
@@ -124,38 +124,33 @@ def tokenize(text: str, use_stemming: bool = True, remove_stopwords: bool = True
     Returns:
         List of tokens
     """
-    # Lowercase, NFC-normalize, then split into word runs. NFC composes
-    # decomposed sequences (e.g. "e" + U+0301 -> precomposed "e-acute") so a
-    # base letter and its accent stay one token and a composed query matches a
-    # decomposed document. ``[^\W_]+`` is the Unicode-aware analog of
-    # ``[a-zA-Z0-9]+``: it matches runs of letters/digits in any script while
-    # excluding underscore. On pure-ASCII text it yields byte-identical tokens
-    # to the old pattern, so English ranking is unchanged; space-separated
-    # scripts whose words are runs of base letters (Cyrillic, Greek, (N)FC
-    # Latin) - which the old ASCII-only pattern dropped to zero tokens, i.e.
-    # zero keyword recall - now tokenize.
-    #
-    # Two scripts are still NOT handled (separate, heavier follow-up):
-    #   * CJK: no inter-word spaces, so a Han/Kana run collapses to one long
-    #     token. It survives the len filter and, since index and query tokenize
-    #     identically, exact matches still recall - a token-*quality* gap.
-    #   * Combining-mark scripts (Indic, etc.): ``\w`` does not match the
-    #     nonspacing/spacing marks (matras), so a word splits at every mark into
-    #     single base consonants, which the ``len > 2`` filter below then drops
-    #     entirely - still effectively zero recall, like the old pattern.
-    # Both need mark-aware classes / jieba / MeCab / character n-grams.
-    tokens = re.findall(r"[^\W_]+", unicodedata.normalize("NFC", text.lower()))
+    # ``tokenize_core`` NFC-normalizes + lowercases, then splits into
+    # word-forming runs (letters/numbers/marks, any script, excluding
+    # underscore). On pure-ASCII text it is byte-identical to the old
+    # ``[^\W_]+`` pattern, so English ranking is unchanged. Beyond ASCII it
+    # fixes the two scripts the regex could not:
+    #   * CJK (Han/Kana/Hangul): a run with no inter-word spaces is emitted as
+    #     overlapping character bigrams, so sub-phrases match across chunks
+    #     (index and query bigram identically). A single-char run stays a
+    #     unigram.
+    #   * Combining-mark scripts (Indic, etc.): category-M marks (matras) are
+    #     word-forming, so a base consonant and its matras stay ONE token
+    #     instead of splitting into single consonants that the length filter
+    #     would drop.
+    tokens = tokenize_core(text)
 
-    # Remove stopwords
+    # Remove stopwords (English set; no-op on non-Latin tokens).
     if remove_stopwords:
         tokens = [t for t in tokens if t not in STOPWORDS]
 
-    # Basic stemming (simple suffix removal)
+    # Basic stemming (simple ASCII suffix removal). Skip CJK n-gram tokens so a
+    # bigram is never mangled - the suffixes are Latin anyway.
     if use_stemming:
-        tokens = [_basic_stem(t) for t in tokens]
+        tokens = [t if is_cjk_token(t) else _basic_stem(t) for t in tokens]
 
-    # Filter short tokens
-    tokens = [t for t in tokens if len(t) > 2]
+    # Filter short tokens. CJK bigrams are length 2 and MUST survive, so the
+    # length floor applies only to non-CJK (Latin/ASCII) tokens.
+    tokens = [t for t in tokens if is_cjk_token(t) or len(t) > 2]
 
     return tokens
 
