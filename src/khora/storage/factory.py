@@ -132,6 +132,15 @@ class StorageConfig:
     surrealdb_config: Any = field(default=None, repr=False)  # SurrealDBConfig from config/schema.py
     sqlite_lance_config: Any = field(default=None, repr=False)  # SQLiteLanceConfig from config/schema.py
 
+    # HNSW build params for the SurrealDB unified backend's deferred vector
+    # indexes (#1386). The dimension is the real embedder output dimension
+    # (llm.embedding_dimension) so chunk/entity/episode and the temporal_chunk
+    # store size their HNSW indexes from a single source of truth; the HNSW
+    # build params come from StorageSettings.hnsw_*.
+    surrealdb_embedding_dimension: int = 1536
+    surrealdb_hnsw_m: int = 24
+    surrealdb_hnsw_ef_construction: int = 128
+
     # Event store configuration (uses PostgreSQL by default)
     event_store_url: (
         Annotated[
@@ -482,6 +491,9 @@ class StorageFactory:
                     user=getattr(surreal_config, "user", "root"),
                     password=surreal_password,
                     sync_data=getattr(surreal_config, "sync_data", True),
+                    embedding_dimension=self.config.surrealdb_embedding_dimension,
+                    hnsw_m=self.config.surrealdb_hnsw_m,
+                    hnsw_ef_construction=self.config.surrealdb_hnsw_ef_construction,
                 )
                 return StorageCoordinator(
                     relational=SurrealDBRelationalAdapter(conn),

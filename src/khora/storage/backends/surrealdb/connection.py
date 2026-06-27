@@ -42,6 +42,9 @@ class SurrealDBConnection:
         user: str = "root",
         password: str = "root",  # noqa: S107
         sync_data: bool = True,
+        embedding_dimension: int = 1536,
+        hnsw_m: int = 24,
+        hnsw_ef_construction: int = 128,
     ) -> None:
         self._mode = mode
         self._path = path
@@ -51,6 +54,13 @@ class SurrealDBConnection:
         self._user = user
         self._password = password
         self._sync_data = sync_data
+        # HNSW index build params, threaded from config so the deferred
+        # search-index DDL is sized to the configured embedding dimension
+        # rather than a hardcoded 1536 (#1386). ef_search is a query-time
+        # param (see SurrealDBVectorAdapter), not an index-define slot.
+        self.embedding_dimension = embedding_dimension
+        self.hnsw_m = hnsw_m
+        self.hnsw_ef_construction = hnsw_ef_construction
         self._client: Any = None
         self._connected = False
         self._schema_initialized = False

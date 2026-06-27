@@ -360,14 +360,54 @@ DEFINE INDEX IF NOT EXISTS idx_khora_dream_runs_ns_started ON khora_dream_runs F
 """
 
 
-_SEARCH_INDEX_DEFINITIONS = """
+# HNSW build-param defaults. Mirror StorageSettings.hnsw_m /
+# hnsw_ef_construction and llm.embedding_dimension so a deployment that does
+# not override them keeps the historical 1536 / EFC 128 / M 24 index shape.
+# SurrealDB's HNSW DDL maps DIMENSION = embedding dimension, EFC =
+# ef_construction, M = m. There is no index-define slot for ef_search — it is
+# a query-time parameter (passed as ``ef`` on the KNN/search call), so it is
+# intentionally absent here.
+_DEFAULT_EMBEDDING_DIMENSION = 1536
+_DEFAULT_HNSW_M = 24
+_DEFAULT_HNSW_EF_CONSTRUCTION = 128
+
+
+def build_search_index_definitions(
+    *,
+    embedding_dimension: int = _DEFAULT_EMBEDDING_DIMENSION,
+    hnsw_m: int = _DEFAULT_HNSW_M,
+    hnsw_ef_construction: int = _DEFAULT_HNSW_EF_CONSTRUCTION,
+) -> str:
+    """Render the deferred HNSW + BM25 search-index DDL.
+
+    The HNSW indexes are sized from the configured embedding dimension and
+    HNSW build params instead of a fixed string, so a non-1536 embedder
+    (e.g. ``text-embedding-3-large`` at 3072) defines indexes that accept
+    its vectors rather than rejecting every insert (#1386).
+
+    Note: the indexes use ``DEFINE INDEX IF NOT EXISTS``, which is
+    append-only in SurrealDB (same convention as the schema's ``DEFINE
+    FIELD``s). On a fresh database / new namespace the index is created at
+    the configured dimension. On an existing deployment that already built
+    an index at a different dimension, switching embedders requires a manual
+    ``REMOVE INDEX`` + redefine (and a reindex) — ``IF NOT EXISTS`` will not
+    silently re-shape a live index, so inserts at the new dimension would
+    still fail until the index is dropped and recreated.
+    """
+    hnsw = f"HNSW DIMENSION {embedding_dimension} DIST COSINE TYPE F32 EFC {hnsw_ef_construction} M {hnsw_m}"
+    return f"""
 -- HNSW vector indexes (deferred from table definitions for bulk-load performance).
 -- These are expensive to maintain incrementally on every INSERT.
-DEFINE INDEX IF NOT EXISTS idx_chunk_embedding ON chunk FIELDS embedding HNSW DIMENSION 1536 DIST COSINE TYPE F32 EFC 128 M 24;
+DEFINE INDEX IF NOT EXISTS idx_chunk_embedding ON chunk FIELDS embedding {hnsw};
 DEFINE INDEX IF NOT EXISTS idx_chunk_content_ft ON chunk FIELDS content SEARCH ANALYZER khora_fulltext BM25;
-DEFINE INDEX IF NOT EXISTS idx_entity_embedding ON entity FIELDS embedding HNSW DIMENSION 1536 DIST COSINE TYPE F32 EFC 128 M 24;
-DEFINE INDEX IF NOT EXISTS idx_episode_embedding ON episode FIELDS embedding HNSW DIMENSION 1536 DIST COSINE TYPE F32 EFC 128 M 24;
+DEFINE INDEX IF NOT EXISTS idx_entity_embedding ON entity FIELDS embedding {hnsw};
+DEFINE INDEX IF NOT EXISTS idx_episode_embedding ON episode FIELDS embedding {hnsw};
 """
+
+
+# Default rendering kept as a module-level constant for back-compat with
+# callers that import the DDL directly (e.g. diagnostics / probes).
+_SEARCH_INDEX_DEFINITIONS = build_search_index_definitions()
 
 
 async def ensure_search_indexes(conn: SurrealDBConnection) -> None:
@@ -376,12 +416,22 @@ async def ensure_search_indexes(conn: SurrealDBConnection) -> None:
     Call after bulk ingestion to avoid per-INSERT index maintenance
     overhead during data loading.  Idempotent (uses IF NOT EXISTS).
 
+    The HNSW index dimension and build params are read from the connection
+    (``embedding_dimension`` / ``hnsw_m`` / ``hnsw_ef_construction``), which
+    the factory threads from config, so non-1536 embedders work (#1386).
+
     Args:
         conn: An active SurrealDBConnection instance.
     """
     logger.info("Creating SurrealDB search indexes (HNSW + BM25)...")
     await conn.execute(_ANALYZER_DEFINITIONS)
-    await conn.execute(_SEARCH_INDEX_DEFINITIONS)
+    await conn.execute(
+        build_search_index_definitions(
+            embedding_dimension=conn.embedding_dimension,
+            hnsw_m=conn.hnsw_m,
+            hnsw_ef_construction=conn.hnsw_ef_construction,
+        )
+    )
     logger.info("SurrealDB search indexes created")
 
 

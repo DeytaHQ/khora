@@ -89,14 +89,28 @@ DEFINE INDEX IF NOT EXISTS idx_tc_author ON temporal_chunk FIELDS author;
 DEFINE INDEX IF NOT EXISTS idx_tc_channel ON temporal_chunk FIELDS channel;
 """
 
+
 # Expensive indexes deferred until after bulk ingestion via ensure_search_indexes().
 # HNSW is maintained incrementally on every INSERT and never used for search
 # (brute-force cosine is used instead due to KNN being unreliable in embedded mode).
 # BM25 also adds per-INSERT tokenization overhead.
-_TEMPORAL_CHUNK_SEARCH_INDEXES = """
-DEFINE INDEX IF NOT EXISTS idx_tc_embedding ON temporal_chunk FIELDS embedding HNSW DIMENSION 1536 DIST COSINE TYPE F32 EFC 128 M 24;
+#
+# The HNSW dimension / build params are templated from config (#1386) so a
+# non-1536 embedder (e.g. text-embedding-3-large at 3072) defines an index
+# that accepts its vectors instead of rejecting every insert. ef_search is a
+# query-time param (passed as ``ef`` on search), not an index-define slot.
+def _build_temporal_chunk_search_indexes(
+    *,
+    embedding_dimension: int = 1536,
+    hnsw_m: int = 24,
+    hnsw_ef_construction: int = 128,
+) -> str:
+    hnsw = f"HNSW DIMENSION {embedding_dimension} DIST COSINE TYPE F32 EFC {hnsw_ef_construction} M {hnsw_m}"
+    return f"""
+DEFINE INDEX IF NOT EXISTS idx_tc_embedding ON temporal_chunk FIELDS embedding {hnsw};
 DEFINE INDEX IF NOT EXISTS idx_tc_content_ft ON temporal_chunk FIELDS content SEARCH ANALYZER khora_fulltext BM25;
 """
+
 
 # Legacy ``ChunkTemporalFilter.additional`` range-op names → the canonical filter Op,
 # so the deterministic-filter compiler can build a type-gated metadata compare.
@@ -681,7 +695,13 @@ class SurrealDBTemporalStore(TemporalVectorStore):
         """
         if self._conn:
             logger.info("Creating temporal_chunk search indexes (HNSW + BM25)...")
-            await self._conn.execute(_TEMPORAL_CHUNK_SEARCH_INDEXES)
+            await self._conn.execute(
+                _build_temporal_chunk_search_indexes(
+                    embedding_dimension=self._config.llm.embedding_dimension or 1536,
+                    hnsw_m=self._config.storage.hnsw_m,
+                    hnsw_ef_construction=self._config.storage.hnsw_ef_construction,
+                )
+            )
             logger.info("Temporal chunk search indexes created")
 
     async def health_check(self) -> dict[str, Any]:
