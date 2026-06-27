@@ -81,9 +81,12 @@ def tokenize_core(text: str) -> list[str]:
     """Split text into tokens, NFC-normalized and lowercased.
 
     Maximal runs of word-forming characters (letters, numbers, marks; not
-    underscore) are emitted as whole tokens, except CJK runs, which are emitted
-    as overlapping character bigrams (single-char CJK runs emit a unigram).
-    Byte-identical to ``[^\\W_]+`` on pure-ASCII input.
+    underscore) are split into contiguous CJK / non-CJK segments. Non-CJK
+    segments are emitted as a whole token; CJK segments are emitted as
+    overlapping character bigrams (a single-char CJK segment emits a unigram).
+    Splitting on the script boundary keeps a mixed run like "Python语言" from
+    bigramming across scripts. Byte-identical to ``[^\\W_]+`` on pure-ASCII
+    input (no CJK, so every run is one non-CJK segment emitted whole).
 
     Args:
         text: Arbitrary text in any language / script.
@@ -95,17 +98,36 @@ def tokenize_core(text: str) -> list[str]:
     tokens: list[str] = []
     run: list[str] = []
 
-    def flush() -> None:
-        if not run:
+    def emit(segment: list[str], is_cjk: bool) -> None:
+        if not segment:
             return
-        if any(_is_cjk(c) for c in run):
-            if len(run) == 1:
-                tokens.append(run[0])
+        if is_cjk:
+            if len(segment) == 1:
+                tokens.append(segment[0])
             else:
-                for i in range(len(run) - 1):
-                    tokens.append(run[i] + run[i + 1])
+                for i in range(len(segment) - 1):
+                    tokens.append(segment[i] + segment[i + 1])
         else:
-            tokens.append("".join(run))
+            tokens.append("".join(segment))
+
+    def flush() -> None:
+        # Split the run into contiguous CJK / non-CJK segments so a mixed run
+        # like "Python语言" or "東京2024" emits a clean Latin/numeric token AND
+        # CJK bigrams, instead of bigramming across the script boundary. Marks
+        # (category M) never start a segment - they attach to the preceding
+        # base character's segment.
+        segment: list[str] = []
+        segment_is_cjk = False
+        for ch in run:
+            ch_is_cjk = _is_cjk(ch)
+            is_mark = unicodedata.category(ch)[0] == "M"
+            if segment and not is_mark and ch_is_cjk != segment_is_cjk:
+                emit(segment, segment_is_cjk)
+                segment = []
+            if not segment:
+                segment_is_cjk = ch_is_cjk
+            segment.append(ch)
+        emit(segment, segment_is_cjk)
         run.clear()
 
     for ch in normalized:

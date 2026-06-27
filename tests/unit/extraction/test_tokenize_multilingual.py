@@ -119,6 +119,16 @@ def test_core_indic_keeps_marks() -> None:
     assert re.findall(r"[^\W_]+", "हिन्दी") == ["ह", "न", "द"]
 
 
+def test_core_mixed_script_run_segments_at_boundary() -> None:
+    """A run mixing CJK and non-CJK splits at the script boundary (#1388).
+
+    Without segmentation the whole run bigrams across scripts, producing
+    cross-script garbage like "n语" and dropping the clean Latin/numeric token.
+    """
+    assert tokenize_core("Python语言") == ["python", "语言"]
+    assert tokenize_core("東京2024") == ["東京", "2024"]
+
+
 def test_is_cjk_token() -> None:
     """is_cjk_token flags CJK bigrams/unigrams but not Latin/Cyrillic (#1388)."""
     assert is_cjk_token("玛丽")
