@@ -65,6 +65,7 @@ from khora.telemetry import trace, trace_span
 from khora.telemetry.metrics import metric_counter, metric_histogram
 
 from .dual_nodes import DualNodeManager, EntityChunkLink
+from .keyword_edges import persist_keyword_chunk_edges
 from .retriever import RetrieverConfig, VectorCypherRetriever
 from .router import QueryComplexityRouter, RouterConfig
 from .temporal_detection import TemporalCategory, TemporalDetector, TemporalSignal
@@ -1244,6 +1245,14 @@ class VectorCypherEngine:
                     # ingest (ADR-001).
                     await _mirror_chunks_or_degrade(dual_nodes, temporal_chunks, document.namespace_id, out_diagnostics)
 
+                    # keyword_ppr lexical channel (#1391): persist keyword->chunk
+                    # edges. Gated - default bm25 deployments pay zero cost. The
+                    # chunks are already durable, so a write failure degrades.
+                    if self._config.query.lexical_channel == "keyword_ppr":
+                        await persist_keyword_chunk_edges(
+                            storage, document.namespace_id, temporal_chunks, out_diagnostics=out_diagnostics
+                        )
+
                     # Skeleton-based entity extraction (for core chunks only)
                     if self._config.pipeline.extract_entities:
                         ents, rels = await self._run_skeleton_extraction(
@@ -1969,6 +1978,12 @@ class VectorCypherEngine:
                 # pgvector already holds the chunks and the coordinator's #884 path
                 # below handles any remaining graph divergence.
                 await _mirror_chunks_or_degrade(dual_nodes, new_temporal_chunks, namespace_id, replace_diagnostics)
+                # keyword_ppr lexical channel (#1391): replace this document's
+                # keyword->chunk edges (upsert is idempotent per chunk). Gated.
+                if self._config.query.lexical_channel == "keyword_ppr":
+                    await persist_keyword_chunk_edges(
+                        storage, namespace_id, new_temporal_chunks, out_diagnostics=replace_diagnostics
+                    )
         except Exception as e:
             # Self-heal: mark FAILED and re-raise unwrapped so the next
             # successful replace against the same external_id heals the row.
@@ -3205,6 +3220,17 @@ class VectorCypherEngine:
             # already durable in pgvector, so a mirror failure degrades (counter +
             # WARNING) rather than aborting the batch (ADR-001).
             await _mirror_chunks_or_degrade(dual_nodes, all_temporal_chunks, namespace_id)
+
+            # keyword_ppr lexical channel (#1391): persist keyword->chunk edges
+            # per document slice (IDF is document-scoped, matching the skeleton
+            # selection's per-document semantics). Gated - default bm25 pays
+            # zero cost; a write failure degrades (WARNING) per persist helper.
+            if self._config.query.lexical_channel == "keyword_ppr":
+                for si in range(len(state_chunk_ranges)):
+                    start, end = state_chunk_ranges[si]
+                    doc_chunks = all_temporal_chunks[start:end]
+                    if doc_chunks:
+                        await persist_keyword_chunk_edges(storage, namespace_id, doc_chunks)
 
             _stage3_ms += (_time.perf_counter() - _t0) * 1000
 
