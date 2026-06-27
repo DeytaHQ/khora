@@ -380,6 +380,14 @@ class RetrieverConfig:
     bm25_weight: float = 0.3
     bm25_top_k: int = 50  # How many BM25 results to fetch
 
+    # Lexical-channel selector (#1391). "bm25" (default) keeps BM25 in the
+    # lexical slot; "keyword_ppr" swaps in the experimental keyword-chunk
+    # PageRank channel. The keyword_ppr channel feeds the SAME lexical/bm25
+    # fusion slot (bm25_weight) so fusion is unchanged.
+    lexical_channel: str = "bm25"
+    keyword_ppr_damping: float = 0.85
+    keyword_ppr_max_edges: int = 50_000
+
     # Cross-encoder reranking (default BAAI/bge-reranker-v2-m3; see VectorCypherConfig)
     enable_reranking: bool = False
     reranking_model: str = "BAAI/bge-reranker-v2-m3"
@@ -1441,7 +1449,7 @@ class VectorCypherRetriever:
         # its own independent channel). Otherwise a per-call
         # ``hybrid_alpha_override`` (threaded explicitly from the engine, #1116)
         # wins over the configured default; ``None`` keeps the config value.
-        if self._config.enable_bm25_channel:
+        if self._lexical_channel_active():
             effective_hybrid_alpha = 1.0
         else:
             effective_hybrid_alpha = hybrid_alpha_override
@@ -1465,18 +1473,19 @@ class VectorCypherRetriever:
                 )
             )
 
-        # Launch BM25 search in parallel with vector search (independent channel)
+        # Launch the lexical channel (bm25 or keyword_ppr, #1391) in parallel
+        # with vector search (independent channel).
         bm25_chunks_task: asyncio.Task[list[tuple[UUID, float, Chunk]]] | None = None
-        if not skip_bm25_channel and self._config.enable_bm25_channel and self._storage:
+        if not skip_bm25_channel and self._lexical_channel_active() and self._storage:
             bm25_chunks_task = asyncio.create_task(
-                self._bm25_search_chunks(
+                self._lexical_search_chunks(
                     query=query,
                     namespace_id=namespace_id,
                     limit=self._config.bm25_top_k,
                     filter_ast=filter_ast,
                     # Capture the BM25 channel's pushdown plan from the temporal
                     # store's actual ``search_fulltext`` compile (same WHERE the
-                    # vector channel pushes).
+                    # vector channel pushes). Ignored by the keyword_ppr branch.
                     filter_plan_out=bm25_filter_plan_sink,
                     degradations=degradations,
                 )
@@ -2915,7 +2924,7 @@ class VectorCypherRetriever:
             if mode == SearchMode.VECTOR:
                 # Pure-vector: skip the pgvector-internal BM25 fusion entirely.
                 effective_alpha = None
-            elif self._config.enable_bm25_channel and run_bm25_channel:
+            elif self._lexical_channel_active() and run_bm25_channel:
                 effective_alpha = 1.0
             else:
                 # Per-call override (#1116) replaces the config read; the SIMPLE
@@ -2930,9 +2939,9 @@ class VectorCypherRetriever:
             # Launch BM25 search in parallel with vector search. KEYWORD mode
             # always launches BM25 (it is the only source of chunks).
             bm25_task: asyncio.Task[list[tuple[UUID, float, Chunk]]] | None = None
-            if run_bm25_channel and self._storage and (self._config.enable_bm25_channel or mode == SearchMode.KEYWORD):
+            if run_bm25_channel and self._storage and (self._lexical_channel_active() or mode == SearchMode.KEYWORD):
                 bm25_task = asyncio.create_task(
-                    self._bm25_search_chunks(
+                    self._lexical_search_chunks(
                         query=query,
                         namespace_id=namespace_id,
                         limit=self._config.bm25_top_k if mode != SearchMode.KEYWORD else max(limit, 50),
@@ -4030,6 +4039,111 @@ class VectorCypherRetriever:
             span.set_attribute("raw_count", len(recent_tuples))
             span.set_attribute("filtered_count", len(filtered))
             return filtered
+
+    def _lexical_channel_active(self) -> bool:
+        """Whether the lexical recall slot is active (#1391).
+
+        Active when BM25 is enabled (the pre-#1391 gate) OR the lexical channel
+        is set to keyword_ppr. The channel selector is itself the opt-in for
+        keyword_ppr, so it does not require enable_bm25_channel.
+        """
+        return self._config.enable_bm25_channel or self._config.lexical_channel == "keyword_ppr"
+
+    async def _lexical_search_chunks(
+        self,
+        query: str,
+        namespace_id: UUID,
+        limit: int,
+        *,
+        filter_ast: FilterNode | None = None,
+        filter_plan_out: list[ChannelPlan] | None = None,
+        degradations: list[Degradation] | None = None,
+    ) -> list[tuple[UUID, float, Chunk]]:
+        """Run the configured lexical channel (bm25 or keyword_ppr) (#1391).
+
+        Dispatches on ``self._config.lexical_channel``. The keyword_ppr branch
+        fills the SAME lexical/bm25 fusion slot so RRF is unchanged. Default
+        ("bm25") is byte-identical to the pre-#1391 ``_bm25_search_chunks`` call.
+        """
+        if self._config.lexical_channel == "keyword_ppr":
+            return await self._keyword_ppr_search_chunks(
+                query=query,
+                namespace_id=namespace_id,
+                limit=limit,
+                filter_ast=filter_ast,
+                degradations=degradations,
+            )
+        return await self._bm25_search_chunks(
+            query=query,
+            namespace_id=namespace_id,
+            limit=limit,
+            filter_ast=filter_ast,
+            filter_plan_out=filter_plan_out,
+            degradations=degradations,
+        )
+
+    async def _keyword_ppr_search_chunks(
+        self,
+        query: str,
+        namespace_id: UUID,
+        limit: int,
+        *,
+        filter_ast: FilterNode | None = None,
+        degradations: list[Degradation] | None = None,
+    ) -> list[tuple[UUID, float, Chunk]]:
+        """KET-RAG keyword-chunk PageRank lexical channel (#1391).
+
+        Runs the per-query personalized PageRank over the namespace
+        keyword->chunk bipartite and hydrates the ranked ids to ``(chunk_id,
+        score, Chunk)`` triples in the shape fusion expects (matching the BM25
+        and PPR channels).
+
+        The channel cannot push a recall-filter down to the bipartite, so under
+        a deterministic ``filter_ast`` it returns an empty channel (records an
+        ADR-001 ``Degradation``) rather than smuggling filter-violating chunks
+        into RRF - mirroring BM25's filtered-fallback guard. Degrade-safe: no
+        storage / no keywords / no edges / no seed overlap -> ``[]``.
+        """
+        if self._storage is None:
+            return []
+        if filter_ast is not None:
+            if degradations is not None:
+                degradations.append(
+                    Degradation(
+                        component="vectorcypher.keyword_ppr",
+                        reason="filter_not_pushable",
+                        detail="keyword_ppr cannot enforce a recall filter; lexical channel skipped",
+                    )
+                )
+            return []
+
+        from khora.extraction.tokenize import tokenize_multilingual
+        from khora.query.keyword_ppr import keyword_ppr_retrieve_chunks
+
+        with trace_span("khora.vectorcypher.keyword_ppr_search_chunks", namespace_id=str(namespace_id)) as span:
+            ranked = await keyword_ppr_retrieve_chunks(
+                self._storage,
+                namespace_id,
+                query,
+                tokenizer=tokenize_multilingual,
+                damping=self._config.keyword_ppr_damping,
+                max_iter=self._config.ppr_max_iter,
+                tol=self._config.ppr_tol,
+                limit=limit,
+                max_edges=self._config.keyword_ppr_max_edges,
+            )
+            span.set_attribute("ranked_count", len(ranked))
+            if not ranked:
+                return []
+            chunk_ids = [cid for cid, _ in ranked]
+            chunks_map = await self._storage.get_chunks_batch(chunk_ids, namespace_id=namespace_id)
+            results: list[tuple[UUID, float, Chunk]] = []
+            for cid, score in ranked:
+                chunk = chunks_map.get(cid)
+                if chunk is not None:
+                    results.append((cid, score, chunk))
+            span.set_attribute("chunk_count", len(results))
+            return results
 
     async def _bm25_search_chunks(
         self,

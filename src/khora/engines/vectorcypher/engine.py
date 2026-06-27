@@ -818,6 +818,12 @@ class VectorCypherEngine:
             enable_bm25_channel=self._vc_config.enable_bm25_channel,
             bm25_weight=self._vc_config.bm25_weight,
             bm25_top_k=self._vc_config.bm25_top_k,
+            # Issue #1391 — lexical-channel selector (keyword_ppr vs bm25).
+            # Read straight from KhoraConfig.query (bypasses VectorCypherConfig,
+            # mirroring the PPR flags above). Default "bm25" = unchanged.
+            lexical_channel=self._config.query.lexical_channel,
+            keyword_ppr_damping=self._config.query.keyword_ppr_damping,
+            keyword_ppr_max_edges=self._config.query.keyword_ppr_max_edges,
             enable_reranking=self._vc_config.enable_reranking,
             reranking_model=self._vc_config.reranking_model,
             reranking_top_n=self._vc_config.reranking_top_n,
