@@ -1344,6 +1344,42 @@ class QuerySettings(BaseSettings):
         default=False, description="Enable the independent BM25 lexical channel in fusion"
     )
 
+    # Lexical-channel selector (#1391). Picks which retriever fills the lexical
+    # recall slot: "bm25" (default, current behavior, byte-identical) or
+    # "keyword_ppr" (experimental KET-RAG text-keyword channel: per-query
+    # personalized PageRank over the namespace keyword->chunk bipartite). Default
+    # "bm25" = unchanged. An earlier synthetic-corpus spike found the PPR channel
+    # adds ~no marginal recall over BM25, so this exists to A/B it on real data,
+    # not as a recommended default. Switching to "keyword_ppr" requires a
+    # re-ingest to populate the keyword_chunks edge table.
+    lexical_channel: Literal["bm25", "keyword_ppr"] = Field(
+        default="bm25",
+        description=(
+            "Which retriever fills the lexical recall slot: 'bm25' (default, "
+            "unchanged) or 'keyword_ppr' (experimental keyword-chunk PageRank "
+            "channel; requires re-ingest to populate keyword_chunks)."
+        ),
+    )
+    # Damping factor for the keyword_ppr channel's per-query PageRank. Only used
+    # when lexical_channel == "keyword_ppr".
+    keyword_ppr_damping: float = Field(
+        default=0.85,
+        ge=0.0,
+        le=1.0,
+        description="Damping factor for the keyword_ppr lexical channel's per-query PageRank.",
+    )
+    # Cap on the number of keyword->chunk bipartite edges loaded per query for the
+    # keyword_ppr channel. Bounds per-query PageRank cost (heavier than BM25's
+    # inverted-index lookup). Only used when lexical_channel == "keyword_ppr".
+    keyword_ppr_max_edges: int = Field(
+        default=50_000,
+        ge=1,
+        description=(
+            "Max keyword->chunk bipartite edges loaded per query for the "
+            "keyword_ppr lexical channel (bounds per-query PageRank cost)."
+        ),
+    )
+
     # Coherence re-rank: a small post-fusion nudge that demotes word-shuffled /
     # disfluent confounders. Applied to [0,1]-normalized fused scores so it acts
     # as a true ~w nudge (#1056). Set to 0.0 to disable
