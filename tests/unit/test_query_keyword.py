@@ -87,15 +87,42 @@ class TestTokenize:
         # The old pattern would have split "café" into "caf" (dropping the é).
         assert "caf" not in tokens
 
-    def test_cjk_collapses_to_single_run(self) -> None:
-        """Known limitation: a CJK run has no inter-word spaces, so it stays one token.
+    def test_cjk_emits_overlapping_bigrams(self) -> None:
+        """A CJK run is segmented into overlapping character bigrams (#1388).
 
-        Still strictly better than the old ASCII pattern (which returned nothing);
-        real CJK segmentation is a separate, heavier follow-up.
+        No inter-word spaces means ``[^\\W_]+`` collapsed the run to one token,
+        which gave no sub-phrase matching. Overlapping bigrams restore
+        cross-chunk keyword overlap while staying index/query consistent.
         """
-        tokens = tokenize("玛丽居里发现了镭元素", use_stemming=False, remove_stopwords=False)
-        assert tokens == ["玛丽居里发现了镭元素"]
-        assert re.findall(r"\b[a-zA-Z0-9]+\b", "玛丽居里发现了镭元素") == []
+        text = "玛丽居里发现了镭元素"
+        tokens = tokenize(text, use_stemming=False, remove_stopwords=False)
+        # Non-degenerate: more than one token, all length-2 bigrams.
+        assert len(tokens) == len(text) - 1
+        assert tokens[:3] == ["玛丽", "丽居", "居里"]
+        assert all(len(t) == 2 for t in tokens)
+        # The old ASCII pattern extracted nothing from CJK at all.
+        assert re.findall(r"\b[a-zA-Z0-9]+\b", text) == []
+
+    def test_cjk_query_phrase_is_subset_of_doc(self) -> None:
+        """A query phrase's bigrams are a subset of the document's bigrams (#1388)."""
+        doc = set(tokenize("玛丽居里发现了镭元素", use_stemming=False, remove_stopwords=False))
+        query = set(tokenize("居里发现", use_stemming=False, remove_stopwords=False))
+        assert query  # non-empty
+        assert query <= doc
+
+    def test_cjk_single_char_run_emits_unigram(self) -> None:
+        """A single CJK character (no bigram possible) is kept as a unigram (#1388)."""
+        tokens = tokenize("镭", use_stemming=False, remove_stopwords=False)
+        assert tokens == ["镭"]
+
+    def test_japanese_kana_kanji_mix_tokenizes(self) -> None:
+        """Mixed Hiragana/Katakana/Kanji text yields non-degenerate bigrams (#1388)."""
+        tokens = tokenize("日本語のテキスト", use_stemming=False, remove_stopwords=False)
+        assert len(tokens) > 1
+        assert all(len(t) == 2 for t in tokens)
+        assert "日本" in tokens
+        # Index/query consistency across the run.
+        assert set(tokenize("テキスト", use_stemming=False, remove_stopwords=False)) <= set(tokens)
 
     def test_decomposed_latin_normalized(self) -> None:
         """NFC normalization keeps a base letter and a combining accent as one token."""
@@ -105,17 +132,21 @@ class TestTokenize:
         # Without NFC the combining mark splits the word - the bug this guards against.
         assert re.findall(r"[^\W_]+", decomposed) == ["e", "cole"]
 
-    def test_combining_mark_script_still_unsupported(self) -> None:
-        """Known limitation pinned: combining-mark scripts (Indic) are NOT fixed here.
+    def test_combining_mark_script_keeps_base_plus_matra(self) -> None:
+        """Combining-mark scripts (Indic) keep base + matras as one token (#1388).
 
-        ``\\w`` does not match the matras, so Devanagari splits at every mark into
-        single base consonants, which the ``len > 2`` filter then drops entirely -
-        still zero tokens, like the old ASCII pattern. (CJK, by contrast, collapses
-        to one long token that survives.) Proper support needs mark-aware
-        tokenization - a separate follow-up. Pinned so the gap is explicit.
+        ``\\w`` does not match the matras, so the old pattern split Devanagari at
+        every mark into single base consonants, which the ``len > 2`` filter then
+        dropped entirely (zero recall). Category-M marks are now word-forming, so
+        the base consonant and its matras stay ONE non-empty token, and index and
+        query tokenize identically.
         """
         text = "\u0939\u093f\u0928\u094d\u0926\u0940"  # Devanagari "Hindi"
-        assert tokenize(text, use_stemming=False, remove_stopwords=False) == []
+        tokens = tokenize(text, use_stemming=False, remove_stopwords=False)
+        assert tokens != []  # NOT dropped anymore
+        assert tokens == [unicodedata.normalize("NFC", text.lower())]
+        # The old pattern fragmented this into single base consonants.
+        assert re.findall(r"[^\W_]+", text) == ["\u0939", "\u0928", "\u0926"]
 
 
 class TestBasicStem:
