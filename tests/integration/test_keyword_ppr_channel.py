@@ -13,6 +13,7 @@ test_sqlite_lance_ingest.py.
 
 from __future__ import annotations
 
+import ast
 import os
 from pathlib import Path
 
@@ -129,6 +130,50 @@ async def test_default_bm25_does_not_write_keyword_chunks(tmp_path: Path) -> Non
         assert edges == [], "keyword_chunks should be empty on the default bm25 path"
     finally:
         await coord.disconnect()
+
+
+def test_every_engine_edge_write_is_gated_on_keyword_ppr() -> None:
+    """Pin the ingest gate to source: no UNGATED ``persist_keyword_chunk_edges``.
+
+    The behavioral test above only proves "if the helper is never called, no
+    rows are written" — it would stay green if the default bm25 ingest path
+    started persisting edges unconditionally. This is the actual contract: every
+    ``persist_keyword_chunk_edges(...)`` call in the engine is lexically inside an
+    ``if ... lexical_channel == "keyword_ppr"`` guard, so default bm25
+    deployments never write keyword_chunks. AST source-scan (no DB), so it fails
+    the instant a new call site is added without the gate.
+    """
+    engine_src = Path(__file__).resolve().parents[2] / "src" / "khora" / "engines" / "vectorcypher" / "engine.py"
+    tree = ast.parse(engine_src.read_text())
+
+    def _guards_keyword_ppr(test: ast.expr) -> bool:
+        # True if any Compare in the test is `... == "keyword_ppr"`.
+        return any(
+            isinstance(cmp.comparators[0], ast.Constant) and cmp.comparators[0].value == "keyword_ppr"
+            for cmp in ast.walk(test)
+            if isinstance(cmp, ast.Compare) and cmp.comparators
+        )
+
+    # Map each call line -> whether it sits under a keyword_ppr-guarded `if`.
+    guarded_lines: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If) and _guards_keyword_ppr(node.test):
+            for child in ast.walk(node):
+                guarded_lines.add(getattr(child, "lineno", -1))
+
+    ungated = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "persist_keyword_chunk_edges"
+        and node.lineno not in guarded_lines
+    ]
+    assert not ungated, (
+        f"persist_keyword_chunk_edges called WITHOUT a `lexical_channel == 'keyword_ppr'` "
+        f"guard at engine.py line(s) {ungated} — the default bm25 path would write "
+        "keyword_chunks. Wrap the call in the gate."
+    )
 
 
 async def test_upsert_is_idempotent_per_chunk(tmp_path: Path) -> None:

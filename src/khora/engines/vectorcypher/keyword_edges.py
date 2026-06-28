@@ -80,9 +80,8 @@ async def persist_keyword_chunk_edges(
     try:
         await storage.upsert_keyword_chunk_edges(namespace_id, edges)
     except Exception as exc:
-        logger.warning(
+        logger.opt(exception=exc).warning(
             "keyword_ppr edge write failed, continuing without keyword_chunks for this batch",
-            exc_info=True,
         )
         if out_diagnostics is not None:
             out_diagnostics.setdefault("degradations", []).append(

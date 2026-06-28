@@ -4099,14 +4099,19 @@ class VectorCypherRetriever:
         and PPR channels).
 
         The channel cannot push a recall-filter down to the bipartite, so under
-        a deterministic ``filter_ast`` it returns an empty channel (records an
+        a CONSTRAINING ``filter_ast`` it returns an empty channel (records an
         ADR-001 ``Degradation``) rather than smuggling filter-violating chunks
-        into RRF - mirroring BM25's filtered-fallback guard. Degrade-safe: no
-        storage / no keywords / no edges / no seed overlap -> ``[]``.
+        into RRF - mirroring BM25's filtered-fallback guard. A constraint-free
+        filter (``filter={}`` / ``RecallFilter()`` -> non-null match-everything
+        ``AND`` with no children) has nothing to enforce, so it passes through;
+        the test mirrors the ``filter_ast is None or not filter_ast.children``
+        idiom used by the typed-entity fast path and the turbopuffer guard.
+        Degrade-safe: no storage / no keywords / no edges / no seed overlap ->
+        ``[]``.
         """
         if self._storage is None:
             return []
-        if filter_ast is not None:
+        if filter_ast is not None and filter_ast.children:
             if degradations is not None:
                 degradations.append(
                     Degradation(

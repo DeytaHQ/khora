@@ -1194,6 +1194,10 @@ class VectorCypherEngine:
             entities_extracted = 0
             relationships_created = 0
             chunk_index_offset = 0
+            # keyword_ppr (#1391): accumulate this document's chunks across all
+            # windows so IDF is computed once per document, not per window. A
+            # window split (max_chunks_in_flight) must not change keyword weights.
+            keyword_edge_chunks: list[TemporalChunk] = []
 
             for window in windows:
                 # Acquire global chunk semaphore before processing this window.
@@ -1251,13 +1255,11 @@ class VectorCypherEngine:
                     # ingest (ADR-001).
                     await _mirror_chunks_or_degrade(dual_nodes, temporal_chunks, document.namespace_id, out_diagnostics)
 
-                    # keyword_ppr lexical channel (#1391): persist keyword->chunk
-                    # edges. Gated - default bm25 deployments pay zero cost. The
-                    # chunks are already durable, so a write failure degrades.
+                    # keyword_ppr lexical channel (#1391): collect this window's
+                    # chunks; edges are persisted once after the window loop so
+                    # IDF is document-scoped. Gated - default bm25 pays zero cost.
                     if self._config.query.lexical_channel == "keyword_ppr":
-                        await persist_keyword_chunk_edges(
-                            storage, document.namespace_id, temporal_chunks, out_diagnostics=out_diagnostics
-                        )
+                        keyword_edge_chunks.extend(temporal_chunks)
 
                     # Skeleton-based entity extraction (for core chunks only)
                     if self._config.pipeline.extract_entities:
@@ -1279,6 +1281,15 @@ class VectorCypherEngine:
                 finally:
                     if chunk_semaphore is not None:
                         await chunk_semaphore.release(n_acquired)
+
+            # keyword_ppr lexical channel (#1391): persist keyword->chunk edges
+            # once for the whole document (IDF is document-scoped, matching the
+            # streaming batch path's per-document semantics). The chunks are
+            # already durable, so a write failure degrades.
+            if self._config.query.lexical_channel == "keyword_ppr" and keyword_edge_chunks:
+                await persist_keyword_chunk_edges(
+                    storage, document.namespace_id, keyword_edge_chunks, out_diagnostics=out_diagnostics
+                )
 
             # Update document status
             document.mark_completed(total_chunks_created, entities_extracted, relationships_created)

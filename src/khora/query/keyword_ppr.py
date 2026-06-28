@@ -81,19 +81,26 @@ async def keyword_ppr_retrieve_chunks(
         return []
 
     # Build the keyword -> chunk-ids map (first-seen order), the per-chunk index,
-    # and the per-keyword IDF (stored at ingest; same value on every row for a
-    # keyword, so first-seen wins). Mirrors core.ranking.select_core_chunks'
-    # construction of keyword_chunk_ids / idf_scores.
+    # and the per-keyword IDF. IDF is stored per edge at ingest and is computed
+    # per-document, so the SAME keyword can carry DIFFERENT idf values across
+    # documents. Averaging the per-edge idf gives a deterministic, order-
+    # independent per-keyword weight (collapsing to first-seen made the weight
+    # depend on whichever rows get_keyword_chunk_edges returned first under the
+    # max_edges cap). Mirrors core.ranking.select_core_chunks' construction of
+    # keyword_chunk_ids / idf_scores.
     chunk_index: dict[UUID, int] = {}
     keyword_to_chunks: dict[str, list[int]] = {}
-    keyword_idf: dict[str, float] = {}
+    keyword_idf_sum: dict[str, float] = {}
+    keyword_idf_count: dict[str, int] = {}
     for keyword, chunk_id, idf in edges_rows:
         idx = chunk_index.get(chunk_id)
         if idx is None:
             idx = len(chunk_index)
             chunk_index[chunk_id] = idx
         keyword_to_chunks.setdefault(keyword, []).append(idx)
-        keyword_idf.setdefault(keyword, idf)
+        keyword_idf_sum[keyword] = keyword_idf_sum.get(keyword, 0.0) + idf
+        keyword_idf_count[keyword] = keyword_idf_count.get(keyword, 0) + 1
+    keyword_idf = {kw: keyword_idf_sum[kw] / keyword_idf_count[kw] for kw in keyword_idf_sum}
 
     n_chunks = len(chunk_index)
     keyword_list = list(keyword_to_chunks.keys())
