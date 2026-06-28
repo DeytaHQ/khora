@@ -27,7 +27,7 @@ import asyncio
 import math
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pyarrow as pa
 from loguru import logger
@@ -36,7 +36,7 @@ from khora.core.models import Chunk, Entity
 from khora.exceptions import EmbeddingError
 from khora.storage.backends._fts5 import escape_fts5_query
 
-from ._helpers import from_json_text, to_json_text, uuid_to_text
+from ._helpers import from_json_text, text_to_uuid, to_json_text, uuid_to_text
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -477,6 +477,58 @@ class SQLiteLanceVectorAdapter:
         )
         rows = await cur.fetchall()
         return [self._row_to_chunk(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Keyword-chunk bipartite (keyword_ppr lexical channel, #1391)
+    # ------------------------------------------------------------------
+
+    async def upsert_keyword_chunk_edges(
+        self,
+        namespace_id: UUID,
+        edges: list[tuple[str, UUID, float]],
+    ) -> int:
+        """Bulk-insert keyword -> chunk edges. Idempotent per chunk.
+
+        Deletes existing edges for the chunk_ids in this batch, then inserts the
+        fresh rows. Returns the number of rows inserted. The ``keyword_chunks``
+        table is created by migration 050 on both dialects, so it is present on
+        the sqlite_lance stack too.
+        """
+        if not edges:
+            return 0
+        ns_text = uuid_to_text(namespace_id)
+        chunk_ids = {chunk_id for _kw, chunk_id, _idf in edges}
+        chunk_placeholders = ",".join("?" for _ in chunk_ids)
+        await self._sqlite.execute(
+            f"DELETE FROM keyword_chunks WHERE namespace_id = ? AND chunk_id IN ({chunk_placeholders})",  # noqa: S608
+            [ns_text, *(uuid_to_text(c) for c in chunk_ids)],
+        )
+        now = _now_iso()
+        rows = [
+            (uuid_to_text(uuid4()), ns_text, keyword, uuid_to_text(chunk_id), idf, now)
+            for keyword, chunk_id, idf in edges
+        ]
+        await self._sqlite.executemany(
+            "INSERT INTO keyword_chunks (id, namespace_id, keyword, chunk_id, idf, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        await self._sqlite.commit()
+        return len(rows)
+
+    async def get_keyword_chunk_edges(
+        self,
+        namespace_id: UUID,
+        *,
+        limit: int,
+    ) -> list[tuple[str, UUID, float]]:
+        """Load a namespace's keyword -> chunk edges, capped at ``limit``."""
+        cur = await self._sqlite.execute(
+            "SELECT keyword, chunk_id, idf FROM keyword_chunks WHERE namespace_id = ? LIMIT ?",
+            (uuid_to_text(namespace_id), limit),
+        )
+        rows = await cur.fetchall()
+        return [(row["keyword"], text_to_uuid(row["chunk_id"]), row["idf"]) for row in rows]
 
     # ------------------------------------------------------------------
     # Chunk search

@@ -43,6 +43,8 @@ _FILTER_AWARE_METHODS = frozenset(
         "_vector_search_chunks",
         "_recency_channel_chunks",
         "_bm25_search_chunks",
+        "_lexical_search_chunks",
+        "_keyword_ppr_search_chunks",
         "_vector_only_fallback",
     }
 )

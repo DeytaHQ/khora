@@ -65,6 +65,7 @@ from khora.telemetry import trace, trace_span
 from khora.telemetry.metrics import metric_counter, metric_histogram
 
 from .dual_nodes import DualNodeManager, EntityChunkLink
+from .keyword_edges import persist_keyword_chunk_edges, persist_keyword_chunk_edges_from_keywords
 from .retriever import RetrieverConfig, VectorCypherRetriever
 from .router import QueryComplexityRouter, RouterConfig
 from .temporal_detection import TemporalCategory, TemporalDetector, TemporalSignal
@@ -817,6 +818,12 @@ class VectorCypherEngine:
             enable_bm25_channel=self._vc_config.enable_bm25_channel,
             bm25_weight=self._vc_config.bm25_weight,
             bm25_top_k=self._vc_config.bm25_top_k,
+            # Issue #1391 — lexical-channel selector (keyword_ppr vs bm25).
+            # Read straight from KhoraConfig.query (bypasses VectorCypherConfig,
+            # mirroring the PPR flags above). Default "bm25" = unchanged.
+            lexical_channel=self._config.query.lexical_channel,
+            keyword_ppr_damping=self._config.query.keyword_ppr_damping,
+            keyword_ppr_max_edges=self._config.query.keyword_ppr_max_edges,
             enable_reranking=self._vc_config.enable_reranking,
             reranking_model=self._vc_config.reranking_model,
             reranking_top_n=self._vc_config.reranking_top_n,
@@ -1187,6 +1194,12 @@ class VectorCypherEngine:
             entities_extracted = 0
             relationships_created = 0
             chunk_index_offset = 0
+            # keyword_ppr (#1391): accumulate a LIGHTWEIGHT (chunk_id, keyword_set)
+            # snapshot across all windows so IDF is computed once per document
+            # (a window split via max_chunks_in_flight must not change keyword
+            # weights) WITHOUT retaining the embedded TemporalChunks (and their
+            # 1536-dim payloads) past their window - preserving the memory bound.
+            keyword_chunk_snapshot: list[tuple[UUID, set[str]]] = []
 
             for window in windows:
                 # Acquire global chunk semaphore before processing this window.
@@ -1244,6 +1257,18 @@ class VectorCypherEngine:
                     # ingest (ADR-001).
                     await _mirror_chunks_or_degrade(dual_nodes, temporal_chunks, document.namespace_id, out_diagnostics)
 
+                    # keyword_ppr lexical channel (#1391): snapshot this window's
+                    # (chunk_id, keyword_set) NOW (while the chunks are live) so
+                    # edges are persisted once after the window loop with a
+                    # document-scoped IDF, without retaining the embedded chunks.
+                    # Gated - default bm25 pays zero cost.
+                    if self._config.query.lexical_channel == "keyword_ppr":
+                        from khora.extraction.tokenize import tokenize_multilingual
+
+                        keyword_chunk_snapshot.extend(
+                            (tc.id, set(tokenize_multilingual(tc.content))) for tc in temporal_chunks
+                        )
+
                     # Skeleton-based entity extraction (for core chunks only)
                     if self._config.pipeline.extract_entities:
                         ents, rels = await self._run_skeleton_extraction(
@@ -1264,6 +1289,15 @@ class VectorCypherEngine:
                 finally:
                     if chunk_semaphore is not None:
                         await chunk_semaphore.release(n_acquired)
+
+            # keyword_ppr lexical channel (#1391): persist keyword->chunk edges
+            # once for the whole document (IDF is document-scoped, matching the
+            # streaming batch path's per-document semantics) from the lightweight
+            # snapshot. The chunks are already durable, so a write failure degrades.
+            if self._config.query.lexical_channel == "keyword_ppr" and keyword_chunk_snapshot:
+                await persist_keyword_chunk_edges_from_keywords(
+                    storage, document.namespace_id, keyword_chunk_snapshot, out_diagnostics=out_diagnostics
+                )
 
             # Update document status
             document.mark_completed(total_chunks_created, entities_extracted, relationships_created)
@@ -1969,6 +2003,12 @@ class VectorCypherEngine:
                 # pgvector already holds the chunks and the coordinator's #884 path
                 # below handles any remaining graph divergence.
                 await _mirror_chunks_or_degrade(dual_nodes, new_temporal_chunks, namespace_id, replace_diagnostics)
+                # keyword_ppr lexical channel (#1391): replace this document's
+                # keyword->chunk edges (upsert is idempotent per chunk). Gated.
+                if self._config.query.lexical_channel == "keyword_ppr":
+                    await persist_keyword_chunk_edges(
+                        storage, namespace_id, new_temporal_chunks, out_diagnostics=replace_diagnostics
+                    )
         except Exception as e:
             # Self-heal: mark FAILED and re-raise unwrapped so the next
             # successful replace against the same external_id heals the row.
@@ -3205,6 +3245,17 @@ class VectorCypherEngine:
             # already durable in pgvector, so a mirror failure degrades (counter +
             # WARNING) rather than aborting the batch (ADR-001).
             await _mirror_chunks_or_degrade(dual_nodes, all_temporal_chunks, namespace_id)
+
+            # keyword_ppr lexical channel (#1391): persist keyword->chunk edges
+            # per document slice (IDF is document-scoped, matching the skeleton
+            # selection's per-document semantics). Gated - default bm25 pays
+            # zero cost; a write failure degrades (WARNING) per persist helper.
+            if self._config.query.lexical_channel == "keyword_ppr":
+                for si in range(len(state_chunk_ranges)):
+                    start, end = state_chunk_ranges[si]
+                    doc_chunks = all_temporal_chunks[start:end]
+                    if doc_chunks:
+                        await persist_keyword_chunk_edges(storage, namespace_id, doc_chunks)
 
             _stage3_ms += (_time.perf_counter() - _t0) * 1000
 

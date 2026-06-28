@@ -24,6 +24,7 @@ from khora.db.models import (
     ChronicleEventModel,
     ChunkModel,
     EntityModel,
+    KeywordChunkModel,
     MemoryFactModel,
     RelationshipModel,
 )
@@ -1389,6 +1390,61 @@ class PgVectorBackend(AsyncSessionMixin):
 
             result = await session.execute(query)
             return [(row.id, row.similarity) for row in result.all()]
+
+    # =========================================================================
+    # Keyword-chunk bipartite (keyword_ppr lexical channel, #1391)
+    # =========================================================================
+
+    async def upsert_keyword_chunk_edges(
+        self,
+        namespace_id: UUID,
+        edges: list[tuple[str, UUID, float]],
+    ) -> int:
+        """Bulk-insert keyword -> chunk edges for the keyword_ppr channel.
+
+        ``edges`` is a list of ``(keyword, chunk_id, idf)``. Idempotent per
+        chunk: all existing edges for the chunk_ids in this batch are deleted
+        before the fresh rows are inserted, so re-ingesting a chunk replaces
+        its keyword set rather than accumulating duplicates. Returns the number
+        of rows inserted.
+        """
+        if not edges:
+            return 0
+        chunk_ids = {chunk_id for _kw, chunk_id, _idf in edges}
+        async with self._get_session() as session:
+            await session.execute(
+                delete(KeywordChunkModel).where(
+                    KeywordChunkModel.namespace_id == namespace_id,
+                    KeywordChunkModel.chunk_id.in_(chunk_ids),
+                )
+            )
+            values = [
+                {"namespace_id": namespace_id, "keyword": keyword, "chunk_id": chunk_id, "idf": idf}
+                for keyword, chunk_id, idf in edges
+            ]
+            await session.execute(sa.insert(KeywordChunkModel), values)
+            await session.commit()
+        return len(values)
+
+    async def get_keyword_chunk_edges(
+        self,
+        namespace_id: UUID,
+        *,
+        limit: int,
+    ) -> list[tuple[str, UUID, float]]:
+        """Load a namespace's keyword -> chunk edges, capped at ``limit``.
+
+        Returns ``(keyword, chunk_id, idf)`` tuples. The cap bounds the
+        per-query PageRank cost of the keyword_ppr channel.
+        """
+        async with self._get_session() as session:
+            query = (
+                select(KeywordChunkModel.keyword, KeywordChunkModel.chunk_id, KeywordChunkModel.idf)
+                .where(KeywordChunkModel.namespace_id == namespace_id)
+                .limit(limit)
+            )
+            result = await session.execute(query)
+            return [(row.keyword, row.chunk_id, row.idf) for row in result.all()]
 
     # =========================================================================
     # Utility operations
