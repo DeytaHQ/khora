@@ -304,7 +304,7 @@ class TestMigration032OnSqlite:
                 async with engine.connect() as conn:
                     # Chain reached head (sanity).
                     result = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
-                    assert result.scalar() == "049_hook_subscriptions"
+                    assert result.scalar() == "050_keyword_chunks"
 
                     # khora_dream_runs exists on SQLite (#896) so dream_history /
                     # dream_status work on the embedded sqlite_lance stack.

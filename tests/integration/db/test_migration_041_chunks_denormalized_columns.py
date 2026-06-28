@@ -322,7 +322,7 @@ class TestMigration041OnPostgres:
                 async with engine.connect() as conn:
                     # Chain reached head.
                     result = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
-                    assert result.scalar() == "049_hook_subscriptions"
+                    assert result.scalar() == "050_keyword_chunks"
 
                     # The migration did not create the table.
                     result = await conn.execute(
@@ -353,7 +353,7 @@ class TestMigration041OnSqlite:
             try:
                 async with engine.connect() as conn:
                     result = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
-                    assert result.scalar() == "049_hook_subscriptions"
+                    assert result.scalar() == "050_keyword_chunks"
             finally:
                 await engine.dispose()
 
