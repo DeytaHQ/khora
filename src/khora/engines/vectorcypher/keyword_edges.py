@@ -29,8 +29,10 @@ if TYPE_CHECKING:
     from khora.storage.temporal import TemporalChunk
 
 
-def build_keyword_chunk_edges(chunks: list[TemporalChunk]) -> list[tuple[str, UUID, float]]:
-    """Build ``(keyword, chunk_id, idf)`` edges for a batch of chunks.
+def build_keyword_chunk_edges_from_keywords(
+    chunk_keywords: list[tuple[UUID, set[str]]],
+) -> list[tuple[str, UUID, float]]:
+    """Build ``(keyword, chunk_id, idf)`` edges from per-chunk keyword sets.
 
     Mirrors the keyword -> chunk-ids map + IDF formula in
     ``khora.core.ranking.select_core_chunks``: each keyword's IDF is
@@ -39,20 +41,22 @@ def build_keyword_chunk_edges(chunks: list[TemporalChunk]) -> list[tuple[str, UU
     Approximate by design - computed per ingest batch, not over the whole
     namespace - which is fine for the experimental channel.
 
-    Chunks must carry ``.id`` (assigned post-persist) and ``.content``. Returns
-    one edge per (keyword, chunk) pair.
+    Takes ``(chunk_id, keyword_set)`` pairs rather than chunks so the caller can
+    tokenize per window and release the embedded ``TemporalChunk``s (and their
+    1536-dim payloads) without retaining the whole document in memory - keeping
+    the ``max_chunks_in_flight`` bound. Returns one edge per (keyword, chunk).
     """
-    if not chunks:
+    if not chunk_keywords:
         return []
 
     # keyword -> chunk ids it appears in (first-seen order), mirroring
     # select_core_chunks' insertion semantics.
     keyword_to_chunks: dict[str, list[UUID]] = {}
-    for chunk in chunks:
-        for keyword in set(tokenize_multilingual(chunk.content)):
-            keyword_to_chunks.setdefault(keyword, []).append(chunk.id)
+    for chunk_id, keywords in chunk_keywords:
+        for keyword in keywords:
+            keyword_to_chunks.setdefault(keyword, []).append(chunk_id)
 
-    n_chunks = len(chunks)
+    n_chunks = len(chunk_keywords)
     edges: list[tuple[str, UUID, float]] = []
     for keyword, chunk_ids in keyword_to_chunks.items():
         idf = math.log(n_chunks / (1 + len(chunk_ids))) + 1
@@ -61,20 +65,24 @@ def build_keyword_chunk_edges(chunks: list[TemporalChunk]) -> list[tuple[str, UU
     return edges
 
 
-async def persist_keyword_chunk_edges(
+def build_keyword_chunk_edges(chunks: list[TemporalChunk]) -> list[tuple[str, UUID, float]]:
+    """Build ``(keyword, chunk_id, idf)`` edges for a batch of chunks.
+
+    Tokenizes each chunk and delegates to
+    :func:`build_keyword_chunk_edges_from_keywords`. Chunks must carry ``.id``
+    (assigned post-persist) and ``.content``.
+    """
+    return build_keyword_chunk_edges_from_keywords(
+        [(chunk.id, set(tokenize_multilingual(chunk.content))) for chunk in chunks]
+    )
+
+
+async def _persist_edges(
     storage: StorageCoordinator,
     namespace_id: UUID,
-    chunks: list[TemporalChunk],
-    *,
-    out_diagnostics: dict[str, Any] | None = None,
+    edges: list[tuple[str, UUID, float]],
+    out_diagnostics: dict[str, Any] | None,
 ) -> None:
-    """Extract keywords + persist keyword -> chunk edges for ``chunks`` (#1391).
-
-    Called from the VectorCypher persist sites only when the keyword_ppr channel
-    is enabled. The chunks are already durable, so a write failure degrades
-    (WARNING + ADR-001 ``Degradation``) rather than aborting ingest.
-    """
-    edges = build_keyword_chunk_edges(chunks)
     if not edges:
         return
     try:
@@ -94,4 +102,44 @@ async def persist_keyword_chunk_edges(
             )
 
 
-__all__ = ["build_keyword_chunk_edges", "persist_keyword_chunk_edges"]
+async def persist_keyword_chunk_edges(
+    storage: StorageCoordinator,
+    namespace_id: UUID,
+    chunks: list[TemporalChunk],
+    *,
+    out_diagnostics: dict[str, Any] | None = None,
+) -> None:
+    """Extract keywords + persist keyword -> chunk edges for ``chunks`` (#1391).
+
+    Called from the VectorCypher persist sites only when the keyword_ppr channel
+    is enabled. The chunks are already durable, so a write failure degrades
+    (WARNING + ADR-001 ``Degradation``) rather than aborting ingest.
+    """
+    await _persist_edges(storage, namespace_id, build_keyword_chunk_edges(chunks), out_diagnostics)
+
+
+async def persist_keyword_chunk_edges_from_keywords(
+    storage: StorageCoordinator,
+    namespace_id: UUID,
+    chunk_keywords: list[tuple[UUID, set[str]]],
+    *,
+    out_diagnostics: dict[str, Any] | None = None,
+) -> None:
+    """Persist edges from a precomputed ``(chunk_id, keyword_set)`` snapshot (#1391).
+
+    Same contract as :func:`persist_keyword_chunk_edges` but document-scoped IDF
+    is computed over a lightweight keyword-set snapshot, so the windowed ingest
+    path can tokenize + release each window's embedded chunks instead of
+    retaining the whole document (preserving the ``max_chunks_in_flight`` bound).
+    """
+    await _persist_edges(
+        storage, namespace_id, build_keyword_chunk_edges_from_keywords(chunk_keywords), out_diagnostics
+    )
+
+
+__all__ = [
+    "build_keyword_chunk_edges",
+    "build_keyword_chunk_edges_from_keywords",
+    "persist_keyword_chunk_edges",
+    "persist_keyword_chunk_edges_from_keywords",
+]

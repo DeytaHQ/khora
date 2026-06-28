@@ -138,11 +138,12 @@ def test_every_engine_edge_write_is_gated_on_keyword_ppr() -> None:
     The behavioral test above only proves "if the helper is never called, no
     rows are written" — it would stay green if the default bm25 ingest path
     started persisting edges unconditionally. This is the actual contract: every
-    ``persist_keyword_chunk_edges(...)`` call in the engine is lexically inside an
-    ``if ... lexical_channel == "keyword_ppr"`` guard, so default bm25
+    ``persist_keyword_chunk_edges*(...)`` call in the engine is lexically inside
+    an ``if ... lexical_channel == "keyword_ppr"`` guard, so default bm25
     deployments never write keyword_chunks. AST source-scan (no DB), so it fails
     the instant a new call site is added without the gate.
     """
+    edge_write_fns = {"persist_keyword_chunk_edges", "persist_keyword_chunk_edges_from_keywords"}
     engine_src = Path(__file__).resolve().parents[2] / "src" / "khora" / "engines" / "vectorcypher" / "engine.py"
     tree = ast.parse(engine_src.read_text())
 
@@ -166,11 +167,11 @@ def test_every_engine_edge_write_is_gated_on_keyword_ppr() -> None:
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
-        and node.func.id == "persist_keyword_chunk_edges"
+        and node.func.id in edge_write_fns
         and node.lineno not in guarded_lines
     ]
     assert not ungated, (
-        f"persist_keyword_chunk_edges called WITHOUT a `lexical_channel == 'keyword_ppr'` "
+        f"a keyword_chunk edge write was called WITHOUT a `lexical_channel == 'keyword_ppr'` "
         f"guard at engine.py line(s) {ungated} — the default bm25 path would write "
         "keyword_chunks. Wrap the call in the gate."
     )
