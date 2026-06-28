@@ -223,20 +223,36 @@ async def test_pgvector_keyword_ppr_round_trip_and_recall() -> None:
     Exercises the pgvector backend's upsert/load + the query channel end-to-end
     against the live Postgres stack, and asserts a fresh namespace with the
     default (no edge write) leaves keyword_chunks empty.
+
+    Uses a graph-LESS coordinator (PostgreSQL relational + pgvector on one shared
+    engine), not a full ``Khora(...).connect()``: the channel only touches the
+    storage layer + the query helper, and the full engine's ``connect()`` would
+    require Neo4j credentials this PG-only leg has no business depending on
+    (mirrors test_chronicle_filter_pgvector.py).
     """
-    from khora import Khora
-    from khora.config import KhoraConfig
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from khora.db.session import run_migrations
+    from khora.storage.backends.pgvector import PgVectorBackend
+    from khora.storage.backends.postgresql import PostgreSQLBackend
+    from khora.storage.coordinator import StorageCoordinator
 
     database_url = os.environ.get("KHORA_DATABASE_URL", _database_url())
-    config = KhoraConfig(database_url=database_url)
-    config.llm.embedding_dimension = _PG_EMBED_DIM
-    config.storage.embedding_dimension = _PG_EMBED_DIM
-    kb = Khora(config, run_migrations=True)
-    await kb.connect()
+    if database_url.startswith("postgresql://"):
+        database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    elif database_url.startswith("postgres://"):
+        database_url = database_url.replace("postgres://", "postgresql+asyncpg://", 1)
+    result = await run_migrations(database_url)
+    assert result.success, f"migrations failed: {result.error}"
+
+    engine = create_async_engine(database_url)
+    relational = PostgreSQLBackend(database_url, engine=engine)
+    vector = PgVectorBackend(database_url, embedding_dimension=_PG_EMBED_DIM, engine=engine)
+    storage = StorageCoordinator(relational=relational, vector=vector)
+    await storage.connect()
     try:
-        storage = kb._engine._retriever._storage  # type: ignore[union-attr,attr-defined]
-        ns_public = (await kb.create_namespace()).namespace_id
-        ns_row = await storage.resolve_namespace(ns_public)
+        ns = await storage.create_namespace(MemoryNamespace())
+        ns_row = await storage.resolve_namespace(ns.namespace_id)
 
         doc = Document(namespace_id=ns_row, content="photosynthesis in plants", title="bio")
         await storage.create_document(doc)
@@ -281,4 +297,5 @@ async def test_pgvector_keyword_ppr_round_trip_and_recall() -> None:
         assert results, "pgvector keyword_ppr channel returned no chunks"
         assert results[0][0] == target.id
     finally:
-        await kb.disconnect()
+        await storage.disconnect()
+        await engine.dispose()
