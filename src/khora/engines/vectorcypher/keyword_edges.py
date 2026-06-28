@@ -49,11 +49,14 @@ def build_keyword_chunk_edges_from_keywords(
     if not chunk_keywords:
         return []
 
-    # keyword -> chunk ids it appears in (first-seen order), mirroring
-    # select_core_chunks' insertion semantics.
+    # keyword -> chunk ids it appears in, mirroring select_core_chunks'
+    # insertion semantics. Iterate keywords SORTED so the produced edge-list
+    # order is deterministic (a set's iteration order is hash-seed dependent,
+    # which would make the edge list - and exact-list tests - order-flaky and
+    # break the byte-identical guarantee between the two entry points).
     keyword_to_chunks: dict[str, list[UUID]] = {}
     for chunk_id, keywords in chunk_keywords:
-        for keyword in keywords:
+        for keyword in sorted(keywords):
             keyword_to_chunks.setdefault(keyword, []).append(chunk_id)
 
     n_chunks = len(chunk_keywords)

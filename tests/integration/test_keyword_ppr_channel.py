@@ -108,40 +108,74 @@ async def test_ingest_populates_keyword_chunks_and_channel_recalls(tmp_path: Pat
         await coord.disconnect()
 
 
-async def test_default_bm25_does_not_write_keyword_chunks(tmp_path: Path) -> None:
-    """Default lexical_channel (bm25) must not populate keyword_chunks.
+async def test_default_bm25_ingest_writes_no_keyword_chunks(tmp_path: Path) -> None:
+    """A REAL default-config (bm25) ingest through the engine writes zero edges.
 
-    The gate lives in the engine (``if lexical_channel == "keyword_ppr"``); this
-    asserts the storage table stays empty when the ingest helper is never
-    called, i.e. the default path writes zero edges.
+    Unlike asserting "the helper was never called", this drives an actual
+    ``VectorCypherEngine.remember()`` with the default ``lexical_channel="bm25"``
+    so the engine's ``if lexical_channel == "keyword_ppr"`` gate is exercised and
+    evaluates False. If the default ingest path ever started persisting edges
+    unconditionally, keyword_chunks would be non-empty and this fails.
+
+    Hermetic: sqlite_lance backend (graph-less, no Neo4j), a fake embedder (no
+    LiteLLM), and ``extract_entities=False`` (no LLM extraction).
     """
-    coord = await build_sqlite_lance_coordinator(tmp_path)
+    from khora.config import KhoraConfig
+    from khora.config.schema import SQLiteLanceConfig
+    from khora.db.session import run_migrations
+    from khora.engines.vectorcypher.engine import VectorCypherEngine
+
+    db_path = str(tmp_path / "khora.db")
+    lance_path = str(tmp_path / "khora.lance")
+    result = await run_migrations(f"sqlite+aiosqlite:///{db_path}")
+    assert result.success, f"migration failed: {result.error}"
+
+    config = KhoraConfig()
+    config.storage.backend = "sqlite_lance"
+    config.storage.sqlite_lance = SQLiteLanceConfig(db_path=db_path, lance_path=lance_path, embedding_dimension=32)
+    config.storage.embedding_dimension = 32
+    config.llm.embedding_dimension = 32
+    config.pipeline.extract_entities = False
+    assert config.query.lexical_channel == "bm25", "default lexical_channel must be bm25 for this test"
+
+    class _FakeEmbedder:
+        async def embed(self, text: str) -> list[float]:
+            return fake_embedding(text)
+
+        async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            return [fake_embedding(t) for t in texts]
+
+    engine = VectorCypherEngine(config)
+    await engine.connect()
     try:
-        ns = await coord.create_namespace(MemoryNamespace())
-        # Documents/chunks FK to memory_namespaces.id (the row id), so use the
-        # resolved id. The coordinator keyword methods resolve internally and are
-        # idempotent on row ids, so passing the row id is fine there too.
-        ns_id = await coord.resolve_namespace(ns.namespace_id)
-
-        await _seed_docs(coord, ns_id, ["a document about volcanoes and lava flows"])
-
-        # No persist_keyword_chunk_edges call (the bm25 default never invokes it).
-        edges = await coord.get_keyword_chunk_edges(ns_id, limit=10_000)
-        assert edges == [], "keyword_chunks should be empty on the default bm25 path"
+        engine._embedder = _FakeEmbedder()  # type: ignore[assignment]  # no LiteLLM in the hermetic suite
+        ns = await engine.create_namespace()
+        # The engine's remember() works in row-id space (the public Khora wrapper
+        # does the stable->row resolution); documents FK to memory_namespaces.id.
+        ns_row = ns.id
+        result = await engine.remember(
+            "a document about volcanoes and lava flows and magma chambers",
+            ns_row,
+            entity_types=[],
+            relationship_types=[],
+        )
+        # The ingest really ran (so the no-edges assertion below is not vacuous).
+        assert result.chunks_created > 0, "default ingest produced no chunks"
+        edges = await engine._storage.get_keyword_chunk_edges(ns_row, limit=10_000)  # type: ignore[union-attr]
+        assert edges == [], "default bm25 ingest must not populate keyword_chunks"
     finally:
-        await coord.disconnect()
+        await engine.disconnect()
 
 
 def test_every_engine_edge_write_is_gated_on_keyword_ppr() -> None:
     """Pin the ingest gate to source: no UNGATED ``persist_keyword_chunk_edges``.
 
-    The behavioral test above only proves "if the helper is never called, no
-    rows are written" — it would stay green if the default bm25 ingest path
-    started persisting edges unconditionally. This is the actual contract: every
+    Belt-and-braces with the behavioral test above: every
     ``persist_keyword_chunk_edges*(...)`` call in the engine is lexically inside
     an ``if ... lexical_channel == "keyword_ppr"`` guard, so default bm25
     deployments never write keyword_chunks. AST source-scan (no DB), so it fails
-    the instant a new call site is added without the gate.
+    the instant a NEW call site is added without the gate — catching a regression
+    statically even before the behavioral test runs.
     """
     edge_write_fns = {"persist_keyword_chunk_edges", "persist_keyword_chunk_edges_from_keywords"}
     engine_src = Path(__file__).resolve().parents[2] / "src" / "khora" / "engines" / "vectorcypher" / "engine.py"
