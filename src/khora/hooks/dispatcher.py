@@ -68,7 +68,22 @@ class HookDispatcher:
         config: SemanticHooksConfig | None = None,
         subscription_store: Any = None,
         delivery_sink: Callable[[PersistentSubscription, MemoryEvent], Awaitable[None]] | None = None,
+        namespace_resolver: Callable[[UUID], Awaitable[UUID]] | None = None,
     ) -> None:
+        # #1399: a namespace scope check compares ``event.namespace_id`` against
+        # the subscription/filter ``namespace_id``. But ingest emits events with
+        # the *row-level* id (``remember()`` resolves the public stable
+        # namespace_id to the active version's row id before extraction), while
+        # ``subscribe(namespace_id=...)`` stores the *stable* id the caller
+        # passed — so the two never matched and every scoped subscription fired
+        # zero callbacks. ``namespace_resolver`` (the coordinator's idempotent
+        # ``resolve_namespace``, which maps either a stable id OR a row id to the
+        # row id) lets the scope check normalize BOTH sides to the row-id space
+        # before comparing, so it matches regardless of which space each side
+        # started in. None (e.g. a pure in-memory test, or a graph-/vector-only
+        # stack with no namespace table) falls back to a direct compare.
+        self._namespace_resolver = namespace_resolver
+        self._ns_resolve_cache: dict[UUID, UUID] = {}
         self._subscriptions: dict[str, list[HookSubscription]] = defaultdict(list)
         self._sub_by_id: dict[UUID, HookSubscription] = {}
         # Phase 3 (#599): durable subscriptions. Default off — when
@@ -497,6 +512,40 @@ class HookDispatcher:
         await asyncio.gather(*[_safe_invoke(sub) for sub in matching])
         return len(matching)
 
+    async def _resolve_ns(self, namespace_id: UUID) -> UUID:
+        """Normalize a namespace id to the row-id space for scope comparison (#1399).
+
+        Uses the (idempotent) ``namespace_resolver`` so a stable id and a
+        row-level id both map to the row id. Cached because the mapping is
+        stable for the namespace's active version. Falls back to the input
+        unchanged when no resolver is wired or resolution fails (e.g. a
+        graph-/vector-only stack with no namespace table), preserving the
+        pre-#1399 direct-compare behavior rather than dropping events.
+        """
+        if self._namespace_resolver is None:
+            return namespace_id
+        cached = self._ns_resolve_cache.get(namespace_id)
+        if cached is not None:
+            return cached
+        try:
+            resolved = await self._namespace_resolver(namespace_id)
+        except Exception:  # noqa: BLE001 - resolver is best-effort; never drop an event on lookup failure
+            return namespace_id
+        self._ns_resolve_cache[namespace_id] = resolved
+        return resolved
+
+    async def _namespace_scope_matches(self, event: MemoryEvent, scope_ns: UUID | None) -> bool:
+        """True if an event is in scope for a subscription/filter namespace (#1399).
+
+        ``None`` scope = all namespaces. Otherwise normalize both the event's
+        namespace and the scope namespace to the row-id space before comparing,
+        so a subscription scoped by the stable id matches events emitted with
+        the resolved row id (and vice versa).
+        """
+        if scope_ns is None:
+            return True
+        return await self._resolve_ns(event.namespace_id) == await self._resolve_ns(scope_ns)
+
     async def _passes_filter_cascade(self, event: MemoryEvent, filter: SemanticFilter | None) -> bool:
         """Run the Level 0/1/2 filter cascade for one subscription.
 
@@ -507,8 +556,8 @@ class HookDispatcher:
         if filter is None:
             return True
 
-        # Namespace scope check
-        if filter.namespace_id and event.namespace_id != filter.namespace_id:
+        # Namespace scope check (#1399: normalize both sides to row-id space).
+        if not await self._namespace_scope_matches(event, filter.namespace_id):
             return False
 
         # Level 0: entity_type / relationship_type pre-filter
@@ -553,7 +602,8 @@ class HookDispatcher:
             # scoped to a namespace must never see another namespace's events,
             # even when it carries no filter — the filter cascade returns True
             # for ``filter is None``, so the scope check cannot live there.
-            if sub.namespace_id is not None and event.namespace_id != sub.namespace_id:
+            # #1399: normalize both sides to the row-id space before comparing.
+            if not await self._namespace_scope_matches(event, sub.namespace_id):
                 continue
             if not await self._passes_filter_cascade(event, sub.filter):
                 continue
