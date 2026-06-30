@@ -1717,8 +1717,18 @@ class TestRememberBatchImplStreaming:
             return [ent], []
 
         monkeypatch.setattr("khora.pipelines.tasks.extract.extract_entities", fake_extract)
-        engine._storage.upsert_entities_batch = AsyncMock(return_value=None)
-        engine._storage.create_relationships_batch = AsyncMock(return_value=0)
+
+        # upsert/create return ``[(obj, is_new)]`` pairs; the streaming path now
+        # consumes them to dispatch entity/relationship hooks (#1401), so the
+        # mocks must echo the real contract, not None/0.
+        async def _upsert(_ns, entities):
+            return [(e, True) for e in entities]
+
+        async def _create_rels(rels):
+            return [(r, True) for r in rels]
+
+        engine._storage.upsert_entities_batch = AsyncMock(side_effect=_upsert)
+        engine._storage.create_relationships_batch = AsyncMock(side_effect=_create_rels)
 
         ns = uuid4()
         result = await engine.remember_batch(

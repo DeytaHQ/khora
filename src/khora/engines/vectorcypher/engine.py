@@ -3475,8 +3475,36 @@ class VectorCypherEngine:
                 pre_upsert_ids = [str(e.id) for e in all_entities]
 
                 _t0 = _time.perf_counter()
-                await storage.upsert_entities_batch(namespace_id, all_entities)
+                upsert_results = await storage.upsert_entities_batch(namespace_id, all_entities)
                 _stage6_upsert_ms += (_time.perf_counter() - _t0) * 1000
+
+                # Emit entity.created / entity.updated semantic hooks (#1401).
+                # The single-doc path (_run_skeleton_extraction) dispatches per
+                # upserted entity; the streaming batch path discarded the upsert
+                # result and fired nothing, so remember_batch() silently emitted
+                # zero hooks. Mirror the single-doc payload + created-vs-updated
+                # split (the ``is_new`` flag); entities span multiple documents
+                # here, so ``document_id`` is derived per entity.
+                for entity, is_new in upsert_results:
+                    await storage.dispatch_hook(
+                        MemoryEvent(
+                            namespace_id=namespace_id,
+                            event_type=EventType.ENTITY_CREATED if is_new else EventType.ENTITY_UPDATED,
+                            resource_type="entity",
+                            resource_id=entity.id,
+                            data={
+                                "name": entity.name,
+                                "entity_type": entity.entity_type,
+                                "description": entity.description,
+                                "confidence": entity.confidence,
+                                "is_new": is_new,
+                                "document_id": (
+                                    str(entity.source_document_ids[0]) if entity.source_document_ids else None
+                                ),
+                                "embedding": entity.embedding,
+                            },
+                        )
+                    )
 
                 # Extend id_remap with post-upsert canonicalisations.
                 # Compose with the dedup pass: if dedup said X -> Y and
@@ -3516,8 +3544,32 @@ class VectorCypherEngine:
 
                 if all_relationships:
                     _t0 = _time.perf_counter()
-                    await storage.create_relationships_batch(all_relationships)
+                    rel_results = await storage.create_relationships_batch(all_relationships)
                     _stage6_rels_ms += (_time.perf_counter() - _t0) * 1000
+
+                    # Emit relationship.created / relationship.updated hooks
+                    # (#1401), mirroring the single-doc path's payload + split.
+                    for rel, is_new in rel_results:
+                        await storage.dispatch_hook(
+                            MemoryEvent(
+                                namespace_id=namespace_id,
+                                event_type=(
+                                    EventType.RELATIONSHIP_CREATED if is_new else EventType.RELATIONSHIP_UPDATED
+                                ),
+                                resource_type="relationship",
+                                resource_id=rel.id,
+                                data={
+                                    "relationship_type": rel.relationship_type,
+                                    "source_entity_id": str(rel.source_entity_id),
+                                    "target_entity_id": str(rel.target_entity_id),
+                                    "confidence": rel.confidence,
+                                    "is_new": is_new,
+                                    "document_id": (
+                                        str(rel.source_document_ids[0]) if rel.source_document_ids else None
+                                    ),
+                                },
+                            )
+                        )
 
                 if all_entity_chunk_links and dual_nodes is not None:
                     _t0 = _time.perf_counter()
