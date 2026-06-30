@@ -6,11 +6,14 @@ that must call into async khora. Without one shared bridge, every
 adapter reinvents it, and one of them deadlocks.
 
 This module owns one daemon-thread event loop. Sync callers hand it a
-coroutine via :func:`run_sync`; the coroutine runs on that loop and the
-caller blocks until it completes. Reentrancy is **rejected explicitly**:
-calling :func:`run_sync` from inside a running event loop raises
-:class:`RuntimeError`. That's the deadlock surface and we refuse to
-paper over it.
+coroutine via :func:`run_sync`; the coroutine runs on the daemon loop
+and the caller blocks (via ``future.result()``) until it completes.
+The coroutine always runs on the daemon loop, never on the calling
+thread's loop, so the call is safe from inside a running event loop as
+long as the coroutine does not need work to make progress on the
+calling loop. The hazard is stalling the calling event loop while
+waiting for the daemon result — do not call :func:`run_sync` from
+inside an ``async def``.
 
 Underscore-prefixed module: it's a contract surface for adapter authors,
 not for end users. Adapters call ``run_sync(self.kb.recall(...))``.

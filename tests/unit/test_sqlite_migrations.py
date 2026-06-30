@@ -69,6 +69,8 @@ class TestSqliteMigrations:
                         "khora_dream_runs",
                         # FTS5 virtual table from migration 002
                         "chunks_fts",
+                        # KET-RAG keyword_ppr edge table (050, #1391)
+                        "keyword_chunks",
                         # Alembic version table
                         "khora_alembic_version",
                     }
@@ -82,7 +84,7 @@ class TestSqliteMigrations:
                     # Version table must point at head.
                     result = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
                     version = result.scalar()
-                    assert version == "049_hook_subscriptions"
+                    assert version == "050_keyword_chunks"
             finally:
                 await engine.dispose()
 

@@ -48,21 +48,26 @@ Before doing any expensive processing, we answer a simple question: is this cont
 
 ### Deduplication by Checksum
 
-Every document gets a SHA-256 hash of its content:
+Every document gets a SHA-256 hash of its content. A checksum hit is only treated as a duplicate when the caller-supplied `external_id` and `session_id` also match the existing row -- so the same content with a new `external_id` or `session_id` produces a new document:
 
 ```python
 from hashlib import sha256
 
 checksum = sha256(content.encode("utf-8")).hexdigest()
 
-# Check if we've seen this exact content before
+# Look up existing document by checksum
 existing = await storage.get_document_by_checksum(namespace_id, checksum)
-if existing:
-    # Skip it - we already have this
+if existing and _checksum_dedup_applies(
+    existing,
+    external_id=doc_input.get("external_id"),
+    session_id=doc_input.get("session_id"),
+):
+    # Skip - same content AND same identity (external_id + session_id)
     return None
+# Otherwise: same content but different identity → create a new document
 ```
 
-This catches duplicates even if the filename or metadata changed. Same content = same checksum = skip.
+This prevents accidental re-ingestion of the same file while still allowing the same text to be stored under different identities (e.g., two sessions ingesting a shared document template, or a connector re-submitting content with a new `external_id`).
 
 ### Source Timestamps
 
@@ -108,7 +113,7 @@ document = Document(
 await storage.create_document(document)
 ```
 
-Staging runs in parallel with controlled concurrency - typically `2 * max_concurrent_documents` since it's lightweight.
+Staging runs in parallel with controlled concurrency - the staging semaphore is hardcoded at 10 since it only involves a checksum lookup and a document row insert (lightweight I/O).
 
 ## Phase 2: Enrichment (Staged Batch Pipeline)
 
@@ -166,7 +171,8 @@ Embedding is batched internally - instead of 100 API calls for 100 chunks, we ma
 entities, relationships = await extract_entities(
     chunks,
     model="gpt-4o-mini",
-    skill_name="general_entities",  # or domain-specific
+    expertise=expertise,            # ExpertiseConfig or name string (preferred)
+    # skill_name="general_entities" is legacy and ignored when expertise= is set
     max_concurrent=20               # parallel LLM calls
 )
 ```
@@ -383,14 +389,14 @@ See [Semantic Expansion](semantic-expansion.md) for full details on each mode an
 The pipeline uses semaphores to prevent overwhelming your system or hitting API limits:
 
 ```python
-# Document-level: 10 docs processing at once
-doc_semaphore = asyncio.Semaphore(10)
+# Document-level: controlled by max_concurrent_documents (default 10)
+doc_semaphore = asyncio.Semaphore(max_concurrent_documents)
 
-# Extraction-level: 20 LLM calls at once
-extraction_semaphore = asyncio.Semaphore(20)
+# Extraction-level: controlled by max_concurrent_extractions (default 20)
+extraction_semaphore = asyncio.Semaphore(max_concurrent_extractions)
 
-# Staging-level: 20 docs staging at once (it's fast)
-staging_semaphore = asyncio.Semaphore(20)
+# Staging-level: hardcoded 10 (lightweight checksum + DB lookup)
+staging_semaphore = asyncio.Semaphore(10)
 ```
 
 **Neo4j write-level coordination** prevents lock contention during storage:

@@ -263,6 +263,9 @@ async with Khora() as kb:
     )
 
     for chunk in results.chunks:
+        # chunk.score is an absolute relevance score (0.0–1.0), not a
+        # per-result-set normalized RRF value. ORDER is decided by RRF /
+        # coherence / reranking; the score itself is calibrated absolutely.
         print(f"[{chunk.score:.2f}] {chunk.content[:100]}...")
 ```
 
@@ -282,10 +285,11 @@ results = await kb.recall(
 ```
 
 `kb.recall()` accepts `mode`, `limit`, `min_similarity`, `start_time`,
-and `end_time` directly. Fusion weights, reranking, and recency knobs
-are global - configure them via `KhoraConfig.query` (`QueryConfig`) at
-construction time or via `KHORA_QUERY_*` environment variables; there
-is no `config=` kwarg on `kb.recall()`.
+`end_time`, and `filter` (a `RecallFilter` or equivalent dict) directly.
+Fusion weights, reranking, and recency knobs are global - configure them
+via `KhoraConfig.query` (`QueryConfig`) at construction time or via
+`KHORA_QUERY_*` environment variables; there is no `config=` kwarg on
+`kb.recall()`.
 
 #### Which `query.*` settings apply on the default (VectorCypher) recall path
 
@@ -309,6 +313,32 @@ use `HybridQueryEngine` if you need mention-based linking.
 Per-query agentic search isn't exposed on `kb.recall()`. Use
 `khora.query.agentic.AgenticSearchAgent` directly (see
 [agentic-search.md](agentic-search.md)).
+
+### Abstention & Confidence Signals
+
+Both VectorCypher and Chronicle expose abstention and confidence signals on every
+recall via `result.engine_info` (not `result.metadata`):
+
+```python
+result = await kb.recall("What is Alice currently working on?", namespace=ns_id)
+
+signals = result.engine_info["abstention_signals"]
+print(signals["entities_empty"])    # No entities found
+print(signals["chunks_empty"])      # No chunks returned
+print(signals["chunks_below_min"])  # Below minimum chunks threshold
+print(signals["top_score_low"])     # Top score below minimum similarity
+print(signals["combined_score"])    # 0.0–1.0 weighted abstention-risk signal (higher = riskier)
+print(signals["should_abstain"])    # Convenience bool
+
+confidence = result.engine_info["confidence"]  # 0.0–1.0 calibrated score
+```
+
+The `should_abstain` flag is passive - the engine still returns chunks when it trips.
+Use it to suppress LLM answer generation when retrieval quality is low. In the default
+`cosine_floor` mode, `should_abstain` fires when `top_score_low` trips on its own OR
+retrieval came back genuinely empty (`chunks_empty AND entities_empty`); it is not
+thresholded from `combined_score` (that mapping only applies in the legacy `weighted`
+mode). Confidence formula: `0.8 * clip01(top_cosine / target_cosine) + 0.2 * clip01(top_score_gap / target_gap)`.
 
 ## Search Mode Quick Reference
 

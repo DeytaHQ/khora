@@ -59,6 +59,7 @@ async def extract_entities(
     expertise: ExpertiseConfig | str | None = None,
     model: str = "gpt-4o-mini",
     max_concurrent: int = 10,
+    wave_size: int = 20,
     context: dict[str, Any] | None = None,
     timeout: int = 60,
     max_retries: int = 3,
@@ -71,6 +72,7 @@ async def extract_entities(
     selective_extraction: bool = True,
     extraction_importance_ratio: float = 0.7,
     extraction_min_importance: float = 0.2,
+    ketrag_skeleton_channel: bool = False,
     shared_extractor: Any | None = None,
     out_diagnostics: dict[str, Any] | None = None,
 ) -> tuple[list[Entity], list[Relationship]]:
@@ -90,6 +92,7 @@ async def extract_entities(
         expertise: ExpertiseConfig, expertise name string, or file path
         model: LLM model for extraction
         max_concurrent: Maximum concurrent extractions
+        wave_size: Number of extraction batches dispatched concurrently per wave
         context: Optional context dict for prompt template rendering
         timeout: Request timeout in seconds
         max_retries: Maximum retries on failure
@@ -102,6 +105,10 @@ async def extract_entities(
         selective_extraction: Enable importance-based selective extraction
         extraction_importance_ratio: Fraction of chunks to send to LLM (top-K by score)
         extraction_min_importance: Minimum importance score threshold
+        ketrag_skeleton_channel: When True, route core-chunk selection through the
+            keyword-PageRank scorer (``khora.core.ranking.select_core_chunks``)
+            with the multilingual tokenizer instead of ``ChunkImportanceScorer``.
+            Default False - flag-off behavior is byte-identical to before.
         shared_extractor: Optional pre-initialized LLMEntityExtractor to reuse
             across documents (shares semaphore for cross-document concurrency control)
         out_diagnostics: Optional dict the function populates with ADR-001
@@ -140,19 +147,40 @@ async def extract_entities(
     llm_chunks = chunks
 
     if selective_extraction and len(chunks) > 1:
-        from khora.extraction.importance import ChunkImportanceScorer
+        if ketrag_skeleton_channel:
+            # KET-RAG-faithful path (flag-on): pick core (LLM) chunks via the
+            # keyword-PageRank scorer using the multilingual tokenizer, route the
+            # complement to the lightweight path. Same (llm, lightweight) partition.
+            from khora.core.ranking import select_core_chunks
+            from khora.extraction.tokenize import tokenize_multilingual
 
-        scorer = ChunkImportanceScorer()
-        llm_chunks, lightweight_chunks = scorer.select_for_extraction(
-            chunks,
-            ratio=extraction_importance_ratio,
-            min_score=extraction_min_importance,
-        )
-        logger.debug(
-            f"Selective extraction: {len(llm_chunks)} chunks to LLM, "
-            f"{len(lightweight_chunks)} chunks to lightweight edges "
-            f"(ratio={extraction_importance_ratio}, min_score={extraction_min_importance})"
-        )
+            selection = select_core_chunks(
+                chunks,
+                extraction_importance_ratio,
+                tokenizer=tokenize_multilingual,
+            )
+            core_ids = set(selection.core_ids)
+            llm_chunks = [c for c in chunks if c.id in core_ids]
+            lightweight_chunks = [c for c in chunks if c.id not in core_ids]
+            logger.debug(
+                f"Selective extraction (KET-RAG skeleton): {len(llm_chunks)} chunks to LLM, "
+                f"{len(lightweight_chunks)} chunks to lightweight edges "
+                f"(core_ratio={extraction_importance_ratio})"
+            )
+        else:
+            from khora.extraction.importance import ChunkImportanceScorer
+
+            scorer = ChunkImportanceScorer()
+            llm_chunks, lightweight_chunks = scorer.select_for_extraction(
+                chunks,
+                ratio=extraction_importance_ratio,
+                min_score=extraction_min_importance,
+            )
+            logger.debug(
+                f"Selective extraction: {len(llm_chunks)} chunks to LLM, "
+                f"{len(lightweight_chunks)} chunks to lightweight edges "
+                f"(ratio={extraction_importance_ratio}, min_score={extraction_min_importance})"
+            )
 
     # Resolve expertise configuration
     resolved_expertise: ExpertiseConfig | None = None
@@ -191,6 +219,7 @@ async def extract_entities(
         extractor_kwargs = dict(
             model=model,
             max_concurrent=max_concurrent,
+            wave_size=wave_size,
             timeout=timeout,
             max_retries=max_retries,
             retry_wait=retry_wait,
@@ -484,7 +513,20 @@ async def extract_entities(
         logger.debug(f"Applied {state_changes_applied} STATE_CHANGE entities to affected entities")
 
     # --- Process lightweight chunks (selective extraction) ---
-    if lightweight_chunks:
+    # Move 2 (KET-RAG skeleton separation): when the skeleton-channel flag is on,
+    # do NOT synthesize CONCEPT entities / CO_OCCURS_WITH edges from the skipped
+    # ("lightweight") chunks. The entity graph then holds only LLM-extracted
+    # ontology; the skipped chunks stay fully retrievable through the vector and
+    # BM25 keyword channels (they are embedded + keyword-indexed at ingest
+    # regardless), so dropping the synthetic co-occurrence skeleton removes graph
+    # noise without losing chunk recall. An empirical spike found the
+    # keyword-cooccurrence graph adds ~no retrieval lift over BM25.
+    if lightweight_chunks and ketrag_skeleton_channel:
+        logger.debug(
+            "KET-RAG skeleton channel on: skipping co-occurrence edges for "
+            f"{len(lightweight_chunks)} lightweight chunks (served by vector + BM25)"
+        )
+    elif lightweight_chunks:
         from khora.extraction.importance import extract_lightweight_edges
 
         lightweight_edge_count = 0

@@ -420,6 +420,11 @@
       "owner": "vectorcypher"
     },
     {
+      "name": "khora.vectorcypher.keyword_ppr_search_chunks",
+      "stability": "internal",
+      "owner": "vectorcypher"
+    },
+    {
       "name": "khora.vectorcypher.change_decomposition",
       "stability": "internal",
       "owner": "vectorcypher"

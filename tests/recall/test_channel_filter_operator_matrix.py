@@ -170,6 +170,21 @@ _EXCLUDED_CHANNELS: dict[str, str] = {
         "Pushdown channel: search_fulltext compiles filter_ast to a khora_chunks WHERE "
         "(on_unsupported='raise') — no in-memory over-fetch."
     ),
+    "_lexical_search_chunks": (
+        "Lexical-slot dispatcher (#1391): selects bm25 vs keyword_ppr on "
+        "config.lexical_channel and forwards filter_ast= into whichever branch it calls "
+        "(_bm25_search_chunks / _keyword_ppr_search_chunks). It does no candidate-gating "
+        "of its own, so it is not a post-filter seam — like _simple_retrieve."
+    ),
+    "_keyword_ppr_search_chunks": (
+        "Fail-CLOSED lexical channel (#1391): the keyword->chunk PageRank cannot push a "
+        "recall filter into the namespace bipartite, so under a deterministic filter_ast it "
+        "returns [] (records an ADR-001 Degradation) instead of post-filtering or "
+        "smuggling — it can never emit a candidate while a caller filter is present, so it "
+        "is not a post-filter seam. A filtered recall gets an empty contribution from this "
+        "slot, same fail-safe shape as turbopuffer's fail-loud boundary and BM25's "
+        "filtered-fallback []."
+    ),
     "_typed_entity_recent_retrieve": (
         "Gated OFF whenever a caller filter is present: the dispatch guard is "
         "`... and filter_ast is None`. A filtered recall never enters it, so it can "
@@ -308,7 +323,7 @@ def test_partition_total_and_disjoint() -> None:
     """The two seam-sets totally and disjointly partition the filter-aware methods.
 
     ``_POST_FILTER_CHANNELS`` ∪ ``_EXCLUDED_CHANNELS.keys()`` == the audit gate's
-    ``_FILTER_AWARE_METHODS`` (currently 2 + 7 = 9), and the two sets are disjoint.
+    ``_FILTER_AWARE_METHODS`` (currently 2 + 9 = 11), and the two sets are disjoint.
     A new filter-aware channel added to ``retriever.py`` (which ``test_param_set_is_current``
     in the audit gate forces into ``_FILTER_AWARE_METHODS``) lands in NEITHER set
     until it is classified, failing this — the new-channel backstop.

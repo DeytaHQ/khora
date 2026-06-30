@@ -1146,6 +1146,41 @@ class StorageCoordinator:
             raise RuntimeError("Vector backend not configured")
         return await self._vector.get_chunks_batch(chunk_ids, namespace_id=namespace_id)
 
+    async def upsert_keyword_chunk_edges(
+        self,
+        namespace_id: UUID,
+        edges: list[tuple[str, UUID, float]],
+    ) -> int:
+        """Persist keyword -> chunk edges for the keyword_ppr lexical channel (#1391).
+
+        No-op (returns 0) when the vector backend lacks the method (e.g. a
+        SurrealDB-unified stack) so the gated ingest step degrades rather than
+        crashes. Resolves ``namespace_id`` to the row id so the stored
+        ``keyword_chunks.namespace_id`` matches the chunks table's FK value.
+        """
+        if not edges:
+            return 0
+        namespace_id = await self._resolve_read_namespace(namespace_id)
+        if self._vector and hasattr(self._vector, "upsert_keyword_chunk_edges"):
+            return await self._vector.upsert_keyword_chunk_edges(namespace_id, edges)  # type: ignore[unresolved-attribute]
+        return 0
+
+    async def get_keyword_chunk_edges(
+        self,
+        namespace_id: UUID,
+        *,
+        limit: int,
+    ) -> list[tuple[str, UUID, float]]:
+        """Load a namespace's keyword -> chunk edges, capped at ``limit`` (#1391).
+
+        Returns ``[]`` when the vector backend lacks the method so the
+        keyword_ppr query channel degrades to an empty lexical slot.
+        """
+        namespace_id = await self._resolve_read_namespace(namespace_id)
+        if self._vector and hasattr(self._vector, "get_keyword_chunk_edges"):
+            return await self._vector.get_keyword_chunk_edges(namespace_id, limit=limit)  # type: ignore[unresolved-attribute]
+        return []
+
     @_record_storage_op("search_similar_chunks", "pgvector")
     async def search_similar_chunks(
         self,

@@ -7,12 +7,13 @@ vector search.
 from __future__ import annotations
 
 import math
-import re
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from loguru import logger
+
+from khora.extraction.tokenize import is_cjk_token, tokenize_core
 
 if TYPE_CHECKING:
     from khora.core.models import Chunk
@@ -123,19 +124,33 @@ def tokenize(text: str, use_stemming: bool = True, remove_stopwords: bool = True
     Returns:
         List of tokens
     """
-    # Lowercase and split on non-alphanumeric
-    tokens = re.findall(r"\b[a-zA-Z0-9]+\b", text.lower())
+    # ``tokenize_core`` NFC-normalizes + lowercases, then splits into
+    # word-forming runs (letters/numbers/marks, any script, excluding
+    # underscore). On pure-ASCII text it is byte-identical to the old
+    # ``[^\W_]+`` pattern, so English ranking is unchanged. Beyond ASCII it
+    # fixes the two scripts the regex could not:
+    #   * CJK (Han/Kana/Hangul): a run with no inter-word spaces is emitted as
+    #     overlapping character bigrams, so sub-phrases match across chunks
+    #     (index and query bigram identically). A single-char run stays a
+    #     unigram.
+    #   * Combining-mark scripts (Indic, etc.): category-M marks (matras) are
+    #     word-forming, so a base consonant and its matras stay ONE token
+    #     instead of splitting into single consonants that the length filter
+    #     would drop.
+    tokens = tokenize_core(text)
 
-    # Remove stopwords
+    # Remove stopwords (English set; no-op on non-Latin tokens).
     if remove_stopwords:
         tokens = [t for t in tokens if t not in STOPWORDS]
 
-    # Basic stemming (simple suffix removal)
+    # Basic stemming (simple ASCII suffix removal). Skip CJK n-gram tokens so a
+    # bigram is never mangled - the suffixes are Latin anyway.
     if use_stemming:
-        tokens = [_basic_stem(t) for t in tokens]
+        tokens = [t if is_cjk_token(t) else _basic_stem(t) for t in tokens]
 
-    # Filter short tokens
-    tokens = [t for t in tokens if len(t) > 2]
+    # Filter short tokens. CJK bigrams are length 2 and MUST survive, so the
+    # length floor applies only to non-CJK (Latin/ASCII) tokens.
+    tokens = [t for t in tokens if is_cjk_token(t) or len(t) > 2]
 
     return tokens
 

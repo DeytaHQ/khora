@@ -65,6 +65,7 @@ from khora.telemetry import trace, trace_span
 from khora.telemetry.metrics import metric_counter, metric_histogram
 
 from .dual_nodes import DualNodeManager, EntityChunkLink
+from .keyword_edges import persist_keyword_chunk_edges, persist_keyword_chunk_edges_from_keywords
 from .retriever import RetrieverConfig, VectorCypherRetriever
 from .router import QueryComplexityRouter, RouterConfig
 from .temporal_detection import TemporalCategory, TemporalDetector, TemporalSignal
@@ -817,6 +818,12 @@ class VectorCypherEngine:
             enable_bm25_channel=self._vc_config.enable_bm25_channel,
             bm25_weight=self._vc_config.bm25_weight,
             bm25_top_k=self._vc_config.bm25_top_k,
+            # Issue #1391 — lexical-channel selector (keyword_ppr vs bm25).
+            # Read straight from KhoraConfig.query (bypasses VectorCypherConfig,
+            # mirroring the PPR flags above). Default "bm25" = unchanged.
+            lexical_channel=self._config.query.lexical_channel,
+            keyword_ppr_damping=self._config.query.keyword_ppr_damping,
+            keyword_ppr_max_edges=self._config.query.keyword_ppr_max_edges,
             enable_reranking=self._vc_config.enable_reranking,
             reranking_model=self._vc_config.reranking_model,
             reranking_top_n=self._vc_config.reranking_top_n,
@@ -844,6 +851,8 @@ class VectorCypherEngine:
             ppr_max_iter=self._config.query.ppr_max_iter,
             ppr_tol=self._config.query.ppr_tol,
             ppr_top_entities=self._config.query.ppr_top_entities,
+            ppr_neighborhood_per_seed_limit=self._config.query.ppr_neighborhood_per_seed_limit,
+            ppr_max_neighborhood_entities=self._config.query.ppr_max_neighborhood_entities,
             metadata_overfetch_multiplier=self._config.query.metadata_overfetch_multiplier,
             # Issue #1018 — QuerySettings tier on the default recall() path.
             # These were inert on VectorCypher because recall() dispatches
@@ -1185,6 +1194,12 @@ class VectorCypherEngine:
             entities_extracted = 0
             relationships_created = 0
             chunk_index_offset = 0
+            # keyword_ppr (#1391): accumulate a LIGHTWEIGHT (chunk_id, keyword_set)
+            # snapshot across all windows so IDF is computed once per document
+            # (a window split via max_chunks_in_flight must not change keyword
+            # weights) WITHOUT retaining the embedded TemporalChunks (and their
+            # 1536-dim payloads) past their window - preserving the memory bound.
+            keyword_chunk_snapshot: list[tuple[UUID, set[str]]] = []
 
             for window in windows:
                 # Acquire global chunk semaphore before processing this window.
@@ -1242,6 +1257,18 @@ class VectorCypherEngine:
                     # ingest (ADR-001).
                     await _mirror_chunks_or_degrade(dual_nodes, temporal_chunks, document.namespace_id, out_diagnostics)
 
+                    # keyword_ppr lexical channel (#1391): snapshot this window's
+                    # (chunk_id, keyword_set) NOW (while the chunks are live) so
+                    # edges are persisted once after the window loop with a
+                    # document-scoped IDF, without retaining the embedded chunks.
+                    # Gated - default bm25 pays zero cost.
+                    if self._config.query.lexical_channel == "keyword_ppr":
+                        from khora.extraction.tokenize import tokenize_multilingual
+
+                        keyword_chunk_snapshot.extend(
+                            (tc.id, set(tokenize_multilingual(tc.content))) for tc in temporal_chunks
+                        )
+
                     # Skeleton-based entity extraction (for core chunks only)
                     if self._config.pipeline.extract_entities:
                         ents, rels = await self._run_skeleton_extraction(
@@ -1262,6 +1289,15 @@ class VectorCypherEngine:
                 finally:
                     if chunk_semaphore is not None:
                         await chunk_semaphore.release(n_acquired)
+
+            # keyword_ppr lexical channel (#1391): persist keyword->chunk edges
+            # once for the whole document (IDF is document-scoped, matching the
+            # streaming batch path's per-document semantics) from the lightweight
+            # snapshot. The chunks are already durable, so a write failure degrades.
+            if self._config.query.lexical_channel == "keyword_ppr" and keyword_chunk_snapshot:
+                await persist_keyword_chunk_edges_from_keywords(
+                    storage, document.namespace_id, keyword_chunk_snapshot, out_diagnostics=out_diagnostics
+                )
 
             # Update document status
             document.mark_completed(total_chunks_created, entities_extracted, relationships_created)
@@ -1353,6 +1389,19 @@ class VectorCypherEngine:
             except Exception as exc:
                 logger.warning(f"submit_batch cleanup: could not clear :Chunk nodes for document {document_id}: {exc}")
 
+    def _skeleton_tokenizer(self) -> Callable[[str], list[str]] | None:
+        """Keyword tokenizer for skeleton core-chunk selection.
+
+        Returns the multilingual tokenizer when the KET-RAG skeleton channel
+        flag is on (so non-Latin chunks are selected on real keyword signal),
+        otherwise ``None`` so ``select_core_chunk_ids`` uses its ASCII default.
+        """
+        if self._config.pipeline.ketrag_skeleton_channel:
+            from khora.extraction.tokenize import tokenize_multilingual
+
+            return tokenize_multilingual
+        return None
+
     async def _run_skeleton_extraction(
         self,
         chunks: list[TemporalChunk],
@@ -1401,7 +1450,10 @@ class VectorCypherEngine:
                     core_ratio=self._vc_config.skeleton_core_ratio,
                 ):
                     core_ids = await asyncio.to_thread(
-                        select_core_chunk_ids, chunks, self._vc_config.skeleton_core_ratio
+                        select_core_chunk_ids,
+                        chunks,
+                        self._vc_config.skeleton_core_ratio,
+                        tokenizer=self._skeleton_tokenizer(),
                     )
 
             logger.debug(f"Skeleton indexing: {len(core_ids)}/{len(chunks)} core chunks")
@@ -1435,12 +1487,14 @@ class VectorCypherEngine:
                 expertise=expertise,
                 model=model,
                 max_concurrent=self._vc_config.max_concurrent_extractions,
+                wave_size=self._config.llm.extraction_wave_size,
                 timeout=self._config.llm.timeout,
                 max_tokens=self._config.llm.max_tokens,
                 extraction_batch_size=self._vc_config.extraction_batch_size,
                 entity_types=entity_types,
                 relationship_types=relationship_types,
                 store_events=self._vc_config.store_events,
+                ketrag_skeleton_channel=self._config.pipeline.ketrag_skeleton_channel,
                 out_diagnostics=out_diagnostics,
             )
 
@@ -1639,7 +1693,12 @@ class VectorCypherEngine:
                 chunk_count=len(chunks),
                 core_ratio=effective_ratio,
             ):
-                core_ids = await asyncio.to_thread(select_core_chunk_ids, chunks, effective_ratio)
+                core_ids = await asyncio.to_thread(
+                    select_core_chunk_ids,
+                    chunks,
+                    effective_ratio,
+                    tokenizer=self._skeleton_tokenizer(),
+                )
 
         logger.debug(f"Skeleton indexing (deferred): {len(core_ids)}/{len(chunks)} core chunks")
 
@@ -1666,12 +1725,14 @@ class VectorCypherEngine:
             expertise=expertise,
             model=model,
             max_concurrent=self._vc_config.max_concurrent_extractions,
+            wave_size=self._config.llm.extraction_wave_size,
             timeout=self._config.llm.timeout,
             max_tokens=self._config.llm.max_tokens,
             extraction_batch_size=self._vc_config.extraction_batch_size,
             entity_types=entity_types,
             relationship_types=relationship_types,
             store_events=self._vc_config.store_events,
+            ketrag_skeleton_channel=self._config.pipeline.ketrag_skeleton_channel,
         )
 
         if not entities:
@@ -1834,7 +1895,10 @@ class VectorCypherEngine:
                     for c in new_chunks
                 ]
                 core_ids = await asyncio.to_thread(
-                    select_core_chunk_ids, skeleton_input, self._vc_config.skeleton_core_ratio
+                    select_core_chunk_ids,
+                    skeleton_input,
+                    self._vc_config.skeleton_core_ratio,
+                    tokenizer=self._skeleton_tokenizer(),
                 )
                 core_chunks = [c for c in new_chunks if c.id in core_ids]
 
@@ -1846,12 +1910,14 @@ class VectorCypherEngine:
                     expertise=expertise,
                     model=model,
                     max_concurrent=self._vc_config.max_concurrent_extractions,
+                    wave_size=self._config.llm.extraction_wave_size,
                     timeout=self._config.llm.timeout,
                     max_tokens=self._config.llm.max_tokens,
                     extraction_batch_size=self._vc_config.extraction_batch_size,
                     entity_types=entity_types,
                     relationship_types=relationship_types,
                     store_events=self._vc_config.store_events,
+                    ketrag_skeleton_channel=self._config.pipeline.ketrag_skeleton_channel,
                 )
 
                 if extracted_entities:
@@ -1937,6 +2003,12 @@ class VectorCypherEngine:
                 # pgvector already holds the chunks and the coordinator's #884 path
                 # below handles any remaining graph divergence.
                 await _mirror_chunks_or_degrade(dual_nodes, new_temporal_chunks, namespace_id, replace_diagnostics)
+                # keyword_ppr lexical channel (#1391): replace this document's
+                # keyword->chunk edges (upsert is idempotent per chunk). Gated.
+                if self._config.query.lexical_channel == "keyword_ppr":
+                    await persist_keyword_chunk_edges(
+                        storage, namespace_id, new_temporal_chunks, out_diagnostics=replace_diagnostics
+                    )
         except Exception as e:
             # Self-heal: mark FAILED and re-raise unwrapped so the next
             # successful replace against the same external_id heals the row.
@@ -3174,6 +3246,17 @@ class VectorCypherEngine:
             # WARNING) rather than aborting the batch (ADR-001).
             await _mirror_chunks_or_degrade(dual_nodes, all_temporal_chunks, namespace_id)
 
+            # keyword_ppr lexical channel (#1391): persist keyword->chunk edges
+            # per document slice (IDF is document-scoped, matching the skeleton
+            # selection's per-document semantics). Gated - default bm25 pays
+            # zero cost; a write failure degrades (WARNING) per persist helper.
+            if self._config.query.lexical_channel == "keyword_ppr":
+                for si in range(len(state_chunk_ranges)):
+                    start, end = state_chunk_ranges[si]
+                    doc_chunks = all_temporal_chunks[start:end]
+                    if doc_chunks:
+                        await persist_keyword_chunk_edges(storage, namespace_id, doc_chunks)
+
             _stage3_ms += (_time.perf_counter() - _t0) * 1000
 
             # ── Stage 4: Skeleton extraction across ALL documents ───────────
@@ -3206,7 +3289,12 @@ class VectorCypherEngine:
                         core_ids = {c.id for c in doc_chunks}
                     else:
                         effective_ratio = skeleton_ratio or self._vc_config.skeleton_core_ratio
-                        core_ids = await asyncio.to_thread(select_core_chunk_ids, doc_chunks, effective_ratio)
+                        core_ids = await asyncio.to_thread(
+                            select_core_chunk_ids,
+                            doc_chunks,
+                            effective_ratio,
+                            tokenizer=self._skeleton_tokenizer(),
+                        )
 
                     for tc in doc_chunks:
                         if tc.id in core_ids:
@@ -3264,6 +3352,7 @@ class VectorCypherEngine:
                                     expertise=expertise,
                                     model=model,
                                     max_concurrent=1,
+                                    wave_size=self._config.llm.extraction_wave_size,
                                     context=ctx,
                                     timeout=self._config.llm.timeout,
                                     max_tokens=self._config.llm.max_tokens,
@@ -3271,6 +3360,7 @@ class VectorCypherEngine:
                                     entity_types=entity_types,
                                     relationship_types=relationship_types,
                                     store_events=self._vc_config.store_events,
+                                    ketrag_skeleton_channel=self._config.pipeline.ketrag_skeleton_channel,
                                 )
 
                         extraction_results = await asyncio.gather(
@@ -3295,12 +3385,14 @@ class VectorCypherEngine:
                             expertise=expertise,
                             model=model,
                             max_concurrent=self._vc_config.max_concurrent_extractions,
+                            wave_size=self._config.llm.extraction_wave_size,
                             timeout=self._config.llm.timeout,
                             max_tokens=self._config.llm.max_tokens,
                             extraction_batch_size=self._vc_config.extraction_batch_size,
                             entity_types=entity_types,
                             relationship_types=relationship_types,
                             store_events=self._vc_config.store_events,
+                            ketrag_skeleton_channel=self._config.pipeline.ketrag_skeleton_channel,
                         )
 
                     if entities:
@@ -3542,19 +3634,41 @@ class VectorCypherEngine:
         existing_docs: dict[str, Any] = {}
         if deduplicate:
             existing_docs = await storage.get_documents_by_checksums(namespace_id, doc_checksums)
-        checksums_in_flight: set[str] = set()
-        checksums_lock = asyncio.Lock()
+        identities_in_flight: set[tuple[str, str | None, str | None]] = set()
+        identities_lock = asyncio.Lock()
         semaphore = asyncio.Semaphore(max_concurrent)
 
         async def process_document(doc_data: dict[str, Any], checksum: str) -> None:
             nonlocal progress_count
-            async with checksums_lock:
-                if checksum in checksums_in_flight:
+            # Identity-scoped dedup (#1171): two same-content docs with different
+            # external_id/session_id must both proceed; only a true identity
+            # collision is an intra-batch duplicate (mirrors the streaming path).
+            doc_external_id = doc_data.get("external_id")
+            doc_session_id = _coerce_session_id_from_metadata(doc_data.get("metadata", {}))
+            identity_key = (checksum, doc_external_id, str(doc_session_id) if doc_session_id else None)
+            async with identities_lock:
+                if identity_key in identities_in_flight:
                     async with results_lock:
                         results["skipped"] += 1
+                    if on_progress:
+                        async with progress_lock:
+                            progress_count += 1
+                            on_progress(progress_count, total)
                     return
-                checksums_in_flight.add(checksum)
-            if deduplicate and checksum in existing_docs:
+                identities_in_flight.add(identity_key)
+            # DB-side dedup is identity-scoped too: a checksum hit stored under a
+            # different external_id/session_id is NOT a duplicate (#1139/#1171) —
+            # fall through to remember(), which creates a new doc or replaces by
+            # external_id as appropriate.
+            if (
+                deduplicate
+                and checksum in existing_docs
+                and _checksum_dedup_applies(
+                    existing_docs[checksum],
+                    external_id=doc_external_id,
+                    session_id=doc_session_id,
+                )
+            ):
                 async with results_lock:
                     results["skipped"] += 1
                 if on_progress:
@@ -3709,10 +3823,12 @@ class VectorCypherEngine:
         self,
         *,
         config_overrides: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> MemoryNamespace:
         """Create a new memory namespace."""
         namespace = MemoryNamespace(
             config_overrides=config_overrides or {},
+            metadata=metadata or {},
         )
         return await self._get_storage().create_namespace(namespace)
 

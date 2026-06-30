@@ -39,6 +39,11 @@ llm:
   timeout: 30
   max_retries: 3
   max_concurrent_llm_calls: 10
+  # Batches dispatched concurrently per wave in extract_multi(). Raising this
+  # above max_concurrent_llm_calls has no effect (the per-call semaphore is the
+  # binding limit); raising both increases throughput but also the worst-case
+  # doomed-call count when the circuit breaker trips.
+  extraction_wave_size: 20
 
   # Embedding settings
   embedding_model: text-embedding-3-small

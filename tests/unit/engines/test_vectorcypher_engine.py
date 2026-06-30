@@ -1672,6 +1672,196 @@ class TestVectorCypherEngineBatchDedupScope:
 
 
 @pytest.mark.unit
+class TestVectorCypherEngineLegacyBatchDedupScope:
+    """#1352/#1353: the legacy (non-streaming) remember_batch path is also identity-scoped.
+
+    ``_remember_batch_legacy`` (used when ``streaming_pipeline=False``) runs one
+    ``remember()`` per non-skipped doc. Its dedup pre-checks — the intra-batch
+    in-flight set and the DB-side ``existing_docs`` short-circuit — must honour
+    caller identity exactly like the streaming Stage 0, or a new
+    external_id/session_id sharing existing content is silently dropped.
+    """
+
+    @pytest.fixture
+    def legacy_engine(self) -> VectorCypherEngine:
+        config = MagicMock()
+        config.get_postgresql_url.return_value = "postgresql://localhost/test"
+        config.get_neo4j_url.return_value = "bolt://localhost:7687"
+        config.get_neo4j_user.return_value = "neo4j"
+        config.get_neo4j_password.return_value = "password"
+        config.get_neo4j_database.return_value = "neo4j"
+        config.get_graph_config.return_value = MagicMock()
+        config.get_vector_config.return_value = MagicMock()
+        config.storage.postgresql_pool_size = 5
+        config.storage.postgresql_max_overflow = 10
+        config.storage.embedding_dimension = 1536
+        config.llm.model = "gpt-4o-mini"
+        config.pipeline.extract_entities = True
+
+        engine = VectorCypherEngine(config)
+        engine._connected = True
+        engine._storage = AsyncMock()
+        engine._temporal_store = AsyncMock()
+        engine._embedder = AsyncMock()
+        engine._dual_nodes = AsyncMock()
+        engine._retriever = AsyncMock()
+        engine._router = MagicMock()
+        engine._neo4j_driver = AsyncMock()
+        engine._vc_config.streaming_pipeline = False  # force the legacy path
+        return engine
+
+    def _make_existing_doc(self, *, external_id=None, session_id=None):
+        doc = MagicMock()
+        doc.id = uuid4()
+        doc.external_id = external_id
+        doc.session_id = session_id
+        doc.status = "completed"
+        return doc
+
+    @staticmethod
+    def _fake_remember_result() -> MagicMock:
+        """A RememberResult-shaped mock the legacy accumulator can sum over."""
+        result = MagicMock()
+        result.metadata = {}  # .get("duplicate") -> None (not a duplicate)
+        result.chunks_created = 1
+        result.entities_extracted = 0
+        result.relationships_created = 0
+        return result
+
+    @pytest.mark.asyncio
+    async def test_legacy_same_content_new_external_id_not_dropped(self, legacy_engine: VectorCypherEngine) -> None:
+        """#1352: legacy DB-side dedup must not drop a doc whose external_id differs from existing."""
+        import hashlib
+
+        namespace_id = uuid4()
+        content = "same content"
+        checksum = hashlib.sha256(content.encode()).hexdigest()
+
+        existing = self._make_existing_doc(external_id="ext-a")
+        legacy_engine._storage.get_documents_by_checksums = AsyncMock(return_value={checksum: existing})
+        legacy_engine.remember = AsyncMock(return_value=self._fake_remember_result())
+
+        result = await legacy_engine.remember_batch(
+            [{"content": content, "external_id": "ext-b"}],
+            namespace_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+
+        assert result.skipped == 0, "New external_id must not be dropped by the legacy DB-side check"
+        assert result.processed == 1
+        legacy_engine.remember.assert_awaited_once()
+        assert legacy_engine.remember.call_args.kwargs["external_id"] == "ext-b"
+
+    @pytest.mark.asyncio
+    async def test_legacy_same_content_new_session_id_not_dropped(self, legacy_engine: VectorCypherEngine) -> None:
+        """#1352: legacy DB-side dedup must not drop a doc whose session_id differs from existing."""
+        import hashlib
+
+        namespace_id = uuid4()
+        session_a = uuid4()
+        session_b = uuid4()
+        content = "same content"
+        checksum = hashlib.sha256(content.encode()).hexdigest()
+
+        existing = self._make_existing_doc(session_id=session_a)
+        legacy_engine._storage.get_documents_by_checksums = AsyncMock(return_value={checksum: existing})
+        legacy_engine.remember = AsyncMock(return_value=self._fake_remember_result())
+
+        result = await legacy_engine.remember_batch(
+            [{"content": content, "metadata": {"session_id": str(session_b)}}],
+            namespace_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+
+        assert result.skipped == 0, "New session_id must not be dropped by the legacy DB-side check"
+        assert result.processed == 1
+        legacy_engine.remember.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_legacy_same_content_no_identity_still_dedups(self, legacy_engine: VectorCypherEngine) -> None:
+        """#1352: with no caller identity, legacy dedup stays checksum-only (still skips)."""
+        import hashlib
+
+        namespace_id = uuid4()
+        content = "same content"
+        checksum = hashlib.sha256(content.encode()).hexdigest()
+
+        existing = self._make_existing_doc(session_id=uuid4())
+        legacy_engine._storage.get_documents_by_checksums = AsyncMock(return_value={checksum: existing})
+        legacy_engine.remember = AsyncMock(return_value=self._fake_remember_result())
+
+        result = await legacy_engine.remember_batch(
+            [{"content": content}],
+            namespace_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+
+        assert result.skipped == 1, "No identity supplied -> checksum-only dedup must still apply"
+        legacy_engine.remember.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_legacy_two_same_content_different_external_ids_both_proceed(
+        self, legacy_engine: VectorCypherEngine
+    ) -> None:
+        """#1353: two same-content docs with different external_ids in one legacy batch must both proceed."""
+        namespace_id = uuid4()
+        content = "same content"
+
+        legacy_engine._storage.get_documents_by_checksums = AsyncMock(return_value={})  # nothing in DB
+        legacy_engine.remember = AsyncMock(side_effect=lambda *a, **k: self._fake_remember_result())
+
+        result = await legacy_engine.remember_batch(
+            [
+                {"content": content, "external_id": "ext-a"},
+                {"content": content, "external_id": "ext-b"},
+            ],
+            namespace_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+
+        assert result.skipped == 0, "Distinct external_ids must not collapse intra-batch"
+        assert result.processed == 2
+        assert legacy_engine.remember.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_legacy_two_same_content_same_external_id_dedups_intrabatch(
+        self, legacy_engine: VectorCypherEngine
+    ) -> None:
+        """#1353: two same-content docs with the SAME external_id collapse to one (intra-batch dup)."""
+        namespace_id = uuid4()
+        content = "same content"
+
+        legacy_engine._storage.get_documents_by_checksums = AsyncMock(return_value={})  # nothing in DB
+        legacy_engine.remember = AsyncMock(side_effect=lambda *a, **k: self._fake_remember_result())
+
+        # Progress must be reported for the in-flight skip too, or callbacks
+        # undercount completed items for batches with intra-batch duplicates.
+        progress_calls: list[tuple[int, int]] = []
+
+        result = await legacy_engine.remember_batch(
+            [
+                {"content": content, "external_id": "ext-a"},
+                {"content": content, "external_id": "ext-a"},
+            ],
+            namespace_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            on_progress=lambda done, total: progress_calls.append((done, total)),
+        )
+
+        assert result.skipped == 1, "Same external_id + same content is an intra-batch duplicate"
+        assert result.processed == 1
+        assert legacy_engine.remember.await_count == 1
+        # Both docs (the processed one and the skipped duplicate) must report progress.
+        assert len(progress_calls) == 2, "Intra-batch skip must still fire on_progress"
+        assert max(done for done, _ in progress_calls) == 2, "Progress must reach total=2"
+
+
+@pytest.mark.unit
 class TestVectorCypherEngineRecall:
     """Tests for engine recall() with mocked backends."""
 

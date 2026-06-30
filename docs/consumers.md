@@ -12,6 +12,8 @@ The one piece of CLI-flavoured functionality available inside the library is bin
 from khora.extraction.binary_readers import extract_if_needed
 ```
 
+**Failure contract:** `extract_if_needed` raises `ExtractionError` on genuine parse/open failures (xlsx, docx, parquet). Passing a `.pdf` path raises `NotImplementedError` - preprocess PDFs upstream or use `khora-cli`'s PDF preprocessing.
+
 ## Stability contract
 
 Two public API surfaces are pinned as stable.
@@ -24,7 +26,7 @@ Two public API surfaces are pinned as stable.
 | Operation results | `RememberResult`, `RecallResult`, `BatchResult`, `BatchHandle`, `DocumentResult`, `Stats`, `LLMUsage` |
 | Query types | `SearchMode`, `SemanticFilter` |
 | Helpers | `context_text` (render a `RecallResult` as an LLM context string) |
-| Errors | `KhoraError` |
+| Errors | `KhoraError`, `EngineCapabilityError` |
 | Domain enums at the boundary | `DocumentSource`, `EventType` |
 | Engine registry | `create_engine`, `list_engines`, `register_engine` |
 | Re-exported from the extraction-skill surface | `ExpertiseConfig`, `EntityTypeConfig`, `RelationshipTypeConfig` |

@@ -33,11 +33,20 @@ class Document:
     # Processing stats
     chunk_count: int = 0
     entity_count: int = 0
+    relationship_count: int = 0
+
+    # Extraction config tracking
+    extraction_config_hash: str | None = None
+    extraction_params: dict[str, Any] | None = None
 
     # Timestamps
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     processed_at: datetime | None = None
+    source_timestamp: datetime | None = None
+
+    # Session attribution (#620)
+    session_id: UUID | None = None
 ```
 
 ### Document Status
@@ -48,9 +57,15 @@ class DocumentStatus(str, Enum):
     PROCESSING = "processing"  # Currently being processed
     COMPLETED = "completed"    # Successfully processed
     FAILED = "failed"          # Processing failed
+    ARCHIVED = "archived"      # Archived, not actively used
 ```
 
 ### Status Transitions
+
+```
+PENDING → PROCESSING → COMPLETED → ARCHIVED
+                     → FAILED
+```
 
 ```python
 # Mark as processing
@@ -58,8 +73,8 @@ document.mark_processing()
 # status → PROCESSING, updated_at → now
 
 # Mark as completed
-document.mark_completed(chunk_count=5, entity_count=10)
-# status → COMPLETED, chunk_count=5, entity_count=10
+document.mark_completed(chunk_count=5, entity_count=10, relationship_count=3)
+# status → COMPLETED, chunk_count=5, entity_count=10, relationship_count=3
 # processed_at → now, updated_at → now
 
 # Mark as failed
@@ -70,7 +85,7 @@ document.mark_failed("Error: LLM timeout")
 
 ### Checksum Deduplication
 
-Documents are deduplicated by content checksum:
+Documents are deduplicated by content checksum, but only when all caller-supplied identity fields also match the existing row. Same content with a new `external_id` or `session_id` produces a **new** document.
 
 ```python
 # During ingestion
@@ -78,10 +93,13 @@ checksum = hashlib.sha256(content.encode()).hexdigest()
 
 # Check if identical document exists
 existing = await storage.get_document_by_checksum(namespace_id, checksum)
-if existing:
-    # Skip - document already exists
+if existing and _checksum_dedup_applies(existing, external_id=external_id, session_id=session_id):
+    # Skip - same content AND same caller identity
     return None
+# Otherwise ingest as a new document (new external_id or session_id = new document)
 ```
+
+The `_checksum_dedup_applies` guard (added in #1171) returns `False` when the caller supplies an `external_id` that differs from the existing row, or a `session_id` that differs. Callers that supply neither field keep the checksum-only behavior.
 
 ## Chunk Model
 
@@ -108,9 +126,19 @@ class Chunk:
 
     # Embedding
     embedding: list[float] | None = None
+    embedding_model: str = ""
 
     # Timestamps
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    source_timestamp: datetime | None = None
+    occurred_at: datetime | None = None        # Chunk event-time
+    last_accessed_at: datetime | None = None   # Set on recall with reinforcement
+
+    # Session attribution propagated from the parent document (#620)
+    session_id: UUID | None = None
+
+    # Populated by Khora when include_sources=True
+    source_document: DocumentSource | None = None
 ```
 
 ### Chunk Metadata vs chunker_info
@@ -258,8 +286,8 @@ result = await kb.remember_batch(
     relationship_types=["MENTIONS"],
 )
 
-print(f"Processed: {result['processed_documents']}")
-print(f"Skipped (duplicates): {result['skipped_documents']}")
+print(f"Processed: {result.processed}")
+print(f"Skipped (duplicates): {result.skipped}")
 ```
 
 ### Forgetting Documents
@@ -284,6 +312,7 @@ Documents are chunked using configurable strategies:
 | `fixed` | Fixed token size with overlap |
 | `semantic` | Sentence/paragraph boundaries |
 | `recursive` | Hierarchical splitting |
+| `conversation` | Groups messages into coherent conversation chunks (Slack and similar) |
 
 See [Chunkers](../extraction/chunkers.md) for details.
 
@@ -299,6 +328,7 @@ CREATE TABLE documents (
     external_id VARCHAR(512),      -- Caller-supplied source identity
     status VARCHAR(20) DEFAULT 'pending',
     metadata JSONB,
+    checksum VARCHAR(64),          -- SHA-256 for deduplication
     chunk_count INTEGER DEFAULT 0,
     entity_count INTEGER DEFAULT 0,
     created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -308,7 +338,7 @@ CREATE TABLE documents (
 
 CREATE INDEX idx_documents_namespace ON documents(namespace_id);
 CREATE INDEX idx_documents_status ON documents(namespace_id, status);
-CREATE INDEX idx_documents_checksum ON documents(namespace_id, (metadata->>'checksum'));
+CREATE INDEX ix_documents_namespace_checksum ON documents(namespace_id, checksum);
 CREATE UNIQUE INDEX ix_documents_namespace_external_id_unique
     ON documents(namespace_id, external_id) WHERE external_id IS NOT NULL;
 ```

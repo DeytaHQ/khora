@@ -46,12 +46,17 @@ Each document's entities are checked against a shared in-memory `EntityIndex`. E
 After every document has been processed, a single resolution pass runs across the full entity set. The `CrossToolUnifier` uses the `EntityIndex` for token-blocked candidate retrieval, reducing fuzzy and embedding matching from O(n^2) to O(n * k) where k is the blocked candidate set size (typically 10-20 entities). Relationship inference also runs once on the fully resolved graph.
 
 ```python
+from khora.extraction.skills import load_expertise
+
+expertise = load_expertise("saas_expert")
+# Set inference_mode via ExpertiseConfig.expansion.inference_mode:
+expertise.expansion.inference_mode = "smart"  # default
+
 result = await ingest_documents(
     namespace_id,
     documents,
     storage,
-    expertise="saas_expert",
-    inference_mode="smart",     # default
+    expertise=expertise,
     enable_expansion=True,
 )
 ```
@@ -87,7 +92,7 @@ expander = SemanticExpander(
 )
 
 # After all documents: batch inference
-from khora.pipelines.flows import run_batch_inference
+from khora.pipelines.flows.ingest import run_batch_inference
 
 result = await run_batch_inference(
     namespace_id=namespace_id,
@@ -353,28 +358,31 @@ When merging entities:
 
 ```python
 def merge_with(self, other: Entity):
+    # Combine source references (deduplicated)
+    for doc_id in other.source_document_ids:
+        if doc_id not in self.source_document_ids:
+            self.source_document_ids.append(doc_id)
+    for chunk_id in other.source_chunk_ids:
+        if chunk_id not in self.source_chunk_ids:
+            self.source_chunk_ids.append(chunk_id)
+
     # Sum mention counts
     self.mention_count += other.mention_count
 
-    # Average confidence
-    self.confidence = (self.confidence + other.confidence) / 2
-
-    # Merge attributes (non-empty values preferred)
+    # Merge attributes: only add keys not already present (existing values win)
     for key, value in other.attributes.items():
-        if value and not self.attributes.get(key):
+        if key not in self.attributes:
             self.attributes[key] = value
 
-    # Combine aliases
-    self.aliases.extend(a for a in other.aliases if a not in self.aliases)
+    # Take maximum confidence (not average)
+    self.confidence = max(self.confidence, other.confidence)
 
-    # Combine source references
-    self.source_document_ids.extend(other.source_document_ids)
-    self.source_chunk_ids.extend(other.source_chunk_ids)
-
-    # Expand temporal validity
-    if other.valid_from and other.valid_from < self.valid_from:
-        self.valid_from = other.valid_from
+    # Fill description only if currently empty
+    if not self.description and other.description:
+        self.description = other.description
 ```
+
+Key points: confidence uses `max()`, not the average. Attributes are added only when the key does not already exist (existing values are never overwritten). There is no `aliases` field and no `valid_from` expansion -- those were not part of the model.
 
 ## RelationshipInferrer
 
@@ -551,26 +559,34 @@ result = await run_smart_resolution(
 ### Via Pipeline (Smart Mode)
 
 ```python
+from khora.extraction.skills import load_expertise
+
+expertise = load_expertise("saas_expert")
+# inference_mode defaults to "smart" (controlled via ExpertiseConfig)
+
 result = await ingest_documents(
     namespace_id,
     documents,
     storage,
-    expertise="saas_expert",
+    expertise=expertise,
     enable_expansion=True,
-    # inference_mode defaults to "smart"
 )
 ```
 
-### Via Pipeline (Legacy Modes)
+### Via Pipeline (Other Modes)
 
 ```python
+from khora.extraction.skills import load_expertise
+
+expertise = load_expertise("saas_expert")
+expertise.expansion.inference_mode = "incremental"  # or "batch", "none"
+
 result = await ingest_documents(
     namespace_id,
     documents,
     storage,
-    expertise="saas_expert",
+    expertise=expertise,
     enable_expansion=True,
-    inference_mode="incremental",  # or "batch", "none"
 )
 ```
 
@@ -604,6 +620,24 @@ expander = SemanticExpander.from_expertise_name("saas_expert")
 ```
 
 ## Configuration
+
+### Per-Type Merge Thresholds
+
+Entity resolution uses per-type thresholds to balance precision and recall. Types where false merges are most damaging (people, dates) get higher thresholds:
+
+| Entity Type | Threshold | Rationale |
+|-------------|-----------|-----------|
+| `DATE` | 0.95 | Dates are precise; merging distinct dates is a correctness error |
+| `PERSON` | 0.92 | Different people should not be merged |
+| `ORGANIZATION` | 0.88 | Company names are fairly unique |
+| `LOCATION` | 0.85 | Locations can have aliases (city/municipality) |
+| `TECHNOLOGY` | 0.85 | Tech names are specific |
+| `PRODUCT` | 0.85 | Product names are specific |
+| `CONCEPT` | 0.82 | Concepts overlap more; moderate merge tolerance |
+| `EVENT` | 0.80 | Event names are often informal |
+| *(default)* | 0.85 | Fallback for unknown types |
+
+These defaults live in `extraction/entity_resolution.py::DEFAULT_MERGE_THRESHOLDS` and can be overridden via expertise configuration.
 
 ### Similarity Thresholds
 

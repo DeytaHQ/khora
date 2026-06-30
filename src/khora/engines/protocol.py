@@ -205,11 +205,13 @@ class MemoryEngineProtocol(Protocol):
         self,
         *,
         config_overrides: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> MemoryNamespace:
         """Create a new memory namespace.
 
         Args:
             config_overrides: Optional configuration overrides
+            metadata: Optional namespace metadata
 
         Returns:
             Created MemoryNamespace

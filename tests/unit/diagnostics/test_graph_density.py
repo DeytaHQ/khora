@@ -33,10 +33,12 @@ def test_isolated_nodes_have_n_components_zero_degree() -> None:
     assert stats.num_relationships == 0
     assert stats.mean_degree == 0.0
     assert stats.median_degree == 0.0
-    # 3 singletons → 3 components — passes the ≥3 components decision arm.
+    # 3 singletons → 3 components. The old gate green-lit this via the
+    # ≥3-components arm; the #1377 gate requires actual connectivity, so an
+    # edgeless graph (median_degree 0, largest_cc_fraction 1/3) fails.
     assert stats.num_components == 3
     assert stats.largest_cc_size == 1
-    assert stats.meets_ppr_threshold is True
+    assert stats.meets_ppr_threshold is False
 
 
 @pytest.mark.unit
@@ -44,14 +46,19 @@ def test_chain_graph_one_component() -> None:
     ns = uuid4()
     a, b, c, d = uuid4(), uuid4(), uuid4(), uuid4()
     # a-b-c-d chain: 4 nodes, 3 edges, 1 component, mean degree 1.5
-    stats = _stats_from_lists(ns, [a, b, c, d], [(a, b), (b, c), (c, d)])
+    stats = _stats_from_lists(
+        ns,
+        [a, b, c, d],
+        [(a, b, "WORKS_FOR"), (b, c, "WORKS_FOR"), (c, d, "WORKS_FOR")],
+    )
     assert stats.num_entities == 4
     assert stats.num_relationships == 3
     assert stats.num_components == 1
     assert stats.largest_cc_size == 4
     assert stats.largest_cc_fraction == 1.0
     assert stats.mean_degree == 1.5
-    # 1 component, mean degree well below 5 → doesn't pass either arm.
+    # Connected + semantic, but mean_degree_largest_cc (1.5) is below the
+    # core-degree threshold → fails the density conjunct.
     assert stats.meets_ppr_threshold is False
 
 
@@ -66,11 +73,12 @@ def test_dense_largest_cc_meets_threshold() -> None:
     """
     ns = uuid4()
     nodes = [uuid4() for _ in range(6)]
-    edges = [(nodes[i], nodes[j]) for i in range(6) for j in range(i + 1, 6)]
+    edges = [(nodes[i], nodes[j], "DISCOVERED") for i in range(6) for j in range(i + 1, 6)]
     stats = _stats_from_lists(ns, nodes, edges)
     assert stats.num_components == 1
     assert stats.mean_degree_largest_cc == 5.0
-    # Mean degree ≥5 arm passes.
+    assert stats.non_generic_edge_fraction == 1.0
+    # Connected, fully linked, semantic edges, dense core → passes all conjuncts.
     assert stats.meets_ppr_threshold is True
 
 
@@ -79,7 +87,7 @@ def test_dangling_edge_dropped_silently() -> None:
     ns = uuid4()
     a, b = uuid4(), uuid4()
     ghost = uuid4()  # not in entity_ids
-    stats = _stats_from_lists(ns, [a, b], [(a, b), (a, ghost)])
+    stats = _stats_from_lists(ns, [a, b], [(a, b, "WORKS_FOR"), (a, ghost, "WORKS_FOR")])
     # Only the valid edge survives; the dangling one is ignored.
     assert stats.num_relationships == 1
     assert stats.num_components == 1
@@ -90,7 +98,7 @@ def test_dangling_edge_dropped_silently() -> None:
 def test_self_loops_ignored() -> None:
     ns = uuid4()
     a, b = uuid4(), uuid4()
-    stats = _stats_from_lists(ns, [a, b], [(a, a), (a, b)])
+    stats = _stats_from_lists(ns, [a, b], [(a, a, "WORKS_FOR"), (a, b, "WORKS_FOR")])
     # Self-loop is dropped — only a-b counts.
     assert stats.num_relationships == 1
 
@@ -100,13 +108,64 @@ def test_two_components_below_threshold() -> None:
     """Two small triangles: 6 nodes, 6 edges, 2 components, mean_deg_in_largest_cc=2."""
     ns = uuid4()
     a, b, c, d, e, f = (uuid4() for _ in range(6))
-    edges = [(a, b), (b, c), (c, a), (d, e), (e, f), (f, d)]
+    edges = [
+        (a, b, "WORKS_FOR"),
+        (b, c, "WORKS_FOR"),
+        (c, a, "WORKS_FOR"),
+        (d, e, "WORKS_FOR"),
+        (e, f, "WORKS_FOR"),
+        (f, d, "WORKS_FOR"),
+    ]
     stats = _stats_from_lists(ns, [a, b, c, d, e, f], edges)
     assert stats.num_components == 2
     assert stats.largest_cc_size == 3
     assert stats.mean_degree_largest_cc == 2.0
-    # Neither ≥3 components nor mean degree ≥5.
+    # largest_cc_fraction is only 0.5 and the core degree (2.0) is below the
+    # threshold → fails.
     assert stats.meets_ppr_threshold is False
+
+
+@pytest.mark.unit
+def test_edgeless_hundred_node_graph_fails_gate() -> None:
+    """#1377 misfire A: 100 entities, 0 relationships must NOT meet the gate.
+
+    The old gate green-lit this via num_components >= 3 (each singleton is a
+    component). PPR on an edgeless graph has nothing to walk.
+    """
+    ns = uuid4()
+    nodes = [uuid4() for _ in range(100)]
+    stats = _stats_from_lists(ns, nodes, [])
+    assert stats.num_components == 100
+    assert stats.num_relationships == 0
+    assert stats.median_degree == 0.0
+    assert stats.non_generic_edge_fraction == 0.0
+    assert stats.meets_ppr_threshold is False
+
+
+@pytest.mark.unit
+def test_noise_clique_vs_semantic_clique_differ() -> None:
+    """#1377 misfire B: identical topology, different edge type → different verdict.
+
+    A dense clique of pure CO_OCCURS_WITH noise must fail; the same clique built
+    from semantic DISCOVERED edges must pass. Edge type is no longer invisible.
+    """
+    ns = uuid4()
+    nodes = [uuid4() for _ in range(6)]
+    pairs = [(nodes[i], nodes[j]) for i in range(6) for j in range(i + 1, 6)]
+
+    noise = _stats_from_lists(ns, nodes, [(a, b, "CO_OCCURS_WITH") for a, b in pairs])
+    semantic = _stats_from_lists(ns, nodes, [(a, b, "DISCOVERED") for a, b in pairs])
+
+    # Identical topology → identical structural stats.
+    assert noise.mean_degree_largest_cc == semantic.mean_degree_largest_cc
+    assert noise.largest_cc_fraction == semantic.largest_cc_fraction
+
+    assert noise.non_generic_edge_fraction == 0.0
+    assert semantic.non_generic_edge_fraction == 1.0
+    assert noise.meets_ppr_threshold is False
+    assert semantic.meets_ppr_threshold is True
+    # The verdicts differ — edge quality is now a signal.
+    assert noise.meets_ppr_threshold != semantic.meets_ppr_threshold
 
 
 @pytest.mark.unit

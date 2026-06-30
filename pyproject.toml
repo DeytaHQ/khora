@@ -147,7 +147,7 @@ nlp = ["spacy>=3.8.0"]
 # LOCKSTEP: this pin must match rust/khora-accel/Cargo.toml's version exactly.
 # Bump both in the same PR. See CLAUDE.md → Version Bumps.
 rust = [
-    "khora-accel==0.21.0",
+    "khora-accel==0.21.1",
 ]
 # SurrealDB unified backend (graph + vector + relational in one DB)
 surrealdb = ["surrealdb>=2.0.0,<3.0"]
@@ -351,7 +351,7 @@ exclude-newer = "7 days"
 # staging window so a same-week CVE fix isn't held back. Use sparingly —
 # every entry here is an explicit "we trust this package enough to skip
 # the staging window".
-exclude-newer-package = { urllib3 = "0 days", litellm = "0 days", idna = "0 days", "turbopuffer" = "0 days", aiohttp = "0 days", "pydantic-settings" = "0 days" }  # urllib3: CVE-2026-44431/44432; litellm: CVE-2026-42208/42271/40217 (1.83.10+); idna: CVE-2026-45409 (3.15+); turbopuffer: 2.1.0 newer than the 7-day window when introduced in #824 - opt-in extra so safe to bypass; aiohttp: CVE-2026-34993/47265 (3.14.0+), CVE-2026-54273..54280 (3.14.1+); pydantic-settings: GHSA-4xgf-cpjx-pc3j (fixed 2.14.2).
+exclude-newer-package = { urllib3 = "0 days", litellm = "0 days", idna = "0 days", "turbopuffer" = "0 days", aiohttp = "0 days", "pydantic-settings" = "0 days", langsmith = "0 days" }  # urllib3: CVE-2026-44431/44432; litellm: CVE-2026-42208/42271/40217 (1.83.10+); idna: CVE-2026-45409 (3.15+); turbopuffer: 2.1.0 newer than the 7-day window when introduced in #824 - opt-in extra so safe to bypass; aiohttp: CVE-2026-34993/47265 (3.14.0+), CVE-2026-54273..54280 (3.14.1+); pydantic-settings: GHSA-4xgf-cpjx-pc3j (fixed 2.14.2); langsmith: GHSA-f4xh-w4cj-qxq8 (0.8.18, released within the 7-day window).
 constraint-dependencies = [
     # Security: CVE-2026-25645 fixed in 2.33.0
     "requests>=2.33.1",
@@ -368,6 +368,9 @@ constraint-dependencies = [
     "python-multipart>=0.0.30",
     # Security: GHSA-xgmm-8j9v-c9wx (JWK accepted as HMAC secret) fixed in 2.13.0
     "pyjwt>=2.13.0",
+    # Security: GHSA-f4xh-w4cj-qxq8 (TracingMiddleware arbitrary server-side
+    # file read) fixed in 0.8.18; transitive via langchain-core (langgraph extra)
+    "langsmith>=0.8.18",
     # #1163: keep logfire consistent with the opentelemetry-sdk that each
     # conflict fork resolves. The crewai fork pins opentelemetry-api<1.35
     # (so otel-sdk stays 1.34.x), where only logfire<4.7 is installable

@@ -1,6 +1,6 @@
 # API Reference
 
-The public Khora surface is pinned by the machine-readable `__all__` in `src/khora/__init__.py`. Everything on this page is stable. Symbols not listed here may change without notice.
+The public Khora surface is pinned by the machine-readable `__all__` in `src/khora/__init__.py`. The symbols documented here are stable. Additional stable-but-not-yet-fully-documented symbols are noted in [Additional stable exports](#additional-stable-exports) below. Symbols absent from `__all__` may change without notice.
 
 ## Top-level imports
 
@@ -9,6 +9,7 @@ from khora import (
     Khora,
     KhoraConfig,
     KhoraError,
+    EngineCapabilityError,  # raised when a mode/feature is unsupported by the active engine
     SearchMode,
     RememberResult,
     RecallResult,
@@ -17,6 +18,7 @@ from khora import (
     DocumentResult,     # per-document callback payload from submit_batch
     Stats,
     LLMUsage,
+    UsageSummary,       # aggregate view over a list of LLMUsage
     DocumentSource,
     EventType,
     SemanticFilter,
@@ -29,6 +31,24 @@ from khora import (
     ExpertiseConfig,
     EntityTypeConfig,
     RelationshipTypeConfig,
+    # Recall filter DSL
+    RecallFilter,
+    StringOps,
+    DateOps,
+    Op,
+    SYSTEM_KEYS,
+    RecallFilterValidationError,
+    RecallFilterUnsupportedError,
+    # Dream phase
+    DreamConfig,
+    DreamMode,
+    DreamScope,
+    DreamResult,
+    DreamRunInfo,
+    OpKind,
+    # Filter pushdown reporting
+    FilterPushdownReport,
+    FilterChannelReport,
 )
 ```
 
@@ -93,6 +113,7 @@ result: RememberResult = await kb.remember(
     source_type: str = "library",
     source_name: str | None = None,
     source_url: str | None = None,
+    source_timestamp: datetime | None = None,
     metadata: dict[str, Any] | None = None,
     skill_name: str = "general_entities",
     entity_types: list[str],
@@ -120,6 +141,7 @@ result: BatchResult = await kb.remember_batch(
     source_type: str = "library",
     source_name: str | None = None,
     source_url: str | None = None,
+    source_timestamp: datetime | None = None,
     max_concurrent: int = 10,
     deduplicate: bool = True,
     infer_relationships: bool = True,
@@ -148,6 +170,7 @@ handle: BatchHandle = await kb.submit_batch(
     source_type: str = "library",
     source_name: str | None = None,
     source_url: str | None = None,
+    source_timestamp: datetime | None = None,
     entity_types: list[str],
     relationship_types: list[str],
     expertise: ExpertiseConfig | None = None,
@@ -182,7 +205,7 @@ result: RecallResult = await kb.recall(
 )
 ```
 
-- `mode` - one of `SearchMode.VECTOR`, `GRAPH`, `HYBRID`, or `ALL`.
+- `mode` - one of `SearchMode.VECTOR`, `GRAPH`, `HYBRID`, `ALL`, or `KEYWORD`.
 - `start_time` / `end_time` - **Deprecated.** Explicit temporal filter; bypasses NLP temporal detection. Both-naive or both-aware datetimes are required. Honored on all three engines (chronicle, vectorcypher, skeleton). Prefer the `filter` form: `filter={"occurred_at": {"$gte": ..., "$lt": ...}}`. Cannot be combined with `filter=`.
 - To skip LLM-side work (reranking, HyDE expansion), set the config flags `enable_llm_reranking=False` and `enable_hyde="never"` on `KhoraConfig.query` (env: `KHORA_QUERY_ENABLE_LLM_RERANKING`, `KHORA_QUERY_ENABLE_HYDE`).
 
@@ -329,7 +352,8 @@ JSON-serializable response projection. Lives at `khora.core.models.recall.Recall
 | `chunks` | `list[RecallChunk]` | Scored chunks. Score is a typed field, not a tuple position. |
 | `entities` | `list[RecallEntity]` | Scored entities with document/chunk provenance ids. |
 | `relationships` | `list[RecallRelationship]` | Scored relationships. Always present; populated by graph-backed engines (VectorCypher), empty list for others (Chronicle, Skeleton). |
-| `usage` | `list[LLMUsage]` | Token usage incurred during the recall. |
+| `llm_usage` | `list[LLMUsage]` | Token usage incurred during the recall. |
+| `communities` | `list[CommunityNode]` | Dream-phase community summaries surfaced by graph-backed engines. Empty list when no communities are materialized or the engine doesn't support them. See [`CommunityNode`](#communitynode). |
 | `engine_info` | `dict[str, Any]` | Free-form engine telemetry. **Every engine emits the mandatory key `"engine": "<strategy-name>"`** (`vectorcypher` / `chronicle` / `skeleton`) so consumers can route on producer identity. |
 
 **Producer invariant:** every `chunks[i].document_id` and every id in `entities[i].source_document_ids` / `relationships[i].source_document_ids` is guaranteed to appear as some `documents[j].id`.
@@ -434,6 +458,44 @@ Prior to #1069 the skeleton engine derived `pushed_down` from a hardcoded `backe
 
 `LLMUsage` fields are part of the stable public API and are consumed by external cost-tracking integrations. Do not mutate instances; they are `frozen`.
 
+| Field | Type | Description |
+|---|---|---|
+| `operation` | `str` | Logical operation name (e.g. `"entity_extraction"`, `"embedding"`). |
+| `model` | `str` | Model identifier (e.g. `"gpt-4o"`, `"text-embedding-3-small"`). |
+| `prompt_tokens` | `int` | Input tokens consumed. |
+| `completion_tokens` | `int` | Output tokens (0 for embeddings). |
+| `total_tokens` | `int` | Sum of prompt and completion tokens. |
+| `latency_ms` | `float` | Round-trip latency in milliseconds. |
+| `batch_size` | `int` | Batch size (`>1` for embedding batches). |
+| `cost_usd` | `float` | Estimated USD cost via litellm pricing tables; `0.0` when unknown. |
+
+### `UsageSummary`
+
+`UsageSummary` is a stable public export (`from khora import UsageSummary`). It aggregates a `list[LLMUsage]` into totals and per-operation / per-model breakdowns. See `Khora.recall()`'s return value or build one directly with `UsageSummary.from_usage(usages)`.
+
+| Field | Type | Description |
+|---|---|---|
+| `total_prompt_tokens` | `int` | Sum of all `LLMUsage.prompt_tokens`. |
+| `total_completion_tokens` | `int` | Sum of all `LLMUsage.completion_tokens`. |
+| `total_tokens` | `int` | Sum of all `LLMUsage.total_tokens`. |
+| `total_cost_usd` | `float` | Sum of all `LLMUsage.cost_usd`. |
+| `total_latency_ms` | `float` | Sum of all `LLMUsage.latency_ms`. |
+| `by_operation` | `dict[str, _OperationUsage]` | Totals keyed by `LLMUsage.operation`. |
+| `by_model` | `dict[str, _OperationUsage]` | Totals keyed by `LLMUsage.model`. |
+
+### `CommunityNode`
+
+Returned in `RecallResult.communities`. A materialized dream-phase community summary node, produced by the `community_summary` dream op and mirrored to the graph as a `:Community` node.
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | `UUID` | Community node id. |
+| `namespace_id` | `UUID` | Namespace the community belongs to. |
+| `summary` | `str` | LLM-grounded summary text (uncited claims dropped before insert). |
+| `member_ids` | `list[UUID]` | Entity ids that are members of this community. |
+| `summary_depth` | `int` | Hierarchical depth (1 = leaf community). |
+| `embedding` | `list[float] \| None` | Optional embedding of the summary text. |
+
 ## `SearchMode`
 
 ```python
@@ -443,6 +505,7 @@ SearchMode.VECTOR    # pgvector / HNSW only
 SearchMode.GRAPH     # Cypher / graph traversal only
 SearchMode.HYBRID    # vector + graph + keyword, fused via RRF
 SearchMode.ALL       # every available channel (slower, more context)
+SearchMode.KEYWORD   # BM25 / keyword-only; skips vector search, returns BM25 results on all backends
 ```
 
 See [query-engine/search-modes.md](query-engine/search-modes.md).
@@ -506,6 +569,62 @@ from khora.diagnostics import compute_graph_stats, GraphStats  # PPR decision-ga
 - `khora.query.hyde_cypher` - `select_template()`, `generate_cypher()`, `validate_selection()`, `TEMPLATES`, `HyDECypherTemplate`, `HyDECypherSelection`, `HyDECypherValidationError`. Default OFF; enable via `KHORA_QUERY_ENABLE_HYDE_CYPHER=true`. See [query-engine/retrieval-tuning.md](query-engine/retrieval-tuning.md).
 - `khora.diagnostics.graph_density` - one-shot reporter for the PPR audit (Issue #598). Operator script: `scripts/audit_graph_density.py`. This module is intentionally **not stable public API** - it may be renamed or removed without a major-version bump.
 
+## RecallFilter
+
+The `RecallFilter` DSL provides deterministic, pre-retrieval filtering of recall results. It is a stable public export.
+
+```python
+from datetime import datetime, timezone
+from khora import RecallFilter, StringOps, DateOps, Op, SYSTEM_KEYS
+from khora import RecallFilterValidationError, RecallFilterUnsupportedError
+
+# Match documents from a specific source (kwargs form, recommended)
+f = RecallFilter(source_name="slack")
+
+# Operator form - exclude a source_type
+f = RecallFilter(source_name=StringOps(**{"$ne": "internal"}))
+
+# Date range filter using DateOps
+f = RecallFilter(occurred_at=DateOps(**{"$gte": datetime(2024, 1, 1, tzinfo=timezone.utc),
+                                        "$lt": datetime(2024, 7, 1, tzinfo=timezone.utc)}))
+
+# Wire/dict form (useful when deserializing HTTP bodies or YAML configs)
+f = RecallFilter.model_validate({"source_name": "slack", "source_type": {"$ne": "internal"}})
+
+result = await kb.recall("query", namespace=ns_id, filter=f)
+```
+
+Pass a `RecallFilter` (or a raw `dict` that will be coerced to one) to `recall(filter=...)`. The recommended form is Pydantic kwargs (`RecallFilter(source_name="slack")`); the wire form (`RecallFilter.model_validate({...})`) is useful for deserializing HTTP bodies or YAML configs. The engine reports what it enforced in `engine_info["filter"]` as a [`FilterPushdownReport`](#recallresult) (see above). Validation errors raise `RecallFilterValidationError`; unsupported operations on the active backend raise `RecallFilterUnsupportedError`. `SYSTEM_KEYS` is a frozenset of the ten filterable system keys (`occurred_at`, `created_at`, `source_timestamp`, `source_type`, `source_name`, `source_url`, `external_id`, `content_type`, `source`, `title`).
+
+## Dream phase
+
+The dream phase is Khora's background knowledge-consolidation cycle. It is documented in [dream-phase.md](dream-phase.md).
+
+Stable public exports for dream orchestration:
+
+```python
+from khora import DreamConfig, DreamMode, DreamScope, DreamResult, DreamRunInfo, OpKind
+```
+
+- `DreamConfig` - per-run configuration (which ops to run, concurrency, LLM budget).
+- `DreamMode` - enum controlling which dream ops fire (`FULL`, `QUICK`, `CUSTOM`).
+- `DreamScope` - namespace(s) the dream run targets.
+- `DreamResult` - return value of `Khora.dream()` (per-op results, metadata, partial-failure diagnostics).
+- `DreamRunInfo` - lightweight summary of a completed or in-progress dream run.
+- `OpKind` - enum of available dream ops (`DEDUPE_ENTITIES`, `COMMUNITY_SUMMARY`, `CONTRADICTION_DETECT`, …).
+
+## Additional stable exports
+
+The following symbols are in `__all__` and therefore stable but are not yet individually documented on this page.
+
+| Symbol | Notes |
+|---|---|
+| `FilterPushdownReport` / `FilterChannelReport` | Documented under [`RecallResult`](#recallresult) above. |
+| `RecallFilter` / `StringOps` / `DateOps` / `Op` / `SYSTEM_KEYS` / `RecallFilterValidationError` / `RecallFilterUnsupportedError` | Documented under [`RecallFilter`](#recallfilter) above. |
+| `DreamConfig` / `DreamMode` / `DreamScope` / `DreamResult` / `DreamRunInfo` / `OpKind` | Documented under [`Dream phase`](#dream-phase) above. |
+| `UsageSummary` | Documented under [`UsageSummary`](#usagesummary) above. |
+| `EngineCapabilityError` | Documented under [`Errors`](#errors) below. |
+
 ## Errors
 
 All domain errors subclass `KhoraError`. Catch it at system boundaries; internal code uses specific subclasses. See `src/khora/exceptions.py` for the hierarchy.
@@ -518,6 +637,8 @@ try:
 except KhoraError as exc:
     ...
 ```
+
+`EngineCapabilityError` (a `KhoraError` subclass, stable public export) is raised when the active engine does not support a requested mode or feature - for example, asking the `skeleton` engine for `SearchMode.GRAPH` traversal. Catch it to implement graceful fallback between engines.
 
 ## Stability guarantee
 

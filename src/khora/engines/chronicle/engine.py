@@ -1578,9 +1578,11 @@ class ChronicleEngine:
             embedding_model=self._config.llm.embedding_model,
             embedding_dimension=self._config.llm.embedding_dimension,
             extraction_model=self._config.llm.extraction_model or self._config.llm.model,
+            extraction_wave_size=self._config.llm.extraction_wave_size,
             entity_types=entity_types,
             relationship_types=relationship_types,
             expertise=expertise,
+            ketrag_skeleton_channel=self._config.pipeline.ketrag_skeleton_channel,
         )
         if chunk_strategy is not None:
             kwargs["chunk_strategy"] = chunk_strategy
@@ -3387,6 +3389,7 @@ class ChronicleEngine:
             embedding_dimension=self._config.llm.embedding_dimension,
             extraction_model=self._config.llm.extraction_model or self._config.llm.model,
             extraction_timeout=self._config.llm.timeout,
+            extraction_wave_size=self._config.llm.extraction_wave_size,
             max_concurrent_documents=max_concurrent,
             shared_embedder=shared_embedder,
             shared_entity_index=shared_entity_index,
@@ -3394,6 +3397,7 @@ class ChronicleEngine:
             entity_types=entity_types,
             relationship_types=relationship_types,
             expertise=expertise,
+            ketrag_skeleton_channel=self._config.pipeline.ketrag_skeleton_channel,
         )
         if chunk_strategy is not None:
             ingest_kwargs["chunk_strategy"] = chunk_strategy
@@ -3517,10 +3521,12 @@ class ChronicleEngine:
         self,
         *,
         config_overrides: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> MemoryNamespace:
         """Create a new memory namespace."""
         namespace = MemoryNamespace(
             config_overrides=config_overrides or {},
+            metadata=metadata or {},
         )
         return await self._get_storage().create_namespace(namespace)
 

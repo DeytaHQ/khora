@@ -617,6 +617,30 @@ RRF score = vector_weight / (k + vector_rank) + graph_weight / (k + graph_rank)
 Tiebreaker = normalized_score from the dominant source
 ```
 
+## Abstention & Confidence
+
+VectorCypher emits abstention and confidence signals on every recall via `result.engine_info` (not `result.metadata`):
+
+```python
+result = await kb.recall("What is Alice currently working on?", namespace=ns_id)
+
+signals = result.engine_info["abstention_signals"]
+# Four boolean flags:
+print(signals["entities_empty"])       # No entities found
+print(signals["chunks_empty"])         # No chunks returned
+print(signals["chunks_below_min"])     # Fewer than minimum chunks threshold
+print(signals["top_score_low"])        # Top chunk score below minimum similarity
+
+print(signals["combined_score"])       # 0.0–1.0 weighted abstention-risk signal (higher = riskier)
+print(signals["should_abstain"])       # Convenience bool
+
+confidence = result.engine_info["confidence"]  # 0.0–1.0 calibrated score
+```
+
+The `should_abstain` flag is passive - VectorCypher still returns chunks even when it trips. Use it to suppress LLM answer generation when retrieval quality is too low. In the default `cosine_floor` mode, `should_abstain` fires when `top_score_low` trips on its own OR retrieval came back genuinely empty (`chunks_empty AND entities_empty`); it is NOT thresholded from `combined_score`. The `combined_score` is a weighted risk indicator that only directly drives the decision in the legacy `weighted` mode.
+
+The confidence score formula: `0.8 * clip01(top_cosine / target_cosine) + 0.2 * clip01(top_score_gap / target_gap)`.
+
 ## Search Index Improvements
 
 Migration 005 adds three PostgreSQL indexes that improve query-time performance:
@@ -639,7 +663,7 @@ uv run alembic upgrade head
 
 **Cross-encoder reranking.** After the initial vector + Cypher retrieval, an optional cross-encoder model rescores the top candidates for precision. The model is cached across queries to avoid reload overhead, and inference runs in `asyncio.to_thread` to keep the event loop free. Enable/disable via `KHORA_QUERY_ENABLE_RERANKING`.
 
-**Independent BM25 channel.** VectorCypher now runs BM25 full-text search as a separate retrieval channel alongside vector and Cypher graph traversal. Results are fused via RRF, giving keyword-exact matches a dedicated signal path rather than relying solely on embedding similarity.
+**Independent BM25 channel (opt-in).** When `KHORA_QUERY_ENABLE_BM25_CHANNEL=true` is set, VectorCypher runs BM25 full-text search as a separate retrieval channel alongside vector and Cypher graph traversal. Results are fused via RRF, giving keyword-exact matches a dedicated signal path rather than relying solely on embedding similarity. Default is OFF; keyword matching in HYBRID mode uses the `enable_keyword_search` path inside `HybridQueryEngine`, not this channel.
 
 **Temporal SQL pushdown.** Relative date expressions in queries ("last 7 days", "since March") are detected by the temporal classifier and translated into SQL WHERE clauses that filter at the database level before vector search. This reduces the candidate set and improves both latency and relevance for time-scoped queries. Controlled by `KHORA_QUERY_TEMPORAL_SQL_PUSHDOWN`.
 

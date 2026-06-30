@@ -345,7 +345,7 @@ ChunkResult(
     end_char=2048,        # End character offset
     token_count=512,      # Actual token count
     metadata={            # Additional info
-        "sentences": 5,   # (semantic chunker adds this)
+        "chunker": "semantic",  # strategy name (all chunkers set this)
     }
 )
 ```

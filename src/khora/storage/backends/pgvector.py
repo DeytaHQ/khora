@@ -24,6 +24,7 @@ from khora.db.models import (
     ChronicleEventModel,
     ChunkModel,
     EntityModel,
+    KeywordChunkModel,
     MemoryFactModel,
     RelationshipModel,
 )
@@ -505,7 +506,48 @@ class PgVectorBackend(AsyncSessionMixin):
                 )
             )
             models = result.scalars().all()
-            return {m.id: self._chunk_model_to_domain(m) for m in models}
+            out = {m.id: self._chunk_model_to_domain(m) for m in models}
+
+            # Fallback for the temporal engines (skeleton / vectorcypher), which
+            # write chunks to ``khora_chunks`` rather than ``chunks`` (#1372 —
+            # the storage-layer sibling of the sqlite_lance fallback added in
+            # #905). PPR scores chunk ids then hydrates them via this batch
+            # path; without the fallback the ids resolve to nothing and the
+            # graph channel silently collapses to vector-only. Only look up the
+            # ids ``chunks`` didn't satisfy, scoped to ``namespace_id``
+            # (IDOR-safe). A chronicle-only stack has no ``khora_chunks`` table,
+            # so swallow the missing-table error and return what ``chunks``
+            # yielded instead of crashing.
+            missing = [cid for cid in chunk_ids if cid not in out]
+            if missing:
+                from khora.core.temporal import temporal_chunk_to_chunk
+                from khora.khora import _is_undefined_table_error
+                from khora.storage.temporal.pgvector import (
+                    PgVectorTemporalStore,
+                    khora_chunks_table,
+                )
+
+                try:
+                    t_result = await session.execute(
+                        select(khora_chunks_table).where(
+                            khora_chunks_table.c.id.in_(missing),
+                            khora_chunks_table.c.namespace_id == namespace_id,
+                        )
+                    )
+                    t_rows = t_result.fetchall()
+                except Exception as exc:
+                    # Only swallow the absent-``khora_chunks`` case (SQLSTATE
+                    # 42P01) of a chronicle-only stack. Re-raise everything else
+                    # (transient DB failures, decode bugs) so the batch never
+                    # silently returns partial results.
+                    if not _is_undefined_table_error(exc):
+                        raise
+                    logger.debug("khora_chunks fallback skipped in get_chunks_batch: {}", exc)
+                    t_rows = []
+                for row in t_rows:
+                    chunk = temporal_chunk_to_chunk(PgVectorTemporalStore._row_to_chunk(row))
+                    out[chunk.id] = chunk
+            return out
 
     async def get_chunks_by_document(self, document_id: UUID, *, namespace_id: UUID) -> list[Chunk]:
         """Get all chunks for a document, filtered to the caller's ``namespace_id``."""
@@ -1348,6 +1390,61 @@ class PgVectorBackend(AsyncSessionMixin):
 
             result = await session.execute(query)
             return [(row.id, row.similarity) for row in result.all()]
+
+    # =========================================================================
+    # Keyword-chunk bipartite (keyword_ppr lexical channel, #1391)
+    # =========================================================================
+
+    async def upsert_keyword_chunk_edges(
+        self,
+        namespace_id: UUID,
+        edges: list[tuple[str, UUID, float]],
+    ) -> int:
+        """Bulk-insert keyword -> chunk edges for the keyword_ppr channel.
+
+        ``edges`` is a list of ``(keyword, chunk_id, idf)``. Idempotent per
+        chunk: all existing edges for the chunk_ids in this batch are deleted
+        before the fresh rows are inserted, so re-ingesting a chunk replaces
+        its keyword set rather than accumulating duplicates. Returns the number
+        of rows inserted.
+        """
+        if not edges:
+            return 0
+        chunk_ids = {chunk_id for _kw, chunk_id, _idf in edges}
+        async with self._get_session() as session:
+            await session.execute(
+                delete(KeywordChunkModel).where(
+                    KeywordChunkModel.namespace_id == namespace_id,
+                    KeywordChunkModel.chunk_id.in_(chunk_ids),
+                )
+            )
+            values = [
+                {"namespace_id": namespace_id, "keyword": keyword, "chunk_id": chunk_id, "idf": idf}
+                for keyword, chunk_id, idf in edges
+            ]
+            await session.execute(sa.insert(KeywordChunkModel), values)
+            await session.commit()
+        return len(values)
+
+    async def get_keyword_chunk_edges(
+        self,
+        namespace_id: UUID,
+        *,
+        limit: int,
+    ) -> list[tuple[str, UUID, float]]:
+        """Load a namespace's keyword -> chunk edges, capped at ``limit``.
+
+        Returns ``(keyword, chunk_id, idf)`` tuples. The cap bounds the
+        per-query PageRank cost of the keyword_ppr channel.
+        """
+        async with self._get_session() as session:
+            query = (
+                select(KeywordChunkModel.keyword, KeywordChunkModel.chunk_id, KeywordChunkModel.idf)
+                .where(KeywordChunkModel.namespace_id == namespace_id)
+                .limit(limit)
+            )
+            result = await session.execute(query)
+            return [(row.keyword, row.chunk_id, row.idf) for row in result.all()]
 
     # =========================================================================
     # Utility operations

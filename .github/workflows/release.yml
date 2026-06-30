@@ -20,9 +20,9 @@
 #
 # Version lockstep: khora and khora-accel are released at identical versions.
 #   - khora-accel: `Set version from tag` seds rust/khora-accel/Cargo.toml.
-#   - khora: hatch-vcs derives version from the git tag automatically, and
-#     `Pin khora-accel to release version` seds pyproject.toml so the
-#     published khora wheel hard-requires khora-accel == ${tag-version}.
+#   - khora: hatch-vcs derives version from the git tag automatically.
+#     pyproject.toml's `rust` extra already pins khora-accel == X.Y.Z —
+#     this pin is committed in the release PR, not rewritten at build time.
 #
 # Publish order: accel first, then khora. Serializing prevents the skew where
 # `khora==X.Y.Z` lands on PyPI but its `khora-accel==X.Y.Z` dependency hasn't
@@ -178,8 +178,8 @@ jobs:
   # also resolve its khora-accel==X.Y.Z dep.
   #
   # hatch-vcs derives khora's version from the git tag automatically.
-  # The `Pin khora-accel to release version` step rewrites pyproject.toml so
-  # the published wheel/sdist hard-pins khora-accel==X.Y.Z (lockstep contract).
+  # pyproject.toml's `rust` extra already pins khora-accel==X.Y.Z at commit
+  # time (same PR that bumps Cargo.toml) — no rewrite step at build time.
   # ============================================================================
   publish-khora:
     needs: publish-accel
@@ -396,3 +396,57 @@ jobs:
           else
             gh release create "$TAG" --title "$TAG" --generate-notes $LATEST_FLAG
           fi
+
+  # ============================================================================
+  # Notify Slack — runs on success or failure once we know a release was
+  # attempted. Uses the org-wide SLACK_WEBHOOK_PRODUCTION secret.
+  # ============================================================================
+  notify:
+    needs: [publish-khora, smoke-install, github-release]
+    if: always() && needs.publish-khora.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Extract version
+        id: ver
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Notify Slack
+        uses: slackapi/slack-github-action@v2
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_PRODUCTION }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "${{ needs.github-release.result == 'success' && ':white_check_mark:' || ':x:' }} *khora* ${{ needs.github-release.result == 'success' && 'published' || 'failed to publish' }} *${{ github.ref_name }}*"
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    { "type": "mrkdwn", "text": "*Version:*\n`${{ steps.ver.outputs.version }}`" },
+                    { "type": "mrkdwn", "text": "*Actor:*\n${{ github.actor }}" }
+                  ]
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "text": { "type": "plain_text", "text": "View Run" },
+                      "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    },
+                    {
+                      "type": "button",
+                      "text": { "type": "plain_text", "text": "View on PyPI" },
+                      "url": "https://pypi.org/project/khora/${{ steps.ver.outputs.version }}/"
+                    }
+                  ]
+                }
+              ]
+            }

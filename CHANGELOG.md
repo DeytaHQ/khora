@@ -9,6 +9,26 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 ### Changed
 
 - **Breaking:** `weaviate` and `turbopuffer` temporal-store backends are now config-driven. `SkeletonConstructionEngine`, `StorageCoordinator.temporal_store()`, and `create_temporal_store()` no longer accept `weaviate_url` / `turbopuffer_config` kwargs. Configure via `KHORA_STORAGE_WEAVIATE_*` / `KHORA_STORAGE_TURBOPUFFER_*` env vars or by populating `config.storage.weaviate` / `config.storage.turbopuffer` (`WeaviateConfig` / `TurbopufferConfig`). See `docs/engines/skeleton-engine.md`.
+## [0.21.1] - keyword-PPR retrieval, KET-RAG foundation, namespace metadata
+
+### Added
+
+- **Namespace metadata at creation time** (#1369): `Khora.create_namespace` now accepts an optional `metadata` parameter, threaded through `MemoryEngineProtocol` and all three engine implementations (VectorCypher, Chronicle, Skeleton).
+- **Keyword-PPR retrieval channel** (#1391, #1392): a new `keyword_ppr` lexical channel writes keyword-chunk edges at ingest (`keyword_chunks` edge table + migration), retrieves via windowed Personalized PageRank at query time, and plugs into the fusion layer as a `RetrieverConfig.lexical_channel` option.
+- **KET-RAG foundation** (#1383, #1385): multilingual tokenizer with keyword-PageRank chunk selection (flag-gated), co-occurrence skeleton kept out of the entity graph.
+- **CJK bigram + Indic mark-aware tokenization** (#1388, #1390): dependency-free tokenizer handles CJK bigrams, mixed CJK/non-CJK segmentation, and Indic combining marks.
+- **Extraction `wave_size` configurable** (#1374, #1375): default changed to 20 (was hardcoded at 8).
+
+### Fixed
+
+- **SurrealDB HNSW dimension mismatch** (#1386, #1389): index DDL now reads `llm.embedding_dimension` from config instead of hardcoding 1536.
+- **PPR seed-anchored graph** (#1373, #1378): query entities survive large namespaces by seed-anchoring the PPR graph.
+- **PPR chunk hydration from pgvector** (#1372, #1380): chunks hydrate via `khora_chunks` fallback in PgVectorBackend.
+- **PPR density gate** (#1377, #1381): verdict is now edge-quality- and connectivity-aware.
+- **Orphan-report PageRank graph built bidirectionally** (#1376, #1382).
+- **BM25 tokenizer Unicode-aware** (#1384): non-Latin recall no longer silently drops tokens.
+- **Intra-batch identity-scope dedup** (#1352, #1353, #1370): legacy `remember_batch` path deduplicates within the batch.
+- **Langsmith bumped to patched version** (GHSA-f4xh-w4cj-qxq8) (#1371).
 
 ## [0.21.0] - dream-on-graph bi-temporal mirror and recall/temporal hardening
 

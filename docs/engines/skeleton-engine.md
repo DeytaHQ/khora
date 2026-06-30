@@ -490,6 +490,9 @@ results = await engine.recall(query, namespace_id=ns_id, mode=SearchMode.VECTOR)
 # Hybrid (vector + BM25 with RRF)
 results = await engine.recall(query, namespace_id=ns_id, mode=SearchMode.HYBRID)
 
+# Keyword-only (pure BM25, supported on all backends including weaviate/turbopuffer)
+results = await engine.recall(query, namespace_id=ns_id, mode=SearchMode.KEYWORD)
+
 # Note: SearchMode.GRAPH is not supported in Skeleton Construction engine
 # Use VectorCypher engine for graph-based queries
 ```

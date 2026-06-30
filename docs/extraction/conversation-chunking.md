@@ -43,14 +43,15 @@ Each chunk stores metadata about every message it contains, including character 
 
 ```python
 chunk.metadata = {
-    "source_type": "slack_conversation",
+    "chunker": "conversation",
     "channel": "general",
     "thread_ts": "1234567890.123456",  # None for top-level groups
+    "session_id": None,                # Forwarded from the ingest call if set
     "message_count": 3,
     "time_start": "2025-01-15T10:00:00+00:00",
     "time_end": "2025-01-15T10:05:00+00:00",
     "authors": ["alice", "bob"],
-    "messages": [
+    "messages": [                      # Only present when include_message_metadata=True
         {"id": "msg1", "author": "alice", "timestamp": "...", "start_char": 0, "end_char": 42},
         {"id": "msg2", "author": "bob", "timestamp": "...", "start_char": 43, "end_char": 89},
         ...
@@ -63,6 +64,7 @@ chunk.metadata = {
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `time_gap_minutes` | `int` | `15` | Gap threshold to split conversations |
+| `session_gap_minutes` | `int` | `30` | Larger gap that marks a new session boundary |
 | `max_group_size` | `int` | `50` | Max messages per chunk |
 | `min_group_size` | `int` | `2` | Below this, merge with adjacent group |
 | `semantic_threshold` | `float \| None` | `None` | Cosine similarity split (None = disabled) |

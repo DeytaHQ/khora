@@ -1,0 +1,210 @@
+"""Unit tests for flag-gated KET-RAG core-chunk selection routing.
+
+Asserts that ``extract_entities`` routes chunk selection through the
+keyword-PageRank scorer (``select_core_chunks``) when
+``ketrag_skeleton_channel=True``, and through ``ChunkImportanceScorer``
+when it is False (the default). Flag-off behavior is unchanged.
+"""
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, patch
+from uuid import uuid4
+
+import pytest
+
+from khora.core.models import Chunk
+from khora.core.ranking import CoreSelection
+from khora.extraction.extractors.base import ExtractionResult
+from khora.pipelines.tasks.extract import extract_entities
+
+
+def _chunks(n: int = 3) -> list[Chunk]:
+    ns = uuid4()
+    doc = uuid4()
+    return [
+        Chunk(
+            id=uuid4(),
+            namespace_id=ns,
+            document_id=doc,
+            content=f"Marija Kiri otkrila radijum dokument broj {i}",
+            chunk_index=i,
+        )
+        for i in range(n)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_flag_on_routes_through_keyword_pagerank() -> None:
+    """Flag on: select_core_chunks is called, ChunkImportanceScorer is NOT."""
+    chunks = _chunks(3)
+    mock_extractor = AsyncMock()
+    mock_extractor.extract_multi = AsyncMock(return_value=[ExtractionResult(entities=[], relationships=[])] * 3)
+
+    selection = CoreSelection(core_ids=[chunks[0].id, chunks[1].id], scores={c.id: 1.0 for c in chunks})
+
+    with (
+        patch("khora.core.ranking.select_core_chunks", return_value=selection) as spy_core,
+        patch("khora.extraction.importance.ChunkImportanceScorer") as spy_scorer,
+    ):
+        await extract_entities(
+            chunks,
+            entity_types=["PERSON"],
+            relationship_types=["RELATES_TO"],
+            selective_extraction=True,
+            ketrag_skeleton_channel=True,
+            shared_extractor=mock_extractor,
+        )
+
+    spy_core.assert_called_once()
+    spy_scorer.assert_not_called()
+    # Only the 2 core chunks reach the LLM.
+    texts = mock_extractor.extract_multi.call_args.args[0]
+    assert len(texts) == 2
+
+
+@pytest.mark.asyncio
+async def test_flag_off_routes_through_importance_scorer() -> None:
+    """Flag off (default): ChunkImportanceScorer is used, select_core_chunks is NOT."""
+    chunks = _chunks(3)
+    mock_extractor = AsyncMock()
+    mock_extractor.extract_multi = AsyncMock(return_value=[ExtractionResult(entities=[], relationships=[])] * 3)
+
+    with (
+        patch("khora.core.ranking.select_core_chunks") as spy_core,
+        patch(
+            "khora.extraction.importance.ChunkImportanceScorer.select_for_extraction",
+            return_value=(chunks[:2], chunks[2:]),
+        ) as spy_scorer,
+    ):
+        await extract_entities(
+            chunks,
+            entity_types=["PERSON"],
+            relationship_types=["RELATES_TO"],
+            selective_extraction=True,
+            ketrag_skeleton_channel=False,
+            shared_extractor=mock_extractor,
+        )
+
+    spy_scorer.assert_called_once()
+    spy_core.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_flag_on_uses_multilingual_tokenizer() -> None:
+    """Flag on: select_core_chunks receives the multilingual tokenizer."""
+    from khora.extraction.tokenize import tokenize_multilingual
+
+    chunks = _chunks(3)
+    mock_extractor = AsyncMock()
+    mock_extractor.extract_multi = AsyncMock(return_value=[ExtractionResult(entities=[], relationships=[])] * 3)
+
+    selection = CoreSelection(core_ids=[chunks[0].id], scores={c.id: 1.0 for c in chunks})
+
+    with patch("khora.core.ranking.select_core_chunks", return_value=selection) as spy_core:
+        await extract_entities(
+            chunks,
+            entity_types=["PERSON"],
+            relationship_types=["RELATES_TO"],
+            selective_extraction=True,
+            ketrag_skeleton_channel=True,
+            shared_extractor=mock_extractor,
+        )
+
+    assert spy_core.call_args.kwargs["tokenizer"] is tokenize_multilingual
+
+
+def test_select_core_chunk_ids_forwards_tokenizer() -> None:
+    """select_core_chunk_ids forwards a custom tokenizer to select_core_chunks."""
+    from khora.core import ranking
+
+    chunks = _chunks(2)
+
+    def fake_tokenizer(_text: str) -> list[str]:  # pragma: no cover - patched out
+        return []
+
+    with patch.object(
+        ranking,
+        "select_core_chunks",
+        return_value=CoreSelection(core_ids=[chunks[0].id], scores={}),
+    ) as spy:
+        ranking.select_core_chunk_ids(chunks, 0.5, tokenizer=fake_tokenizer)
+
+    assert spy.call_args.kwargs["tokenizer"] is fake_tokenizer
+
+
+def test_engine_skeleton_tokenizer_gated_by_flag() -> None:
+    """VectorCypherEngine._skeleton_tokenizer returns the multilingual tokenizer iff flag on."""
+    from unittest.mock import MagicMock
+
+    from khora.engines.vectorcypher.engine import VectorCypherEngine
+    from khora.extraction.tokenize import tokenize_multilingual
+
+    engine = VectorCypherEngine.__new__(VectorCypherEngine)
+
+    engine._config = MagicMock()
+    engine._config.pipeline.ketrag_skeleton_channel = False
+    assert engine._skeleton_tokenizer() is None
+
+    engine._config.pipeline.ketrag_skeleton_channel = True
+    assert engine._skeleton_tokenizer() is tokenize_multilingual
+
+
+@pytest.mark.asyncio
+async def test_flag_on_skips_lightweight_skeleton_edges() -> None:
+    """Move 2: flag on => no CONCEPT entities / CO_OCCURS_WITH edges from skipped chunks.
+
+    The LLM mock returns nothing, so the only entities/relationships that could
+    appear are the synthetic co-occurrence skeleton from the lightweight chunk -
+    which the flag must suppress, keeping the entity graph LLM-ontology-only.
+    """
+    chunks = _chunks(3)
+    mock_extractor = AsyncMock()
+    mock_extractor.extract_multi = AsyncMock(return_value=[ExtractionResult(entities=[], relationships=[])] * 3)
+
+    # Force chunk[2] (which carries capitalized "Marija"/"Kiri") to the lightweight set.
+    selection = CoreSelection(core_ids=[chunks[0].id, chunks[1].id], scores={c.id: 1.0 for c in chunks})
+    with patch("khora.core.ranking.select_core_chunks", return_value=selection):
+        entities, relationships = await extract_entities(
+            chunks,
+            entity_types=["PERSON"],
+            relationship_types=["RELATES_TO"],
+            selective_extraction=True,
+            ketrag_skeleton_channel=True,
+            shared_extractor=mock_extractor,
+        )
+
+    assert all(e.entity_type != "CONCEPT" for e in entities)
+    assert all(r.relationship_type != "CO_OCCURS_WITH" for r in relationships)
+    # LLM gave nothing + skeleton skipped => the entity graph stays empty here.
+    assert entities == []
+    assert relationships == []
+
+
+@pytest.mark.asyncio
+async def test_flag_off_writes_lightweight_skeleton_edges() -> None:
+    """Move 2 control: flag off (default) still synthesizes the co-occurrence skeleton.
+
+    Proves the suppression above is the flag's effect, not an artifact - the same
+    lightweight chunk DOES produce CONCEPT entities + a CO_OCCURS_WITH edge when
+    the flag is off.
+    """
+    chunks = _chunks(3)
+    mock_extractor = AsyncMock()
+    mock_extractor.extract_multi = AsyncMock(return_value=[ExtractionResult(entities=[], relationships=[])] * 3)
+
+    with patch(
+        "khora.extraction.importance.ChunkImportanceScorer.select_for_extraction",
+        return_value=(chunks[:2], chunks[2:]),
+    ):
+        entities, relationships = await extract_entities(
+            chunks,
+            entity_types=["PERSON"],
+            relationship_types=["RELATES_TO"],
+            selective_extraction=True,
+            ketrag_skeleton_channel=False,
+            shared_extractor=mock_extractor,
+        )
+
+    assert any(e.entity_type == "CONCEPT" for e in entities)
+    assert any(r.relationship_type == "CO_OCCURS_WITH" for r in relationships)

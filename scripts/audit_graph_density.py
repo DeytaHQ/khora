@@ -15,10 +15,16 @@ Usage::
     # JSON output (machine-readable)
     uv run python scripts/audit_graph_density.py --format json
 
-Decision criteria (from #598): the median namespace must have ≥3
-connected components OR mean degree ≥5 in the largest connected
-component. If neither holds, PPR converges near-uniform and the
-#542 BFS+RRF → PPR swap isn't worth the complexity.
+Decision criteria (#1377 revision of #598): meets_ppr_threshold is True only
+when ALL of largest_cc_fraction ≥ 0.5, median_degree ≥ 1.0,
+non_generic_edge_fraction ≥ 0.5, and mean_degree_largest_cc ≥ 3.0 hold. If not,
+PPR converges near-uniform / rides on co-occurrence noise and the #542 BFS+RRF →
+PPR swap isn't worth the complexity.
+
+CAVEAT: stats are computed over a recency-ordered slice (list_entities limit
+100k / list_relationships limit 1M), so they are only trustworthy when
+num_entities < the entity limit. Past the cap the verdict reflects a biased
+sub-graph (deferred follow-up: a real sampling strategy, #1377 part 3).
 """
 
 from __future__ import annotations
@@ -79,6 +85,7 @@ def _print_csv(rows: list[GraphStats]) -> None:
         "largest_cc_size",
         "largest_cc_fraction",
         "mean_degree_largest_cc",
+        "non_generic_edge_fraction",
         "meets_ppr_threshold",
     ]
     print(",".join(headers))
@@ -96,6 +103,7 @@ def _print_csv(rows: list[GraphStats]) -> None:
                     r.largest_cc_size,
                     f"{r.largest_cc_fraction:.3f}",
                     f"{r.mean_degree_largest_cc:.3f}",
+                    f"{r.non_generic_edge_fraction:.3f}",
                     r.meets_ppr_threshold,
                 )
             )
@@ -117,6 +125,11 @@ def _print_verdict(rows: list[GraphStats]) -> None:
     )
     print(
         "# #598 decision: land #542 swap iff this rate is meaningfully >50% on a representative sample.",
+        file=sys.stderr,
+    )
+    print(
+        "# CAVEAT: stats are a recency-ordered capped slice (entity limit 100k / "
+        "relationship limit 1M); trustworthy only when num_entities < the entity limit.",
         file=sys.stderr,
     )
 

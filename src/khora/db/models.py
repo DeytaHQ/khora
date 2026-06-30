@@ -941,3 +941,39 @@ class MemoryFactModel(Base):
 
     def __repr__(self) -> str:
         return f"<MemoryFact(id={self.id!r}, {self.subject} {self.predicate} {self.object_})>"
+
+
+# =============================================================================
+# KET-RAG keyword-chunk bipartite edge table (#1391)
+# =============================================================================
+
+
+class KeywordChunkModel(Base):
+    """Keyword -> chunk bipartite edge for the keyword_ppr lexical channel.
+
+    Written at ingest only when ``query.lexical_channel == "keyword_ppr"``; one
+    row per (keyword, chunk) with the keyword's ingest-time IDF. The query-time
+    channel loads a namespace's edges (capped), builds chunk->chunk edges, and
+    runs personalized PageRank seeded on chunks containing query keywords.
+    """
+
+    __tablename__ = "keyword_chunks"
+
+    id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    namespace_id: Mapped[UUIDType] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False
+    )
+    keyword: Mapped[str] = mapped_column(Text, nullable=False)
+    chunk_id: Mapped[UUIDType] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("chunks.id", ondelete="CASCADE"), nullable=False
+    )
+    idf: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+    __table_args__ = (
+        Index("ix_keyword_chunks_namespace_keyword", "namespace_id", "keyword"),
+        Index("ix_keyword_chunks_namespace_chunk", "namespace_id", "chunk_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<KeywordChunk(keyword={self.keyword!r}, chunk_id={self.chunk_id!r}, idf={self.idf})>"
