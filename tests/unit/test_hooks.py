@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from unittest.mock import AsyncMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -290,6 +290,51 @@ class TestHookDispatcherTypeFilter:
         )
         count = await d.dispatch(event_miss)
         assert count == 0
+
+    async def test_namespace_scope_matches_across_id_spaces(self) -> None:
+        """#1399: a sub scoped by the STABLE namespace_id matches events emitted with the ROW id.
+
+        ``remember()`` resolves the public stable namespace_id to the active
+        version's row id before extraction, so ingest events carry the row id;
+        ``subscribe(namespace_id=stable)`` stores the stable id. Without
+        normalization the two never matched and every scoped subscription fired
+        zero callbacks. The dispatcher now normalizes both sides through the
+        (idempotent) resolver before comparing.
+        """
+        stable_ns = uuid4()
+        row_ns = uuid4()  # what _resolve_namespace(stable_ns) returns at ingest
+
+        async def resolver(ns: UUID) -> UUID:
+            # Idempotent on row ids: stable -> row, row -> row (mirrors the real
+            # coordinator.resolve_namespace, which matches on namespace_id OR id).
+            return row_ns if ns == stable_ns else ns
+
+        d = HookDispatcher(namespace_resolver=resolver)
+        cb = AsyncMock()
+        # Caller subscribes with the STABLE id (what create_namespace returns).
+        d.subscribe(EventType.ENTITY_CREATED, cb, namespace_id=stable_ns)
+
+        # Ingest emits with the RESOLVED ROW id.
+        event = MemoryEvent.entity_created(namespace_id=row_ns, entity_id=uuid4(), data={})
+        count = await d.dispatch(event)
+        assert count == 1, "scoped subscription must fire when event carries the resolved row id"
+        cb.assert_awaited_once()
+
+        # A genuinely different namespace still must not match.
+        cb.reset_mock()
+        other = MemoryEvent.entity_created(namespace_id=uuid4(), entity_id=uuid4(), data={})
+        assert await d.dispatch(other) == 0
+        cb.assert_not_awaited()
+
+    async def test_namespace_scope_reproduces_1399_without_resolver(self) -> None:
+        """Anti-vacuity: with NO resolver (pre-#1399 behavior) the mismatch drops the event."""
+        stable_ns = uuid4()
+        row_ns = uuid4()
+        d = HookDispatcher()  # no namespace_resolver -> direct compare (old behavior)
+        cb = AsyncMock()
+        d.subscribe(EventType.ENTITY_CREATED, cb, namespace_id=stable_ns)
+        event = MemoryEvent.entity_created(namespace_id=row_ns, entity_id=uuid4(), data={})
+        assert await d.dispatch(event) == 0  # the bug: zero callbacks
 
     async def test_relationship_type_filter(self) -> None:
         d = HookDispatcher()

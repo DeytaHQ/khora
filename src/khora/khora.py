@@ -3081,8 +3081,19 @@ class Khora:
                 max_concurrent=max_concurrent,
                 callback_timeout_seconds=callback_timeout,
                 config=hooks_config,
+                # #1399: let the dispatcher's namespace scope check normalize a
+                # subscription's stable namespace_id and an event's resolved
+                # row-id to the same space. ``resolve_namespace`` is idempotent
+                # on row ids, so both directions land on the row id. Resolved
+                # lazily so it picks up the coordinator once connected; the
+                # dispatcher falls back to a direct compare if it ever raises.
+                namespace_resolver=self._resolve_hook_namespace,
             )
         return self._hook_dispatcher
+
+    async def _resolve_hook_namespace(self, namespace_id: UUID) -> UUID:
+        """Resolve a namespace id to the active row id for hook scope checks (#1399)."""
+        return await self.storage.resolve_namespace(namespace_id)
 
     @property
     def hooks(self) -> Any:
