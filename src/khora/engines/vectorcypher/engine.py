@@ -616,6 +616,7 @@ class VectorCypherEngine:
         self._temporal_store = None
         self._neo4j_driver: AsyncDriver | None = None
         self._embedder: LiteLLMEmbedder | None = None
+        self._extractors: dict[str, Any] = {}
         self._retriever: VectorCypherRetriever | None = None
         self._dual_nodes: DualNodeManager | None = None
         self._router: QueryComplexityRouter | None = None
@@ -890,6 +891,7 @@ class VectorCypherEngine:
             self._neo4j_driver = None
 
         self._embedder = None
+        self._extractors = {}
         self._retriever = None
         self._dual_nodes = None
         self._router = None
@@ -911,6 +913,28 @@ class VectorCypherEngine:
         if self._embedder is None:
             raise RuntimeError("VectorCypher engine not connected. Call connect() first.")
         return self._embedder
+
+    def _get_extractor(self, extraction_model: str | None = None) -> Any:
+        if not self._connected:
+            raise RuntimeError("VectorCypher engine not connected. Call connect() first.")
+
+        model = extraction_model or self._config.llm.model
+        extractor = self._extractors.get(model)
+        if extractor is None:
+            from khora.extraction.extractors import LLMEntityExtractor
+
+            extractor_kwargs = dict(
+                model=model,
+                max_concurrent=self._vc_config.max_concurrent_extractions,
+                wave_size=self._config.llm.extraction_wave_size,
+                timeout=self._config.llm.timeout,
+                max_retries=self._config.llm.max_retries,
+                retry_wait=self._config.llm.retry_wait,
+                max_tokens=self._config.llm.max_tokens,
+            )
+            extractor = LLMEntityExtractor(**extractor_kwargs)
+            self._extractors[model] = extractor
+        return extractor
 
     def _get_retriever(self) -> VectorCypherRetriever:
         if self._retriever is None:
@@ -1447,6 +1471,7 @@ class VectorCypherEngine:
 
             # Run LLM extraction on core chunks
             model = extraction_model or self._config.llm.model
+            extractor = self._get_extractor(model)
             entities, relationships = await extract_entities(
                 chunk_objects,
                 skill_name=skill_name,
@@ -1461,6 +1486,7 @@ class VectorCypherEngine:
                 relationship_types=relationship_types,
                 store_events=self._vc_config.store_events,
                 ketrag_skeleton_channel=self._config.pipeline.ketrag_skeleton_channel,
+                shared_extractor=extractor,
                 out_diagnostics=out_diagnostics,
             )
 

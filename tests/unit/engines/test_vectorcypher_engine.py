@@ -11,6 +11,7 @@ import pytest
 
 from khora.core.models import Chunk
 from khora.core.models.entity import CommunityNode, Entity
+from khora.core.temporal import TemporalChunk
 from khora.engines.vectorcypher.engine import (
     ExtractionQualityMetrics,
     VectorCypherConfig,
@@ -219,6 +220,11 @@ class TestVectorCypherEngineGetters:
         with pytest.raises(RuntimeError, match="not connected"):
             engine._get_embedder()
 
+    def test_get_extractor_raises_when_not_connected(self, engine: VectorCypherEngine) -> None:
+        """Test _get_extractor raises RuntimeError when not connected."""
+        with pytest.raises(RuntimeError, match="not connected"):
+            engine._get_extractor()
+
     def test_get_retriever_raises_when_not_connected(self, engine: VectorCypherEngine) -> None:
         """Test _get_retriever raises RuntimeError when not connected."""
         with pytest.raises(RuntimeError, match="not connected"):
@@ -227,6 +233,76 @@ class TestVectorCypherEngineGetters:
     def test_get_dual_nodes_returns_none_when_not_connected(self, engine: VectorCypherEngine) -> None:
         """Test _get_dual_nodes returns None when not connected (or SurrealDB backend)."""
         assert engine._get_dual_nodes() is None
+
+    def test_get_extractor_reuses_same_model(self, engine: VectorCypherEngine) -> None:
+        """Test _get_extractor caches one extractor per effective model."""
+        engine._connected = True
+        engine._config.llm.model = "gpt-4o-mini"
+        engine._config.llm.extraction_wave_size = 17
+        engine._config.llm.timeout = 31
+        engine._config.llm.max_retries = 4
+        engine._config.llm.retry_wait = 1.5
+        engine._config.llm.max_tokens = 4321
+        engine._vc_config.max_concurrent_extractions = 23
+
+        created = []
+
+        def _fake_extractor(**kwargs):
+            inst = MagicMock()
+            inst.kwargs = kwargs
+            created.append(inst)
+            return inst
+
+        with patch("khora.extraction.extractors.LLMEntityExtractor", side_effect=_fake_extractor):
+            first = engine._get_extractor()
+            second = engine._get_extractor("gpt-4o-mini")
+            third = engine._get_extractor("gpt-4.1-nano")
+
+        assert first is second
+        assert third is not first
+        assert len(created) == 2
+        assert created[0].kwargs == {
+            "model": "gpt-4o-mini",
+            "max_concurrent": 23,
+            "wave_size": 17,
+            "timeout": 31,
+            "max_retries": 4,
+            "retry_wait": 1.5,
+            "max_tokens": 4321,
+        }
+        assert created[1].kwargs["model"] == "gpt-4.1-nano"
+
+    @pytest.mark.asyncio
+    async def test_run_skeleton_extraction_passes_shared_extractor(self, engine: VectorCypherEngine) -> None:
+        """Test skeleton extraction reuses the engine-level extractor."""
+        engine._connected = True
+        engine._config.llm.model = "gpt-4o-mini"
+
+        chunk = TemporalChunk(
+            id=uuid4(),
+            namespace_id=uuid4(),
+            document_id=uuid4(),
+            content="Alice works at Acme.",
+            embedding=[0.1, 0.2],
+        )
+        shared_extractor = object()
+
+        with (
+            patch.object(engine, "_get_extractor", return_value=shared_extractor),
+            patch("khora.pipelines.tasks.extract.extract_entities", new_callable=AsyncMock, return_value=([], [])) as mock_extract,
+        ):
+            entities, relationships = await engine._run_skeleton_extraction(
+                [chunk],
+                chunk.namespace_id,
+                skill_name="general_entities",
+                extraction_model="gpt-4.1-nano",
+                entity_types=["PERSON"],
+                relationship_types=["WORKS_FOR"],
+            )
+
+        assert (entities, relationships) == (0, 0)
+        mock_extract.assert_awaited_once()
+        assert mock_extract.await_args.kwargs["shared_extractor"] is shared_extractor
 
 
 @pytest.mark.unit
