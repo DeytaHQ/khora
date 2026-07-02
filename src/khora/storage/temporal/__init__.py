@@ -209,8 +209,6 @@ def create_temporal_store(
     backend: str,
     config: KhoraConfig,
     *,
-    weaviate_url: str | Any | None = None,
-    turbopuffer_config: str | Any | None = None,
     surrealdb_config: Any | None = None,
     surrealdb_connection: Any | None = None,
     engine: Any | None = None,
@@ -219,11 +217,11 @@ def create_temporal_store(
     """Create a temporal vector store backend.
 
     Args:
-        backend: Backend type ("pgvector", "weaviate", "surrealdb", or "sqlite_lance")
-        config: Khora configuration
-        weaviate_url: Either a Weaviate connection URL (str, self-hosted)
-            or a :class:`khora.storage.temporal.weaviate.WeaviateBackendConfig`
-            (cloud / auth / custom-port). Required for the weaviate backend.
+        backend: Backend type ("pgvector", "weaviate", "turbopuffer",
+            "surrealdb", or "sqlite_lance")
+        config: Khora configuration. The ``weaviate`` and ``turbopuffer``
+            backends read their connection details from
+            ``config.storage.weaviate`` / ``config.storage.turbopuffer``.
         surrealdb_config: SurrealDBConfig instance (optional, falls back to config.storage.surrealdb)
         surrealdb_connection: Shared ``SurrealDBConnection`` (surrealdb backend only).
             When provided, the temporal store reuses this connection instead
@@ -248,19 +246,42 @@ def create_temporal_store(
 
         return PgVectorTemporalStore(config, engine=engine)
     elif backend == "weaviate":
-        if not weaviate_url:
-            raise ValueError("weaviate_url is required for weaviate backend")
-        from khora.storage.temporal.weaviate import WeaviateTemporalStore
-
-        return WeaviateTemporalStore(config, weaviate_url)
-    elif backend == "turbopuffer":
-        if not turbopuffer_config:
+        weaviate_cfg = getattr(config.storage, "weaviate", None)
+        if weaviate_cfg is None:
             raise ValueError(
-                "turbopuffer_config is required for turbopuffer backend (api-key str or TurbopufferBackendConfig)"
+                "Weaviate backend requires storage.weaviate config. Set KHORA_STORAGE_WEAVIATE_URL "
+                "(self-hosted) or KHORA_STORAGE_WEAVIATE_CLUSTER_URL + KHORA_STORAGE_WEAVIATE_API_KEY (cloud)."
             )
-        from khora.storage.temporal.turbopuffer import TurbopufferTemporalStore
+        from khora.storage.temporal.weaviate import WeaviateBackendConfig, WeaviateTemporalStore
 
-        return TurbopufferTemporalStore(config, turbopuffer_config)
+        backend_cfg = WeaviateBackendConfig(
+            url=weaviate_cfg.url.get_secret_value() if weaviate_cfg.url is not None else None,
+            cluster_url=weaviate_cfg.cluster_url.get_secret_value() if weaviate_cfg.cluster_url is not None else None,
+            api_key=weaviate_cfg.api_key.get_secret_value() if weaviate_cfg.api_key is not None else None,
+            grpc_port=weaviate_cfg.grpc_port,
+            http_secure=weaviate_cfg.http_secure,
+            grpc_secure=weaviate_cfg.grpc_secure,
+            additional_headers=weaviate_cfg.additional_headers,
+            skip_init_checks=weaviate_cfg.skip_init_checks,
+        )
+        return WeaviateTemporalStore(config, backend_cfg)
+    elif backend == "turbopuffer":
+        tp_cfg = getattr(config.storage, "turbopuffer", None)
+        if tp_cfg is None or tp_cfg.api_key is None:
+            raise ValueError(
+                "Turbopuffer backend requires storage.turbopuffer config with an api_key. "
+                "Set KHORA_STORAGE_TURBOPUFFER_API_KEY."
+            )
+        from khora.storage.temporal.turbopuffer import TurbopufferBackendConfig, TurbopufferTemporalStore
+
+        backend_cfg = TurbopufferBackendConfig(
+            api_key=tp_cfg.api_key.get_secret_value(),
+            region=tp_cfg.region,
+            base_url=tp_cfg.base_url.get_secret_value() if tp_cfg.base_url is not None else None,
+            namespace_prefix=tp_cfg.namespace_prefix,
+            ann_distance_threshold=tp_cfg.ann_distance_threshold,
+        )
+        return TurbopufferTemporalStore(config, backend_cfg)
     elif backend == "surrealdb":
         from khora.storage.temporal.surrealdb import SurrealDBTemporalStore
 

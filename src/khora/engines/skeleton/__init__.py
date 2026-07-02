@@ -14,12 +14,13 @@ Usage:
         await kb.remember("content", title="Doc", entity_types=[...], relationship_types=[...])
         results = await kb.recall("query", temporal_filter=TemporalFilter.relative_days(-1))
 
-    # Weaviate backend (advanced filtering)
+    # Weaviate backend (advanced filtering). Configure the connection via env
+    # (export KHORA_STORAGE_WEAVIATE_URL=http://localhost:8080) or by setting
+    # config.storage.weaviate before constructing the engine.
     async with Khora(
         db_url,
         engine="skeleton",
         backend="weaviate",
-        weaviate_url="http://localhost:8080",
     ) as kb:
         results = await kb.recall(
             "query",

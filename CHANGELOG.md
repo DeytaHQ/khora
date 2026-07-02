@@ -4,6 +4,11 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [Unreleased]
+
+### Changed
+
+- **Breaking:** `weaviate` and `turbopuffer` temporal-store backends are now config-driven. `SkeletonConstructionEngine`, `StorageCoordinator.temporal_store()`, and `create_temporal_store()` no longer accept `weaviate_url` / `turbopuffer_config` kwargs. Configure via `KHORA_STORAGE_WEAVIATE_*` / `KHORA_STORAGE_TURBOPUFFER_*` env vars or by populating `config.storage.weaviate` / `config.storage.turbopuffer` (`WeaviateConfig` / `TurbopufferConfig`). See `docs/engines/skeleton-engine.md`.
 ## [0.21.1] - keyword-PPR retrieval, KET-RAG foundation, namespace metadata
 
 ### Added
@@ -89,7 +94,6 @@ Minor release. The dominant theme is **dream-on-graph**: dream-apply now mirrors
 - **Checksum dedup scoped by caller-supplied identity on the batch path** (#1345, #1171): `remember_batch`'s Stage-0 dedup conflated documents, silently dropping the same content under a new `external_id` / `session_id`; the identity-scoping fix from the single-doc path is applied to all three batch dedup sites, falling back to a new document when the identity check cannot be satisfied.
 - **Neo4j keepalive integration flake** (#1341, #1328): the keepalive ping assertion is relaxed to tolerate the documented self-heal canary (`failures <= pings // 2`) while still catching a persistent-failure regression.
 - **Test-infrastructure and CI hardening**: a regression guard asserting the vectorcypher and skeleton engines stay import-isolated (#1334), HuggingFace reranker model caching + mock-LLM determinism to kill examples-smoke retry storms and 429s (#1351, #1249, #1099), and a diff-aware local secret-typing pre-commit hook to avoid a semgrep full-tree hang (#1350, #1347).
-
 ## [0.20.0] - honest filter-pushdown reporting and temporal/observability hardening
 
 Minor release. Two themes dominate. First, **honest filter-pushdown reporting**: every engine now emits the canonical `FilterPushdownReport` on `RecallResult.engine_info["filter"]`, built backend-agnostically from each channel's *actual* compile, plus a cross-engine CI invariant gate that proves the report is total, disjoint, and never claims a pushdown that did not happen. Second, broad **correctness/observability hardening** across the recall-filter compilers (a full per-backend conformance corpus over fourteen filter families and seven engine configs), temporal/timezone handling, Rust/NumPy acceleration parity, multi-backend write integrity, and ADR-001 failure observability. Also lands a full suite of recall-filter compilers for the embedded SQLite, SurrealDB, and Weaviate backends.

@@ -136,6 +136,104 @@ def test_storage_vector_embedding_dimension_double_underscore_legacy(
 
 
 # ---------------------------------------------------------------------------
+# storage.weaviate / storage.turbopuffer (config-driven temporal stores)
+# ---------------------------------------------------------------------------
+
+
+def test_storage_weaviate_url_single_underscore(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``KHORA_STORAGE_WEAVIATE_URL`` must populate ``storage.weaviate.url`` (SecretStr)."""
+    monkeypatch.setenv("KHORA_STORAGE_WEAVIATE_URL", "http://localhost:8090")
+
+    config = KhoraConfig()
+    assert config.storage.weaviate is not None
+    assert config.storage.weaviate.url.get_secret_value() == "http://localhost:8090"
+
+
+def test_storage_weaviate_url_double_underscore_legacy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Legacy double-underscore spelling must keep working for weaviate."""
+    monkeypatch.setenv("KHORA_STORAGE__WEAVIATE__URL", "http://legacy:8090")
+
+    config = KhoraConfig()
+    assert config.storage.weaviate is not None
+    assert config.storage.weaviate.url.get_secret_value() == "http://legacy:8090"
+
+
+def test_storage_weaviate_cluster_url_and_api_key_single_underscore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Weaviate-Cloud config (cluster_url + api_key) loads as SecretStr."""
+    monkeypatch.setenv("KHORA_STORAGE_WEAVIATE_CLUSTER_URL", "https://c.weaviate.network")
+    monkeypatch.setenv("KHORA_STORAGE_WEAVIATE_API_KEY", "wv_secret")
+
+    config = KhoraConfig()
+    assert config.storage.weaviate is not None
+    assert config.storage.weaviate.cluster_url.get_secret_value() == "https://c.weaviate.network"
+    assert config.storage.weaviate.api_key.get_secret_value() == "wv_secret"
+
+
+def test_storage_weaviate_url_alias_conflict_raises_when_values_differ(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Conflict detection must fire for the weaviate URL aliases too."""
+    monkeypatch.setenv("KHORA_STORAGE_WEAVIATE_URL", "http://new:8090")
+    monkeypatch.setenv("KHORA_STORAGE__WEAVIATE__URL", "http://old:8090")
+
+    with pytest.raises(ValueError) as excinfo:
+        KhoraConfig()
+    message = str(excinfo.value)
+    assert "KHORA_STORAGE_WEAVIATE_URL" in message
+    assert "KHORA_STORAGE__WEAVIATE__URL" in message
+
+
+def test_storage_turbopuffer_api_key_single_underscore(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``KHORA_STORAGE_TURBOPUFFER_API_KEY`` must populate ``storage.turbopuffer.api_key`` (SecretStr)."""
+    monkeypatch.setenv("KHORA_STORAGE_TURBOPUFFER_API_KEY", "tpuf_secret")
+
+    config = KhoraConfig()
+    assert config.storage.turbopuffer is not None
+    assert config.storage.turbopuffer.api_key.get_secret_value() == "tpuf_secret"
+
+
+def test_storage_turbopuffer_api_key_double_underscore_legacy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy double-underscore spelling must keep working for turbopuffer."""
+    monkeypatch.setenv("KHORA_STORAGE__TURBOPUFFER__API_KEY", "tpuf_legacy")
+
+    config = KhoraConfig()
+    assert config.storage.turbopuffer is not None
+    assert config.storage.turbopuffer.api_key.get_secret_value() == "tpuf_legacy"
+
+
+def test_storage_turbopuffer_region_and_base_url_single_underscore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Turbopuffer region (plain str) + base_url (SecretStr override) load correctly."""
+    monkeypatch.setenv("KHORA_STORAGE_TURBOPUFFER_API_KEY", "tpuf_secret")
+    monkeypatch.setenv("KHORA_STORAGE_TURBOPUFFER_REGION", "gcp-europe-west3")
+    monkeypatch.setenv("KHORA_STORAGE_TURBOPUFFER_BASE_URL", "https://proxy.local")
+
+    config = KhoraConfig()
+    assert config.storage.turbopuffer is not None
+    assert config.storage.turbopuffer.region == "gcp-europe-west3"
+    assert config.storage.turbopuffer.base_url.get_secret_value() == "https://proxy.local"
+
+
+def test_storage_turbopuffer_api_key_alias_conflict_raises_when_values_differ(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Conflict detection must fire for the turbopuffer api_key aliases too."""
+    monkeypatch.setenv("KHORA_STORAGE_TURBOPUFFER_API_KEY", "tpuf_new")
+    monkeypatch.setenv("KHORA_STORAGE__TURBOPUFFER__API_KEY", "tpuf_old")
+
+    with pytest.raises(ValueError) as excinfo:
+        KhoraConfig()
+    message = str(excinfo.value)
+    assert "KHORA_STORAGE_TURBOPUFFER_API_KEY" in message
+    assert "KHORA_STORAGE__TURBOPUFFER__API_KEY" in message
+
+
+# ---------------------------------------------------------------------------
 # Neo4j *_max provenance fields (PE#1's audit gap)
 # ---------------------------------------------------------------------------
 
