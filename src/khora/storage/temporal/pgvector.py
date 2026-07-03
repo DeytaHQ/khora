@@ -525,16 +525,27 @@ class PgVectorTemporalStore(TemporalVectorStore):
                     limit * 2,
                 )
 
-                # Fuse results using RRF
-                results = self._rrf_fusion(vector_results, bm25_results, hybrid_alpha, limit)
+                # Fuse results using RRF. An explicit min_similarity floor
+                # applies to the BM25 side too: BM25-only chunks never passed
+                # the vector floor (BM25 scores are not cosine similarities),
+                # so they are excluded from the fused set (#1404).
+                results = self._rrf_fusion(
+                    vector_results,
+                    bm25_results,
+                    hybrid_alpha,
+                    limit,
+                    exclude_bm25_only=min_similarity > 0.0,
+                )
             else:
                 results = vector_results[:limit]
 
                 # QUALITY FIX: Keyword fallback when vector search returns
                 # insufficient results. This improves recall for non-core chunks
                 # that may not have strong vector similarity but contain
-                # relevant keywords.
-                if len(results) < limit and query_text:
+                # relevant keywords. Skipped when the caller set an explicit
+                # min_similarity: the backfill bypasses the vector floor, so it
+                # would re-introduce chunks the floor just excluded (#1404).
+                if len(results) < limit and query_text and min_similarity <= 0.0:
                     needed = limit - len(results)
                     existing_ids = {str(r.chunk.id) for r in results}
 
@@ -796,10 +807,17 @@ class PgVectorTemporalStore(TemporalVectorStore):
         alpha: float,
         limit: int,
         k: int = 60,  # RRF constant
+        *,
+        exclude_bm25_only: bool = False,
     ) -> list[TemporalSearchResult]:
         """Fuse vector and BM25 results using Reciprocal Rank Fusion (RRF).
 
         Score = alpha * (1 / (k + vector_rank)) + (1 - alpha) * (1 / (k + bm25_rank))
+
+        ``exclude_bm25_only=True`` restricts the fused set to chunks present in
+        ``vector_results`` (BM25 ranks still contribute to their scores). Used
+        when the caller set an explicit ``min_similarity`` floor, which BM25-only
+        chunks never passed (#1404).
         """
         # Build maps of chunk_id -> rank
         vector_ranks = {str(r.chunk.id): i + 1 for i, r in enumerate(vector_results)}
@@ -807,6 +825,8 @@ class PgVectorTemporalStore(TemporalVectorStore):
 
         # Collect all chunk IDs
         all_ids = set(vector_ranks.keys()) | set(bm25_ranks.keys())
+        if exclude_bm25_only:
+            all_ids = set(vector_ranks.keys())
 
         # Calculate RRF scores
         rrf_scores: dict[str, float] = {}
