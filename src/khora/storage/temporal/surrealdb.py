@@ -478,11 +478,21 @@ class SurrealDBTemporalStore(TemporalVectorStore):
 
         if hybrid and query_text:
             bm25_results = await self._bm25_search(filter_clauses, filter_bindings, query_text, limit * 2)
-            return self._rrf_fusion(vector_results, bm25_results, hybrid_alpha, limit)
+            # An explicit min_similarity floor applies to the BM25 side too:
+            # BM25-only chunks never passed the vector floor (#1404).
+            return self._rrf_fusion(
+                vector_results,
+                bm25_results,
+                hybrid_alpha,
+                limit,
+                exclude_bm25_only=min_similarity > 0.0,
+            )
 
-        # Pure vector — possibly with keyword fallback
+        # Pure vector — possibly with keyword fallback. The fallback is skipped
+        # when the caller set an explicit min_similarity: it bypasses the vector
+        # floor, so it would re-introduce chunks the floor just excluded (#1404).
         results = vector_results[:limit]
-        if len(results) < limit and query_text:
+        if len(results) < limit and query_text and min_similarity <= 0.0:
             needed = limit - len(results)
             existing_ids = {str(r.chunk.id) for r in results}
             bm25_results = await self._bm25_search(
@@ -650,14 +660,23 @@ class SurrealDBTemporalStore(TemporalVectorStore):
         alpha: float,
         limit: int,
         k: int = 60,
+        *,
+        exclude_bm25_only: bool = False,
     ) -> list[TemporalSearchResult]:
         """Reciprocal Rank Fusion.
 
         score = alpha / (k + vector_rank) + (1 - alpha) / (k + bm25_rank)
+
+        ``exclude_bm25_only=True`` restricts the fused set to chunks present in
+        ``vector_results`` (BM25 ranks still contribute to their scores). Used
+        when the caller set an explicit ``min_similarity`` floor, which BM25-only
+        chunks never passed (#1404).
         """
         vector_ranks = {str(r.chunk.id): i + 1 for i, r in enumerate(vector_results)}
         bm25_ranks = {str(r.chunk.id): i + 1 for i, r in enumerate(bm25_results)}
         all_ids = set(vector_ranks.keys()) | set(bm25_ranks.keys())
+        if exclude_bm25_only:
+            all_ids = set(vector_ranks.keys())
 
         rrf_scores: dict[str, float] = {}
         for cid in all_ids:
