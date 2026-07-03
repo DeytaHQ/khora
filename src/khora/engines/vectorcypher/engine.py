@@ -1440,8 +1440,11 @@ class VectorCypherEngine:
             namespace_id=str(namespace_id),
             total_chunks=len(chunks),
         ) as span:
-            # Skip skeleton overhead for small documents (≤2 chunks)
-            if len(chunks) <= 2:
+            # Skip skeleton overhead for small documents (≤2 chunks).
+            # #1408: config.pipeline.selective_extraction gates the skeleton
+            # selection on this path - when False, every chunk goes to LLM
+            # extraction.
+            if len(chunks) <= 2 or not self._config.pipeline.selective_extraction:
                 core_ids = {c.id for c in chunks}
             else:
                 with trace_span(
@@ -1495,6 +1498,10 @@ class VectorCypherEngine:
                 relationship_types=relationship_types,
                 store_events=self._vc_config.store_events,
                 ketrag_skeleton_channel=self._config.pipeline.ketrag_skeleton_channel,
+                # #1408: the skeleton PageRank selection above IS the selective
+                # step. Without this, ChunkImportanceScorer re-selected the top
+                # 70% of the already-selected 70% (~0.49 effective coverage).
+                selective_extraction=False,
                 out_diagnostics=out_diagnostics,
             )
 
@@ -1683,8 +1690,10 @@ class VectorCypherEngine:
             logger.debug(f"Skipping entity extraction for {len(chunks)} short chunks (all ≤ {min_tokens} tokens)")
             return [], [], []
 
-        # Skip skeleton overhead for small documents (≤2 chunks)
-        if len(chunks) <= 2:
+        # Skip skeleton overhead for small documents (≤2 chunks).
+        # #1408: config.pipeline.selective_extraction gates the skeleton
+        # selection - when False, every chunk goes to LLM extraction.
+        if len(chunks) <= 2 or not self._config.pipeline.selective_extraction:
             core_ids = {c.id for c in chunks}
         else:
             effective_ratio = skeleton_ratio_override or self._vc_config.skeleton_core_ratio
@@ -1733,6 +1742,9 @@ class VectorCypherEngine:
             relationship_types=relationship_types,
             store_events=self._vc_config.store_events,
             ketrag_skeleton_channel=self._config.pipeline.ketrag_skeleton_channel,
+            # #1408: skeleton selection above is the selective step - never
+            # re-select inside extract_entities.
+            selective_extraction=False,
         )
 
         if not entities:
@@ -1878,7 +1890,9 @@ class VectorCypherEngine:
         new_entities: list[Entity] = []
         new_relationships: list[Relationship] = []
         if new_chunks and self._config.pipeline.extract_entities:
-            if len(new_chunks) <= 2:
+            # #1408: config.pipeline.selective_extraction gates the skeleton
+            # selection - when False, every chunk goes to LLM extraction.
+            if len(new_chunks) <= 2 or not self._config.pipeline.selective_extraction:
                 core_chunks = new_chunks
             else:
                 skeleton_input = [
@@ -1918,6 +1932,9 @@ class VectorCypherEngine:
                     relationship_types=relationship_types,
                     store_events=self._vc_config.store_events,
                     ketrag_skeleton_channel=self._config.pipeline.ketrag_skeleton_channel,
+                    # #1408: skeleton selection above is the selective step -
+                    # never re-select inside extract_entities.
+                    selective_extraction=False,
                 )
 
                 if extracted_entities:
@@ -3285,7 +3302,10 @@ class VectorCypherEngine:
                         if min_tokens > 0 and all(len(c.content.split()) <= min_tokens for c in doc_chunks):
                             continue
 
-                    if len(doc_chunks) <= 2:
+                    # #1408: config.pipeline.selective_extraction gates the
+                    # skeleton selection - when False, every chunk goes to LLM
+                    # extraction.
+                    if len(doc_chunks) <= 2 or not self._config.pipeline.selective_extraction:
                         core_ids = {c.id for c in doc_chunks}
                     else:
                         effective_ratio = skeleton_ratio or self._vc_config.skeleton_core_ratio
@@ -3361,6 +3381,10 @@ class VectorCypherEngine:
                                     relationship_types=relationship_types,
                                     store_events=self._vc_config.store_events,
                                     ketrag_skeleton_channel=self._config.pipeline.ketrag_skeleton_channel,
+                                    # #1408: skeleton selection above is the
+                                    # selective step - never re-select inside
+                                    # extract_entities.
+                                    selective_extraction=False,
                                 )
 
                         extraction_results = await asyncio.gather(
@@ -3393,6 +3417,12 @@ class VectorCypherEngine:
                             relationship_types=relationship_types,
                             store_events=self._vc_config.store_events,
                             ketrag_skeleton_channel=self._config.pipeline.ketrag_skeleton_channel,
+                            # #1408: per-document skeleton selection above is
+                            # the selective step. Without this the scorer also
+                            # ranked position across the CONCATENATED cross-
+                            # document chunk list, making first/last-position
+                            # signal meaningless for inner documents.
+                            selective_extraction=False,
                         )
 
                     if entities:
