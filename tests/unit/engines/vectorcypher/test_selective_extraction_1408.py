@@ -155,9 +155,10 @@ class TestImportanceScorerNeverRunsOnVCPath:
 
         assert result == (0, 0)
         scorer_spy.assert_not_called()
-        # The skeleton selected a subset and all of it reached the LLM boundary.
+        # The skeleton selected a strict subset (max(1, int(6 * 0.7)) == 4)
+        # and all of it reached the LLM boundary.
         assert len(captured) == 1
-        assert 1 <= len(captured[0]) <= 6
+        assert 1 <= len(captured[0]) < 6
 
     @pytest.mark.asyncio
     async def test_streaming_batch_path(self, monkeypatch) -> None:
