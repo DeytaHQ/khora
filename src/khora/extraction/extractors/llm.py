@@ -297,6 +297,80 @@ Guidelines:
 
 Return ONLY valid JSON, no other text."""
 
+# Batched second-pass prompt for focused relationship extraction on the
+# extract_multi path (#1409). One object per input section, mirroring the
+# sections envelope used by _extract_multi_batch.
+RELATIONSHIP_EXTRACTION_MULTI_PROMPT = """Entities were already extracted from each text section below. Identify ALL relationships between the entities of each section.
+
+{sections}
+
+Relationship types to use: {relationship_types}
+
+Return a JSON object with a "sections" array, one object per input section:
+{{"sections": [
+    {{
+        "relationships": [
+            {{
+                "source_entity": "entity name (must match an entity in the same section)",
+                "target_entity": "entity name (must match an entity in the same section)",
+                "relationship_type": "type from the list above or a specific type",
+                "description": "brief description of relationship",
+                "confidence": null,
+                "temporal": null
+            }}
+        ]
+    }},
+    ...
+]}}
+
+Guidelines:
+- Only use entity names from the same section's entity list
+- Never relate entities across different sections
+- Focus on relationships that are implied but not explicitly stated
+- Consider co-occurrence, organizational, temporal, and causal relationships
+- Use ASSOCIATED_WITH or RELATES_TO for weaker connections
+- Do NOT repeat relationships that are obvious from the text - focus on non-obvious connections
+
+Return ONLY valid JSON, no other text."""
+
+# Relationship item schema for the relationships-only response formats used by
+# the second pass (#1409). Mirrors the "relationships" item shape in
+# _get_response_format / _get_multi_response_format.
+_RELATIONSHIP_ITEM_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "source_entity": {"type": "string"},
+        "target_entity": {"type": "string"},
+        "relationship_type": {"type": "string"},
+        "description": {"type": "string"},
+        "confidence": {"type": ["number", "null"]},
+        "temporal": {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "valid_from": {"type": ["string", "null"]},
+                        "valid_until": {"type": ["string", "null"]},
+                        "occurred_at": {"type": ["string", "null"]},
+                    },
+                    "required": ["valid_from", "valid_until", "occurred_at"],
+                    "additionalProperties": False,
+                },
+                {"type": "null"},
+            ],
+        },
+    },
+    "required": [
+        "source_entity",
+        "target_entity",
+        "relationship_type",
+        "description",
+        "confidence",
+        "temporal",
+    ],
+    "additionalProperties": False,
+}
+
 
 # finish_reason values that mean the model hit its output-token cap and the
 # JSON is truncated. OpenAI/Anthropic use "length"; Gemini/Vertex use
@@ -840,6 +914,64 @@ class LLMEntityExtractor(EntityExtractor):
             }
         return {"type": "json_object"}
 
+    def _get_relationship_response_format(self) -> dict[str, Any]:
+        """Relationships-only response_format for the single-doc second pass.
+
+        The second-pass prompt asks for relationships only (#1409); requiring
+        the full entities+relationships+events strict schema forces the model
+        to emit empty arrays it was never asked for.
+        """
+        if self._model in self.MODELS_REQUIRING_JSON_SCHEMA:
+            return {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "relationship_extraction_result",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "relationships": {"type": "array", "items": _RELATIONSHIP_ITEM_SCHEMA},
+                        },
+                        "required": ["relationships"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        return {"type": "json_object"}
+
+    def _get_relationship_multi_response_format(self) -> dict[str, Any]:
+        """Relationships-only response_format for the batched second pass (#1409)."""
+        if self._model in self.MODELS_REQUIRING_JSON_SCHEMA:
+            return {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "relationship_multi_extraction_result",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "sections": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "relationships": {
+                                            "type": "array",
+                                            "items": _RELATIONSHIP_ITEM_SCHEMA,
+                                        },
+                                    },
+                                    "required": ["relationships"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                        },
+                        "required": ["sections"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        return {"type": "json_object"}
+
     @classmethod
     def from_config(cls, config: LiteLLMConfig) -> LLMEntityExtractor:
         """Create extractor from LiteLLM configuration.
@@ -1128,13 +1260,17 @@ class LLMEntityExtractor(EntityExtractor):
                     # focused second pass to catch missed connections.
                     # Reference: DeepStruct (Wang et al., 2022)
                     if self._should_run_second_pass(result):
+                        second_pass_diags: list[Degradation] = []
                         second_pass = await self._extract_additional_relationships(
                             result.entities,
                             text,
                             relationship_types=relationship_types,
+                            out_diagnostics=second_pass_diags,
                         )
                         if second_pass:
                             result = self._merge_relationships(result, second_pass)
+                        if second_pass_diags:
+                            result.metadata.setdefault("degradations", []).extend(second_pass_diags)
 
                     # Apply confidence filtering from expertise if available
                     if expertise:
@@ -1171,6 +1307,7 @@ class LLMEntityExtractor(EntityExtractor):
         text: str,
         *,
         relationship_types: list[str] | None = None,
+        out_diagnostics: list[Degradation] | None = None,
     ) -> list[ExtractedRelationship]:
         """Run a focused second-pass LLM call to find relationships between entities.
 
@@ -1182,6 +1319,8 @@ class LLMEntityExtractor(EntityExtractor):
             entities: Entities from the first pass
             text: Original text chunk
             relationship_types: Allowed relationship types
+            out_diagnostics: If provided, a Degradation is appended when the
+                second pass fails (ADR-001) instead of failing silently
 
         Returns:
             List of additional relationships found
@@ -1224,7 +1363,7 @@ class LLMEntityExtractor(EntityExtractor):
                             temperature=self._temperature,
                             max_tokens=self._max_tokens,
                             timeout=self._timeout,
-                            response_format=self._get_response_format(),
+                            response_format=self._get_relationship_response_format(),
                             shared_session=get_shared_session(),
                         ),
                         llm_call_timeout(self._timeout),
@@ -1274,32 +1413,255 @@ class LLMEntityExtractor(EntityExtractor):
                 return []
 
             entity_names = {e.name for e in entities}
-            relationships = []
-            for r in data.get("relationships", []):
-                if not isinstance(r, dict):
-                    continue
-                source = r.get("source_entity") or r.get("source") or ""
-                target = r.get("target_entity") or r.get("target") or ""
-                # Only accept relationships referencing known entities
-                if source not in entity_names or target not in entity_names:
-                    continue
-                confidence = self._compute_relationship_confidence(r, entity_names)
-                relationships.append(
-                    ExtractedRelationship(
-                        source_entity=source,
-                        target_entity=target,
-                        relationship_type=r.get("relationship_type") or r.get("type") or "RELATES_TO",
-                        description=r.get("description", ""),
-                        confidence=confidence,
-                    )
-                )
+            relationships = self._parse_second_pass_relationships(data.get("relationships", []), entity_names)
 
             logger.debug(f"Second-pass extraction found {len(relationships)} additional relationships")
             return relationships
 
         except Exception as e:
-            logger.warning(f"Second-pass relationship extraction failed: {e}")
+            # ADR-001: the second pass is opportunistic, but its failure must not
+            # be invisible - record a Degradation and log with the traceback.
+            logger.warning(
+                "Second-pass relationship extraction failed; keeping first-pass relationships: {}",
+                e,
+                exc_info=True,
+            )
+            if out_diagnostics is not None:
+                degradation: Degradation = {
+                    "component": "extraction.llm.second_pass",
+                    "reason": "second_pass_failed",
+                    "detail": str(e)[:200] or type(e).__name__,
+                    "exception": type(e).__name__,
+                }
+                out_diagnostics.append(degradation)
             return []
+
+    def _parse_second_pass_relationships(
+        self,
+        rels_data: Any,  # noqa: ANN401
+        entity_names: set[str],
+    ) -> list[ExtractedRelationship]:
+        """Parse a second-pass relationships array, keeping only known entities."""
+        relationships: list[ExtractedRelationship] = []
+        if not isinstance(rels_data, list):
+            return relationships
+        for r in rels_data:
+            if not isinstance(r, dict):
+                continue
+            source = r.get("source_entity") or r.get("source") or ""
+            target = r.get("target_entity") or r.get("target") or ""
+            # Only accept relationships referencing known entities
+            if source not in entity_names or target not in entity_names:
+                continue
+            confidence = self._compute_relationship_confidence(r, entity_names)
+            relationships.append(
+                ExtractedRelationship(
+                    source_entity=source,
+                    target_entity=target,
+                    relationship_type=r.get("relationship_type") or r.get("type") or "RELATES_TO",
+                    description=r.get("description", ""),
+                    confidence=confidence,
+                )
+            )
+        return relationships
+
+    async def _apply_batch_second_pass(
+        self,
+        results: list[ExtractionResult],
+        texts: list[str],
+        *,
+        relationship_types: list[str] | None = None,
+    ) -> list[ExtractionResult]:
+        """Two-pass relationship extraction for the batch path (G-6, #1409).
+
+        Collects under-connected sections (same trigger as the single-doc path:
+        relationships < entities - 1) and runs one batched relationship-only
+        second pass, merging the extra relationships into each section's result.
+        A second-pass failure records a Degradation on the affected results and
+        never discards first-pass output.
+        """
+        candidate_indices = [
+            i for i, r in enumerate(results) if not r.metadata.get("error") and self._should_run_second_pass(r)
+        ]
+        if not candidate_indices:
+            return results
+
+        diagnostics: list[Degradation] = []
+        additional = await self._extract_additional_relationships_batch(
+            [(results[i].entities, texts[i]) for i in candidate_indices],
+            relationship_types=relationship_types,
+            out_diagnostics=diagnostics,
+        )
+        for rels, idx in zip(additional, candidate_indices, strict=True):
+            if rels:
+                results[idx] = self._merge_relationships(results[idx], rels)
+            if diagnostics:
+                results[idx].metadata.setdefault("degradations", []).extend(diagnostics)
+        return results
+
+    async def _extract_additional_relationships_batch(
+        self,
+        items: list[tuple[list[ExtractedEntity], str]],
+        *,
+        relationship_types: list[str] | None = None,
+        out_diagnostics: list[Degradation] | None = None,
+    ) -> list[list[ExtractedRelationship]]:
+        """Batched second-pass relationship extraction: one LLM call, one section per item.
+
+        Batch-path counterpart of ``_extract_additional_relationships`` (#1409).
+        Each item is ``(first-pass entities, original text)`` for one
+        under-connected section. Returns one relationship list per item,
+        aligned by index. Failures degrade to empty lists and are recorded
+        via ``out_diagnostics`` per ADR-001.
+        """
+        empty: list[list[ExtractedRelationship]] = [[] for _ in items]
+        if not items:
+            return empty
+
+        try:
+            import litellm
+        except ImportError:
+            return empty
+
+        section_blocks = []
+        for i, (entities, text) in enumerate(items):
+            entity_list = "\n".join(f"- {e.name} ({e.entity_type})" for e in entities)
+            # Truncate to 4000 chars to match _extract_multi_batch's sections
+            section_blocks.append(f"=== SECTION {i + 1} ===\nEntities:\n{entity_list}\n\nText:\n{text[:4000]}")
+
+        prompt = RELATIONSHIP_EXTRACTION_MULTI_PROMPT.format(
+            sections="\n\n".join(section_blocks),
+            relationship_types=", ".join(relationship_types or []),
+        )
+
+        try:
+            async with self._acquire_slot():
+                import time as _time
+
+                from khora.telemetry import get_collector, trace_span
+
+                _t0 = _time.perf_counter()
+                with trace_span(
+                    "khora.extraction.llm_call",
+                    model=self._model,
+                    call_type="relationship_second_pass_batch",
+                    batch_size=len(items),
+                ) as llm_span:
+                    set_connector_attributes(llm_span, get_shared_session())
+                    response = await self._bounded_acompletion(
+                        litellm.acompletion(
+                            model=self._model,
+                            messages=[
+                                {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
+                                {"role": "user", "content": prompt},
+                            ],
+                            temperature=self._temperature,
+                            max_tokens=self._max_tokens,
+                            timeout=self._timeout,
+                            num_retries=0,
+                            response_format=self._get_relationship_multi_response_format(),
+                            shared_session=get_shared_session(),
+                        ),
+                        llm_call_timeout(self._timeout),
+                    )
+                    set_rate_limit_attributes(llm_span, response)
+                _latency = (_time.perf_counter() - _t0) * 1000
+                self._log_rate_limit_headers(response)
+
+                usage = getattr(response, "usage", None)
+                _pt = getattr(usage, "prompt_tokens", 0) or 0
+                _ct = getattr(usage, "completion_tokens", 0) or 0
+                _tt = getattr(usage, "total_tokens", 0) or 0
+
+                from khora.khora import LLMUsage, _safe_completion_cost
+
+                _cost = _safe_completion_cost(response, model=self._model)
+                get_collector().record_llm_call(
+                    operation="relationship_extraction_second_pass",
+                    model=self._model,
+                    prompt_tokens=_pt,
+                    completion_tokens=_ct,
+                    total_tokens=_tt,
+                    latency_ms=_latency,
+                    metadata={"batch_size": len(items)},
+                    cost_usd=_cost,
+                )
+
+                from khora.telemetry.context import record_usage
+
+                record_usage(
+                    LLMUsage(
+                        operation="relationship_extraction_second_pass",
+                        model=self._model,
+                        prompt_tokens=_pt,
+                        completion_tokens=_ct,
+                        total_tokens=_tt,
+                        latency_ms=_latency,
+                        batch_size=len(items),
+                        cost_usd=_cost,
+                    )
+                )
+
+            content = response.choices[0].message.content
+            if not content:
+                return empty
+
+            data = json.loads(_strip_json_fences(content))
+            if not isinstance(data, dict):
+                return empty
+
+            sections_data = data.get("sections", [])
+            # Flat-shape tolerance, mirroring _extract_multi_batch: only safe
+            # for a single-section call.
+            if not sections_data and len(items) == 1 and data.get("relationships"):
+                sections_data = [data]
+            if not isinstance(sections_data, list):
+                return empty
+
+            if len(sections_data) < len(items):
+                # Second pass is additive: unmatched sections just get no extra
+                # relationships (first-pass output is untouched), so a mismatch
+                # is a warning rather than an error.
+                logger.warning(
+                    "Batched second-pass extraction returned {} sections for {} inputs; "
+                    "unmatched sections keep first-pass relationships only",
+                    len(sections_data),
+                    len(items),
+                )
+
+            out: list[list[ExtractedRelationship]] = []
+            total = 0
+            for i, (entities, _text) in enumerate(items):
+                section = sections_data[i] if i < len(sections_data) else None
+                if not isinstance(section, dict):
+                    out.append([])
+                    continue
+                entity_names = {e.name for e in entities}
+                rels = self._parse_second_pass_relationships(section.get("relationships", []), entity_names)
+                total += len(rels)
+                out.append(rels)
+
+            logger.debug(
+                f"Batched second-pass extraction found {total} additional relationships across {len(items)} sections"
+            )
+            return out
+
+        except Exception as e:
+            # ADR-001: never fail the batch for a lost second pass, but record it.
+            logger.warning(
+                "Batched second-pass relationship extraction failed; keeping first-pass relationships: {}",
+                e,
+                exc_info=True,
+            )
+            if out_diagnostics is not None:
+                degradation: Degradation = {
+                    "component": "extraction.llm.second_pass",
+                    "reason": "second_pass_failed",
+                    "detail": str(e)[:200] or type(e).__name__,
+                    "exception": type(e).__name__,
+                }
+                out_diagnostics.append(degradation)
+            return empty
 
     @staticmethod
     def _merge_relationships(
@@ -2179,7 +2541,15 @@ Return ONLY valid JSON, no other text."""
                         else:
                             results.append(ExtractionResult(metadata={"error": "section_count_mismatch"}))
 
-                    return results
+                    # Two-pass relationship extraction (G-6, #1409): previously
+                    # only the single-doc extract() path ran the second pass,
+                    # leaving the production batch path (remember/remember_batch)
+                    # with systematically fewer relationships.
+                    return await self._apply_batch_second_pass(
+                        results,
+                        texts,
+                        relationship_types=relationship_types,
+                    )
         except Exception as e:
             logger.error(f"Multi-extraction failed after {self._max_retries} attempts: {e}")
             # str(e) or type name — a bare TimeoutError's empty str() is falsy and
