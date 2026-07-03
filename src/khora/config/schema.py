@@ -1233,7 +1233,12 @@ class PipelineSettings(BaseSettings):
         default=True,
         description="Enable importance-based selective extraction to reduce LLM cost. "
         "When True, only the most important chunks are sent to LLM extraction; "
-        "the rest get lightweight co-occurrence edges.",
+        "the rest get lightweight co-occurrence edges. Precedence (#1408): on the "
+        "VectorCypher engine the skeleton PageRank selection is the single selector "
+        "(ratio from vectorcypher.skeleton_core_ratio) and this flag gates it - when "
+        "False, every chunk goes to LLM extraction. ChunkImportanceScorer "
+        "(extraction_importance_ratio / extraction_min_importance) applies only on "
+        "the generic ingest pipeline flow, never on top of the skeleton.",
     )
     extraction_importance_ratio: float = Field(
         default=0.7,
