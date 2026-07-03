@@ -1334,15 +1334,30 @@ class QuerySettings(BaseSettings):
 
     # Basic search settings
     default_mode: str = Field(default="hybrid", description="Default search mode: vector, graph, hybrid, keyword, all")
-    min_chunk_similarity: float = Field(default=0.05, ge=0.0, le=1.0, description="Minimum chunk similarity threshold")
+    # Wired onto the default VectorCypher engine in #1406 as the chunk-channel
+    # cosine floor. Default canonicalized to 0.0 (the engine's previous
+    # effective behavior - no floor) so the wiring changed nothing silently;
+    # the old 0.05 here never took effect on the default recall() path. Set
+    # KHORA_QUERY_MIN_CHUNK_SIMILARITY to opt in to a floor.
+    min_chunk_similarity: float = Field(default=0.0, ge=0.0, le=1.0, description="Minimum chunk similarity threshold")
     min_entity_similarity: float = Field(
         default=0.05, ge=0.0, le=1.0, description="Minimum entity similarity threshold"
     )
 
-    # Fusion weights
-    vector_weight: float = Field(default=0.5, ge=0.0, le=1.0, description="Weight for vector search in fusion")
-    graph_weight: float = Field(default=0.3, ge=0.0, le=1.0, description="Weight for graph search in fusion")
-    keyword_weight: float = Field(default=0.2, ge=0.0, le=1.0, description="Weight for keyword search in fusion")
+    # Fusion weights. Wired onto the default VectorCypher engine in #1406
+    # (previously dead there - the engine read only VectorCypherConfig). The
+    # defaults were canonicalized to the values the engine already used
+    # (``fusion_vector_weight=0.6`` / ``fusion_graph_weight=0.4`` /
+    # ``bm25_weight=0.3``) so the wiring changed no default behavior; the old
+    # 0.5/0.3/0.2 here never took effect on the default recall() path.
+    vector_weight: float = Field(default=0.6, ge=0.0, le=1.0, description="Weight for vector search in fusion")
+    graph_weight: float = Field(default=0.4, ge=0.0, le=1.0, description="Weight for graph search in fusion")
+    keyword_weight: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description="Weight of the lexical (BM25 keyword) channel in fusion (fills the bm25_weight slot)",
+    )
 
     # Independent lexical (BM25 full-text) channel fused alongside vector + graph
     # via RRF. Default OFF (unchanged). Exposing it here (#1330) makes the

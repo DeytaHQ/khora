@@ -36,8 +36,9 @@ class TestRetrieverConfig:
         assert config.simple_graph_weight == 0.2
         assert config.complex_vector_weight == 0.4
         assert config.complex_graph_weight == 0.6
-        assert config.recency_weight == 0.2
-        assert config.recency_decay_days == 30
+        # #1406 - canonicalized to the post-BEAM-100k QuerySettings values.
+        assert config.recency_weight == 0.35
+        assert config.recency_decay_days == 7.0
         assert config.recency_decay_type == "exponential"
         assert config.min_entity_similarity == 0.3
         assert config.hybrid_alpha == 0.7
