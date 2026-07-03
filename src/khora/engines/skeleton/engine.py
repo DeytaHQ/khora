@@ -227,9 +227,10 @@ class SkeletonConstructionEngine:
         occurred_at: datetime | None = None,
         entity_types: list[str],
         relationship_types: list[str],
-        expertise: ExpertiseConfig | None = None,
+        expertise: ExpertiseConfig | str | None = None,
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
+        chunk_size: int | None = None,
         external_id: str | None = None,
     ) -> RememberResult:
         """Store content in the memory engine.
@@ -246,6 +247,8 @@ class SkeletonConstructionEngine:
                 ``source_timestamp`` > ``datetime.now(UTC)``.
             chunk_strategy: Override chunking strategy for this call.
                 Valid values: "fixed", "semantic", "recursive", "conversation".
+                When None (default), uses the configured pipeline default.
+            chunk_size: Override target chunk size (in tokens) for this call.
                 When None (default), uses the configured pipeline default.
 
         Returns:
@@ -340,6 +343,7 @@ class SkeletonConstructionEngine:
             skill_name=skill_name,
             occurred_at=occurred_at,
             chunk_strategy=chunk_strategy,
+            chunk_size=chunk_size,
         )
 
         return RememberResult(
@@ -359,6 +363,7 @@ class SkeletonConstructionEngine:
         selective_embedding: bool = False,
         importance_ratio: float = 0.7,
         chunk_strategy: ChunkStrategy | None = None,
+        chunk_size: int | None = None,
     ) -> tuple[int, int, int]:
         """Process a document into chunks (simplified pipeline).
 
@@ -375,7 +380,7 @@ class SkeletonConstructionEngine:
         strategy = chunk_strategy if chunk_strategy is not None else self._config.pipeline.chunking_strategy
         chunker = create_chunker(
             strategy=strategy,
-            chunk_size=self._config.pipeline.chunk_size,
+            chunk_size=chunk_size if chunk_size is not None else self._config.pipeline.chunk_size,
             chunk_overlap=self._config.pipeline.chunk_overlap,
         )
 
@@ -772,9 +777,10 @@ class SkeletonConstructionEngine:
         on_progress: Callable[[int, int], None] | None = None,
         entity_types: list[str],
         relationship_types: list[str],
-        expertise: ExpertiseConfig | None = None,
+        expertise: ExpertiseConfig | str | None = None,
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
+        chunk_size: int | None = None,
         source_type: str = "library",
         source_name: str | None = None,
         source_url: str | None = None,
@@ -804,6 +810,8 @@ class SkeletonConstructionEngine:
             extraction_config_hash: Persisted for change-detection workflows
             chunk_strategy: Override chunking strategy for this call.
                 Valid values: "fixed", "semantic", "recursive", "conversation".
+                When None (default), uses the configured pipeline default.
+            chunk_size: Override target chunk size (in tokens) for this call.
                 When None (default), uses the configured pipeline default.
             bulk_mode: When True, defer HNSW index creation for faster bulk loads
 
@@ -898,7 +906,7 @@ class SkeletonConstructionEngine:
             strategy = chunk_strategy if chunk_strategy is not None else self._config.pipeline.chunking_strategy
             chunker = create_chunker(
                 strategy=strategy,
-                chunk_size=self._config.pipeline.chunk_size,
+                chunk_size=chunk_size if chunk_size is not None else self._config.pipeline.chunk_size,
                 chunk_overlap=self._config.pipeline.chunk_overlap,
             )
 

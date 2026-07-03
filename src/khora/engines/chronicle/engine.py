@@ -194,6 +194,26 @@ def _checksum_dedup_applies(existing: Document, *, external_id: str | None, sess
     return True
 
 
+def _resolve_expertise(expertise: ExpertiseConfig | str | None) -> ExpertiseConfig | None:
+    """Resolve a string expertise (registered name or YAML path) to a config.
+
+    Chronicle reads ``expertise.events`` / ``expertise.facts`` /
+    ``expertise.expansion`` attributes directly, so a string must be
+    resolved up-front (the shared ingest pipeline resolves its own copy).
+    Mirrors the pipeline's soft-fail: an unresolvable string logs a warning
+    and behaves like no expertise.
+    """
+    if expertise is None or not isinstance(expertise, str):
+        return expertise
+    from khora.extraction.skills import load_expertise
+
+    try:
+        return load_expertise(expertise)
+    except Exception as e:
+        logger.warning(f"Failed to load expertise '{expertise}': {e}")
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Temporal decay helpers
 # ---------------------------------------------------------------------------
@@ -1491,9 +1511,10 @@ class ChronicleEngine:
         skill_name: str = "general_entities",
         entity_types: list[str],
         relationship_types: list[str],
-        expertise: ExpertiseConfig | None = None,
+        expertise: ExpertiseConfig | str | None = None,
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
+        chunk_size: int | None = None,
         external_id: str | None = None,
     ) -> RememberResult:
         """Store content in the memory engine.
@@ -1511,13 +1532,17 @@ class ChronicleEngine:
             skill_name: Extraction skill to use
             entity_types: Entity types to extract
             relationship_types: Relationship types to extract
-            expertise: Optional expertise config
+            expertise: Optional expertise — an ``ExpertiseConfig``, a
+                registered expertise name, or a YAML file path
             extraction_config_hash: Optional hash for change detection
             chunk_strategy: Override chunking strategy for this call
+            chunk_size: Override target chunk size (in tokens) for this call.
+                When None (default), uses the pipeline default.
 
         Returns:
             RememberResult with document_id and counts
         """
+        expertise = _resolve_expertise(expertise)
         timings: dict[str, float] = {}
         total_start = time.perf_counter()
 
@@ -1586,6 +1611,8 @@ class ChronicleEngine:
         )
         if chunk_strategy is not None:
             kwargs["chunk_strategy"] = chunk_strategy
+        if chunk_size is not None:
+            kwargs["chunk_size"] = chunk_size
         result = await process_document(document, storage, **kwargs)
         timings["pipeline_ms"] = (time.perf_counter() - start) * 1000
 
@@ -3284,9 +3311,10 @@ class ChronicleEngine:
         on_progress: Callable[[int, int], None] | None = None,
         entity_types: list[str],
         relationship_types: list[str],
-        expertise: ExpertiseConfig | None = None,
+        expertise: ExpertiseConfig | str | None = None,
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
+        chunk_size: int | None = None,
         source_type: str = "library",
         source_name: str | None = None,
         source_url: str | None = None,
@@ -3309,15 +3337,18 @@ class ChronicleEngine:
             on_progress: Callback(processed_count, total_count)
             entity_types: Entity types to extract
             relationship_types: Relationship types to extract
-            expertise: Optional expertise config
+            expertise: Optional expertise — an ``ExpertiseConfig``, a
+                registered expertise name, or a YAML file path
             extraction_config_hash: Hash for change detection
             chunk_strategy: Override chunking strategy
+            chunk_size: Override target chunk size in tokens (None = pipeline default)
             extraction_batch_size: Max texts per LLM extraction call (None = pipeline default)
             extraction_max_tokens: Max tokens for extraction LLM calls (None = pipeline default)
 
         Returns:
             BatchResult with aggregated statistics
         """
+        expertise = _resolve_expertise(expertise)
         timings: dict[str, float] = {}
         total_start = time.perf_counter()
 
@@ -3401,6 +3432,8 @@ class ChronicleEngine:
         )
         if chunk_strategy is not None:
             ingest_kwargs["chunk_strategy"] = chunk_strategy
+        if chunk_size is not None:
+            ingest_kwargs["chunk_size"] = chunk_size
         if extraction_batch_size is not None:
             ingest_kwargs["extraction_batch_size"] = extraction_batch_size
         if extraction_max_tokens is not None:

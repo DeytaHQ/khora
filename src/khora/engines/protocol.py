@@ -69,9 +69,10 @@ class MemoryEngineProtocol(Protocol):
         skill_name: str = "general_entities",
         entity_types: list[str],
         relationship_types: list[str],
-        expertise: ExpertiseConfig | None = None,
+        expertise: ExpertiseConfig | str | None = None,
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
+        chunk_size: int | None = None,
         external_id: str | None = None,
     ) -> RememberResult:
         """Store content in the memory engine.
@@ -90,11 +91,16 @@ class MemoryEngineProtocol(Protocol):
             skill_name: Extraction skill to use
             entity_types: Required entity types to extract
             relationship_types: Required relationship types to extract
-            expertise: Optional expertise config for domain-specific extraction
+            expertise: Optional expertise for domain-specific extraction —
+                an ``ExpertiseConfig``, a registered expertise name, or a
+                YAML file path (strings are resolved via ``load_expertise``).
             extraction_config_hash: Optional hash of the extraction config for change detection
             chunk_strategy: Override chunking strategy for this call only.
                 Valid values: "fixed", "semantic", "recursive", "conversation".
                 When None (default), uses the configured pipeline default.
+            chunk_size: Override target chunk size (in tokens) for this call
+                only. When None (default), uses the configured pipeline
+                default (512).
             external_id: Optional caller-supplied external identifier for the document.
                 Must be None or a non-blank string (max 512 chars).
                 Raises ValueError if constraints are violated.
@@ -162,9 +168,10 @@ class MemoryEngineProtocol(Protocol):
         on_progress: Callable[[int, int], None] | None = None,
         entity_types: list[str],
         relationship_types: list[str],
-        expertise: ExpertiseConfig | None = None,
+        expertise: ExpertiseConfig | str | None = None,
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
+        chunk_size: int | None = None,
         source_type: str = "library",
         source_name: str | None = None,
         source_url: str | None = None,
@@ -186,14 +193,22 @@ class MemoryEngineProtocol(Protocol):
             on_progress: Callback(processed_count, total_count) for progress updates
             entity_types: Required entity types to extract
             relationship_types: Required relationship types to extract
-            expertise: Optional expertise config for domain-specific extraction
+            expertise: Optional expertise for domain-specific extraction —
+                an ``ExpertiseConfig``, a registered expertise name, or a
+                YAML file path (strings are resolved via ``load_expertise``).
             extraction_config_hash: Optional hash of the extraction config for change detection
             chunk_strategy: Override chunking strategy for this call only.
                 Valid values: "fixed", "semantic", "recursive", "conversation".
                 When None (default), uses the configured pipeline default.
+            chunk_size: Override target chunk size (in tokens) for this call
+                only. When None (default), uses the configured pipeline
+                default (512).
 
         Returns:
-            BatchResult with aggregated statistics
+            BatchResult with aggregated statistics. Engines that support it
+            populate ``BatchResult.per_document`` with a per-input breakdown
+            (document_id, source, chunks, entities, skipped) including
+            checksum-skipped duplicates; other engines may leave it empty.
         """
         ...
 
