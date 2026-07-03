@@ -464,7 +464,28 @@ class SurrealDBTemporalStore(TemporalVectorStore):
         if pure_bm25:
             if not query_text:
                 return []
-            return await self._bm25_search(filter_clauses, filter_bindings, query_text, limit)
+            if min_similarity <= 0.0:
+                return await self._bm25_search(filter_clauses, filter_bindings, query_text, limit)
+            # An explicit min_similarity floor: route through the shared
+            # vector+fusion path (alpha=0.0 keeps BM25 rank ordering) so
+            # BM25-only chunks that never passed the vector floor are
+            # excluded — consistent with the pgvector/sqlite_lance keyword
+            # mode, which reaches _rrf_fusion for hybrid_alpha=0.0 (#1404).
+            vector_results = await self._vector_search(
+                filter_clauses,
+                filter_bindings,
+                query_embedding,
+                limit * 2,
+                min_similarity,
+            )
+            bm25_results = await self._bm25_search(filter_clauses, filter_bindings, query_text, limit * 2)
+            return self._rrf_fusion(
+                vector_results,
+                bm25_results,
+                0.0,
+                limit,
+                exclude_bm25_only=True,
+            )
 
         # Vector search (fetch extra for fusion if hybrid)
         vector_limit = limit * 2 if hybrid else limit

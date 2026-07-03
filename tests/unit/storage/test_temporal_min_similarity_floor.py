@@ -149,6 +149,39 @@ async def test_floor_excludes_bm25_only_from_hybrid_fusion(factory) -> None:
     assert results[0].bm25_score == 2.0
 
 
+@pytest.mark.asyncio
+async def test_surrealdb_keyword_mode_floor_excludes_bm25_only() -> None:
+    """SurrealDB pure-BM25 shortcut (hybrid_alpha=0.0, SearchMode.KEYWORD).
+
+    With an explicit floor, the shortcut routes through the vector+fusion
+    path so BM25-only chunks are excluded — matching pgvector/sqlite_lance,
+    whose keyword mode reaches ``_rrf_fusion`` for ``hybrid_alpha=0.0``.
+    """
+    passed = _result("passed-floor", similarity=0.8, bm25_score=None)
+    bm25_dup = _result("passed-floor", bm25_score=2.0)
+    bm25_dup.chunk.id = passed.chunk.id
+    bm25_only = [_result(f"kw{i}") for i in range(3)]
+
+    store = _make_surrealdb(vector=[passed], bm25=[bm25_dup, *bm25_only])
+
+    results = await _search(store, min_similarity=0.5, hybrid_alpha=0.0)
+
+    assert [r.chunk.id for r in results] == [passed.chunk.id]
+    store._vector_search.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_surrealdb_keyword_mode_no_floor_stays_pure_bm25() -> None:
+    """Without a floor, the SurrealDB pure-BM25 shortcut is unchanged."""
+    bm25_only = [_result(f"kw{i}") for i in range(3)]
+    store = _make_surrealdb(vector=[], bm25=list(bm25_only))
+
+    results = await _search(store, min_similarity=0.0, hybrid_alpha=0.0)
+
+    assert [r.chunk.id for r in results] == [r.chunk.id for r in bm25_only]
+    store._vector_search.assert_not_awaited()
+
+
 @pytest.mark.parametrize("factory", _FACTORIES)
 @pytest.mark.asyncio
 async def test_no_floor_hybrid_fusion_keeps_union(factory) -> None:
