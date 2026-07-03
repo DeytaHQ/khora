@@ -304,9 +304,16 @@ class RetrieverConfig:
     temporal_vector_weight: float = 0.3
     temporal_graph_weight: float = 0.7
 
-    # Temporal settings
-    recency_weight: float = 0.2
-    recency_decay_days: int = 30
+    # Temporal settings. Defaults canonicalized to QuerySettings' post-BEAM-100k
+    # values (0.35 / 7) in #1406; the engine wires them from
+    # ``KhoraConfig.query.recency_weight`` / ``recency_decay_days``.
+    # NOTE: at runtime the per-query recency weight comes from the
+    # temporal-category RETRIEVAL_PARAMS table (or a per-call ``recency_bias``
+    # override); ``recency_weight`` here is not consulted by retrieve().
+    # ``recency_decay_days`` IS live: it is the fallback decay window in
+    # ``_calculate_recency_scores`` when no category override applies.
+    recency_weight: float = 0.35
+    recency_decay_days: float = 7.0
     recency_decay_type: str = "exponential"  # "linear" or "exponential"
 
     # Issue #567 — temporal recency Phase A. Each flag defaults OFF so the
@@ -369,6 +376,11 @@ class RetrieverConfig:
 
     # Search thresholds
     min_entity_similarity: float = 0.3
+    # Cosine floor for the chunk (vector) channel, applied when the per-call
+    # ``min_similarity`` kwarg is left at its 0.0 default (#1406). Wired from
+    # ``KhoraConfig.query.min_chunk_similarity`` / KHORA_QUERY_MIN_CHUNK_SIMILARITY.
+    # Default 0.0 = no floor (the previous effective behavior); opt in via config.
+    min_chunk_similarity: float = 0.0
     hybrid_alpha: float = 0.7
 
     # Lazy entity expansion
@@ -788,6 +800,19 @@ class VectorCypherRetriever:
         # existing score order so nothing is dropped.
         return [fused_results[i] for i in selected] + [r for i, r in enumerate(fused_results) if i not in selected_set]
 
+    def _effective_min_similarity(self, min_similarity: float) -> float:
+        """Resolve the chunk-channel cosine floor (#1406).
+
+        A positive per-call ``min_similarity`` wins (caller intent). ``0.0``
+        (the kwarg default) means "unset" and falls back to the configured
+        ``min_chunk_similarity`` - the documented
+        ``KHORA_QUERY_MIN_CHUNK_SIMILARITY`` knob, which was previously dead
+        on this path. Set it to ``0`` to disable the floor entirely.
+        """
+        if min_similarity > 0.0:
+            return min_similarity
+        return self._config.min_chunk_similarity
+
     async def retrieve(
         self,
         query: str,
@@ -815,6 +840,8 @@ class VectorCypherRetriever:
             min_similarity: Minimum cosine-similarity floor applied to the
                 vector channel. Chunks below this threshold are filtered at
                 the storage layer before any fusion / reranking happens.
+                ``0.0`` (the default) means "unset" and falls back to the
+                configured ``min_chunk_similarity`` (#1406).
             hybrid_alpha_override: Per-call vector/BM25 blend factor. Threaded
                 explicitly from the engine so the shared ``RetrieverConfig``
                 is never mutated (#1116). ``None`` keeps the configured /
@@ -845,6 +872,7 @@ class VectorCypherRetriever:
         """
         with trace_span("khora.vectorcypher.retrieve", namespace_id=str(namespace_id)) as span:
             limit = limit or self._config.max_chunks
+            min_similarity = self._effective_min_similarity(min_similarity)
 
             # Resolve retrieval parameters from temporal signal
             params = (

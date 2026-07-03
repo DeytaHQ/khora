@@ -418,9 +418,12 @@ class VectorCypherConfig:
     fusion_complex_vector_weight: float = 0.4
     fusion_complex_graph_weight: float = 0.6
 
-    # Temporal
-    temporal_recency_weight: float = 0.2
-    temporal_recency_decay_days: int = 30
+    # Temporal. Defaults canonicalized to QuerySettings' post-BEAM-100k values
+    # (0.35 / 7) in #1406 - the old 0.2 / 30 here silently shadowed the
+    # documented ``query.recency_weight`` / ``query.recency_decay_days``
+    # remediation (see the BEAM comment in config/schema.py).
+    temporal_recency_weight: float = 0.35
+    temporal_recency_decay_days: float = 7.0
     recency_decay_type: str = "exponential"  # "linear" or "exponential"
 
     # Extraction concurrency (aligned with ingest pipeline's default of 20)
@@ -586,28 +589,39 @@ class VectorCypherEngine:
         query_cfg = getattr(config, "query", None)
         if query_cfg is not None:
             _vc_defaults = VectorCypherConfig()
-            for _field in (
-                "enable_reranking",
-                "reranking_model",
-                "reranking_top_n",
-                "reranking_blend_weight",
-                "enable_llm_reranking",
-                "llm_reranking_model",
-                "llm_reranking_top_n",
-                "llm_reranking_confidence_threshold",
+            for _query_field, _vc_field in (
+                ("enable_reranking", "enable_reranking"),
+                ("reranking_model", "reranking_model"),
+                ("reranking_top_n", "reranking_top_n"),
+                ("reranking_blend_weight", "reranking_blend_weight"),
+                ("enable_llm_reranking", "enable_llm_reranking"),
+                ("llm_reranking_model", "llm_reranking_model"),
+                ("llm_reranking_top_n", "llm_reranking_top_n"),
+                ("llm_reranking_confidence_threshold", "llm_reranking_confidence_threshold"),
                 # Issue #1330 — expose the independent BM25 lexical channel via
                 # KHORA_QUERY_ENABLE_BM25_CHANNEL. Reconciled (not read directly
                 # in _assemble_retriever_config) so a caller-supplied
                 # VectorCypherConfig still wins per the established precedence.
-                "enable_bm25_channel",
+                ("enable_bm25_channel", "enable_bm25_channel"),
+                # Issue #1406 - fusion weights, recency tuning, and the lexical
+                # fusion weight were silently inert on the default recall()
+                # path: the query.* and VectorCypherConfig field names differ,
+                # so the same-name reconcile above could never bridge them.
+                # ``keyword_weight`` fills the BM25 fusion slot (the lexical
+                # channel's weight in RRF fusion).
+                ("vector_weight", "fusion_vector_weight"),
+                ("graph_weight", "fusion_graph_weight"),
+                ("recency_weight", "temporal_recency_weight"),
+                ("recency_decay_days", "temporal_recency_decay_days"),
+                ("keyword_weight", "bm25_weight"),
             ):
-                _query_val = getattr(query_cfg, _field, None)
+                _query_val = getattr(query_cfg, _query_field, None)
                 if _query_val is None:
                     continue
                 # Only fill in fields the caller left at the VectorCypherConfig
                 # default (i.e. did not explicitly override).
-                if getattr(self._vc_config, _field) == getattr(_vc_defaults, _field):
-                    setattr(self._vc_config, _field, _query_val)
+                if getattr(self._vc_config, _vc_field) == getattr(_vc_defaults, _vc_field):
+                    setattr(self._vc_config, _vc_field, _query_val)
 
         # Build storage config (shared helper handles SurrealDB, pool_pre_ping, etc.)
         self._storage_config = storage_config or build_storage_config(config)
@@ -811,6 +825,11 @@ class VectorCypherEngine:
             # default and unreachable from public config.
             coherence_weight=self._config.query.coherence_weight,
             min_entity_similarity=self._vc_config.retriever_min_entity_similarity,
+            # Issue #1406 - chunk-channel cosine floor. Read straight from
+            # KhoraConfig.query (no VectorCypherConfig equivalent exists),
+            # mirroring coherence_weight above. Applied by the retriever when
+            # the per-call ``min_similarity`` is left at its 0.0 default.
+            min_chunk_similarity=self._config.query.min_chunk_similarity,
             hybrid_alpha=self._vc_config.fusion_hybrid_alpha,
             lazy_entity_expansion=self._vc_config.lazy_entity_expansion,
             skeleton_core_ratio=self._vc_config.skeleton_core_ratio,
@@ -2267,7 +2286,9 @@ class VectorCypherEngine:
                 ``HYBRID`` (vector-weighted RRF, the default), and ``ALL``
                 (balanced fusion with ``hybrid_alpha=0.5``). Unsupported
                 modes raise ``EngineCapabilityError``.
-            min_similarity: Minimum similarity threshold
+            min_similarity: Minimum similarity threshold. ``0.0`` (the
+                default) falls back to the configured
+                ``query.min_chunk_similarity`` floor (#1406).
             temporal_filter: Temporal constraints
             graph_depth: Override graph traversal depth
             hybrid_alpha: Blend factor (0=graph, 1=vector)
