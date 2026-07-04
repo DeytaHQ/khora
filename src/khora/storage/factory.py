@@ -177,6 +177,7 @@ class StorageConfig:
         vector = storage_config.get("vector", {})
         pgvector_url = vector.get("url") or postgresql_url  # Default to same as PostgreSQL
         embedding_dimension = vector.get("embedding_dimension", 1536)
+        hnsw_ef_search = storage_config.get("hnsw_ef_search", vector.get("hnsw_ef_search", 100))
 
         # Extract graph config
         graph = storage_config.get("graph", {})
@@ -192,6 +193,7 @@ class StorageConfig:
             postgresql_max_overflow=relational.get("max_overflow", 10),
             pgvector_url=pgvector_url,
             pgvector_embedding_dimension=embedding_dimension,
+            pgvector_hnsw_ef_search=hnsw_ef_search,
             neo4j_url=neo4j_url,
             neo4j_user=neo4j_user,
             neo4j_password=neo4j_password,
