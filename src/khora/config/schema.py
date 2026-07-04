@@ -1263,6 +1263,15 @@ class PipelineSettings(BaseSettings):
         "keyword-PageRank chunk selection + (later) a separate keyword-chunk retrieval channel "
         "kept out of the entity graph. Default off; no behavior change when off.",
     )
+    extraction_second_pass: bool = Field(
+        default=False,
+        description="Opt-in second-pass relationship extraction on the batch ingest path "
+        "(#1409/#1420). When True, under-connected sections (relationships < entities - 1) "
+        "get one extra batched relationship-only LLM call, recovering 30-40% more "
+        "connections at extra LLM cost. Default off to keep the default ingest cost "
+        "profile flat; enable via KHORA_PIPELINES_EXTRACTION_SECOND_PASS=true for "
+        "denser graphs.",
+    )
 
     # Entity embedding skip rules — skip embedding generation for low-value entity types
     skip_embedding_entity_types: list[str] = Field(

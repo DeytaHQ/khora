@@ -22,7 +22,7 @@ Choose Skeleton Construction instead when:
 - **No Neo4j available**: VectorCypher requires Neo4j
 - **Simple infrastructure preferred**: Skeleton works with PostgreSQL only
 
-For comprehensive extraction over 100% of chunks, pass `engine_kwargs={"vectorcypher_config": VectorCypherConfig(skeleton_core_ratio=1.0)}` - VectorCypher's KET-RAG selectivity defaults to the top 70% of chunks but accepts a 1.0 override that extracts from every chunk.
+For comprehensive extraction over 100% of chunks, pass `engine_kwargs={"vectorcypher_config": VectorCypherConfig(skeleton_core_ratio=1.0)}` - VectorCypher's KET-RAG selectivity defaults to the top 50% of chunks (cost-parity default since #1420; 0.7+ is the quality opt-in) but accepts a 1.0 override that extracts from every chunk.
 
 ## Architecture Overview
 
@@ -415,7 +415,7 @@ config = VectorCypherConfig(
     routing_use_llm=False,  # Heuristic routing (faster)
 
     # Skeleton indexing
-    skeleton_core_ratio=0.70,  # 70% get full KG extraction
+    skeleton_core_ratio=0.50,  # 50% get full KG extraction (default; 0.7+ = quality opt-in)
 
     # Graph traversal
     graph_default_depth=2,
@@ -495,7 +495,7 @@ vectorcypher:
     enabled: true
     use_llm: false
   skeleton:
-    core_ratio: 0.70
+    core_ratio: 0.50
   graph:
     default_depth: 2
     max_depth: 4
@@ -539,8 +539,8 @@ KHORA_STORAGE_NEO4J_PASSWORD=password
 
 | Metric | VectorCypher | Skeleton |
 |--------|--------------|----------|
-| LLM calls per 1000 docs | ~700 (default) / ~1000 (`skeleton_core_ratio=1.0`) | ~100 |
-| Core chunk ratio | 70% (configurable 0.0–1.0) | 10% |
+| LLM calls per 1000 docs | ~500 (default) / ~1000 (`skeleton_core_ratio=1.0`) | ~100 |
+| Core chunk ratio | 50% (configurable 0.0–1.0) | 10% |
 | Multi-hop queries | Native | Limited |
 | Graph database | Required | Not required |
 | Query routing | Yes | No |
@@ -555,8 +555,8 @@ Controls what percentage of chunks get full knowledge graph extraction:
 | Value | LLM Calls | Graph Density | Use When |
 |-------|-----------|---------------|----------|
 | 0.90 | Most | Very dense graph | Maximum recall, cost not a concern |
-| 0.70 | Default | Dense graph | Most cases (good quality/cost balance) |
-| 0.50 | Moderate | Moderate graph | Cost-conscious with decent coverage |
+| 0.70 | More | Dense graph | Quality opt-in (denser graph, ~40% more extraction calls) |
+| 0.50 | Moderate | Moderate graph | Default (cost parity with pre-#1408 behavior) |
 | 0.25 | Fewer | Sparse graph | Cost-sensitive, simple queries |
 
 ### graph_depth

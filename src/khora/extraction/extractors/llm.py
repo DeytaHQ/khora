@@ -482,6 +482,7 @@ class LLMEntityExtractor(EntityExtractor):
         max_concurrent: int = 10,
         wave_size: int = 20,
         retry_wait: float = 1.0,
+        second_pass: bool = False,
     ) -> None:
         """Initialize the LLM entity extractor.
 
@@ -496,6 +497,12 @@ class LLMEntityExtractor(EntityExtractor):
                 wave in extract_multi(); the circuit breaker is checked between
                 waves. Raising it above max_concurrent has no effect.
             retry_wait: Base wait time (seconds) for exponential backoff between retries
+            second_pass: Enable the batched second-pass relationship extraction
+                (#1409) for under-connected sections on the extract_multi path.
+                Default False (#1420) - the extra LLM call per under-connected
+                batch is an explicit cost/quality opt-in
+                (pipeline.extraction_second_pass /
+                KHORA_PIPELINES_EXTRACTION_SECOND_PASS).
         """
         self._model = model
         self._temperature = temperature
@@ -505,6 +512,7 @@ class LLMEntityExtractor(EntityExtractor):
         self._retry_wait = retry_wait
         self._max_concurrent = max_concurrent
         self._wave_size = wave_size
+        self._second_pass = second_pass
         self._semaphore = asyncio.Semaphore(max_concurrent)
         # Persists across extract_batch calls so the circuit breaker can actually trip
         self._consecutive_batch_failures = 0
@@ -1479,7 +1487,13 @@ class LLMEntityExtractor(EntityExtractor):
         second pass, merging the extra relationships into each section's result.
         A second-pass failure records a Degradation on the affected results and
         never discards first-pass output.
+
+        Default OFF (#1420): short-circuits unless the extractor was built with
+        ``second_pass=True`` - the extra LLM call is an explicit cost opt-in.
         """
+        if not self._second_pass:
+            return results
+
         candidate_indices = [
             i for i, r in enumerate(results) if not r.metadata.get("error") and self._should_run_second_pass(r)
         ]

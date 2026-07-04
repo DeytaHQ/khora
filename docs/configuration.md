@@ -240,10 +240,22 @@ Prefix: `KHORA_PIPELINES_`.
 | `KHORA_PIPELINES_EXTRACT_ENTITIES` | `true` | Run the entity extractor. |
 | `KHORA_PIPELINES_ENTITY_TYPES` | `PERSON,ORGANIZATION,CONCEPT,LOCATION` | Entity type allowlist. |
 | `KHORA_PIPELINES_SELECTIVE_EXTRACTION` | `true` | KET-RAG selective extraction (cost reduction). |
-| `KHORA_PIPELINES_EXTRACTION_IMPORTANCE_RATIO` | `0.7` | Top fraction of chunks sent to LLM extraction. |
+| `KHORA_PIPELINES_EXTRACTION_IMPORTANCE_RATIO` | `0.7` | Top fraction of chunks sent to LLM extraction (generic pipeline only). |
 | `KHORA_PIPELINES_EXTRACTION_MIN_IMPORTANCE` | `0.2` | Minimum importance threshold; chunks above this are always extracted. |
+| `KHORA_PIPELINES_EXTRACTION_SECOND_PASS` | `false` | Opt-in second-pass relationship extraction for under-connected sections (extra LLM cost). |
 | `KHORA_PIPELINES_SKIP_EMBEDDING_ENTITY_TYPES` | `DATE,URL,EMAIL` | Skip embeddings for these types when `mention_count` is low. |
 | `KHORA_PIPELINES_SKIP_EMBEDDING_MENTION_THRESHOLD` | `1` | Skip embedding for rare-mention entities of the above types. |
+
+### Extraction cost/quality knobs
+
+Ingest-side LLM cost is dominated by how many chunks reach the extractor and how many passes run. Defaults are tuned for cost parity (#1420); each knob below is an explicit quality opt-in with a known cost impact:
+
+| Knob | Default | Cost impact when raised/enabled |
+|---|---|---|
+| `VectorCypherConfig.skeleton_core_ratio` (engine kwarg) | `0.50` | Fraction of chunks per document that get full LLM extraction on the default VectorCypher engine (skeleton PageRank is the single selector since #1408). `0.5` matches the pre-#1408 effective coverage (~0.49 = the accidental 0.7 x 0.7 double selection). `0.7` costs ~40% more extraction calls for a denser graph; `1.0` is full extraction. At `<= 0.6` the retriever's lazy entity expansion recovers graph signal for skipped chunks at query time (no LLM calls). |
+| `KHORA_PIPELINES_EXTRACTION_SECOND_PASS` | `false` | Second relationship-only LLM pass over under-connected sections (relationships < entities - 1) on the batch ingest path (#1409). Recovers 30-40% more connections; adds up to one extra LLM call per extraction batch. |
+| `KHORA_PIPELINES_SELECTIVE_EXTRACTION` | `true` | Setting `false` disables chunk selection entirely - every chunk goes to LLM extraction on all engines (maximum cost and coverage). |
+| `KHORA_PIPELINES_EXTRACTION_IMPORTANCE_RATIO` | `0.7` | Top fraction of chunks the `ChunkImportanceScorer` sends to the LLM on the generic ingest pipeline (chronicle and non-VC flows). Never applies on top of the skeleton (#1408). |
 
 > **`extract_entities` gates the entire entity graph.** With `KHORA_PIPELINES_EXTRACT_ENTITIES=false` (or `pipeline.extract_entities=False` / `pipeline:\n  extract_entities: false` in YAML), khora skips *all* entity and relationship extraction at ingest. The vector + keyword store still works, but the graph stays empty: graph / Cypher / multi-hop / entity-neighborhood retrieval returns nothing, recall silently degrades to vector + keyword, and `kb.list_entities()` returns `0`. It is a global switch, not a per-call option - the `entity_types` / `relationship_types` `remember()` kwargs control *what* is extracted, not *whether*. Default `true`; only disable it if you intend a graph-less store.
 

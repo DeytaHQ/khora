@@ -73,6 +73,7 @@ async def extract_entities(
     extraction_importance_ratio: float = 0.7,
     extraction_min_importance: float = 0.2,
     ketrag_skeleton_channel: bool = False,
+    extraction_second_pass: bool = False,
     shared_extractor: Any | None = None,
     out_diagnostics: dict[str, Any] | None = None,
 ) -> tuple[list[Entity], list[Relationship]]:
@@ -109,6 +110,11 @@ async def extract_entities(
             keyword-PageRank scorer (``khora.core.ranking.select_core_chunks``)
             with the multilingual tokenizer instead of ``ChunkImportanceScorer``.
             Default False - flag-off behavior is byte-identical to before.
+        extraction_second_pass: Enable the batched second-pass relationship
+            extraction (#1409) for under-connected sections. Default False
+            (#1420) - extra LLM cost, explicit opt-in. Ignored when
+            ``shared_extractor`` is provided (the shared extractor carries its
+            own flag).
         shared_extractor: Optional pre-initialized LLMEntityExtractor to reuse
             across documents (shares semaphore for cross-document concurrency control)
         out_diagnostics: Optional dict the function populates with ADR-001
@@ -223,6 +229,7 @@ async def extract_entities(
             timeout=timeout,
             max_retries=max_retries,
             retry_wait=retry_wait,
+            second_pass=extraction_second_pass,
         )
         if max_tokens is not None:
             extractor_kwargs["max_tokens"] = max_tokens

@@ -23,10 +23,10 @@ The embedded path (SQLite + LanceDB) has a documented scale ceiling: **~1M chunk
 | Aspect | VectorCypher (default) | Skeleton Construction | Chronicle |
 |--------|------------------------|----------------------|-----------|
 | **Primary Focus** | Hybrid retrieval | Temporal events | Conversational memory |
-| **Entity Extraction** | Selective (70% default, configurable 0.0–1.0) | Lazy (on-demand) | Full extraction |
+| **Entity Extraction** | Selective (50% default, configurable 0.0–1.0) | Lazy (on-demand) | Full extraction |
 | **Core Data Model** | Dual nodes (Entity + Chunk) | Chunks with temporal metadata | SVO events + facts |
 | **Time Model** | Bi-temporal + temporal detection (7 categories) | Bi-temporal (`occurred_at` + `ingested_at`) | Triple timestamps + Ebbinghaus decay |
-| **LLM Cost** | Medium (~700 calls/1000 docs) at default; ~1000 at `skeleton_core_ratio=1.0` | Lower (~100 calls/1000 docs) | Higher (~1000 calls/1000 docs, full extraction) |
+| **LLM Cost** | Medium (~500 calls/1000 docs) at default; ~1000 at `skeleton_core_ratio=1.0` | Lower (~100 calls/1000 docs) | Higher (~1000 calls/1000 docs, full extraction) |
 | **Graph Backend** | Required (Neo4j/Neptune/AGE) | Not required | Not required |
 | **Search Modes** | Vector + Cypher + BM25 + RRF | Vector + BM25 Hybrid | 4-channel: Semantic + BM25 + Temporal + Entity |
 | **Point-in-time queries** | Production-only (PG+Neo4j); on the embedded `sqlite_lance` backend, degrades to current-state entity recall + records a Degradation; occurred-bounds chunk filtering (`start_time`/`end_time`) still applies | n/a | n/a |
@@ -38,7 +38,7 @@ The embedded path (SQLite + LanceDB) has a documented scale ceiling: **~1M chunk
 
 **VectorCypher:**
 - Skeleton-based selective extraction (KET-RAG): top N% chunks by importance get full LLM extraction; remaining chunks get keyword + co-occurrence edges.
-- `skeleton_core_ratio` defaults to 0.70 (70% core). Set to `1.0` for full extraction (legacy GraphRAG behavior).
+- `skeleton_core_ratio` defaults to 0.50 (50% core - cost parity with the pre-#1408 effective coverage; #1420). Set to 0.7+ for a denser graph (quality opt-in) or `1.0` for full extraction (legacy GraphRAG behavior).
 - Entities stored in Neo4j (or alternate graph backend) for Cypher traversal.
 
 ```python
@@ -173,9 +173,9 @@ results = await kb.recall(
 
 For 1000 documents averaging 5KB each:
 
-| Operation | VectorCypher (default 70%) | VectorCypher (`skeleton_core_ratio=1.0`) | Skeleton Construction | Chronicle |
+| Operation | VectorCypher (default 50%) | VectorCypher (`skeleton_core_ratio=1.0`) | Skeleton Construction | Chronicle |
 |-----------|---------------------------|------------------------------------------|----------------------|-----------|
-| Entity extraction | ~700 LLM calls | ~1000 LLM calls | ~100 LLM calls (core only) | ~1000 LLM calls |
+| Entity extraction | ~500 LLM calls | ~1000 LLM calls | ~100 LLM calls (core only) | ~1000 LLM calls |
 | Embedding generation | ~1000 embedding calls | ~1000 embedding calls | ~1000 embedding calls | ~1000 embedding calls |
 | Graph operations | Cypher writes | Cypher writes | None | None |
 | **Total LLM cost** | **~$0.10–0.20** | **~$0.15–0.30** | **~$0.02–0.05** | **~$0.15–0.30** |
@@ -186,7 +186,7 @@ For 1000 documents averaging 5KB each:
 
 - **Multi-hop knowledge queries**: "Who works with engineers who worked on the auth project?"
 - **Graph-shaped data**: Documents reference entities that reference other entities.
-- **Balanced cost/quality**: Default 70% extraction is cheaper than full GraphRAG-style; 100% available via `skeleton_core_ratio=1.0`.
+- **Balanced cost/quality**: Default 50% extraction is cheaper than full GraphRAG-style; 0.7+ is the quality opt-in and 100% is available via `skeleton_core_ratio=1.0`.
 - **Production-grade**: The default-recommended engine; well-tested on PostgreSQL + Neo4j.
 
 ### Choose Skeleton Construction When...
