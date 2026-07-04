@@ -14,6 +14,7 @@ from khora.engines.vectorcypher.dual_nodes import (
     ChunkNode,
     DualNodeManager,
     EntityChunkLink,
+    _build_neighborhood_query,
 )
 
 
@@ -1270,3 +1271,178 @@ class TestGetChunksByEntitiesFilterPushdown:
             pushed_keys_out=no_filter_sink,
         )
         assert no_filter_sink == []
+
+
+@pytest.mark.unit
+class TestBoundedNeighborhoodExpansionQuery:
+    """Tests for the bounded per-hop expansion query (#1419).
+
+    The old ``OPTIONAL MATCH path = (e)-[*1..depth]-(related:Entity)``
+    enumerated every undirected trail (exponential in graph density); the
+    replacement unrolls one frontier-expansion block per hop with a visited
+    set and a ``$hop_limit`` fan-out cap. These tests lock the query shape;
+    result parity against the legacy query is covered by the real-Neo4j
+    integration test
+    ``tests/integration/test_neo4j_neighborhood_expansion_parity_integration.py``.
+    """
+
+    @pytest.mark.parametrize("depth", [1, 2, 3, 4])
+    @pytest.mark.parametrize("prefer_current", [False, True])
+    def test_no_variable_length_pattern(self, depth: int, prefer_current: bool) -> None:
+        """The exponential all-paths pattern must be gone for every shape."""
+        query = _build_neighborhood_query(depth, prefer_current)
+        assert "[*1.." not in query
+        assert "relationships(path)" not in query
+
+    @pytest.mark.parametrize("depth", [1, 2, 3, 4])
+    def test_one_expansion_block_per_hop(self, depth: int) -> None:
+        """depth N unrolls exactly N frontier-expansion blocks with 1..N distances."""
+        query = _build_neighborhood_query(depth, prefer_current=False)
+        assert query.count("OPTIONAL MATCH") == depth
+        assert query.count("collect(DISTINCT") == depth
+        for i in range(1, depth + 1):
+            assert f"distance: {i}}}" in query
+        assert f"distance: {depth + 1}}}" not in query
+
+    def test_hop_and_result_limits_parameterized(self) -> None:
+        """Frontier cap and per-entity result cap bind via Cypher params."""
+        query = _build_neighborhood_query(2, prefer_current=False)
+        assert query.count("[0..$hop_limit]") == 2  # one cap per hop
+        assert "_found[0..$limit]" in query
+
+    def test_prefer_current_filters_every_hop(self) -> None:
+        """valid_until is checked per traversed relationship and per reported node."""
+        depth = 3
+        query = _build_neighborhood_query(depth, prefer_current=True)
+        assert "datetime() AS _now" in query
+        # One relationship-validity check per hop...
+        for i in range(1, depth + 1):
+            assert f"_r{i}.valid_until IS NULL OR datetime(_r{i}.valid_until) > _now" in query
+        # ...and one reported-node validity check per hop.
+        assert query.count("x.valid_until IS NULL OR datetime(x.valid_until) > _now") == depth
+
+    def test_prefer_current_false_has_no_temporal_filter(self) -> None:
+        query = _build_neighborhood_query(3, prefer_current=False)
+        assert "valid_until" not in query
+        assert "_now" not in query
+
+    def test_reported_nodes_filtered_but_traversal_unrestricted(self) -> None:
+        """Only *reported* nodes are Entity+namespace filtered - the traversal
+        itself must remain label/namespace-unrestricted so entities reachable
+        through :Chunk / :TimeNode intermediates keep surfacing (old-query
+        parity: the ``[*1..depth]`` pattern constrained only the endpoint)."""
+        query = _build_neighborhood_query(1, prefer_current=False)
+        # The expansion pattern has no label on the neighbor node.
+        assert "OPTIONAL MATCH (_cur1)-[_r1]-(_nb1)" in query
+        # The report-side comprehension is where Entity/namespace filtering lives.
+        assert "'Entity' IN labels(x)" in query
+        assert "x.namespace_id = $namespace_id" in query
+
+    @pytest.mark.asyncio
+    async def test_hop_limit_param_reaches_tx_run(self) -> None:
+        """The hop_limit kwarg is bound as a Cypher parameter."""
+        driver, session = _make_neo4j_driver()
+        captured: dict[str, object] = {}
+
+        async def _capture_execute_read(work_fn):
+            class _AsyncIter:
+                def __aiter__(self):
+                    return self
+
+                async def __anext__(self):
+                    raise StopAsyncIteration
+
+            result_cursor = MagicMock()
+            result_cursor.__aiter__ = lambda self: _AsyncIter()
+
+            async def _run(query, **params):
+                captured["query"] = query
+                captured["params"] = params
+                return result_cursor
+
+            tx = MagicMock()
+            tx.run = _run
+            return await work_fn(tx)
+
+        session.execute_read = AsyncMock(side_effect=_capture_execute_read)
+        manager = DualNodeManager(driver)
+
+        result = await manager.get_entity_neighborhoods([uuid4()], uuid4(), depth=2, limit_per_entity=7, hop_limit=55)
+
+        assert result == {}
+        params = captured["params"]
+        assert params["hop_limit"] == 55
+        assert params["limit"] == 7
+        assert "$hop_limit" in captured["query"]
+
+
+@pytest.mark.unit
+class TestGetEntityNeighborhoodsTimeoutDegradation:
+    """ADR-001 (#1419): timeout no longer degrades silently."""
+
+    @pytest.mark.asyncio
+    async def test_timeout_appends_degradation_and_bumps_counter(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        driver, session = _make_neo4j_driver()
+        session.execute_read = AsyncMock(
+            side_effect=_make_neo4j_error("Neo.ClientError.Transaction.TransactionTimedOut")
+        )
+        counter = MagicMock()
+        monkeypatch.setattr(
+            "khora.engines.vectorcypher.retriever._CYPHER_EXPAND_DEGRADED_COUNTER",
+            counter,
+        )
+
+        manager = DualNodeManager(driver, query_timeout=1.5)
+        sink: list = []
+        result = await manager.get_entity_neighborhoods([uuid4(), uuid4()], uuid4(), depth=3, degradations=sink)
+
+        assert result == {}
+        counter.add.assert_called_once_with(1, attributes={"reason": "neo4j_timeout"})
+        assert len(sink) == 1
+        deg = sink[0]
+        assert deg["component"] == "vectorcypher.cypher_expand"
+        assert deg["reason"] == "neo4j_timeout"
+        assert "1.5" in deg["detail"]
+        assert "entity_count=2" in deg["detail"]
+        assert "depth=3" in deg["detail"]
+        assert deg["exception"] == "ClientError"
+
+    @pytest.mark.asyncio
+    async def test_timeout_without_sink_still_counts_and_returns_empty(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Callers without a sink (engine.find_related_entities) keep the old
+        return contract; the counter still fires so the event is observable."""
+        driver, session = _make_neo4j_driver()
+        session.execute_read = AsyncMock(
+            side_effect=_make_neo4j_error("Neo.ClientError.Transaction.TransactionTimedOutClientConfiguration")
+        )
+        counter = MagicMock()
+        monkeypatch.setattr(
+            "khora.engines.vectorcypher.retriever._CYPHER_EXPAND_DEGRADED_COUNTER",
+            counter,
+        )
+
+        manager = DualNodeManager(driver, query_timeout=1.0)
+        result = await manager.get_entity_neighborhoods([uuid4()], uuid4(), depth=1)
+
+        assert result == {}
+        counter.add.assert_called_once_with(1, attributes={"reason": "neo4j_timeout"})
+
+    @pytest.mark.asyncio
+    async def test_non_timeout_error_records_no_degradation(self) -> None:
+        driver, session = _make_neo4j_driver()
+        session.execute_read = AsyncMock(
+            side_effect=_make_neo4j_error("Neo.ClientError.Statement.SyntaxError", message="bad cypher")
+        )
+        manager = DualNodeManager(driver, query_timeout=1.0)
+        sink: list = []
+
+        with pytest.raises(ClientError):
+            await manager.get_entity_neighborhoods([uuid4()], uuid4(), depth=1, degradations=sink)
+
+        assert sink == []

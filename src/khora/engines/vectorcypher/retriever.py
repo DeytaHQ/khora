@@ -143,22 +143,27 @@ _VERSION_FILTER_DEGRADED_COUNTER = metric_counter(
     ),
 )
 
-# Cypher-expand neighborhood-normalization degradation counter. The embedded
-# sqlite_lance backend returns ``Entity`` domain objects (mapped to dicts);
-# any entry that is neither an ``Entity`` nor a dict is dropped from the
-# expansion. Incremented per dropped entry so an unexpectedly empty
-# graph-channel recall is observable; the same event is appended to
-# ``RecallResult.engine_info['degradations']``. NO namespace_id label.
+# Cypher-expand degradation counter. Two reasons:
+# - unrecognized_neighborhood_shape: the embedded sqlite_lance backend returns
+#   ``Entity`` domain objects (mapped to dicts); any entry that is neither an
+#   ``Entity`` nor a dict is dropped from the expansion (incremented per entry).
+# - neo4j_timeout (#1419): DualNodeManager.get_entity_neighborhoods hit the
+#   configured query timeout and the graph channel returned empty (incremented
+#   per timed-out call; also imported lazily by dual_nodes.py).
+# The same events are appended to ``RecallResult.engine_info['degradations']``.
+# NO namespace_id label.
 _CYPHER_EXPAND_DEGRADED_COUNTER = metric_counter(
     "khora.vectorcypher.cypher_expand.degraded_total",
     unit="1",
     description=(
-        "VectorCypher graph-expansion normalization fallbacks. Incremented when "
-        "a neighborhood entry returned by get_neighborhoods_batch has an "
+        "VectorCypher graph-expansion degradations. Incremented when a "
+        "neighborhood entry returned by get_neighborhoods_batch has an "
         "unrecognized shape (neither an Entity domain object nor a dict) and is "
-        "dropped from the expansion. The same event is appended to "
-        "RecallResult.engine_info['degradations']. Labels: reason "
-        "(unrecognized_neighborhood_shape). NO namespace_id label - cardinality rule."
+        "dropped from the expansion, or when the Neo4j neighborhood expansion "
+        "times out and the graph channel returns empty. The same event is "
+        "appended to RecallResult.engine_info['degradations']. Labels: reason "
+        "(unrecognized_neighborhood_shape, neo4j_timeout). NO namespace_id "
+        "label - cardinality rule."
     ),
 )
 
@@ -3393,6 +3398,7 @@ class VectorCypherRetriever:
                     depth=depth,
                     limit_per_entity=20,
                     prefer_current=prefer_current,
+                    degradations=degradations,
                 )
             elif self._storage and self._storage._graph:
                 raw_neighborhoods = await self._storage.get_neighborhoods_batch(

@@ -1098,9 +1098,9 @@
       "unit": "1",
       "owner": "vectorcypher",
       "labels": [
-        {"name": "reason", "values": ["unrecognized_neighborhood_shape"], "_comment": "Low-cardinality enum; extend when adding new cypher-expand normalization fallback paths."}
+        {"name": "reason", "values": ["unrecognized_neighborhood_shape", "neo4j_timeout"], "_comment": "Low-cardinality enum; extend when adding new cypher-expand fallback paths."}
       ],
-      "description": "VectorCypher graph-expansion normalization fallback - incremented per neighborhood entry returned by get_neighborhoods_batch whose shape is unrecognized (neither an Entity domain object nor a dict) and is therefore dropped from the expansion. The same event is also appended to RecallResult.engine_info['degradations']. No namespace_id label."
+      "description": "VectorCypher graph-expansion degradations - incremented per neighborhood entry returned by get_neighborhoods_batch whose shape is unrecognized (neither an Entity domain object nor a dict) and is therefore dropped from the expansion (reason=unrecognized_neighborhood_shape), and per get_entity_neighborhoods call that hits the configured Neo4j query timeout and returns an empty neighborhood, dropping the graph channel (reason=neo4j_timeout, issue #1419). The same events are also appended to RecallResult.engine_info['degradations']. No namespace_id label."
     },
     {
       "name": "khora.vectorcypher.temporal_semantic_fallback.degraded_total",
