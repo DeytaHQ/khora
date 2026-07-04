@@ -26,6 +26,7 @@ from loguru import logger
 from neo4j import unit_of_work
 from neo4j.exceptions import ClientError
 
+from khora.core.diagnostics import Degradation
 from khora.storage.backends.mixins import deserialize_dict, serialize_dict
 from khora.telemetry import trace, trace_span
 
@@ -46,6 +47,104 @@ _NEO4J_TIMEOUT_CODES = (
     "Neo.ClientError.Transaction.TransactionTimedOut",
     "Neo.ClientError.Transaction.TransactionTimedOutClientConfiguration",
 )
+
+
+def _build_neighborhood_query(depth: int, prefer_current: bool) -> str:
+    """Build the bounded per-hop neighborhood expansion query (issue #1419).
+
+    Replaces the former ``OPTIONAL MATCH path = (e)-[*1..depth]-(related:Entity)``
+    all-paths enumeration, whose cost was exponential in graph density (every
+    distinct undirected trail to the same node was enumerated just to compute
+    DISTINCT + min distance). This builds an unrolled per-hop BFS instead:
+    each hop expands the current frontier one relationship, dedupes with
+    ``collect(DISTINCT ...)``, drops already-visited nodes, and caps the new
+    frontier at ``$hop_limit`` nodes so hub nodes cannot blow up a hop. Total
+    work is linear in the reachable (bounded) subgraph instead of exponential
+    in path count. Single round-trip, plain Cypher - no APOC required.
+
+    Result parity with the old query (the acceptance bar for #1419):
+
+    - A node's reported ``distance`` is its minimum hop count from the source,
+      identical to the old ``min(length(path))`` because BFS visits each node
+      first at its shortest distance. The old query could additionally emit
+      the *same* node again at larger distances (its DISTINCT was over the
+      whole map including ``distance``); consumers take the max score =
+      min distance (``retriever._cypher_expand``), so dropping those
+      strictly-dominated duplicates is consumption-equivalent.
+    - Traversal is undirected over ALL relationship types and ALL intermediate
+      node labels/namespaces (the old pattern constrained only the endpoint),
+      so entities reachable e.g. through a shared :Chunk or :TimeNode node
+      still surface. Only *reported* nodes are filtered to
+      ``:Entity`` + same namespace + ``<> source``.
+    - ``prefer_current`` filters every traversed relationship's
+      ``valid_until`` per hop (matching the old ``all(r IN relationships(path)
+      ...)``) and filters *reported* entities' ``valid_until`` - but expired
+      entities remain traversable-through, exactly like old intermediate
+      nodes, which were never validity-checked.
+    - Results are appended hop by hop, so ``_found`` is distance-ascending -
+      the same ordering the old ``ORDER BY distance`` + ``[0..$limit]``
+      truncation produced.
+
+    Bounded deviation (documented, not parity-relevant on realistic graphs):
+    when a hop discovers more than ``$hop_limit`` new nodes, the overflow is
+    arbitrary-dropped for that hop and may be rediscovered at a later hop
+    with a larger distance. The old query had no such bound - it timed out
+    instead (silently dropping the whole graph channel).
+
+    Args:
+        depth: Number of hops to unroll (caller clamps to 1-4).
+        prefer_current: Whether to add per-hop valid_until filtering.
+
+    Returns:
+        Cypher query string with ``$entity_ids``, ``$namespace_id``,
+        ``$hop_limit`` and ``$limit`` parameters.
+    """
+    now_carry = ", _now" if prefer_current else ""
+    lines = [
+        "UNWIND $entity_ids AS eid",
+        "MATCH (e:Entity {id: eid, namespace_id: $namespace_id})",
+    ]
+    if prefer_current:
+        # Hoist datetime() so it is evaluated once per source row. valid_until
+        # is persisted as an ISO STRING (``.isoformat()`` at the neo4j backend
+        # boundary), so coerce with datetime() before comparing against the
+        # ZONED DATETIME ``_now`` - a bare string > datetime comparison yields
+        # NULL, which would silently drop every future-dated edge.
+        lines.append("WITH e, datetime() AS _now")
+    lines.append(f"WITH e{now_carry}, [e] AS _visited, [e] AS _frontier, [] AS _found")
+    for i in range(1, depth + 1):
+        rel_filter = (
+            f"\n  AND (_r{i}.valid_until IS NULL OR datetime(_r{i}.valid_until) > _now)" if prefer_current else ""
+        )
+        node_filter = (
+            "\n         AND (x.valid_until IS NULL OR datetime(x.valid_until) > _now)" if prefer_current else ""
+        )
+        lines.append(
+            # An empty frontier must not kill the row (UNWIND [] discards it),
+            # so substitute [null]; OPTIONAL MATCH on a null start node then
+            # yields a null neighbor, which collect() ignores.
+            f"UNWIND (CASE WHEN size(_frontier) = 0 THEN [null] ELSE _frontier END) AS _cur{i}\n"
+            f"OPTIONAL MATCH (_cur{i})-[_r{i}]-(_nb{i})\n"
+            f"WHERE NOT _nb{i} IN _visited{rel_filter}\n"
+            f"WITH e{now_carry}, _visited, _found, collect(DISTINCT _nb{i})[0..$hop_limit] AS _next{i}\n"
+            f"WITH e{now_carry}, _visited + _next{i} AS _visited, _next{i} AS _frontier,\n"
+            f"     _found + [x IN _next{i}\n"
+            f"       WHERE 'Entity' IN labels(x)\n"
+            f"         AND x.namespace_id = $namespace_id\n"
+            f"         AND x.id <> e.id{node_filter}\n"
+            f"       | {{id: x.id, name: x.name, entity_type: x.entity_type,\n"
+            f"          description: x.description, source_tool: x.source_tool,\n"
+            f"          distance: {i}}}] AS _found"
+        )
+    lines.append(
+        "RETURN e.id AS source_id,\n"
+        "       e.name AS source_name,\n"
+        "       e.entity_type AS source_entity_type,\n"
+        "       e.description AS source_description,\n"
+        "       e.source_tool AS source_source_tool,\n"
+        "       _found[0..$limit] AS related_entities"
+    )
+    return "\n".join(lines)
 
 
 @dataclass
@@ -646,14 +745,21 @@ class DualNodeManager:
         depth: int = 2,
         limit_per_entity: int = 20,
         prefer_current: bool = False,
+        hop_limit: int = 200,
+        degradations: list[Degradation] | None = None,
     ) -> dict[str, list[dict[str, Any]]]:
-        """Get neighborhood of entities via relationship traversal.
+        """Get neighborhood of entities via bounded per-hop graph expansion.
 
         OPTIMIZATION: Uses a single Cypher query with UNWIND pattern to fetch
-        all entity neighborhoods in one database round-trip. The query:
+        all entity neighborhoods in one database round-trip. The query
+        (built by :func:`_build_neighborhood_query`, issue #1419):
         1. Uses IN clause for batch entity matching (index-backed)
-        2. Expands all neighborhoods in parallel within Neo4j
-        3. Groups results by source entity
+        2. Expands each neighborhood hop by hop with a visited-set +
+           ``collect(DISTINCT ...)`` frontier - linear in reachable nodes,
+           unlike the former all-paths ``[*1..depth]`` enumeration whose cost
+           was exponential in graph density
+        3. Caps each hop's new frontier at ``hop_limit`` nodes per source
+           entity so hub nodes cannot blow up a hop
         4. Limits per-entity results to avoid explosion
 
         Args:
@@ -664,6 +770,18 @@ class DualNodeManager:
             prefer_current: When True, filter out entities and relationships whose valid_until
                 has passed (for STATE_QUERY/RECENCY/CHANGE temporal categories).
                 Entities and relationships without valid_until are kept (NULL = still valid).
+            hop_limit: Per-hop frontier cap per source entity (default 200).
+                Bounds fan-out at hub nodes; each hop expands at most this
+                many newly discovered nodes. On graphs where a hop exceeds
+                the cap, overflow nodes are dropped for that hop (they may
+                still be rediscovered later at a larger distance). The
+                default comfortably exceeds ``limit_per_entity`` (20 at the
+                retriever call site) so realistic neighborhoods are unaffected.
+            degradations: Optional ADR-001 sink. When the query times out
+                (``query_timeout``), a structured ``Degradation``
+                (component=``vectorcypher.cypher_expand``,
+                reason=``neo4j_timeout``) is appended so the dropped graph
+                channel is observable instead of a silent ``{}``.
 
         Returns:
             Dict mapping entity_id -> list of related entity info
@@ -673,58 +791,7 @@ class DualNodeManager:
 
         depth = min(max(1, depth), 4)  # Clamp to 1-4
 
-        # When prefer_current is set, exclude entities and relationships whose
-        # validity has expired. NULL valid_until is kept (no known end = still valid).
-        # Hoist datetime() into a WITH clause so it is evaluated once per row,
-        # not once per relationship in the all() predicate.
-        #
-        # valid_until is persisted as an ISO STRING (``.isoformat()`` at the
-        # neo4j backend boundary), so coerce it with Cypher datetime() before
-        # comparing against the ZONED DATETIME ``_now``. A bare ``string > datetime``
-        # comparison yields NULL, which would silently drop every future-dated
-        # edge from the neighborhood.
-        temporal_preamble = ""
-        temporal_clause = ""
-        if prefer_current:
-            temporal_preamble = "WITH e, datetime() AS _now"
-            temporal_clause = (
-                "AND (related.valid_until IS NULL OR datetime(related.valid_until) > _now)"
-                "\n          AND all(r IN relationships(path) "
-                "WHERE r.valid_until IS NULL OR datetime(r.valid_until) > _now)"
-            )
-
-        # OPTIMIZATION: Single query fetches all neighborhoods in batch
-        # Uses UNWIND internally via IN clause + collect() aggregation
-        # This avoids N separate queries for N entity IDs
-        query = f"""
-        UNWIND $entity_ids AS eid
-        MATCH (e:Entity {{id: eid, namespace_id: $namespace_id}})
-        {temporal_preamble}
-        OPTIONAL MATCH path = (e)-[*1..{depth}]-(related:Entity)
-        WHERE related.namespace_id = $namespace_id
-          AND related.id <> e.id
-          {temporal_clause}
-        WITH e, related,
-             CASE WHEN related IS NOT NULL THEN length(path) ELSE null END AS distance
-        ORDER BY e.id, distance
-        With e, collect(DISTINCT CASE
-            WHEN related IS NOT NULL THEN {{
-                id: related.id,
-                name: related.name,
-                entity_type: related.entity_type,
-                description: related.description,
-                source_tool: related.source_tool,
-                distance: distance
-            }}
-            ELSE null
-        END)[0..$limit] AS related_raw
-        RETURN e.id AS source_id,
-               e.name AS source_name,
-               e.entity_type AS source_entity_type,
-               e.description AS source_description,
-               e.source_tool AS source_source_tool,
-               [x IN related_raw WHERE x IS NOT NULL] AS related_entities
-        """
+        query = _build_neighborhood_query(depth, prefer_current)
 
         async def _work(tx):
             result = await tx.run(
@@ -732,6 +799,7 @@ class DualNodeManager:
                 entity_ids=[str(eid) for eid in entity_ids],
                 namespace_id=str(namespace_id),
                 limit=limit_per_entity,
+                hop_limit=hop_limit,
             )
             return [record.data() async for record in result]
 
@@ -780,6 +848,31 @@ class DualNodeManager:
                     code=exc.code,
                     timeout_occurred=True,
                 )
+                # ADR-001 (#1419): the silent `{}` here is how the all-paths
+                # blowup stayed hidden - the timeout masked it by dropping
+                # the whole graph channel with no machine-readable signal.
+                # Record a structured Degradation on the caller's sink and
+                # bump the shared cypher_expand degradation counter.
+                # Lazy import: retriever imports this module at top level,
+                # so importing the counter eagerly would be circular.
+                from khora.engines.vectorcypher.retriever import (
+                    _CYPHER_EXPAND_DEGRADED_COUNTER,
+                )
+
+                _CYPHER_EXPAND_DEGRADED_COUNTER.add(1, attributes={"reason": "neo4j_timeout"})
+                if degradations is not None:
+                    degradations.append(
+                        Degradation(
+                            component="vectorcypher.cypher_expand",
+                            reason="neo4j_timeout",
+                            detail=(
+                                f"neighborhood expansion timed out after "
+                                f"{self._query_timeout}s (entity_count={len(entity_ids)}, "
+                                f"depth={depth}); graph channel returned empty"
+                            ),
+                            exception=type(exc).__name__,
+                        )
+                    )
                 return {}
             raise
 
