@@ -1412,16 +1412,18 @@ class QuerySettings(BaseSettings):
     )
 
     # Temporal settings.
-    # `recency_weight` and `recency_decay_days` were tightened
-    # from (0.2, 30) to (0.35, 7) after BEAM 100K showed the four weakest
-    # categories (event_ordering, contradiction_resolution, temporal_reasoning,
-    # knowledge_update) all share a weak-recency / supersession root cause —
-    # 30-day half-life is wider than most session lifetimes, and 0.2 is too
-    # gentle to break ties between an old fact and its in-session update.
+    # `recency_weight` was tightened from 0.2 to 0.35 after BEAM 100K showed
+    # the four weakest categories (event_ordering, contradiction_resolution,
+    # temporal_reasoning, knowledge_update) all share a weak-recency /
+    # supersession root cause. `recency_decay_days` stays at 30: the 7-day
+    # half-life that BEAM tuned alongside it is a conversational-recency
+    # OPT-IN (set KHORA_QUERY_RECENCY_DECAY_DAYS=7 or use per-source decay),
+    # not the default - a global 7d half-life attenuates all week-plus-old
+    # evidence and breaks archival/multi-source temporal ordering (#1421).
     # `apply_recency_bias` still defaults False: callers must opt in.
     apply_recency_bias: bool = Field(default=False, description="Apply recency bias to results")
     recency_weight: float = Field(default=0.35, ge=0.0, le=1.0, description="Weight of recency in scoring")
-    recency_decay_days: float = Field(default=7.0, ge=1.0, description="Days for recency score to decay by half")
+    recency_decay_days: float = Field(default=30.0, ge=1.0, description="Days for recency score to decay by half")
 
     # Issue #567 — temporal recency Phase A. All four flags default OFF so the
     # PR is shippable without changing existing-consumer score distributions.

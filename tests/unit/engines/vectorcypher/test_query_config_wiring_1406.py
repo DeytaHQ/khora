@@ -81,11 +81,14 @@ def test_defaults_are_canonical_across_tiers() -> None:
     agree at defaults - no silent behavior change from the #1406 wiring.
 
     Canonical values: fusion 0.6/0.4 (the engine's previous effective
-    behavior), recency 0.35/7 (the post-BEAM-100k QuerySettings values,
-    previously shadowed), lexical/BM25 weight 0.3, chunk floor 0.0 (no floor;
-    the previous effective behavior - a 0.05 default would deterministically
-    drop ~2/3 of hash-embedding mock chunks in the embedded test lanes, and
-    activating a floor is an opt-in accuracy experiment, not this wiring fix).
+    behavior), recency weight 0.35 (the post-BEAM-100k QuerySettings value,
+    previously shadowed), recency decay 30 (restored in #1421 - the 7d BEAM
+    tuning broke archival temporal ordering and is now a conversational
+    opt-in via KHORA_QUERY_RECENCY_DECAY_DAYS), lexical/BM25 weight 0.3,
+    chunk floor 0.0 (no floor; the previous effective behavior - a 0.05
+    default would deterministically drop ~2/3 of hash-embedding mock chunks
+    in the embedded test lanes, and activating a floor is an opt-in accuracy
+    experiment, not this wiring fix).
     """
     q = KhoraConfig().query
     vc = VectorCypherConfig()
@@ -94,7 +97,7 @@ def test_defaults_are_canonical_across_tiers() -> None:
     assert q.vector_weight == vc.fusion_vector_weight == rc.vector_weight == 0.6
     assert q.graph_weight == vc.fusion_graph_weight == rc.graph_weight == 0.4
     assert q.recency_weight == vc.temporal_recency_weight == rc.recency_weight == 0.35
-    assert q.recency_decay_days == vc.temporal_recency_decay_days == rc.recency_decay_days == 7.0
+    assert q.recency_decay_days == vc.temporal_recency_decay_days == rc.recency_decay_days == 30.0
     assert q.keyword_weight == vc.bm25_weight == rc.bm25_weight == 0.3
     assert q.min_chunk_similarity == rc.min_chunk_similarity == 0.0
 

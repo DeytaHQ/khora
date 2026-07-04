@@ -196,7 +196,18 @@ Recency weighting is configured globally via `QueryConfig.apply_recency_bias`
 and `QueryConfig.recency_weight`; the legacy `recency_bias=` knob isn't
 exposed on the current public surface. Recency bias is **off by default**
 (`apply_recency_bias=False`); when enabled, the defaults are
-`recency_weight=0.35` and `recency_decay_days=7.0`.
+`recency_weight=0.35` and `recency_decay_days=30.0`.
+
+For conversational corpora (chat sessions, agent memory) where in-session
+updates should decisively outrank week-old facts, tighten the half-life to
+7 days: set `KHORA_QUERY_RECENCY_DECAY_DAYS=7` or `recency_decay_days=7` in
+config. For mixed corpora, prefer the per-source alternative instead of a
+global override: enable `temporal_per_source_decay` and tune
+`temporal_default_decay_by_source` (e.g. `slack: 3`, `email: 7`,
+`salesforce: 180`) so fast-moving sources decay quickly while archival
+sources keep long-range evidence rankable. The 30-day default deliberately
+favors archival/multi-source corpora - a global 7-day half-life attenuates
+all week-plus-old evidence and breaks cross-time ordering (#1421).
 
 ## Step 5b: MMR Diversity Selection (Optional)
 
