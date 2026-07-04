@@ -201,7 +201,10 @@ exposed on the current public surface. Recency bias is **off by default**
 For conversational corpora (chat sessions, agent memory) where in-session
 updates should decisively outrank week-old facts, tighten the half-life to
 7 days: set `KHORA_QUERY_RECENCY_DECAY_DAYS=7` or `recency_decay_days=7` in
-config. For mixed corpora, prefer the per-source alternative instead of a
+config. On this query-engine path the decay only takes effect with
+`apply_recency_bias=true`; the default VectorCypher engine instead applies
+it automatically whenever temporal detection fires on the query. For
+mixed corpora, prefer the per-source alternative instead of a
 global override: enable `temporal_per_source_decay` and tune
 `temporal_default_decay_by_source` (e.g. `slack: 3`, `email: 7`,
 `salesforce: 180`) so fast-moving sources decay quickly while archival
