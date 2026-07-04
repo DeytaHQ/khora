@@ -866,6 +866,7 @@ async def process_document(
     extraction_importance_ratio: float = 0.7,
     extraction_min_importance: float = 0.2,
     ketrag_skeleton_channel: bool = False,
+    extraction_second_pass: bool = False,
     bulk_mode: bool = False,
 ) -> dict[str, Any]:
     """Process a document through the enrichment pipeline.
@@ -904,6 +905,9 @@ async def process_document(
         extraction_min_importance: Minimum importance score threshold
         ketrag_skeleton_channel: Route core-chunk selection through the
             keyword-PageRank scorer (multilingual). Default off.
+        extraction_second_pass: Enable the batched second-pass relationship
+            extraction for under-connected sections (#1409). Default off
+            (#1420) - extra LLM cost, explicit opt-in.
     """
     from ..tasks import chunk_document, embed_chunks, extract_entities
 
@@ -996,6 +1000,7 @@ async def process_document(
                     extraction_importance_ratio=extraction_importance_ratio,
                     extraction_min_importance=extraction_min_importance,
                     ketrag_skeleton_channel=ketrag_skeleton_channel,
+                    extraction_second_pass=extraction_second_pass,
                     shared_extractor=shared_extractor,
                 )
 
@@ -1646,6 +1651,7 @@ async def ingest_documents(
     extraction_importance_ratio: float = 0.7,
     extraction_min_importance: float = 0.2,
     ketrag_skeleton_channel: bool = False,
+    extraction_second_pass: bool = False,
     skip_checksum_dedup: bool = False,
     **kwargs,
 ) -> dict[str, Any]:
@@ -1680,6 +1686,9 @@ async def ingest_documents(
         extraction_min_importance: Minimum importance score threshold
         ketrag_skeleton_channel: Route core-chunk selection through the
             keyword-PageRank scorer (multilingual). Default off.
+        extraction_second_pass: Enable the batched second-pass relationship
+            extraction for under-connected sections (#1409). Default off
+            (#1420) - extra LLM cost, explicit opt-in.
 
     Returns:
         Summary of ingestion results
@@ -1769,6 +1778,7 @@ async def ingest_documents(
             timeout=extraction_timeout,
             max_retries=extraction_max_retries,
             retry_wait=extraction_retry_wait,
+            second_pass=extraction_second_pass,
         )
         if extraction_max_tokens is not None:
             extractor_kwargs["max_tokens"] = extraction_max_tokens
@@ -1815,6 +1825,7 @@ async def ingest_documents(
                 extraction_importance_ratio=extraction_importance_ratio,
                 extraction_min_importance=extraction_min_importance,
                 ketrag_skeleton_channel=ketrag_skeleton_channel,
+                extraction_second_pass=extraction_second_pass,
                 bulk_mode=skip_checksum_dedup,
             )
 

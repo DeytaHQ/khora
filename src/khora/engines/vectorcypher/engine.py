@@ -400,8 +400,12 @@ class VectorCypherConfig:
     routing_enabled: bool = True
     routing_use_llm: bool = False
 
-    # Skeleton indexing
-    skeleton_core_ratio: float = 0.70  # 70% get full KG extraction (increased for denser graphs)
+    # Skeleton indexing. Default 0.50 (#1420): cost parity with the pre-#1408
+    # effective LLM chunk coverage (~0.49 = the accidental 0.7 x 0.7 double
+    # selection). #1408's single-selector correctness is kept; only the default
+    # ratio changed. 0.7+ is the quality opt-in for denser graphs - the
+    # 2026-07-04 daily-small run measured +63-77% ingest cost at 0.70.
+    skeleton_core_ratio: float = 0.50
     conversation_skeleton_ratio: float = 0.90  # Higher ratio for conversation batches
 
     # Graph traversal
@@ -1526,8 +1530,9 @@ class VectorCypherEngine:
                 ketrag_skeleton_channel=self._config.pipeline.ketrag_skeleton_channel,
                 # #1408: the skeleton PageRank selection above IS the selective
                 # step. Without this, ChunkImportanceScorer re-selected the top
-                # 70% of the already-selected 70% (~0.49 effective coverage).
+                # of the already-selected core set.
                 selective_extraction=False,
+                extraction_second_pass=self._config.pipeline.extraction_second_pass,
                 out_diagnostics=out_diagnostics,
             )
 
@@ -1771,6 +1776,7 @@ class VectorCypherEngine:
             # #1408: skeleton selection above is the selective step - never
             # re-select inside extract_entities.
             selective_extraction=False,
+            extraction_second_pass=self._config.pipeline.extraction_second_pass,
         )
 
         if not entities:
@@ -1962,6 +1968,7 @@ class VectorCypherEngine:
                     # #1408: skeleton selection above is the selective step -
                     # never re-select inside extract_entities.
                     selective_extraction=False,
+                    extraction_second_pass=self._config.pipeline.extraction_second_pass,
                 )
 
                 if extracted_entities:
@@ -3497,6 +3504,7 @@ class VectorCypherEngine:
                                     # selective step - never re-select inside
                                     # extract_entities.
                                     selective_extraction=False,
+                                    extraction_second_pass=self._config.pipeline.extraction_second_pass,
                                 )
 
                         extraction_results = await asyncio.gather(
@@ -3535,6 +3543,7 @@ class VectorCypherEngine:
                             # document chunk list, making first/last-position
                             # signal meaningless for inner documents.
                             selective_extraction=False,
+                            extraction_second_pass=self._config.pipeline.extraction_second_pass,
                         )
 
                     if entities:

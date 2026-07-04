@@ -1608,6 +1608,7 @@ class ChronicleEngine:
             relationship_types=relationship_types,
             expertise=expertise,
             ketrag_skeleton_channel=self._config.pipeline.ketrag_skeleton_channel,
+            extraction_second_pass=self._config.pipeline.extraction_second_pass,
         )
         if chunk_strategy is not None:
             kwargs["chunk_strategy"] = chunk_strategy
@@ -3429,6 +3430,7 @@ class ChronicleEngine:
             relationship_types=relationship_types,
             expertise=expertise,
             ketrag_skeleton_channel=self._config.pipeline.ketrag_skeleton_channel,
+            extraction_second_pass=self._config.pipeline.extraction_second_pass,
         )
         if chunk_strategy is not None:
             ingest_kwargs["chunk_strategy"] = chunk_strategy

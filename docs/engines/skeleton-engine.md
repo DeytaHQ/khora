@@ -215,7 +215,7 @@ for chunk_id in core_chunk_ids:
 | Approach | LLM Calls per 1000 docs |
 |----------|-------------------------|
 | Full extraction (VectorCypher with `skeleton_core_ratio=1.0`) | ~1000 |
-| Default VectorCypher (selective, 70%) | ~700 |
+| Default VectorCypher (selective, 50%) | ~500 |
 | Skeleton indexing (Skeleton) | ~100 |
 
 ### LazyEntityExpander (`src/khora/engines/skeleton/skeleton.py`)
@@ -558,7 +558,7 @@ temporal:
 
 | Metric | Skeleton Construction | VectorCypher |
 |--------|----------------------|--------------|
-| LLM calls per 1000 docs | ~100 | ~700 (default) / ~1000 (`skeleton_core_ratio=1.0`) |
+| LLM calls per 1000 docs | ~100 | ~500 (default) / ~1000 (`skeleton_core_ratio=1.0`) |
 | Ingestion latency | Lower | Higher |
 | Infrastructure | PostgreSQL only | PostgreSQL + Neo4j |
 | Temporal queries | Native (bi-temporal) | Per-category |

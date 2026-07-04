@@ -34,7 +34,9 @@ class TestVectorCypherConfig:
         config = VectorCypherConfig()
         assert config.routing_enabled is True
         assert config.routing_use_llm is False
-        assert config.skeleton_core_ratio == 0.70
+        # #1420: default lowered from 0.70 to 0.50 for cost parity with the
+        # pre-#1408 effective coverage (~0.49); 0.7+ is the quality opt-in.
+        assert config.skeleton_core_ratio == 0.50
         assert config.graph_default_depth == 2
         assert config.graph_max_depth == 4
         assert config.graph_max_entry_entities == 10

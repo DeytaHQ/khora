@@ -49,6 +49,7 @@ def _make_config() -> MagicMock:
     config.pipeline.chunk_overlap = 0
     config.pipeline.ketrag_skeleton_channel = False
     config.pipeline.selective_extraction = True
+    config.pipeline.extraction_second_pass = False
     config.telemetry_database_url = None
     config.telemetry_service_name = "test"
     return config
@@ -155,8 +156,8 @@ class TestImportanceScorerNeverRunsOnVCPath:
 
         assert result == (0, 0)
         scorer_spy.assert_not_called()
-        # The skeleton selected a strict subset (max(1, int(6 * 0.7)) == 4)
-        # and all of it reached the LLM boundary.
+        # The skeleton selected a strict subset (max(1, int(6 * 0.5)) == 3
+        # at the #1420 default ratio) and all of it reached the LLM boundary.
         assert len(captured) == 1
         assert 1 <= len(captured[0]) < 6
 
@@ -236,5 +237,5 @@ class TestSelectiveExtractionConfigGate:
 
         assert result.chunks > 2
         assert len(captured_chunks) == 1
-        # skeleton_core_ratio=0.70 selects a strict subset
+        # skeleton_core_ratio=0.50 (the #1420 default) selects a strict subset
         assert 1 <= len(captured_chunks[0]) < result.chunks

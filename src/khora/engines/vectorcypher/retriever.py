@@ -385,7 +385,9 @@ class RetrieverConfig:
 
     # Lazy entity expansion
     lazy_entity_expansion: bool = False
-    skeleton_core_ratio: float = 0.70  # Skip lazy expansion when > 0.6
+    # Mirrors VectorCypherConfig.skeleton_core_ratio (default 0.50 since #1420,
+    # cost parity with pre-#1408 coverage). Lazy expansion is skipped when > 0.6.
+    skeleton_core_ratio: float = 0.50
 
     # BM25 channel (independent full-text search alongside vector + graph)
     enable_bm25_channel: bool = False

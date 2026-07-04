@@ -10,6 +10,11 @@ single-text ``extract()`` while the production ingest path uses
   out first-pass results (single and batch paths);
 - the second pass requests a relationships-only response_format instead of
   the full entities+relationships+events strict schema.
+
+#1420: the batch second pass is an explicit cost opt-in - it only runs when
+the extractor is built with ``second_pass=True`` (wired from
+``pipeline.extraction_second_pass`` / KHORA_PIPELINES_EXTRACTION_SECOND_PASS).
+The default-off case makes no extra LLM call.
 """
 
 from __future__ import annotations
@@ -86,7 +91,7 @@ class TestBatchSecondPass:
     @pytest.mark.asyncio
     async def test_second_pass_fires_on_batch_path(self) -> None:
         """Under-connected sections from _extract_multi_batch get a batched second pass."""
-        extractor = LLMEntityExtractor(model="test-model", max_retries=1)
+        extractor = LLMEntityExtractor(model="test-model", max_retries=1, second_pass=True)
 
         calls: list[dict] = []
 
@@ -128,9 +133,43 @@ class TestBatchSecondPass:
         assert results[1].relationships == []
 
     @pytest.mark.asyncio
+    async def test_second_pass_off_by_default(self) -> None:
+        """#1420: default extractor makes NO second-pass call even for
+        under-connected sections - the extra LLM cost is an explicit opt-in."""
+        extractor = LLMEntityExtractor(model="test-model", max_retries=1)
+
+        calls: list[dict] = []
+
+        async def fake_acompletion(**kwargs):
+            calls.append(kwargs)
+            return _response(FIRST_PASS_SECTIONS)
+
+        with (
+            patch("litellm.acompletion", side_effect=fake_acompletion),
+            patch("khora.telemetry.get_collector") as mock_telem,
+        ):
+            mock_telem.return_value.record_llm_call = MagicMock()
+            results = await extractor.extract_multi(
+                ["Alice and Bob discussed Acme.", "Solo update."],
+                batch_size=5,
+                entity_types=["PERSON", "ORGANIZATION"],
+                relationship_types=["WORKS_FOR", "KNOWS"],
+                tiered_extraction=False,
+            )
+
+        # Only the first-pass call - the under-connected section did NOT
+        # trigger a second pass.
+        assert len(calls) == 1
+        assert len(results) == 2
+        # First-pass output is untouched.
+        assert [e.name for e in results[0].entities] == ["Alice", "Bob", "Acme"]
+        assert results[0].relationships == []
+        assert "second_pass_relationships" not in results[0].metadata
+
+    @pytest.mark.asyncio
     async def test_second_pass_not_triggered_when_connected(self) -> None:
         """No extra LLM call when every section meets the density trigger."""
-        extractor = LLMEntityExtractor(model="test-model", max_retries=1)
+        extractor = LLMEntityExtractor(model="test-model", max_retries=1, second_pass=True)
 
         payload = {
             "sections": [
@@ -171,7 +210,7 @@ class TestBatchSecondPass:
     @pytest.mark.asyncio
     async def test_second_pass_failure_records_degradation_keeps_first_pass(self) -> None:
         """A failed batched second pass degrades loudly and preserves first-pass output."""
-        extractor = LLMEntityExtractor(model="test-model", max_retries=1)
+        extractor = LLMEntityExtractor(model="test-model", max_retries=1, second_pass=True)
 
         first_pass = {
             "sections": [
@@ -232,7 +271,7 @@ class TestBatchSecondPass:
     @pytest.mark.asyncio
     async def test_batch_second_pass_requests_relationships_only_schema(self) -> None:
         """The batched second pass asks for a relationships-only strict schema."""
-        extractor = LLMEntityExtractor(model="gpt-4o-mini", max_retries=1)
+        extractor = LLMEntityExtractor(model="gpt-4o-mini", max_retries=1, second_pass=True)
 
         calls: list[dict] = []
 
