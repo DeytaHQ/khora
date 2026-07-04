@@ -422,12 +422,13 @@ class VectorCypherConfig:
     fusion_complex_vector_weight: float = 0.4
     fusion_complex_graph_weight: float = 0.6
 
-    # Temporal. Defaults canonicalized to QuerySettings' post-BEAM-100k values
-    # (0.35 / 7) in #1406 - the old 0.2 / 30 here silently shadowed the
-    # documented ``query.recency_weight`` / ``query.recency_decay_days``
-    # remediation (see the BEAM comment in config/schema.py).
+    # Temporal. Defaults canonicalized to QuerySettings' values in #1406 - the
+    # old 0.2 here silently shadowed the documented ``query.recency_weight`` /
+    # ``query.recency_decay_days`` remediation. Decay restored to 30 in #1421:
+    # the 7d BEAM tuning is a conversational-recency opt-in, not the default
+    # (see the BEAM comment in config/schema.py).
     temporal_recency_weight: float = 0.35
-    temporal_recency_decay_days: float = 7.0
+    temporal_recency_decay_days: float = 30.0
     recency_decay_type: str = "exponential"  # "linear" or "exponential"
 
     # Extraction concurrency (aligned with ingest pipeline's default of 20)

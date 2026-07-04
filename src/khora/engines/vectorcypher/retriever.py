@@ -304,16 +304,17 @@ class RetrieverConfig:
     temporal_vector_weight: float = 0.3
     temporal_graph_weight: float = 0.7
 
-    # Temporal settings. Defaults canonicalized to QuerySettings' post-BEAM-100k
-    # values (0.35 / 7) in #1406; the engine wires them from
-    # ``KhoraConfig.query.recency_weight`` / ``recency_decay_days``.
+    # Temporal settings. Defaults canonicalized to QuerySettings' values in
+    # #1406; the engine wires them from ``KhoraConfig.query.recency_weight`` /
+    # ``recency_decay_days``. Decay restored to 30 in #1421 - the 7d BEAM
+    # tuning is a conversational-recency opt-in, not the default.
     # NOTE: at runtime the per-query recency weight comes from the
     # temporal-category RETRIEVAL_PARAMS table (or a per-call ``recency_bias``
     # override); ``recency_weight`` here is not consulted by retrieve().
     # ``recency_decay_days`` IS live: it is the fallback decay window in
     # ``_calculate_recency_scores`` when no category override applies.
     recency_weight: float = 0.35
-    recency_decay_days: float = 7.0
+    recency_decay_days: float = 30.0
     recency_decay_type: str = "exponential"  # "linear" or "exponential"
 
     # Issue #567 — temporal recency Phase A. Each flag defaults OFF so the
