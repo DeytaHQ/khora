@@ -199,8 +199,9 @@ class DualNodeManager:
             driver: Neo4j async driver
             database: Database name
             query_timeout: Optional per-transaction timeout in seconds,
-                applied to ``get_entity_neighborhoods`` to bound runaway
-                variable-length path queries. ``None`` disables the timeout.
+                applied to ``get_entity_neighborhoods`` to bound a runaway
+                Neo4j query (e.g. on an unusually dense/large reachable
+                subgraph). ``None`` disables the timeout.
             pool_backend: Optional ``Neo4jBackend`` instance. When provided,
                 :meth:`_session` delegates to ``pool_backend._session()`` so
                 pool metric instrumentation (timeout counter, acquire
