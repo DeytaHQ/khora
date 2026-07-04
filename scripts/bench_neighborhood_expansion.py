@@ -72,7 +72,10 @@ async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--entities", type=int, default=48, help="ring size N")
     parser.add_argument("--k", type=int, default=6, help="ring reach (degree = 2k)")
-    parser.add_argument("--depth", type=int, default=4, help="traversal depth (1-4)")
+    # get_entity_neighborhoods clamps depth to 1-4 while the legacy query
+    # interpolates it verbatim; enforce the range here so an out-of-range
+    # value fails at the argument boundary instead of as a bogus parity error.
+    parser.add_argument("--depth", type=int, default=4, choices=range(1, 5), help="traversal depth (1-4)")
     parser.add_argument("--sources", type=int, default=8, help="number of entry entities")
     parser.add_argument("--runs", type=int, default=3, help="timed runs per variant")
     args = parser.parse_args()
@@ -124,7 +127,14 @@ async def main() -> None:
         return {r["source_id"]: _min_distances(r["related_entities"]) for r in records}
 
     async def run_new() -> dict[str, dict[str, int]]:
-        result = await manager.get_entity_neighborhoods(sources, ns, depth=args.depth, limit_per_entity=limit)
+        # hop_limit is raised to `limit` so the parity check isolates the
+        # traversal rewrite: the legacy query has no per-hop cap, and on
+        # graphs where a hop exceeds the default cap (200) the documented
+        # bounded deviation would otherwise trip the assert. The production
+        # call site keeps the default.
+        result = await manager.get_entity_neighborhoods(
+            sources, ns, depth=args.depth, limit_per_entity=limit, hop_limit=limit
+        )
         return {sid: _min_distances(rel) for sid, rel in result.items()}
 
     try:

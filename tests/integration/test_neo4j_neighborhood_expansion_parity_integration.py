@@ -28,22 +28,26 @@ both to ``{related_id: min distance}``.
 
 Why this is marked @pytest.mark.integration and gated by NEO4J_INTEGRATION_TEST=1:
 
-    Khora's CI does NOT provision a Neo4j instance. Real-Neo4j coverage lives
-    behind an opt-in env var so CI stays green while local developers
-    running ``make dev`` can exercise it.
+    CI's ``test-integration`` job provisions a Neo4j side-car and sets
+    NEO4J_INTEGRATION_TEST=1 plus the connection env vars, so this runs in
+    CI; local runs opt in via the same env var.
 
-How to run locally:
+Connection env contract (same as the sibling Neo4j integration tests and
+the CI job env - defaults match the CI side-car on 7687):
 
-    make dev  # starts postgres + neo4j via docker compose
-    NEO4J_INTEGRATION_TEST=1 uv run pytest \
+    KHORA_NEO4J_URL       (default: bolt://localhost:7687)
+    KHORA_NEO4J_USERNAME  (default: neo4j)
+    KHORA_NEO4J_PASSWORD  (default: password)
+
+How to run locally against THIS repo's compose stack (``make dev``; note the
+compose Neo4j is on 7688 - CI's 7688 is a Memgraph side-car, so never rely
+on the port default locally):
+
+    NEO4J_INTEGRATION_TEST=1 \
+    KHORA_NEO4J_URL=bolt://localhost:7688 \
+    KHORA_NEO4J_PASSWORD=pleaseletmein \
+    uv run pytest \
         tests/integration/test_neo4j_neighborhood_expansion_parity_integration.py -v
-
-Connection parameters are read from env vars with defaults that match THIS
-repo's compose stack (``compose.yaml``):
-
-    KHORA_NEO4J_TEST_URL       (default: bolt://localhost:7688)
-    KHORA_NEO4J_TEST_USERNAME  (default: neo4j)
-    KHORA_NEO4J_TEST_PASSWORD  (default: pleaseletmein)
 """
 
 from __future__ import annotations
@@ -123,9 +127,9 @@ class TestBoundedExpansionParity:
 
     @pytest.fixture()
     async def graph(self):
-        url = os.environ.get("KHORA_NEO4J_TEST_URL", "bolt://localhost:7688")
-        user = os.environ.get("KHORA_NEO4J_TEST_USERNAME", "neo4j")
-        password = os.environ.get("KHORA_NEO4J_TEST_PASSWORD", "pleaseletmein")
+        url = os.environ.get("KHORA_NEO4J_URL", "bolt://localhost:7687")
+        user = os.environ.get("KHORA_NEO4J_USERNAME", "neo4j")
+        password = os.environ.get("KHORA_NEO4J_PASSWORD", "password")
 
         driver = AsyncGraphDatabase.driver(url, auth=(user, password))
         ns = uuid4()
@@ -181,18 +185,21 @@ class TestBoundedExpansionParity:
             {"src": str(ids["O"]), "dst": str(ids["P"]), "valid_until": None},
         ]
 
-        async with driver.session(database="neo4j") as session:
-            await session.run(setup, entities=entities)
-            await session.run(edges, edges=edge_rows)
-            await session.run(
-                chunk,
-                a_id=str(ids["A"]),
-                f_id=str(ids["F"]),
-                chunk_id=str(uuid4()),
-                ns=str(ns),
-            )
-
+        # Setup lives INSIDE the try so a transient failure mid-setup still
+        # closes the driver and deletes any partially-created fixture nodes
+        # from the shared instance.
         try:
+            async with driver.session(database="neo4j") as session:
+                await session.run(setup, entities=entities)
+                await session.run(edges, edges=edge_rows)
+                await session.run(
+                    chunk,
+                    a_id=str(ids["A"]),
+                    f_id=str(ids["F"]),
+                    chunk_id=str(uuid4()),
+                    ns=str(ns),
+                )
+
             yield driver, ns, ids
         finally:
             async with driver.session(database="neo4j") as session:
