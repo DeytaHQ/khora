@@ -61,3 +61,24 @@ def test_numpy_floor_is_at_least_2_1() -> None:
         assert ">=2.1" in numpy_spec or ">=2." in numpy_spec or "==2." in numpy_spec, (
             f"numpy requirement {numpy_spec!r} must floor at >= 2.1"
         )
+
+
+def test_sentence_transformers_is_not_a_core_dependency() -> None:
+    """sentence-transformers lives in the ``rerank`` extra, not the core deps.
+
+    It pulls in torch (multi-GB); the only consumer (CrossEncoderReranker)
+    imports it lazily with a guarded error, so lean installs must not pay
+    for it. Guard against it silently creeping back into the core set.
+    """
+    deps = _core_dependencies()
+    names = {spec.split(">=")[0].split("==")[0].split("[")[0].strip().lower() for spec in deps}
+    assert "sentence-transformers" not in names, (
+        "sentence-transformers must stay out of [project].dependencies — "
+        "it belongs to the optional khora[rerank] extra."
+    )
+
+    data = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))
+    extras = data["project"]["optional-dependencies"]
+    assert any(spec.strip().lower().startswith("sentence-transformers") for spec in extras.get("rerank", [])), (
+        "the khora[rerank] extra must declare sentence-transformers"
+    )

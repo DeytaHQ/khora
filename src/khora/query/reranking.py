@@ -224,7 +224,11 @@ class CrossEncoderReranker(Reranker):
             try:
                 from sentence_transformers import CrossEncoder
             except ImportError:
-                raise RuntimeError("sentence-transformers not installed. Run: pip install sentence-transformers")
+                raise RuntimeError(
+                    "sentence-transformers is not installed — it is an optional "
+                    "dependency of the cross-encoder reranker. "
+                    "Install the extra: pip install 'khora[rerank]'"
+                )
             self._model = CrossEncoder(self._model_name, device=self._device)
         return self._model
 

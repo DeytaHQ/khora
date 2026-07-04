@@ -971,6 +971,7 @@ class VectorCypherEngine:
         relationship_types: list[str],
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
+        chunk_size: int | None = None,
         external_id: str | None = None,
     ) -> RememberResult:
         """Store content in the memory engine.
@@ -987,6 +988,8 @@ class VectorCypherEngine:
             occurred_at: When this content/event occurred (default: now)
             chunk_strategy: Override chunking strategy for this call.
                 Valid values: "fixed", "semantic", "recursive", "conversation".
+                When None (default), uses the configured pipeline default.
+            chunk_size: Override target chunk size (in tokens) for this call.
                 When None (default), uses the configured pipeline default.
             external_id: Optional caller-supplied external identifier for the document.
 
@@ -1039,6 +1042,7 @@ class VectorCypherEngine:
                     relationship_types=relationship_types,
                     extraction_config_hash=extraction_config_hash,
                     chunk_strategy=chunk_strategy,
+                    chunk_size=chunk_size,
                     external_id=external_id,
                 )
 
@@ -1109,6 +1113,7 @@ class VectorCypherEngine:
                 relationship_types=relationship_types,
                 extraction_config_hash=extraction_config_hash,
                 chunk_strategy=chunk_strategy,
+                chunk_size=chunk_size,
                 external_id=external_id,
             )
 
@@ -1127,6 +1132,7 @@ class VectorCypherEngine:
             entity_types=entity_types,
             relationship_types=relationship_types,
             chunk_strategy=chunk_strategy,
+            chunk_size=chunk_size,
             out_diagnostics=extraction_diagnostics,
         )
 
@@ -1151,6 +1157,7 @@ class VectorCypherEngine:
         entity_types: list[str],
         relationship_types: list[str],
         chunk_strategy: ChunkStrategy | None = None,
+        chunk_size: int | None = None,
         max_chunks_in_flight: int | None = None,
         chunk_semaphore: _GlobalChunkSemaphore | None = None,
         out_diagnostics: dict[str, Any] | None = None,
@@ -1181,7 +1188,7 @@ class VectorCypherEngine:
             strategy = chunk_strategy if chunk_strategy is not None else self._config.pipeline.chunking_strategy
             chunker = create_chunker(
                 strategy=strategy,
-                chunk_size=self._config.pipeline.chunk_size,
+                chunk_size=chunk_size if chunk_size is not None else self._config.pipeline.chunk_size,
                 chunk_overlap=self._config.pipeline.chunk_overlap,
             )
 
@@ -1812,6 +1819,7 @@ class VectorCypherEngine:
         relationship_types: list[str],
         extraction_config_hash: str | None,
         chunk_strategy: ChunkStrategy | None,
+        chunk_size: int | None = None,
         external_id: str,
     ) -> RememberResult:
         """Dispatch an ``external_id``-matched remember() to the replace path.
@@ -1876,7 +1884,7 @@ class VectorCypherEngine:
         strategy = chunk_strategy if chunk_strategy is not None else self._config.pipeline.chunking_strategy
         chunker = create_chunker(
             strategy=strategy,
-            chunk_size=self._config.pipeline.chunk_size,
+            chunk_size=chunk_size if chunk_size is not None else self._config.pipeline.chunk_size,
             chunk_overlap=self._config.pipeline.chunk_overlap,
         )
         raw_chunks = await asyncio.to_thread(chunker.chunk, content)
@@ -2804,6 +2812,7 @@ class VectorCypherEngine:
         relationship_types: list[str],
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
+        chunk_size: int | None = None,
         source_type: str = "library",
         source_name: str | None = None,
         source_url: str | None = None,
@@ -2833,10 +2842,15 @@ class VectorCypherEngine:
             chunk_strategy: Override chunking strategy for this call.
                 Valid values: "fixed", "semantic", "recursive", "conversation".
                 When None (default), uses the configured pipeline default.
+            chunk_size: Override target chunk size (in tokens) for this call.
+                When None (default), uses the configured pipeline default.
             bulk_mode: If True, defer HNSW indexes during load and rebuild after
 
         Returns:
-            BatchResult with processing statistics
+            BatchResult with processing statistics. ``per_document`` carries a
+            per-input breakdown (document_id, source, chunks, entities,
+            skipped) in input order, including checksum-skipped duplicates
+            (whose entry holds the already-stored document's id).
         """
         if not documents:
             return BatchResult(total=0, processed=0, skipped=0, failed=0, chunks=0, entities=0, relationships=0)
@@ -2862,6 +2876,7 @@ class VectorCypherEngine:
                 relationship_types=relationship_types,
                 extraction_config_hash=extraction_config_hash,
                 chunk_strategy=chunk_strategy,
+                chunk_size=chunk_size,
                 source_type=source_type,
                 source_name=source_name,
                 source_url=source_url,
@@ -2889,6 +2904,7 @@ class VectorCypherEngine:
         relationship_types: list[str],
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
+        chunk_size: int | None = None,
         source_type: str = "library",
         source_name: str | None = None,
         source_url: str | None = None,
@@ -2911,6 +2927,7 @@ class VectorCypherEngine:
                 relationship_types=relationship_types,
                 extraction_config_hash=extraction_config_hash,
                 chunk_strategy=chunk_strategy,
+                chunk_size=chunk_size,
                 source_type=source_type,
                 source_name=source_name,
                 source_url=source_url,
@@ -2941,6 +2958,45 @@ class VectorCypherEngine:
             if on_progress:
                 progress_count += n
                 on_progress(progress_count, total)
+
+        # Per-document breakdown (BatchResult.per_document), one slot per
+        # input document, filled in input order as each doc's fate resolves.
+        # ``chunks``/``entities`` count work performed in THIS call — skipped
+        # duplicates report 0 but carry the existing document's id.
+        per_document: list[dict[str, Any] | None] = [None] * total
+
+        def _record_doc(
+            idx: int,
+            *,
+            document_id: UUID | None,
+            chunks: int = 0,
+            entities: int = 0,
+            skipped: bool = False,
+        ) -> None:
+            per_document[idx] = {
+                "document_id": document_id,
+                "source": documents[idx].get("source") or None,
+                "chunks": chunks,
+                "entities": entities,
+                "skipped": skipped,
+            }
+
+        def _finalize_per_document() -> list[dict[str, Any]]:
+            # Defensive: every index should have been recorded by now; a None
+            # slot means the doc never reached a terminal state (treat as
+            # failed-before-create rather than raising).
+            return [
+                entry
+                if entry is not None
+                else {
+                    "document_id": None,
+                    "source": documents[i].get("source") or None,
+                    "chunks": 0,
+                    "entities": 0,
+                    "skipped": False,
+                }
+                for i, entry in enumerate(per_document)
+            ]
 
         # ── Stage 0a: external_id dispatch ──────────────────────────────
         # Docs with an external_id that already exists in the namespace are
@@ -2995,15 +3051,23 @@ class VectorCypherEngine:
                     relationship_types=relationship_types,
                     extraction_config_hash=extraction_config_hash,
                     chunk_strategy=chunk_strategy,
+                    chunk_size=chunk_size,
                     external_id=ext_id,
                 )
                 results["processed"] += 1
                 results["chunks"] += result.chunks_created
                 results["entities"] += result.entities_extracted
                 results["relationships"] += result.relationships_created
+                _record_doc(
+                    idx,
+                    document_id=result.document_id,
+                    chunks=result.chunks_created,
+                    entities=result.entities_extracted,
+                )
             except Exception as e:
                 logger.error(f"Failed to replace document external_id={ext_id!r}: {e}")
                 results["failed"] += 1
+                _record_doc(idx, document_id=None)
             external_id_handled.add(idx)
             _report_progress()
 
@@ -3023,6 +3087,11 @@ class VectorCypherEngine:
         # different identities in the same batch both proceed.
         identity_seen: set[tuple[str, str | None, str | None]] = set()
         active_indices: list[int] = []
+        # Intra-batch duplicates get the WINNER's document id once the winner
+        # is processed: identity_key -> winner input idx, and the dup indices
+        # waiting on that winner.
+        winner_idx_by_identity: dict[tuple[str, str | None, str | None], int] = {}
+        intra_batch_dups: dict[int, tuple[str, str | None, str | None]] = {}
         for idx, checksum in enumerate(doc_checksums):
             if idx in external_id_handled:
                 continue
@@ -3041,14 +3110,32 @@ class VectorCypherEngine:
             )
             if identity_key in identity_seen or db_dup:
                 results["skipped"] += 1
+                if db_dup:
+                    _record_doc(idx, document_id=existing_docs[checksum].id, skipped=True)
+                else:
+                    # Winner's document id resolved after processing.
+                    _record_doc(idx, document_id=None, skipped=True)
+                    intra_batch_dups[idx] = identity_key
                 _report_progress()
             else:
                 identity_seen.add(identity_key)
+                winner_idx_by_identity[identity_key] = idx
                 active_indices.append(idx)
         _stage0_ms = (_time.perf_counter() - _stage0_t0) * 1000
 
+        # Resolved lazily: winner idx -> created document id (filled below).
+        document_id_by_idx: dict[int, UUID] = {}
+
+        def _resolve_intra_batch_dups() -> None:
+            for dup_idx, identity_key in intra_batch_dups.items():
+                winner_idx = winner_idx_by_identity.get(identity_key)
+                entry = per_document[dup_idx]
+                if winner_idx is not None and entry is not None:
+                    entry["document_id"] = document_id_by_idx.get(winner_idx)
+
         if not active_indices:
-            return BatchResult(total=total, **results)
+            _resolve_intra_batch_dups()
+            return BatchResult(total=total, **results, per_document=_finalize_per_document())
 
         # ── Conversation mode detection ─────────────────────────────────
         docs_with_ts = sum(1 for d in documents if "occurred_at" in d.get("metadata", {}))
@@ -3080,7 +3167,7 @@ class VectorCypherEngine:
         strategy = chunk_strategy if chunk_strategy is not None else self._config.pipeline.chunking_strategy
         chunker = create_chunker(
             strategy=strategy,
-            chunk_size=self._config.pipeline.chunk_size,
+            chunk_size=chunk_size if chunk_size is not None else self._config.pipeline.chunk_size,
             chunk_overlap=self._config.pipeline.chunk_overlap,
         )
 
@@ -3155,16 +3242,20 @@ class VectorCypherEngine:
         for s in failed_states:
             if s.failed:
                 results["failed"] += 1
+                _record_doc(s.idx, document_id=s.document.id if s.document else None)
             elif not s.raw_chunks and s.document:
                 s.document.mark_completed(0, 0)
                 await storage.update_document(s.document)
                 results["processed"] += 1
+                document_id_by_idx[s.idx] = s.document.id
+                _record_doc(s.idx, document_id=s.document.id)
             _report_progress()
 
         _stage1_ms = (_time.perf_counter() - _stage1_t0) * 1000
 
         if not ok_states:
-            return BatchResult(total=total, **results)
+            _resolve_intra_batch_dups()
+            return BatchResult(total=total, **results, per_document=_finalize_per_document())
 
         # ── Build processing windows ─────────────────────────────────────
         # When max_chunks_in_flight is set, group documents into windows so
@@ -3650,6 +3741,13 @@ class VectorCypherEngine:
                 await storage.update_document(doc)
                 results["processed"] += 1
                 results["chunks"] += chunks_created
+                document_id_by_idx[state.idx] = doc.id
+                _record_doc(
+                    state.idx,
+                    document_id=doc.id,
+                    chunks=chunks_created,
+                    entities=doc_entity_count,
+                )
                 _report_progress()
 
             new_entity_count = 0
@@ -3689,6 +3787,7 @@ class VectorCypherEngine:
             f"store_entities={_stage6_total_ms:.0f}ms"
         )
 
+        _resolve_intra_batch_dups()
         return BatchResult(
             total=total,
             processed=results["processed"],
@@ -3697,6 +3796,7 @@ class VectorCypherEngine:
             chunks=results["chunks"],
             entities=results["entities"],
             relationships=results["relationships"],
+            per_document=_finalize_per_document(),
         )
 
     async def _remember_batch_legacy(
@@ -3714,6 +3814,7 @@ class VectorCypherEngine:
         relationship_types: list[str],
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
+        chunk_size: int | None = None,
         source_type: str = "library",
         source_name: str | None = None,
         source_url: str | None = None,
@@ -3741,7 +3842,23 @@ class VectorCypherEngine:
         identities_lock = asyncio.Lock()
         semaphore = asyncio.Semaphore(max_concurrent)
 
-        async def process_document(doc_data: dict[str, Any], checksum: str) -> None:
+        # Per-document breakdown (BatchResult.per_document), one slot per
+        # input document. Intra-batch duplicates resolve to the winning
+        # coroutine's document id after the gather below.
+        per_document: list[dict[str, Any]] = [
+            {
+                "document_id": None,
+                "source": d.get("source") or None,
+                "chunks": 0,
+                "entities": 0,
+                "skipped": False,
+            }
+            for d in documents
+        ]
+        winner_id_by_identity: dict[tuple[str, str | None, str | None], UUID | None] = {}
+        intra_batch_dups: dict[int, tuple[str, str | None, str | None]] = {}
+
+        async def process_document(idx: int, doc_data: dict[str, Any], checksum: str) -> None:
             nonlocal progress_count
             # Identity-scoped dedup (#1171): two same-content docs with different
             # external_id/session_id must both proceed; only a true identity
@@ -3753,6 +3870,8 @@ class VectorCypherEngine:
                 if identity_key in identities_in_flight:
                     async with results_lock:
                         results["skipped"] += 1
+                        per_document[idx]["skipped"] = True
+                        intra_batch_dups[idx] = identity_key
                     if on_progress:
                         async with progress_lock:
                             progress_count += 1
@@ -3774,6 +3893,8 @@ class VectorCypherEngine:
             ):
                 async with results_lock:
                     results["skipped"] += 1
+                    per_document[idx]["skipped"] = True
+                    per_document[idx]["document_id"] = existing_docs[checksum].id
                 if on_progress:
                     async with progress_lock:
                         progress_count += 1
@@ -3803,16 +3924,22 @@ class VectorCypherEngine:
                         relationship_types=relationship_types,
                         extraction_config_hash=extraction_config_hash,
                         chunk_strategy=chunk_strategy,
+                        chunk_size=chunk_size,
                         external_id=doc_data.get("external_id"),
                     )
                     async with results_lock:
+                        per_document[idx]["document_id"] = result.document_id
+                        winner_id_by_identity[identity_key] = result.document_id
                         if result.metadata.get("duplicate"):
                             results["skipped"] += 1
+                            per_document[idx]["skipped"] = True
                         else:
                             results["processed"] += 1
                             results["chunks"] += result.chunks_created
                             results["entities"] += result.entities_extracted
                             results["relationships"] += result.relationships_created
+                            per_document[idx]["chunks"] = result.chunks_created
+                            per_document[idx]["entities"] = result.entities_extracted
                 except Exception as e:
                     logger.error(f"Failed to process document: {e}")
                     async with results_lock:
@@ -3822,8 +3949,14 @@ class VectorCypherEngine:
                     progress_count += 1
                     on_progress(progress_count, total)
 
-        await asyncio.gather(*[process_document(doc, checksum) for doc, checksum in zip(documents, doc_checksums)])
-        return BatchResult(total=total, **results)
+        await asyncio.gather(
+            *[process_document(idx, doc, checksum) for idx, (doc, checksum) in enumerate(zip(documents, doc_checksums))]
+        )
+        # Intra-batch duplicates inherit the winning coroutine's document id
+        # (None when the winner itself failed).
+        for dup_idx, identity_key in intra_batch_dups.items():
+            per_document[dup_idx]["document_id"] = winner_id_by_identity.get(identity_key)
+        return BatchResult(total=total, **results, per_document=per_document)
 
     # Compiled regex for lightweight temporal keyword detection
     _TEMPORAL_KW_RE = re.compile(

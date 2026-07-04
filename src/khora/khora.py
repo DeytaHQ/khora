@@ -332,6 +332,17 @@ class BatchResult:
     relationships: int
     metadata: dict[str, Any] = field(default_factory=dict)
     llm_usage: list[LLMUsage] = field(default_factory=list)
+    # Per-document breakdown, one entry per submitted document (input order):
+    # ``{"document_id": UUID | None, "source": str | None, "chunks": int,
+    # "entities": int, "skipped": bool}``. Checksum-skipped duplicates are
+    # included with the *existing* document's id (resolved via
+    # ``get_documents_by_checksums``) so callers can map every input back to
+    # a stored document — e.g. to record ingest cost per document or to
+    # supersede a document later. ``document_id`` is ``None`` only when the
+    # document failed before a row was created (or an intra-batch duplicate's
+    # winner failed). Populated by the VectorCypher engine; other engines may
+    # leave this empty.
+    per_document: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True, frozen=True)
@@ -1511,9 +1522,10 @@ class Khora:
         skill_name: str = "general_entities",
         entity_types: list[str],
         relationship_types: list[str],
-        expertise: ExpertiseConfig | None = None,
+        expertise: ExpertiseConfig | str | None = None,
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
+        chunk_size: int | None = None,
         external_id: str | None = None,
         session_id: UUID | None = None,
     ) -> RememberResult:
@@ -1542,11 +1554,16 @@ class Khora:
             skill_name: Extraction skill to use
             entity_types: Required entity types to extract
             relationship_types: Required relationship types to extract
-            expertise: Optional expertise config for domain-specific extraction
+            expertise: Optional expertise for domain-specific extraction —
+                an ``ExpertiseConfig``, a registered expertise name, or a
+                YAML file path (strings are resolved via ``load_expertise``).
             extraction_config_hash: Optional hash of the extraction config for change detection
             chunk_strategy: Override chunking strategy for this call only.
                 Valid values: "fixed", "semantic", "recursive", "conversation".
                 When None (default), uses the configured pipeline default.
+            chunk_size: Override target chunk size (in tokens) for this call
+                only. When None (default), uses the configured pipeline
+                default (512).
             external_id: Optional caller-supplied external identifier for the document.
                 Must be None or a non-blank string (max 512 chars).
                 Raises ValueError if constraints are violated.
@@ -1592,9 +1609,10 @@ class Khora:
             if session_id is not None:
                 metadata = {**(metadata or {}), "session_id": str(session_id)}
             with trace_span("khora.remember", namespace_id=str(namespace_id), content_length=len(content)):
-                # NOTE: expertise and extraction_config_hash are always forwarded,
-                # even when None. Custom engines registered via register_engine()
-                # must accept these kwargs to remain compatible.
+                # NOTE: expertise, extraction_config_hash and chunk_size are
+                # always forwarded, even when None. Custom engines registered
+                # via register_engine() must accept these kwargs to remain
+                # compatible.
                 result = await self._get_engine().remember(
                     content,
                     namespace_id,
@@ -1611,6 +1629,7 @@ class Khora:
                     expertise=expertise,
                     extraction_config_hash=extraction_config_hash,
                     chunk_strategy=chunk_strategy,
+                    chunk_size=chunk_size,
                     external_id=external_id,
                 )
                 return replace(result, llm_usage=collect_usage())
@@ -1642,9 +1661,10 @@ class Khora:
         on_progress: Callable[[int, int], None] | None = None,
         entity_types: list[str],
         relationship_types: list[str],
-        expertise: ExpertiseConfig | None = None,
+        expertise: ExpertiseConfig | str | None = None,
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
+        chunk_size: int | None = None,
         extraction_batch_size: int | None = None,
         extraction_max_tokens: int | None = None,
     ) -> BatchResult:
@@ -1695,14 +1715,22 @@ class Khora:
                 smaller so windows close more often.
             entity_types: Required entity types to extract
             relationship_types: Required relationship types to extract
-            expertise: Optional expertise config for domain-specific extraction
+            expertise: Optional expertise for domain-specific extraction —
+                an ``ExpertiseConfig``, a registered expertise name, or a
+                YAML file path (strings are resolved via ``load_expertise``).
             extraction_config_hash: Optional hash of the extraction config for change detection
             chunk_strategy: Override chunking strategy for this call only.
                 Valid values: "fixed", "semantic", "recursive", "conversation".
                 When None (default), uses the configured pipeline default.
+            chunk_size: Override target chunk size (in tokens) for this call
+                only. When None (default), uses the configured pipeline
+                default (512).
 
         Returns:
-            BatchResult with aggregated statistics
+            BatchResult with aggregated statistics. ``per_document`` carries a
+            per-input breakdown (document_id, source, chunks, entities,
+            skipped) including checksum-skipped duplicates, whose entry holds
+            the already-stored document's id.
         """
         import time as _time
 
@@ -1752,6 +1780,7 @@ class Khora:
                     expertise=expertise,
                     extraction_config_hash=extraction_config_hash,
                     chunk_strategy=chunk_strategy,
+                    chunk_size=chunk_size,
                     source_type=source_type,
                     source_name=source_name,
                     source_url=source_url,
