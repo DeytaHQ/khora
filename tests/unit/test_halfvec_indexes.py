@@ -206,8 +206,8 @@ class TestCheckHalfvecIndexes:
 
 
 @pytest.mark.unit
-class TestCosineSimilarityHalfvec:
-    """Tests for _cosine_similarity() halfvec cast behavior."""
+class TestCosineDistanceHalfvec:
+    """Tests for _cosine_distance() halfvec cast behavior."""
 
     def test_uses_halfvec_cast_when_enabled(self) -> None:
         """When halfvec is enabled, the SQL expression should contain HALFVEC cast."""
@@ -217,9 +217,9 @@ class TestCosineSimilarityHalfvec:
         mock_col = MagicMock()
         query_embedding = [0.1] * 1536
 
-        expr = backend._cosine_similarity(mock_col, query_embedding)
+        expr = backend._cosine_distance(mock_col, query_embedding)
 
-        # The expression should involve func.cast calls — the column should NOT
+        # The expression should involve func.cast calls - the column should NOT
         # have cosine_distance called directly on it (it's called on the casted version)
         compiled = str(expr)
         assert "CAST" in compiled.upper() or "halfvec" in compiled.lower() or "cast" in compiled.lower()
@@ -235,7 +235,7 @@ class TestCosineSimilarityHalfvec:
         mock_col.cosine_distance.return_value = MagicMock()
         query_embedding = [0.1] * 1536
 
-        backend._cosine_similarity(mock_col, query_embedding)
+        backend._cosine_distance(mock_col, query_embedding)
 
         # The column's cosine_distance should be called directly with the query embedding
         mock_col.cosine_distance.assert_called_once_with(query_embedding)

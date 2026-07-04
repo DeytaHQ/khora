@@ -716,14 +716,6 @@ class PgVectorBackend(AsyncSessionMixin):
             return casted_col.cosine_distance(casted_query)
         return embedding_col.cosine_distance(query_embedding)
 
-    def _cosine_similarity(self, embedding_col, query_embedding: list[float]):
-        """Build cosine similarity expression (``1 - distance``).
-
-        Projection-only form - never use it in ORDER BY (see
-        :meth:`_cosine_distance`).
-        """
-        return 1 - self._cosine_distance(embedding_col, query_embedding)
-
     async def _probe_iterative_scan_supported(self) -> bool:
         """One-time probe: does this Postgres + pgvector support hnsw.iterative_scan?
 
