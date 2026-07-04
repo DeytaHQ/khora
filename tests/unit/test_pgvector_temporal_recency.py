@@ -216,11 +216,13 @@ async def test_probe_iterative_scan_supported_caches_result() -> None:
     execute_mock = _patch_engine_connect(backend)
 
     first = await backend._probe_iterative_scan_supported()
+    calls_after_first = execute_mock.await_count
     second = await backend._probe_iterative_scan_supported()
 
     assert first is True
     assert second is True
-    assert execute_mock.await_count == 1
+    # The second call must not touch the engine (probe result is cached).
+    assert execute_mock.await_count == calls_after_first
 
 
 @pytest.mark.asyncio

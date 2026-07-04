@@ -274,6 +274,31 @@ class PgVectorTemporalStore(TemporalVectorStore):
         self._connected = False
         logger.info("PgVectorTemporalStore disconnected")
 
+    async def _probe_iterative_scan_supported(self) -> bool:
+        """One-time probe: does this Postgres + pgvector support hnsw.iterative_scan?
+
+        Mirrors ``PgVectorBackend._probe_iterative_scan_supported`` - pgvector
+        >= 0.8 introduced ``hnsw.iterative_scan`` to fix the HNSW recall
+        collapse when a selective WHERE filter removes most of the candidates
+        returned by the index scan. Cached per store instance.
+        """
+        if hasattr(self, "_iterative_scan_supported"):
+            return self._iterative_scan_supported  # type: ignore[attr-defined]
+        if self._engine is None:
+            return False
+        try:
+            async with self._engine.connect() as conn:
+                # Force the extension library load - pgvector registers its
+                # GUCs lazily, so SHOW fails on a fresh pooled connection.
+                await conn.execute(text("SELECT '[1]'::vector IS NOT NULL"))
+                result = await conn.execute(text("SHOW hnsw.iterative_scan"))
+                _ = result.scalar()
+                self._iterative_scan_supported = True
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"hnsw.iterative_scan probe failed (pgvector < 0.8?): {e}")
+            self._iterative_scan_supported = False
+        return self._iterative_scan_supported
+
     def _get_session(self) -> AsyncSession:
         """Get a new async session."""
         if not self._engine:
@@ -580,8 +605,19 @@ class PgVectorTemporalStore(TemporalVectorStore):
         # hnsw.ef_search is set at connection level via server_settings
         # (no per-query SET LOCAL needed)
 
-        # Calculate cosine similarity: 1 - cosine_distance
-        similarity = (1 - khora_chunks_table.c.embedding.cosine_distance(query_embedding)).label("similarity")
+        # The namespace (plus optional temporal/filter) conditions are
+        # post-applied to HNSW candidates - relaxed_order iterative scan
+        # (pgvector >= 0.8) resumes the index scan so a selective filter
+        # can't starve the result set. SET LOCAL scopes the setting to this
+        # transaction (no leak across pooled connections).
+        if await self._probe_iterative_scan_supported():
+            await session.execute(text("SET LOCAL hnsw.iterative_scan = relaxed_order"))
+
+        # ORDER BY the raw distance operator ascending - the only form the
+        # HNSW index can serve (#1407). Similarity (1 - distance) is computed
+        # in the projection only.
+        distance = khora_chunks_table.c.embedding.cosine_distance(query_embedding)
+        similarity = (1 - distance).label("similarity")
 
         # Exclude embedding column — retrieval doesn't need the 1536-float vector
         # (saves ~6KB per row, ~300KB for 50 results)
@@ -594,12 +630,14 @@ class PgVectorTemporalStore(TemporalVectorStore):
                     khora_chunks_table.c.embedding.isnot(None),
                 )
             )
-            .order_by(similarity.desc())
+            .order_by(distance.asc())
             .limit(limit)
         )
 
         result = await session.execute(stmt)
-        rows = result.fetchall()
+        # relaxed_order may yield slightly out-of-order tuples - restore
+        # strict similarity-DESC ordering (RRF fusion ranks by list order).
+        rows = sorted(result.fetchall(), key=lambda r: r.similarity, reverse=True)
 
         results = []
         for row in rows:

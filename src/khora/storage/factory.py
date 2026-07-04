@@ -103,6 +103,8 @@ class StorageConfig:
     ) = field(default=None, repr=False)
     pgvector_embedding_dimension: int = 1536
     pgvector_use_halfvec: bool = True
+    # Query-time HNSW accuracy knob (StorageSettings.hnsw_ef_search).
+    pgvector_hnsw_ef_search: int = 100
 
     # Neo4j configuration — legacy
     neo4j_url: (
@@ -320,6 +322,7 @@ class StorageFactory:
                     pool_size=self.config.postgresql_pool_size,
                     max_overflow=self.config.postgresql_max_overflow,
                     pool_pre_ping=self.config.postgresql_pool_pre_ping,
+                    hnsw_ef_search=self.config.pgvector_hnsw_ef_search,
                     use_halfvec=self.config.pgvector_use_halfvec,
                     engine=engine,
                 )
@@ -345,6 +348,7 @@ class StorageFactory:
             pool_size=self.config.postgresql_pool_size,
             max_overflow=self.config.postgresql_max_overflow,
             pool_pre_ping=self.config.postgresql_pool_pre_ping,
+            hnsw_ef_search=self.config.pgvector_hnsw_ef_search,
             use_halfvec=self.config.pgvector_use_halfvec,
             engine=engine,
         )
