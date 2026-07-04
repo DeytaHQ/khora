@@ -169,81 +169,69 @@ async def test_search_recent_chunks_empty_namespace_returns_empty_list() -> None
 # ---------------------------------------------------------------------------
 
 
-def _patch_engine_connect(backend: PgVectorBackend, *, raise_exc: Exception | None = None) -> AsyncMock:
-    """Patch ``backend._engine.connect()`` to a context-manager that either
-    returns a working conn (whose ``execute`` succeeds) or raises
-    *raise_exc* from ``conn.execute``."""
-    conn = AsyncMock()
+def _make_probe_session(*, version: str | None = "0.8.1", raise_exc: Exception | None = None) -> AsyncMock:
+    """Build a mocked AsyncSession whose ``execute`` either returns a result
+    with ``scalar() == version`` or raises *raise_exc*."""
+    session = AsyncMock()
     if raise_exc is None:
         result = MagicMock()
-        result.scalar = MagicMock(return_value="off")
-        conn.execute = AsyncMock(return_value=result)
+        result.scalar = MagicMock(return_value=version)
+        session.execute = AsyncMock(return_value=result)
     else:
-        conn.execute = AsyncMock(side_effect=raise_exc)
-
-    cm = AsyncMock()
-    cm.__aenter__.return_value = conn
-    cm.__aexit__.return_value = False
-
-    engine = MagicMock()
-    engine.connect = MagicMock(return_value=cm)
-    backend._engine = engine  # type: ignore[attr-defined]
-    return conn.execute
+        session.execute = AsyncMock(side_effect=raise_exc)
+    return session
 
 
 @pytest.mark.asyncio
-async def test_probe_iterative_scan_supported_true_when_show_succeeds() -> None:
+async def test_probe_iterative_scan_supported_true_on_pgvector_08() -> None:
     backend = _make_backend()
-    _patch_engine_connect(backend)
 
-    assert await backend._probe_iterative_scan_supported() is True
+    assert await backend._probe_iterative_scan_supported(_make_probe_session(version="0.8.1")) is True
 
 
 @pytest.mark.asyncio
-async def test_probe_iterative_scan_supported_false_when_show_raises() -> None:
-    """pgvector < 0.8 has no ``hnsw.iterative_scan`` GUC — SHOW raises."""
+async def test_probe_iterative_scan_supported_false_below_08() -> None:
+    """pgvector < 0.8 has no ``hnsw.iterative_scan`` GUC."""
     backend = _make_backend()
-    _patch_engine_connect(backend, raise_exc=RuntimeError('unrecognized configuration parameter "hnsw.iterative_scan"'))
 
-    assert await backend._probe_iterative_scan_supported() is False
+    assert await backend._probe_iterative_scan_supported(_make_probe_session(version="0.7.4")) is False
+
+
+@pytest.mark.asyncio
+async def test_probe_iterative_scan_supported_false_when_extension_missing() -> None:
+    """No ``vector`` extension row - the catalog SELECT returns NULL."""
+    backend = _make_backend()
+
+    assert await backend._probe_iterative_scan_supported(_make_probe_session(version=None)) is False
 
 
 @pytest.mark.asyncio
 async def test_probe_iterative_scan_supported_caches_result() -> None:
-    """Probe runs exactly once per backend instance — second call must not
-    touch the engine."""
+    """Probe runs exactly once per backend instance - second call must not
+    hit the session."""
     backend = _make_backend()
-    execute_mock = _patch_engine_connect(backend)
+    session = _make_probe_session(version="0.8.1")
 
-    first = await backend._probe_iterative_scan_supported()
-    calls_after_first = execute_mock.await_count
-    second = await backend._probe_iterative_scan_supported()
+    first = await backend._probe_iterative_scan_supported(session)
+    calls_after_first = session.execute.await_count
+    second = await backend._probe_iterative_scan_supported(session)
 
     assert first is True
     assert second is True
-    # The second call must not touch the engine (probe result is cached).
-    assert execute_mock.await_count == calls_after_first
+    # The second call must not re-query (probe result is cached).
+    assert session.execute.await_count == calls_after_first
 
 
 @pytest.mark.asyncio
 async def test_probe_iterative_scan_supported_caches_false_too() -> None:
     """Even when the probe decides ``False``, it must cache the result so
-    every search_similar call doesn't keep paying the SHOW round-trip."""
+    every search_similar call doesn't keep paying the round-trip."""
     backend = _make_backend()
-    execute_mock = _patch_engine_connect(backend, raise_exc=RuntimeError("bad GUC"))
+    session = _make_probe_session(raise_exc=RuntimeError("connection lost"))
 
-    first = await backend._probe_iterative_scan_supported()
-    second = await backend._probe_iterative_scan_supported()
+    first = await backend._probe_iterative_scan_supported(session)
+    second = await backend._probe_iterative_scan_supported(session)
 
     assert first is False
     assert second is False
-    assert execute_mock.await_count == 1
-
-
-@pytest.mark.asyncio
-async def test_probe_iterative_scan_returns_false_when_engine_none() -> None:
-    """If ``connect()`` was never called, the probe must not crash."""
-    backend = _make_backend()
-    backend._engine = None  # type: ignore[attr-defined]
-
-    assert await backend._probe_iterative_scan_supported() is False
+    assert session.execute.await_count == 1

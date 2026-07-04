@@ -274,26 +274,25 @@ class PgVectorTemporalStore(TemporalVectorStore):
         self._connected = False
         logger.info("PgVectorTemporalStore disconnected")
 
-    async def _probe_iterative_scan_supported(self) -> bool:
+    async def _probe_iterative_scan_supported(self, session: AsyncSession) -> bool:
         """One-time probe: does this Postgres + pgvector support hnsw.iterative_scan?
 
         Mirrors ``PgVectorBackend._probe_iterative_scan_supported`` - pgvector
         >= 0.8 introduced ``hnsw.iterative_scan`` to fix the HNSW recall
         collapse when a selective WHERE filter removes most of the candidates
         returned by the index scan. Cached per store instance.
+
+        Runs a catalog SELECT on the *caller's* session: it cannot abort the
+        surrounding transaction and needs no extra pooled connection.
         """
         if hasattr(self, "_iterative_scan_supported"):
             return self._iterative_scan_supported  # type: ignore[attr-defined]
-        if self._engine is None:
-            return False
         try:
-            async with self._engine.connect() as conn:
-                # Force the extension library load - pgvector registers its
-                # GUCs lazily, so SHOW fails on a fresh pooled connection.
-                await conn.execute(text("SELECT '[1]'::vector IS NOT NULL"))
-                result = await conn.execute(text("SHOW hnsw.iterative_scan"))
-                _ = result.scalar()
-                self._iterative_scan_supported = True
+            result = await session.execute(text("SELECT extversion FROM pg_extension WHERE extname = 'vector'"))
+            version_str = result.scalar()
+            parts = str(version_str).split(".")
+            major, minor = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+            self._iterative_scan_supported = (major, minor) >= (0, 8)
         except Exception as e:  # noqa: BLE001
             logger.debug(f"hnsw.iterative_scan probe failed (pgvector < 0.8?): {e}")
             self._iterative_scan_supported = False
@@ -610,7 +609,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
         # (pgvector >= 0.8) resumes the index scan so a selective filter
         # can't starve the result set. SET LOCAL scopes the setting to this
         # transaction (no leak across pooled connections).
-        if await self._probe_iterative_scan_supported():
+        if await self._probe_iterative_scan_supported(session):
             await session.execute(text("SET LOCAL hnsw.iterative_scan = relaxed_order"))
 
         # ORDER BY the raw distance operator ascending - the only form the

@@ -716,28 +716,27 @@ class PgVectorBackend(AsyncSessionMixin):
             return casted_col.cosine_distance(casted_query)
         return embedding_col.cosine_distance(query_embedding)
 
-    async def _probe_iterative_scan_supported(self) -> bool:
+    async def _probe_iterative_scan_supported(self, session: AsyncSession) -> bool:
         """One-time probe: does this Postgres + pgvector support hnsw.iterative_scan?
 
         pgvector >= 0.8 introduced ``hnsw.iterative_scan`` to fix the HNSW
         recall collapse that happens when a selective WHERE filter removes
         most of the candidates returned by the index scan. The probe runs
         once per backend instance and is cached.
+
+        Runs a catalog SELECT on the *caller's* session: it cannot abort the
+        surrounding transaction (unlike ``SHOW hnsw.iterative_scan``, which
+        errors until the extension library lazily loads) and needs no extra
+        pooled connection while the caller already holds one.
         """
         if hasattr(self, "_iterative_scan_supported"):
             return self._iterative_scan_supported  # type: ignore[attr-defined]
-        if self._engine is None:
-            return False
         try:
-            async with self._engine.connect() as conn:
-                # pgvector registers its GUCs when the extension library
-                # loads, which happens lazily on first use of a vector type
-                # in the backend process - force the load so SHOW sees the
-                # GUC on a fresh pooled connection.
-                await conn.execute(text("SELECT '[1]'::vector IS NOT NULL"))
-                result = await conn.execute(text("SHOW hnsw.iterative_scan"))
-                _ = result.scalar()
-                self._iterative_scan_supported = True
+            result = await session.execute(text("SELECT extversion FROM pg_extension WHERE extname = 'vector'"))
+            version_str = result.scalar()
+            parts = str(version_str).split(".")
+            major, minor = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+            self._iterative_scan_supported = (major, minor) >= (0, 8)
         except Exception as e:  # noqa: BLE001
             logger.debug(f"hnsw.iterative_scan probe failed (pgvector < 0.8?): {e}")
             self._iterative_scan_supported = False
@@ -778,7 +777,7 @@ class PgVectorBackend(AsyncSessionMixin):
             # below to preserve the strict similarity-DESC contract relied on
             # by RRF fusion. SET LOCAL scopes both settings to this
             # transaction, so nothing leaks across pooled connections.
-            if await self._probe_iterative_scan_supported():
+            if await self._probe_iterative_scan_supported(session):
                 await session.execute(text("SET LOCAL hnsw.iterative_scan = relaxed_order"))
 
             # ORDER BY the raw distance operator ascending - the only form the
@@ -1401,7 +1400,7 @@ class PgVectorBackend(AsyncSessionMixin):
             # Namespace filter is post-applied to HNSW candidates - use
             # relaxed_order iterative scan so a selective namespace can't
             # starve the result set (see search_similar).
-            if await self._probe_iterative_scan_supported():
+            if await self._probe_iterative_scan_supported(session):
                 await session.execute(text("SET LOCAL hnsw.iterative_scan = relaxed_order"))
 
             # ORDER BY raw distance ASC - the only HNSW-servable form (#1407).
