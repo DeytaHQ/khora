@@ -46,7 +46,11 @@ class TestStorageConfigFromDict:
                     "pool_size": 7,
                     "max_overflow": 14,
                 },
-                "vector": {"url": "postgresql://localhost/vec", "embedding_dimension": 768},
+                "vector": {
+                    "url": "postgresql://localhost/vec",
+                    "embedding_dimension": 768,
+                    "hnsw_ef_search": 200,
+                },
                 "graph": {
                     "url": "bolt://localhost:7687",
                     "user": "u",
@@ -63,6 +67,7 @@ class TestStorageConfigFromDict:
         assert sc.postgresql_max_overflow == 14
         assert sc.pgvector_url == "postgresql://localhost/vec"
         assert sc.pgvector_embedding_dimension == 768
+        assert sc.pgvector_hnsw_ef_search == 200
         assert sc.neo4j_url == "bolt://localhost:7687"
         assert sc.neo4j_user == "u"
         assert sc.neo4j_password == "p"

@@ -694,12 +694,18 @@ class PgVectorBackend(AsyncSessionMixin):
             await session.commit()
             return result.rowcount  # type: ignore[unresolved-attribute]
 
-    def _cosine_similarity(self, embedding_col, query_embedding: list[float]):
-        """Build cosine similarity expression, using halfvec cast when enabled.
+    def _cosine_distance(self, embedding_col, query_embedding: list[float]):
+        """Build the raw cosine-distance expression, using halfvec cast when enabled.
+
+        This is the index-servable form: ``ORDER BY <this expression> ASC`` is
+        the ONLY ordering pgvector's HNSW index can satisfy. Ordering by the
+        wrapped similarity (``1 - distance DESC``) forces a full seq scan +
+        top-N sort (#1407).
 
         When halfvec is enabled, both the column and query vector are cast to
-        halfvec to ensure the planner uses the halfvec expression index and
-        avoids upcasting back to float32.
+        halfvec so the expression matches the migration-018 expression index
+        (``(embedding::halfvec(N)) halfvec_cosine_ops``) and avoids upcasting
+        back to float32.
         """
         if self.halfvec_enabled:
             from pgvector.sqlalchemy import HALFVEC
@@ -707,26 +713,30 @@ class PgVectorBackend(AsyncSessionMixin):
             dim = self._embedding_dimension
             casted_col = func.cast(embedding_col, HALFVEC(dim))
             casted_query = func.cast(query_embedding, HALFVEC(dim))
-            return 1 - casted_col.cosine_distance(casted_query)
-        return 1 - embedding_col.cosine_distance(query_embedding)
+            return casted_col.cosine_distance(casted_query)
+        return embedding_col.cosine_distance(query_embedding)
 
-    async def _probe_iterative_scan_supported(self) -> bool:
+    async def _probe_iterative_scan_supported(self, session: AsyncSession) -> bool:
         """One-time probe: does this Postgres + pgvector support hnsw.iterative_scan?
 
         pgvector >= 0.8 introduced ``hnsw.iterative_scan`` to fix the HNSW
         recall collapse that happens when a selective WHERE filter removes
         most of the candidates returned by the index scan. The probe runs
         once per backend instance and is cached.
+
+        Runs a catalog SELECT on the *caller's* session: it cannot abort the
+        surrounding transaction (unlike ``SHOW hnsw.iterative_scan``, which
+        errors until the extension library lazily loads) and needs no extra
+        pooled connection while the caller already holds one.
         """
         if hasattr(self, "_iterative_scan_supported"):
             return self._iterative_scan_supported  # type: ignore[attr-defined]
-        if self._engine is None:
-            return False
         try:
-            async with self._engine.connect() as conn:
-                result = await conn.execute(text("SHOW hnsw.iterative_scan"))
-                _ = result.scalar()
-                self._iterative_scan_supported = True
+            result = await session.execute(text("SELECT extversion FROM pg_extension WHERE extname = 'vector'"))
+            version_str = result.scalar()
+            parts = str(version_str).split(".")
+            major, minor = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+            self._iterative_scan_supported = (major, minor) >= (0, 8)
         except Exception as e:  # noqa: BLE001
             logger.debug(f"hnsw.iterative_scan probe failed (pgvector < 0.8?): {e}")
             self._iterative_scan_supported = False
@@ -758,33 +768,36 @@ class PgVectorBackend(AsyncSessionMixin):
             # Increase HNSW search accuracy for this transaction
             await session.execute(text(f"SET LOCAL hnsw.ef_search = {self._hnsw_ef_search}"))
 
-            # When a temporal WHERE filter is present, the post-index filter can
-            # collapse HNSW recall — enable iterative_scan when pgvector >= 0.8
-            # supports it. ``strict_order`` preserves ORDER BY similarity DESC
-            # invariants relied on by RRF fusion.
-            if (
-                created_after is not None or created_before is not None
-            ) and await self._probe_iterative_scan_supported():
-                await session.execute(text("SET LOCAL hnsw.iterative_scan = strict_order"))
-                await session.execute(text("SET LOCAL hnsw.max_scan_tuples = 20000"))
+            # Every query here ANDs a namespace filter (plus optional
+            # document / temporal / metadata filters); pgvector post-filters
+            # HNSW candidates, so a selective filter can starve the result set
+            # below ``limit``. ``relaxed_order`` iterative scan (pgvector >=
+            # 0.8) resumes the index scan until enough matching tuples are
+            # found. Tuples may come back slightly out of order - re-sorted
+            # below to preserve the strict similarity-DESC contract relied on
+            # by RRF fusion. SET LOCAL scopes both settings to this
+            # transaction, so nothing leaks across pooled connections.
+            if await self._probe_iterative_scan_supported(session):
+                await session.execute(text("SET LOCAL hnsw.iterative_scan = relaxed_order"))
 
-            similarity = self._cosine_similarity(ChunkModel.embedding, query_embedding)
+            # ORDER BY the raw distance operator ascending - the only form the
+            # HNSW index can serve (#1407). Similarity (1 - distance) is
+            # computed in the projection only.
+            distance = self._cosine_distance(ChunkModel.embedding, query_embedding)
+            similarity = (1 - distance).label("similarity")
 
             query = (
-                select(ChunkModel, similarity.label("similarity"))
+                select(ChunkModel, similarity)
                 .where(
                     ChunkModel.namespace_id == namespace_id,
                     ChunkModel.embedding.is_not(None),
                 )
-                .order_by(similarity.desc())
+                .order_by(distance.asc())
                 .limit(limit)
             )
 
             if filter_document_ids:
                 query = query.where(ChunkModel.document_id.in_(filter_document_ids))
-
-            if min_similarity > 0:
-                query = query.where(similarity >= min_similarity)
 
             if created_after is not None:
                 temporal_col = func.coalesce(ChunkModel.source_timestamp, ChunkModel.created_at)
@@ -799,7 +812,18 @@ class PgVectorBackend(AsyncSessionMixin):
                     query = query.where(ChunkModel.metadata_.op("->>")(key) == value)
 
             result = await session.execute(query)
-            rows = result.all()
+            # relaxed_order may yield slightly out-of-order tuples - restore
+            # strict similarity-DESC ordering for downstream RRF fusion.
+            rows = sorted(result.all(), key=lambda r: r.similarity, reverse=True)
+
+            # min_similarity is a post-filter on the returned similarity, NOT a
+            # SQL WHERE on the distance expression: a WHERE bound on the
+            # ORDER BY expression flips the planner back to a seq scan
+            # (verified via EXPLAIN at 1.5k rows). Result-identical: any row
+            # failing the floor sorts after every passing row, so the passing
+            # rows are always within the top-``limit`` fetched.
+            if min_similarity > 0:
+                rows = [row for row in rows if row.similarity >= min_similarity]
 
             return [(self._chunk_model_to_domain(row.ChunkModel), row.similarity) for row in rows]
 
@@ -1373,23 +1397,33 @@ class PgVectorBackend(AsyncSessionMixin):
             # Increase HNSW search accuracy for this transaction
             await session.execute(text(f"SET LOCAL hnsw.ef_search = {self._hnsw_ef_search}"))
 
-            similarity = self._cosine_similarity(EntityModel.embedding, query_embedding)
+            # Namespace filter is post-applied to HNSW candidates - use
+            # relaxed_order iterative scan so a selective namespace can't
+            # starve the result set (see search_similar).
+            if await self._probe_iterative_scan_supported(session):
+                await session.execute(text("SET LOCAL hnsw.iterative_scan = relaxed_order"))
+
+            # ORDER BY raw distance ASC - the only HNSW-servable form (#1407).
+            distance = self._cosine_distance(EntityModel.embedding, query_embedding)
+            similarity = (1 - distance).label("similarity")
 
             query = (
-                select(EntityModel.id, similarity.label("similarity"))
+                select(EntityModel.id, similarity)
                 .where(
                     EntityModel.namespace_id == namespace_id,
                     EntityModel.embedding.is_not(None),
                 )
-                .order_by(similarity.desc())
+                .order_by(distance.asc())
                 .limit(limit)
             )
 
-            if min_similarity > 0:
-                query = query.where(similarity >= min_similarity)
-
             result = await session.execute(query)
-            return [(row.id, row.similarity) for row in result.all()]
+            # relaxed_order may yield slightly out-of-order tuples.
+            rows = sorted(result.all(), key=lambda r: r.similarity, reverse=True)
+            # Post-filter, not SQL WHERE - see search_similar.
+            if min_similarity > 0:
+                rows = [row for row in rows if row.similarity >= min_similarity]
+            return [(row.id, row.similarity) for row in rows]
 
     # =========================================================================
     # Keyword-chunk bipartite (keyword_ppr lexical channel, #1391)

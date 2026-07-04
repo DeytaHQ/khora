@@ -161,6 +161,20 @@ LIMIT 10;
 
 The `<=>` operator computes cosine distance. Subtracting from 1 converts to similarity (higher = more similar).
 
+Ordering by the raw `<=>` operator ascending matters: it is the only form pgvector's HNSW index can serve. Ordering by the wrapped similarity (`1 - distance DESC`) forces a full sequential scan (#1407). Similarity is computed in the projection only, and `min_similarity` is applied as a post-filter on the returned distance for the same reason. Because khora always ANDs a namespace filter (which pgvector applies *after* the index scan), queries also set `SET LOCAL hnsw.iterative_scan = relaxed_order` (pgvector >= 0.8) so a selective namespace cannot starve the result set below `limit`; `SET LOCAL` scopes the setting to the transaction, so nothing leaks across pooled connections. Query-time accuracy is tuned via `KHORA_STORAGE_HNSW_EF_SEARCH` (default 100).
+
+### HNSW at Scale (1-10M chunks)
+
+**RAM sizing.** HNSW queries are only fast while the index stays in memory (shared_buffers + OS page cache). Each element stores its vector plus ~`2 * m` link slots per layer. With the default halfvec (float16) expression indexes from migration 018 (`m = 24`, 1536 dims), budget roughly **3.5 KB per row**: ~3.5 GB at 1M chunks, ~35 GB at 10M. Full-precision indexes (migration 007) double the vector portion: ~6.5 KB per row, ~65 GB at 10M. Size `shared_buffers` (or the machine) so the hot index fits; a spilled HNSW index degrades to random I/O per graph hop.
+
+**Bulk-load pattern.** Inserting rows into a table that already has an HNSW index builds the graph row-by-row - by far the slowest path. For an initial 1M+ ingest:
+
+1. Drop (or defer creating) the HNSW indexes.
+2. Bulk-insert the data (`COPY` or large batched inserts).
+3. Build the indexes afterwards with `CREATE INDEX CONCURRENTLY`, after raising `maintenance_work_mem` (ideally >= the index size, e.g. `8GB`) and `max_parallel_maintenance_workers` (e.g. `7`) for the session. The graph is built in memory and written once.
+
+Khora's migrations already use `CREATE INDEX CONCURRENTLY` for all HNSW indexes, so running migrations *after* a bulk restore naturally follows this pattern.
+
 ### Embedding Configuration
 
 Default model: `text-embedding-3-small` (OpenAI, 1536 dimensions)

@@ -70,6 +70,10 @@ def build_storage_config(config: KhoraConfig, *, skip_graph: bool = False) -> St
         "postgresql_pool_pre_ping": getattr(config.storage, "postgresql_pool_pre_ping", False),
         "pgvector_embedding_dimension": config.storage.embedding_dimension,
         "pgvector_use_halfvec": config.storage.use_halfvec,
+        # Query-time HNSW accuracy (KHORA_STORAGE_HNSW_EF_SEARCH). Wired
+        # end-to-end so PgVectorBackend honors it, matching the temporal
+        # store which already reads it off config directly (#1407).
+        "pgvector_hnsw_ef_search": config.storage.hnsw_ef_search,
         "graph_config": graph_config,
         "vector_config": config.get_vector_config(),
         # Sentinels for #877: silence misleading "URL not configured" WARNINGs

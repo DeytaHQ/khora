@@ -103,6 +103,8 @@ class StorageConfig:
     ) = field(default=None, repr=False)
     pgvector_embedding_dimension: int = 1536
     pgvector_use_halfvec: bool = True
+    # Query-time HNSW accuracy knob (StorageSettings.hnsw_ef_search).
+    pgvector_hnsw_ef_search: int = 100
 
     # Neo4j configuration — legacy
     neo4j_url: (
@@ -175,6 +177,7 @@ class StorageConfig:
         vector = storage_config.get("vector", {})
         pgvector_url = vector.get("url") or postgresql_url  # Default to same as PostgreSQL
         embedding_dimension = vector.get("embedding_dimension", 1536)
+        hnsw_ef_search = storage_config.get("hnsw_ef_search", vector.get("hnsw_ef_search", 100))
 
         # Extract graph config
         graph = storage_config.get("graph", {})
@@ -190,6 +193,7 @@ class StorageConfig:
             postgresql_max_overflow=relational.get("max_overflow", 10),
             pgvector_url=pgvector_url,
             pgvector_embedding_dimension=embedding_dimension,
+            pgvector_hnsw_ef_search=hnsw_ef_search,
             neo4j_url=neo4j_url,
             neo4j_user=neo4j_user,
             neo4j_password=neo4j_password,
@@ -320,6 +324,7 @@ class StorageFactory:
                     pool_size=self.config.postgresql_pool_size,
                     max_overflow=self.config.postgresql_max_overflow,
                     pool_pre_ping=self.config.postgresql_pool_pre_ping,
+                    hnsw_ef_search=self.config.pgvector_hnsw_ef_search,
                     use_halfvec=self.config.pgvector_use_halfvec,
                     engine=engine,
                 )
@@ -345,6 +350,7 @@ class StorageFactory:
             pool_size=self.config.postgresql_pool_size,
             max_overflow=self.config.postgresql_max_overflow,
             pool_pre_ping=self.config.postgresql_pool_pre_ping,
+            hnsw_ef_search=self.config.pgvector_hnsw_ef_search,
             use_halfvec=self.config.pgvector_use_halfvec,
             engine=engine,
         )

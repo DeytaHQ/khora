@@ -25,6 +25,7 @@ def base_config() -> MagicMock:
     config.storage.postgresql_pool_pre_ping = False
     config.storage.embedding_dimension = 1536
     config.storage.use_halfvec = True
+    config.storage.hnsw_ef_search = 100
     config.storage.surrealdb = MagicMock()
     config.storage.sqlite_lance = MagicMock()
     config.get_postgresql_url.return_value = "postgresql://localhost/db"
@@ -89,6 +90,13 @@ class TestTraditionalBranch:
         sc = build_storage_config(base_config)
         assert sc.graph_config is None
         assert sc.neo4j_url is None
+
+    def test_hnsw_ef_search_is_wired(self, base_config: MagicMock) -> None:
+        """``storage.hnsw_ef_search`` reaches StorageConfig so the factory can
+        pass it to PgVectorBackend (#1407 - previously silently dropped)."""
+        base_config.storage.hnsw_ef_search = 250
+        sc = build_storage_config(base_config)
+        assert sc.pgvector_hnsw_ef_search == 250
 
     def test_default_backend_is_postgres(self, base_config: MagicMock) -> None:
         """When ``storage.backend`` is missing, ``getattr`` default kicks in."""
