@@ -175,7 +175,12 @@ def normalize_scores(results: list[FusedResult]) -> list[FusedResult]:
     return results
 
 
-def attach_relevance_scores(results: list[FusedResult]) -> list[FusedResult]:
+def attach_relevance_scores(
+    results: list[FusedResult],
+    *,
+    raw_cosine_by_id: dict[UUID, float] | None = None,
+    query_embedding: list[float] | None = None,
+) -> list[FusedResult]:
     """Replace each result's score with an absolute relevance measure.
 
     The final ranking is decided by ``rrf_score`` (after fusion + all boosts +
@@ -186,22 +191,62 @@ def attach_relevance_scores(results: list[FusedResult]) -> list[FusedResult]:
 
     Cosine similarity is absolute and comparable across queries, so an off-topic
     top result reads as low (e.g. ~0.1) instead of 1.0 and callers can threshold
-    on it. Graph-only chunks (no vector hit) fall back to the graph score; if
-    neither is present the existing ``rrf_score`` is kept unchanged.
+    on it.
+
+    Score resolution per result (#1433):
+
+    1. ``raw_cosine_by_id[item_id]`` when the caller provides the map - the true
+       cosine captured pre-fusion. On HYBRID stores the fusion tuple score is the
+       store-internal RRF blend (``combined_score``), NOT a cosine, so the caller
+       must thread the raw ``similarity`` values separately.
+    2. Without a map, ``vector_score`` (legacy callers whose tuple score IS the
+       cosine).
+    3. Chunks with channel provenance but no captured cosine (graph-only /
+       PPR-only): compute the cosine against ``query_embedding`` when the item
+       carries an embedding, else 0.0. NEVER the graph channel's mentions-scale
+       score - that is a rank input, not a bounded relevance value (#1433).
+    4. Chunks with no channel provenance at all (e.g. BM25-only) keep their
+       existing ``rrf_score`` unchanged.
 
     The list is NOT re-sorted - callers rely on the boost/rerank-determined order.
 
     Args:
         results: List of FusedResult, already sorted by final ``rrf_score``
+        raw_cosine_by_id: Optional map of item_id -> raw vector cosine captured
+            pre-fusion (from ``r.similarity``, never ``combined_score``)
+        query_embedding: Optional query embedding used to compute a display
+            cosine for chunks that carry an embedding but had no vector hit
 
     Returns:
         Same list, in the same order, with ``rrf_score`` set to absolute relevance
     """
+    # Results that need an on-the-fly cosine (graph-only chunks whose item
+    # carries an embedding). Batched into one accelerated call below.
+    pending: list[tuple[FusedResult, list[float]]] = []
+
     for r in results:
-        if r.vector_score is not None:
+        if raw_cosine_by_id is not None and r.item_id in raw_cosine_by_id:
+            r.rrf_score = raw_cosine_by_id[r.item_id]
+            continue
+        if raw_cosine_by_id is None and r.vector_score is not None:
             r.rrf_score = r.vector_score
-        elif r.graph_score is not None:
-            r.rrf_score = r.graph_score
+            continue
+        if r.vector_score is not None or r.graph_score is not None:
+            embedding = getattr(r.item, "embedding", None)
+            if query_embedding is not None and embedding:
+                pending.append((r, embedding))
+            else:
+                r.rrf_score = 0.0
+
+    if pending and query_embedding is not None:
+        from khora._accel import batch_cosine_similarity
+
+        sims = dict(batch_cosine_similarity(query_embedding, [emb for _, emb in pending], threshold=-1.0))
+        for idx, (r, _emb) in enumerate(pending):
+            # Negative cosine clamps to 0.0 - the display contract is a bounded
+            # relevance signal, not a signed similarity.
+            r.rrf_score = max(sims.get(idx, 0.0), 0.0)
+
     return results
 
 

@@ -1433,6 +1433,16 @@ class VectorCypherRetriever:
         vector_filter_plan_sink: list[ChannelPlan] = []
         bm25_filter_plan_sink: list[ChannelPlan] = []
 
+        # Per-chunk raw vector cosine (``r.similarity``), captured pre-fusion by
+        # every vector-channel search this recall runs (#1433). Fusion still
+        # RANKS on the tuple score (``combined_score or similarity`` - the
+        # store's hybrid blend); this map only feeds the exit-time DISPLAY score
+        # (``attach_relevance_scores``) and the ``max_raw_vector_score``
+        # abstention metadata, both of which must be absolute cosine-scale.
+        # Shared across the parallel session fan-out safely: same query
+        # embedding, so a chunk's cosine is identical whichever search wrote it.
+        raw_cosine_by_id: dict[UUID, float] = {}
+
         # When the caller filter has a leaf the Cypher chunk channel cannot push
         # down (any metadata predicate — metadata is a serialized JSON property
         # on the Chunk node, not pushable to Cypher), the graph channel applies
@@ -1506,6 +1516,7 @@ class VectorCypherRetriever:
                     # fan-out / CHANGE decomposition vector calls compile the
                     # identical WHERE, so one representative capture is honest.
                     filter_plan_out=vector_filter_plan_sink,
+                    raw_cosine_out=raw_cosine_by_id,
                 )
             )
 
@@ -1672,6 +1683,7 @@ class VectorCypherRetriever:
                                 hybrid_alpha_override=effective_hybrid_alpha,
                                 min_similarity=min_similarity,
                                 filter_ast=filter_ast,
+                                raw_cosine_out=raw_cosine_by_id,
                             )
                         )
                     )
@@ -1701,6 +1713,7 @@ class VectorCypherRetriever:
                             min_similarity=min_similarity,
                             filter_ast=filter_ast,
                             filter_plan_out=vector_filter_plan_sink,
+                            raw_cosine_out=raw_cosine_by_id,
                         )
                     )
                 )
@@ -1926,6 +1939,7 @@ class VectorCypherRetriever:
                 # Reached only when filter_ast is None (gated above); the re-run
                 # drops the temporal filter, so there is no caller filter to
                 # thread here.
+                raw_cosine_out=raw_cosine_by_id,
             )
 
         # Await BM25 results (also launched in parallel at the beginning)
@@ -1956,6 +1970,11 @@ class VectorCypherRetriever:
                     sub_query_length=len(current_state_query),
                 ):
                     sub_embedding = await self._embedder.embed(current_state_query)
+                    # Local cosine sink: the sub-search's similarity is measured
+                    # against the DECOMPOSED sub-query embedding. Merge below via
+                    # setdefault so a chunk the main query already scored keeps
+                    # its main-query cosine (#1433).
+                    sub_raw_cosine: dict[UUID, float] = {}
                     sub_vector_chunks = await self._vector_search_chunks(
                         query_embedding=sub_embedding,
                         namespace_id=namespace_id,
@@ -1964,7 +1983,10 @@ class VectorCypherRetriever:
                         limit=limit,
                         min_similarity=min_similarity,
                         filter_ast=filter_ast,
+                        raw_cosine_out=sub_raw_cosine,
                     )
+                    for _cid, _cos in sub_raw_cosine.items():
+                        raw_cosine_by_id.setdefault(_cid, _cos)
                     # Merge sub-query results, deduplicating by chunk ID
                     existing_ids = {c[0] for c in vector_chunks}
                     new_chunks = [c for c in sub_vector_chunks if c[0] not in existing_ids]
@@ -2059,6 +2081,11 @@ class VectorCypherRetriever:
                 merged_in = [rc for rc in recent_chunks if rc[0] not in existing_ids]
                 if merged_in:
                     vector_chunks = vector_chunks + merged_in
+                    # The recency channel's tuple score IS the raw cosine vs the
+                    # query embedding (computed in _recency_channel_chunks), so
+                    # it doubles as the display cosine (#1433).
+                    for _cid, _cos, _ in merged_in:
+                        raw_cosine_by_id.setdefault(_cid, float(_cos))
                     logger.debug(
                         "Recency channel merged {} new chunks (relevance>= {}, category={})",
                         len(merged_in),
@@ -2286,8 +2313,17 @@ class VectorCypherRetriever:
         # of actual relevance, so off-topic queries still reported score=1.0 and
         # no threshold was meaningful. Ranking is unchanged - order is decided by
         # rrf_score (after fusion + boosts + reranking); this only rewrites the
-        # reported VALUE to the raw cosine captured pre-fusion.
-        fused_results = attach_relevance_scores(fused_results)
+        # reported VALUE to the raw cosine captured pre-fusion (#1433:
+        # ``raw_cosine_by_id`` carries the true ``r.similarity``, because on
+        # HYBRID stores the fusion tuple score is the store-internal RRF blend,
+        # not a cosine). Graph-only chunks report a cosine computed against the
+        # query embedding when they carry one, else 0.0 - never the
+        # mentions-scale graph rank input.
+        fused_results = attach_relevance_scores(
+            fused_results,
+            raw_cosine_by_id=raw_cosine_by_id,
+            query_embedding=query_embedding,
+        )
 
         # Step 8f: MMR diversity selection (#1018). When enabled, choose the
         # top-``limit`` fused results by Maximal Marginal Relevance over the
@@ -2518,7 +2554,16 @@ class VectorCypherRetriever:
                 "effective_recency": effective_recency,
                 # Max raw cosine similarity from vector search (pre-fusion).
                 # Used by abstention system's vector_confidence_override.
-                "max_raw_vector_score": max(s for _, s, _ in vector_chunks) if vector_chunks else 0.0,
+                # #1433: max over the captured ``r.similarity`` values, NOT the
+                # fusion tuple scores - on HYBRID stores those are the store's
+                # internal RRF blend (~1/(60+rank)), which sat an order of
+                # magnitude below any cosine threshold and tripped
+                # ``top_score_low`` on nearly every full-path hybrid recall.
+                # Matches the ``_simple_retrieve`` computation (raw cosine).
+                "max_raw_vector_score": max(
+                    (raw_cosine_by_id.get(cid, 0.0) for cid, _, _ in vector_chunks),
+                    default=0.0,
+                ),
                 # Session-aware search telemetry
                 "session_aware_activated": session_aware_activated,
                 # Bi-temporal entity version history (populated for CHANGE queries)
@@ -3843,6 +3888,7 @@ class VectorCypherRetriever:
         min_similarity: float = 0.0,
         filter_ast: FilterNode | None = None,
         filter_plan_out: list[ChannelPlan] | None = None,
+        raw_cosine_out: dict[UUID, float] | None = None,
     ) -> list[tuple[UUID, float, Chunk]]:
         """Direct vector search on chunks via pgvector.
 
@@ -3865,6 +3911,12 @@ class VectorCypherRetriever:
                 ``ChannelPlan`` it built from the SAME compile this search ran
                 (no re-compile, no backend-name check). A fresh per-call list
                 keeps the report race-free under concurrent recalls.
+            raw_cosine_out: Optional per-call sink receiving each result's raw
+                cosine (``r.similarity``) keyed by chunk id. The RANKING score in
+                the returned tuples stays ``combined_score or similarity`` (the
+                store's hybrid blend); the sink carries the true cosine so the
+                exit-time display score and abstention metadata are cosine-scale,
+                never store-RRF (#1433).
 
         Returns:
             List of (chunk_id, score, chunk) tuples
@@ -3884,6 +3936,9 @@ class VectorCypherRetriever:
             )
 
             span.set_attribute("chunk_count", len(results))
+            if raw_cosine_out is not None:
+                for r in results:
+                    raw_cosine_out[r.chunk.id] = r.similarity
             return [
                 (
                     r.chunk.id,

@@ -1262,3 +1262,173 @@ class TestExplicitTemporalSignalSkipsFallback:
         )
         forwarded_filter = spy.await_args.kwargs["temporal_filter"]
         assert forwarded_filter is tf
+
+
+@pytest.mark.unit
+class TestHybridDisplayScoreContract:
+    """#1433: display scores on the full HYBRID path are cosine-scale.
+
+    On HYBRID mode the temporal store's internal RRF sets ``combined_score`` to
+    ~1/(60+rank) (~0.016) while the true cosine sits in ``similarity``. The
+    fusion tuples keep RANKING on ``combined_score or similarity`` (order is
+    untouched), but the exit-time display score and ``max_raw_vector_score``
+    must carry the cosine - and a graph-only chunk must never surface its
+    mentions-scale rank input.
+    """
+
+    def _make_store_result(self, ns_id: UUID, content: str, *, combined: float, similarity: float) -> MagicMock:
+        mock_result = MagicMock()
+        mock_result.chunk = MagicMock()
+        mock_result.chunk.id = uuid4()
+        mock_result.chunk.namespace_id = ns_id
+        mock_result.chunk.content = content
+        mock_result.chunk.document_id = uuid4()
+        mock_result.chunk.occurred_at = None
+        mock_result.chunk.created_at = None
+        mock_result.chunk.metadata = {}
+        mock_result.combined_score = combined
+        mock_result.similarity = similarity
+        return mock_result
+
+    def _make_retriever(self, ns_id: UUID, store_results: list[MagicMock]) -> VectorCypherRetriever:
+        vector_store = AsyncMock()
+        vector_store.search = AsyncMock(return_value=store_results)
+        embedder = AsyncMock()
+        embedder.embed = AsyncMock(return_value=[0.1] * 1536)
+        embedder.model_name = "test-model"
+        embedder.dimension = 1536
+
+        storage = AsyncMock()
+        storage.search_similar_entities = AsyncMock(return_value=[(uuid4(), 0.9)])
+        storage.get_entities_batch = AsyncMock(return_value={})
+
+        config = RetrieverConfig(enable_session_aware_search=False, enable_hyde="never")
+        retriever = VectorCypherRetriever(
+            vector_store=vector_store,
+            neo4j_driver=AsyncMock(),
+            embedder=embedder,
+            config=config,
+            storage=storage,
+        )
+        retriever._router = MagicMock()
+        retriever._router.route = AsyncMock(
+            return_value=RoutingDecision(
+                complexity=QueryComplexity.MODERATE,
+                use_graph=True,
+                graph_depth=2,
+                confidence=0.8,
+                reasoning="moderate",
+            )
+        )
+        retriever._router.compute_adaptive_depth = MagicMock(return_value=2)
+        retriever._cypher_expand = AsyncMock(return_value=({}, {}))
+        retriever._dual_nodes.get_relationships_between = AsyncMock(return_value=[])
+        return retriever
+
+    @pytest.mark.asyncio
+    async def test_hybrid_display_scores_are_cosine_not_store_rrf(self) -> None:
+        """Vector-chunk display scores are ``similarity``, not ``combined_score``;
+        graph-only chunks report 0.0 (no embedding), never mentions-scale."""
+        ns_id = uuid4()
+        # Store-level RRF fingerprint: combined_score = 1/(60+rank).
+        r1 = self._make_store_result(
+            ns_id, "hybrid vector chunk one - long enough content", combined=0.0164, similarity=0.72
+        )
+        r2 = self._make_store_result(
+            ns_id, "hybrid vector chunk two - long enough content", combined=0.0161, similarity=0.55
+        )
+        retriever = self._make_retriever(ns_id, [r1, r2])
+
+        graph_chunk_id = uuid4()
+        graph_chunk = Chunk(
+            id=graph_chunk_id,
+            namespace_id=ns_id,
+            document_id=uuid4(),
+            content="graph-only chunk mentioned by many entities",
+        )
+        # Mentions-scale rank input: 3 mentions * (1 + 0.1 * 2 entities) = 3.6
+        retriever._fetch_chunks_from_entities = AsyncMock(return_value=[(graph_chunk_id, 3.6, graph_chunk)])
+
+        result = await retriever.retrieve("what changed", ns_id, limit=10)
+
+        scores_by_id = {c.id: s for c, s in result.chunks}
+        assert scores_by_id[r1.chunk.id] == 0.72
+        assert scores_by_id[r2.chunk.id] == 0.55
+        # Graph-only: no embedding -> 0.0, NEVER the 3.6 mentions score.
+        assert scores_by_id[graph_chunk_id] == 0.0
+        # No display score is store-RRF-scale or mentions-scale.
+        assert all(0.0 <= s <= 1.0 for s in scores_by_id.values())
+        # Abstention metadata carries the max raw COSINE (matches the
+        # _simple_retrieve path), not the ~0.016 store-RRF ceiling.
+        assert result.metadata["max_raw_vector_score"] == 0.72
+
+    @pytest.mark.asyncio
+    async def test_hybrid_order_parity_rank_is_fusion_driven(self) -> None:
+        """ORDER-PARITY (#1433): the returned order equals the order of the same
+        inputs run through ``_fuse_results`` directly - the display-score rewrite
+        never feeds back into ranking."""
+        ns_id = uuid4()
+        r1 = self._make_store_result(
+            ns_id, "vector chunk one with enough content here", combined=0.0164, similarity=0.72
+        )
+        r2 = self._make_store_result(
+            ns_id, "vector chunk two with enough content here", combined=0.0161, similarity=0.55
+        )
+        retriever = self._make_retriever(ns_id, [r1, r2])
+
+        graph_chunk_id = uuid4()
+        graph_chunk = Chunk(
+            id=graph_chunk_id,
+            namespace_id=ns_id,
+            document_id=uuid4(),
+            content="graph-only chunk with enough content here",
+        )
+        graph_tuple = (graph_chunk_id, 3.6, graph_chunk)
+        retriever._fetch_chunks_from_entities = AsyncMock(return_value=[graph_tuple])
+
+        result = await retriever.retrieve("what changed", ns_id, limit=10)
+        returned_order = [c.id for c, _ in result.chunks]
+
+        # Reproduce the ranking from the identical channel inputs. The retrieve
+        # call above ran with no temporal signal and default coherence weight,
+        # so replicate fusion + normalization + coherence boost.
+        from khora.engines.vectorcypher.fusion import apply_coherence_boost, normalize_scores
+
+        vector_tuples = [
+            (r.chunk.id, r.combined_score, retriever_chunk)
+            for r, retriever_chunk in (
+                (
+                    r1,
+                    Chunk(
+                        id=r1.chunk.id, namespace_id=ns_id, document_id=r1.chunk.document_id, content=r1.chunk.content
+                    ),
+                ),
+                (
+                    r2,
+                    Chunk(
+                        id=r2.chunk.id, namespace_id=ns_id, document_id=r2.chunk.document_id, content=r2.chunk.content
+                    ),
+                ),
+            )
+        ]
+        routing = RoutingDecision(
+            complexity=QueryComplexity.MODERATE,
+            use_graph=True,
+            graph_depth=2,
+            confidence=0.8,
+            reasoning="moderate",
+        )
+        expected = retriever._fuse_results(
+            vector_chunks=vector_tuples,
+            graph_chunks=[graph_tuple],
+            use_normalization=True,
+            routing=routing,
+            is_temporal=False,
+        )
+        expected = apply_coherence_boost(normalize_scores(expected), coherence_weight=0.1)
+        expected_order = [fr.item_id for fr in expected]
+
+        assert returned_order == expected_order, (
+            f"rank must be fusion-driven and unaffected by the display-score rewrite; "
+            f"got {returned_order}, expected {expected_order}"
+        )

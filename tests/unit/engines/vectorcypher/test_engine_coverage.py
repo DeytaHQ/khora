@@ -1006,6 +1006,46 @@ class TestRecallContextFormatting:
         assert meta["retrieval_top_score_gap"] == 0.0
 
     @pytest.mark.asyncio
+    async def test_recall_top_score_gap_never_negative(self) -> None:
+        """#1433: chunks arrive in RANK order with display scores that are NOT
+        score-sorted (e.g. a 0.0-scored graph-only chunk ranked first). The gap
+        must be computed from the two LARGEST scores - never negative."""
+        from khora.core.models import Chunk
+        from khora.engines.vectorcypher.retriever import VectorCypherResult
+        from khora.engines.vectorcypher.router import QueryComplexity, RoutingDecision
+
+        engine = _make_connected_engine()
+        routing = RoutingDecision(
+            complexity=QueryComplexity.MODERATE,
+            use_graph=True,
+            graph_depth=2,
+            confidence=0.8,
+            reasoning="t",
+        )
+        mk = lambda: Chunk(  # noqa: E731
+            id=uuid4(),
+            namespace_id=uuid4(),
+            document_id=uuid4(),
+            content="Long enough content for the validation pass to keep this chunk",
+        )
+        # Rank order: graph-only chunk (display 0.0) first, then two vector
+        # chunks with genuine cosines. Positional scores[0]-scores[1] would be
+        # -0.9 here (the pre-#1433 bug fed that into compute_confidence).
+        engine._retriever.retrieve = AsyncMock(
+            return_value=VectorCypherResult(
+                chunks=[(mk(), 0.0), (mk(), 0.9), (mk(), 0.6)],
+                entities=[],
+                relationships=[],
+                routing_decision=routing,
+                metadata={},
+            )
+        )
+        result = await engine.recall("q", uuid4())
+        gap = result.engine_info["retrieval_top_score_gap"]
+        assert gap >= 0.0
+        assert gap == pytest.approx(0.3)
+
+    @pytest.mark.asyncio
     async def test_recall_empty_results_metadata(self) -> None:
         """Empty chunk list produces zero score signals."""
         from khora.engines.vectorcypher.retriever import VectorCypherResult

@@ -45,6 +45,16 @@ class RecallChunk:
 
     Score is a typed field, not a tuple position.
 
+    **Ordering vs. score (#1433):** the returned chunk ORDER is the
+    authoritative relevance ranking - it is decided by the engine's fusion +
+    boost + rerank pipeline. ``score`` is an absolute relevance signal (the
+    raw query-to-chunk cosine similarity when available, else 0.0), suitable
+    for thresholding and cross-query comparison. It is NOT the sort key:
+    re-sorting chunks by ``score`` discards reranking and graph evidence and
+    may reorder results. Chunks retrieved without a computable cosine (e.g.
+    graph-only hits whose stored form carries no embedding) report 0.0, which
+    means "no vector-relevance measurement", not "irrelevant".
+
     ``document_id`` is a foreign key into the top-level
     ``RecallResult.documents`` list — the full ``DocumentProjection`` lives
     there to avoid duplicating the same document across many chunks.
