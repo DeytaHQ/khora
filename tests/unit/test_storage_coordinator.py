@@ -714,6 +714,14 @@ def _make_coordinator_with_fake_txn(
     # that exposes ``_session_factory``.  Hand it ours so ``transaction()``
     # yields a TransactionContext wrapping our fake session.
     relational._session_factory = lambda: session  # type: ignore[attr-defined]
+    # #1430 replace-mirror reconciler capabilities: the coordinator probes
+    # these via getattr, and a bare MagicMock attribute is not awaitable.
+    # Default to "no pending markers" so replace tests exercise the
+    # pre-existing behavior unless a test overrides them.
+    if not isinstance(relational.partial_update_document, AsyncMock):
+        relational.partial_update_document = AsyncMock(return_value=1)
+    if not isinstance(relational.list_documents_with_graph_mirror_pending, AsyncMock):
+        relational.list_documents_with_graph_mirror_pending = AsyncMock(return_value=[])
     coord = StorageCoordinator(relational=relational, vector=vector, graph=graph)
     return coord, session
 

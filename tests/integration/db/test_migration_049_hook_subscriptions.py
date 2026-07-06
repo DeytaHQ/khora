@@ -71,7 +71,7 @@ pytestmark = pytest.mark.integration
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "src" / "khora" / "db" / "migrations"
 
-_HEAD = "050_keyword_chunks"
+_HEAD = "051_documents_graph_mirror_pending"
 _PREV = "048_dream_conflicts_reconcile"
 
 

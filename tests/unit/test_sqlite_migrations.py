@@ -84,7 +84,7 @@ class TestSqliteMigrations:
                     # Version table must point at head.
                     result = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
                     version = result.scalar()
-                    assert version == "050_keyword_chunks"
+                    assert version == "051_documents_graph_mirror_pending"
             finally:
                 await engine.dispose()
 
@@ -102,10 +102,15 @@ class TestSqliteMigrations:
             try:
                 async with engine.connect() as conn:
                     # documents: source_timestamp (009), extraction_config_hash (015/016),
-                    # external_id (021)
+                    # external_id (021), graph_mirror_pending (051, #1430)
                     result = await conn.execute(sa.text("PRAGMA table_info(documents)"))
                     doc_cols = {r[1] for r in result}
-                    assert {"source_timestamp", "extraction_config_hash", "external_id"} <= doc_cols
+                    assert {
+                        "source_timestamp",
+                        "extraction_config_hash",
+                        "external_id",
+                        "graph_mirror_pending",
+                    } <= doc_cols
 
                     # memory_namespaces flattened: no workspace_id, no slug, no name,
                     # no description, no previous_version_id — but namespace_id present.

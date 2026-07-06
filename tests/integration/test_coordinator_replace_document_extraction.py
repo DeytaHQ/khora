@@ -311,3 +311,110 @@ class TestReplaceDocumentExtractionIntegration:
         healed = await coord.get_document(new_doc2.id, namespace_id=namespace_id)
         assert healed is not None
         assert healed.status == DocumentStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_graph_failure_persists_pending_marker_then_reconcile_heals(
+        self, coord: StorageCoordinator, namespace_id, monkeypatch
+    ) -> None:
+        """#1430 end-to-end: a post-commit graph failure durably queues the
+        computed plan on documents.graph_mirror_pending; an explicit
+        reconcile replays it, converges the graph to the PG state, and
+        clears the marker.
+        """
+        old_doc = Document(
+            namespace_id=namespace_id,
+            content="seed",
+            external_id=f"replace-reconcile-{uuid4().hex[:8]}",
+            source="test",
+        )
+        await coord.create_document(old_doc)
+        old_chunks = _chunks(namespace_id, old_doc.id, count=1)
+        await coord.create_chunks_batch(old_chunks)
+
+        # Sole-sourced entity so the retire step deterministically has work.
+        doomed = Entity(
+            namespace_id=namespace_id,
+            name=f"doomed-{uuid4().hex[:6]}",
+            entity_type="PERSON",
+            source_document_ids=[old_doc.id],
+        )
+        await coord.upsert_entities_batch(namespace_id, [doomed])
+
+        new_doc = Document(
+            id=old_doc.id,
+            namespace_id=namespace_id,
+            content="new",
+            external_id=old_doc.external_id,
+            source="test",
+        )
+        new_doc.mark_processing()
+        new_chunks = _chunks(namespace_id, new_doc.id, count=2)
+        carol = Entity(
+            namespace_id=namespace_id,
+            name=f"carol-{uuid4().hex[:6]}",
+            entity_type="PERSON",
+            source_document_ids=[new_doc.id],
+        )
+
+        # One-shot injected failure on the first graph verb of the mirror.
+        graph_backend = getattr(coord.graph, "_backend", coord.graph)
+        orig_retire = graph_backend.retire_orphaned_entities_batch  # type: ignore[union-attr]
+        call_count = {"n": 0}
+
+        async def flaky_retire(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise RuntimeError("injected graph failure")
+            return await orig_retire(*args, **kwargs)
+
+        monkeypatch.setattr(graph_backend, "retire_orphaned_entities_batch", flaky_retire)
+
+        from khora.exceptions import GraphMirrorFailedAfterPGCommitError
+
+        with pytest.raises(GraphMirrorFailedAfterPGCommitError) as exc_info:
+            await coord.replace_document_extraction(
+                namespace_id=namespace_id,
+                old_document_id=old_doc.id,
+                new_document=new_doc,
+                new_chunks=new_chunks,
+                new_entities=[carol],
+                new_relationships=[],
+            )
+        assert exc_info.value.pending_persisted is True
+
+        # Flagged-completed: COMPLETED (#887) + non-NULL pending marker.
+        diverged = await coord.get_document(new_doc.id, namespace_id=namespace_id)
+        assert diverged is not None
+        assert diverged.status == DocumentStatus.COMPLETED
+        assert diverged.graph_mirror_pending is not None
+        assert diverged.graph_mirror_pending["exception"] == "RuntimeError"
+        assert diverged.graph_mirror_pending["net_new_entities"][0]["name"] == carol.name
+
+        # Graph is diverged: doomed still live, carol absent.
+        doomed_before = await coord.get_entity(doomed.id, namespace_id=namespace_id)
+        assert doomed_before is not None
+        assert doomed_before.valid_until is None
+        assert await coord.get_entity_by_name(namespace_id, carol.name, "PERSON") is None
+
+        # Reconcile: replays retire + upsert from the persisted plan.
+        degradations = await coord.reconcile_replace_graph_mirror(namespace_id)
+        assert degradations == []
+
+        # Graph converged to the PG state.
+        doomed_after = await coord.get_entity(doomed.id, namespace_id=namespace_id)
+        assert doomed_after is not None
+        assert doomed_after.valid_until is not None  # retired
+        carol_after = await coord.get_entity_by_name(namespace_id, carol.name, "PERSON")
+        assert carol_after is not None
+
+        # Marker cleared; second drain is a no-op.
+        reconciled = await coord.get_document(new_doc.id, namespace_id=namespace_id)
+        assert reconciled is not None
+        assert reconciled.graph_mirror_pending is None
+        assert await coord.reconcile_replace_graph_mirror(namespace_id) == []
+        # The clear must write SQL NULL, not JSON 'null' (JSONB
+        # none_as_null=True) - otherwise the IS NOT NULL drain probe and the
+        # partial index would match the "cleared" row forever.
+        rel_backend = coord._relational
+        still_pending = await rel_backend.list_documents_with_graph_mirror_pending(namespace_id)
+        assert still_pending == []
