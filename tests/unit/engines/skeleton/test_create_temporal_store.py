@@ -1,9 +1,11 @@
 """Coverage: ``khora.storage.temporal.create_temporal_store``.
 
-Pins the dispatch table for the four supported backends (pgvector, weaviate,
-surrealdb, sqlite_lance) plus the validation errors. Each branch is covered
-without requiring the backend's optional dependencies — we mock the lazy
-imports so the tests run in any environment.
+Pins the dispatch table for the supported backends (pgvector, weaviate,
+turbopuffer, surrealdb, sqlite_lance) plus the validation errors. Each branch
+is covered without requiring the backend's optional dependencies — we mock the
+lazy imports so the tests run in any environment. The weaviate / turbopuffer
+branches read their connection details from ``config.storage.weaviate`` /
+``config.storage.turbopuffer``.
 """
 
 from __future__ import annotations
@@ -53,11 +55,16 @@ def stub_pgvector_store(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
 def stub_weaviate_store(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     instance = MagicMock(name="WeaviateTemporalStore-instance")
     cls = MagicMock(return_value=instance)
+    # The factory also imports WeaviateBackendConfig from the same module to
+    # translate config.storage.weaviate into the backend config. Capture the
+    # kwargs it is built with so the test can assert the values flowed through.
+    backend_cfg_cls = MagicMock(name="WeaviateBackendConfig")
     _install_module(
         monkeypatch,
         "khora.storage.temporal.weaviate",
-        {"WeaviateTemporalStore": cls},
+        {"WeaviateTemporalStore": cls, "WeaviateBackendConfig": backend_cfg_cls},
     )
+    cls.backend_config_cls = backend_cfg_cls  # type: ignore[attr-defined]
     return cls
 
 
@@ -65,11 +72,13 @@ def stub_weaviate_store(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
 def stub_turbopuffer_store(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     instance = MagicMock(name="TurbopufferTemporalStore-instance")
     cls = MagicMock(return_value=instance)
+    backend_cfg_cls = MagicMock(name="TurbopufferBackendConfig")
     _install_module(
         monkeypatch,
         "khora.storage.temporal.turbopuffer",
-        {"TurbopufferTemporalStore": cls},
+        {"TurbopufferTemporalStore": cls, "TurbopufferBackendConfig": backend_cfg_cls},
     )
+    cls.backend_config_cls = backend_cfg_cls  # type: ignore[attr-defined]
     return cls
 
 
@@ -111,23 +120,65 @@ class TestPgVectorDispatch:
 
 
 class TestWeaviateDispatch:
-    def test_requires_url(self, mock_config: MagicMock) -> None:
-        with pytest.raises(ValueError, match="weaviate_url is required"):
+    def test_requires_config(self, mock_config: MagicMock) -> None:
+        mock_config.storage.weaviate = None
+        with pytest.raises(ValueError, match="requires storage.weaviate config"):
             create_temporal_store("weaviate", mock_config)
 
-    def test_passes_url_to_constructor(self, mock_config: MagicMock, stub_weaviate_store: MagicMock) -> None:
-        create_temporal_store("weaviate", mock_config, weaviate_url="http://w:8080")
-        stub_weaviate_store.assert_called_once_with(mock_config, "http://w:8080")
+    def test_passes_config_to_constructor(self, mock_config: MagicMock, stub_weaviate_store: MagicMock) -> None:
+        from khora.config.schema import WeaviateConfig
+
+        mock_config.storage.weaviate = WeaviateConfig(
+            url="http://w:8080",
+            grpc_port=50061,
+            additional_headers={"X-OpenAI-Api-Key": "sk-..."},
+        )
+        create_temporal_store("weaviate", mock_config)
+
+        # Backend config built from the unwrapped SecretStr URL + scalar fields.
+        # additional_headers (code-settable only) threads through verbatim.
+        backend_cfg_cls = stub_weaviate_store.backend_config_cls
+        backend_cfg_cls.assert_called_once_with(
+            url="http://w:8080",
+            cluster_url=None,
+            api_key=None,
+            grpc_port=50061,
+            http_secure=False,
+            grpc_secure=False,
+            additional_headers={"X-OpenAI-Api-Key": "sk-..."},
+            skip_init_checks=False,
+        )
+        stub_weaviate_store.assert_called_once_with(mock_config, backend_cfg_cls.return_value)
 
 
 class TestTurbopufferDispatch:
     def test_requires_config(self, mock_config: MagicMock) -> None:
-        with pytest.raises(ValueError, match="turbopuffer_config is required"):
+        mock_config.storage.turbopuffer = None
+        with pytest.raises(ValueError, match="requires storage.turbopuffer config"):
+            create_temporal_store("turbopuffer", mock_config)
+
+    def test_requires_api_key(self, mock_config: MagicMock) -> None:
+        from khora.config.schema import TurbopufferConfig
+
+        mock_config.storage.turbopuffer = TurbopufferConfig()  # api_key defaults None
+        with pytest.raises(ValueError, match="requires storage.turbopuffer config with an api_key"):
             create_temporal_store("turbopuffer", mock_config)
 
     def test_passes_config_to_constructor(self, mock_config: MagicMock, stub_turbopuffer_store: MagicMock) -> None:
-        create_temporal_store("turbopuffer", mock_config, turbopuffer_config="tpuf_key")
-        stub_turbopuffer_store.assert_called_once_with(mock_config, "tpuf_key")
+        from khora.config.schema import TurbopufferConfig
+
+        mock_config.storage.turbopuffer = TurbopufferConfig(api_key="tpuf_key", region="gcp-europe-west3")
+        create_temporal_store("turbopuffer", mock_config)
+
+        backend_cfg_cls = stub_turbopuffer_store.backend_config_cls
+        backend_cfg_cls.assert_called_once_with(
+            api_key="tpuf_key",
+            region="gcp-europe-west3",
+            base_url=None,
+            namespace_prefix="khora_",
+            ann_distance_threshold=None,
+        )
+        stub_turbopuffer_store.assert_called_once_with(mock_config, backend_cfg_cls.return_value)
 
 
 class TestSurrealDBDispatch:

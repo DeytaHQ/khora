@@ -162,34 +162,52 @@ class TestTemporalStoreSqliteLance:
         factory.assert_not_called()
 
 
-class TestTemporalStorePassthrough:
-    """weaviate / turbopuffer pass their connection config straight through."""
+class TestTemporalStoreConfigDriven:
+    """weaviate / turbopuffer read their config off ``config.storage.*``.
+
+    The coordinator no longer accepts ``weaviate_url`` / ``turbopuffer_config``
+    kwargs — it forwards ``backend`` + ``config`` and the factory reads the
+    backend config from ``config.storage.weaviate`` / ``config.storage.turbopuffer``.
+    """
 
     @pytest.mark.asyncio
-    async def test_weaviate_url_passthrough(self, config: KhoraConfig) -> None:
-        """weaviate_url is forwarded unchanged."""
+    async def test_weaviate_no_vendor_kwargs_forwarded(self, config: KhoraConfig) -> None:
+        """The coordinator passes config through; no vendor kwargs are sent."""
+        from khora.config.schema import WeaviateConfig
+
+        config.storage.weaviate = WeaviateConfig(url="http://w:8080")
         coord = _coordinator()
         store = _make_store()
-        sentinel_url = MagicMock(name="weaviate_url")
 
         with patch("khora.storage.temporal.create_temporal_store", return_value=store) as factory:
-            await coord.temporal_store("weaviate", config, weaviate_url=sentinel_url)
+            await coord.temporal_store("weaviate", config)
 
-        _, kwargs = factory.call_args
-        assert kwargs["weaviate_url"] is sentinel_url
+        args, kwargs = factory.call_args
+        assert args[0] == "weaviate"
+        assert args[1] is config
+        assert "weaviate_url" not in kwargs
+        assert "turbopuffer_config" not in kwargs
+        # The factory will read config.storage.weaviate itself.
+        assert config.storage.weaviate.url.get_secret_value() == "http://w:8080"
 
     @pytest.mark.asyncio
-    async def test_turbopuffer_config_passthrough(self, config: KhoraConfig) -> None:
-        """turbopuffer_config is forwarded unchanged."""
+    async def test_turbopuffer_no_vendor_kwargs_forwarded(self, config: KhoraConfig) -> None:
+        """The coordinator passes config through; no vendor kwargs are sent."""
+        from khora.config.schema import TurbopufferConfig
+
+        config.storage.turbopuffer = TurbopufferConfig(api_key="tpuf_key")
         coord = _coordinator()
         store = _make_store()
-        sentinel_cfg = MagicMock(name="turbopuffer_config")
 
         with patch("khora.storage.temporal.create_temporal_store", return_value=store) as factory:
-            await coord.temporal_store("turbopuffer", config, turbopuffer_config=sentinel_cfg)
+            await coord.temporal_store("turbopuffer", config)
 
-        _, kwargs = factory.call_args
-        assert kwargs["turbopuffer_config"] is sentinel_cfg
+        args, kwargs = factory.call_args
+        assert args[0] == "turbopuffer"
+        assert args[1] is config
+        assert "weaviate_url" not in kwargs
+        assert "turbopuffer_config" not in kwargs
+        assert config.storage.turbopuffer.api_key.get_secret_value() == "tpuf_key"
 
 
 class TestTemporalStoreFactorySemantics:
