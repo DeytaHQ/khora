@@ -512,21 +512,24 @@ class HookDispatcher:
         await asyncio.gather(*[_safe_invoke(sub) for sub in matching])
         return len(matching)
 
-    async def _resolve_ns(self, namespace_id: UUID) -> UUID:
+    async def _resolve_ns(self, namespace_id: UUID, *, refresh: bool = False) -> UUID:
         """Normalize a namespace id to the row-id space for scope comparison (#1399).
 
         Uses the (idempotent) ``namespace_resolver`` so a stable id and a
         row-level id both map to the row id. Cached because the mapping is
-        stable for the namespace's active version. Falls back to the input
-        unchanged when no resolver is wired or resolution fails (e.g. a
-        graph-/vector-only stack with no namespace table), preserving the
-        pre-#1399 direct-compare behavior rather than dropping events.
+        stable for the namespace's active version; ``refresh=True`` bypasses
+        the cache (and overwrites it on success) - the #1427 verification
+        path uses it when a stale stable→row mapping is suspected. Falls back
+        to the input unchanged when no resolver is wired or resolution fails
+        (e.g. a graph-/vector-only stack with no namespace table), preserving
+        the pre-#1399 direct-compare behavior rather than dropping events.
         """
         if self._namespace_resolver is None:
             return namespace_id
-        cached = self._ns_resolve_cache.get(namespace_id)
-        if cached is not None:
-            return cached
+        if not refresh:
+            cached = self._ns_resolve_cache.get(namespace_id)
+            if cached is not None:
+                return cached
         try:
             resolved = await self._namespace_resolver(namespace_id)
         except Exception:  # noqa: BLE001 - resolver is best-effort; never drop an event on lookup failure
@@ -541,10 +544,32 @@ class HookDispatcher:
         namespace and the scope namespace to the row-id space before comparing,
         so a subscription scoped by the stable id matches events emitted with
         the resolved row id (and vice versa).
+
+        #1427: ``create_namespace_version()`` activates a new row id for the
+        same stable id, so a cached stable→row mapping goes stale and the
+        comparison false-negatives forever (scoped subscriptions go silent).
+        The cache self-heals here: on a failed comparison, any side whose
+        value came from a *previously cached non-identity* mapping (only a
+        stable id resolves to a different id - row ids are self-mapping and
+        never remap) is re-resolved once, then compared again. A genuinely
+        foreign event costs at most one extra indexed lookup per scoped
+        subscription; identity-mapped (row-id) sides and cache misses that
+        were freshly resolved in this call are never re-resolved.
         """
         if scope_ns is None:
             return True
-        return await self._resolve_ns(event.namespace_id) == await self._resolve_ns(scope_ns)
+        event_ns = event.namespace_id
+        # Snapshot which sides are stale-suspects BEFORE resolving: a value
+        # served from a pre-existing non-identity cache entry may predate a
+        # re-versioning; a value resolved fresh in this call cannot be stale.
+        stale_suspects = [ns for ns in (event_ns, scope_ns) if self._ns_resolve_cache.get(ns) not in (None, ns)]
+        if await self._resolve_ns(event_ns) == await self._resolve_ns(scope_ns):
+            return True
+        if not stale_suspects:
+            return False
+        for ns in stale_suspects:
+            await self._resolve_ns(ns, refresh=True)
+        return await self._resolve_ns(event_ns) == await self._resolve_ns(scope_ns)
 
     async def _passes_filter_cascade(self, event: MemoryEvent, filter: SemanticFilter | None) -> bool:
         """Run the Level 0/1/2 filter cascade for one subscription.

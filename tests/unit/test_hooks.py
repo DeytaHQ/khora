@@ -326,6 +326,58 @@ class TestHookDispatcherTypeFilter:
         assert await d.dispatch(other) == 0
         cb.assert_not_awaited()
 
+    async def test_namespace_scope_survives_reversioning(self) -> None:
+        """#1427: a stable-scoped sub keeps firing after ``create_namespace_version()``.
+
+        Exact issue sequence: subscribe with the stable id, dispatch an event
+        (which warms the stable→row cache), re-version the namespace (same
+        stable id, NEW active row id), dispatch again with the new row id.
+        Before the fix the cached stable→row_v1 mapping never invalidated, so
+        the scope comparison false-negatived forever and the scoped
+        subscription went silent. The dispatcher now re-resolves the suspect
+        cached mapping once on a failed comparison and retries.
+        """
+        stable_ns = uuid4()
+        row_v1 = uuid4()
+        row_v2 = uuid4()
+        active_row = row_v1
+        resolve_calls: list[UUID] = []
+
+        async def resolver(ns: UUID) -> UUID:
+            # Mirrors coordinator.resolve_namespace: stable id -> ACTIVE row id;
+            # idempotent on row ids.
+            resolve_calls.append(ns)
+            return active_row if ns == stable_ns else ns
+
+        d = HookDispatcher(namespace_resolver=resolver)
+        cb = AsyncMock()
+        d.subscribe(EventType.ENTITY_CREATED, cb, namespace_id=stable_ns)
+
+        # Pre-reversion ingest fires (and warms the stable→row_v1 cache entry).
+        event_v1 = MemoryEvent.entity_created(namespace_id=row_v1, entity_id=uuid4(), data={})
+        assert await d.dispatch(event_v1) == 1
+        cb.assert_awaited_once()
+
+        # Re-version: same stable id, new active row id. The dispatcher gets
+        # no signal - its cached stable→row_v1 mapping is now stale.
+        active_row = row_v2
+
+        # Post-reversion ingest emits with the NEW row id. Before #1427 this
+        # fired 0 callbacks; the verification path must self-heal and fire.
+        cb.reset_mock()
+        event_v2 = MemoryEvent.entity_created(namespace_id=row_v2, entity_id=uuid4(), data={})
+        assert await d.dispatch(event_v2) == 1, "scoped subscription must survive namespace re-versioning (#1427)"
+        cb.assert_awaited_once()
+
+        # A genuinely foreign event still must not match - and re-verifies the
+        # scope mapping at most once (no unbounded resolver storm).
+        cb.reset_mock()
+        resolve_calls.clear()
+        foreign = MemoryEvent.entity_created(namespace_id=uuid4(), entity_id=uuid4(), data={})
+        assert await d.dispatch(foreign) == 0
+        cb.assert_not_awaited()
+        assert resolve_calls.count(stable_ns) <= 1, "foreign-event miss must re-resolve the scope at most once"
+
     async def test_namespace_scope_reproduces_1399_without_resolver(self) -> None:
         """Anti-vacuity: with NO resolver (pre-#1399 behavior) the mismatch drops the event."""
         stable_ns = uuid4()
