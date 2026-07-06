@@ -2311,7 +2311,12 @@ class VectorCypherEngine:
                 empty_count += 1
                 continue
 
-            # Normalize score to [0, 1]
+            # Clamp score to [0, 1]. Since #1433 the display score is already a
+            # bounded absolute value (raw cosine when available, else 0.0), so
+            # this clamp is a guard, not a scale correction: it maps a negative
+            # cosine (opposite-direction embedding) to 0.0 and caps float drift
+            # at 1.0. Pre-#1433 it silently masked the mentions-scale graph
+            # scores (3.6 -> 1.0) - it must never be asked to do that again.
             normalized_score = min(max(score, 0.0), 1.0)
 
             validated.append((chunk, normalized_score))
@@ -2494,12 +2499,18 @@ class VectorCypherEngine:
         # Validate and filter retrieval results
         validated_chunks = self._validate_recall_results(result.chunks, query)
 
-        # Compute retrieval confidence signals for abstention calibration
+        # Compute retrieval confidence signals for abstention calibration.
+        # NOTE: chunks are returned in RANK order (fusion + boosts + rerank),
+        # and the display score is an absolute relevance value that is NOT the
+        # sort key (#1433) - so the list is not score-sorted. Take the gap
+        # between the two LARGEST scores; positional scores[0] - scores[1]
+        # could go negative (e.g. a 0.0-scored graph-only chunk ranked first).
         scores = [s for _, s in validated_chunks]
         if len(scores) >= 2:
             mean_score = sum(scores) / len(scores)
             score_variance = sum((s - mean_score) ** 2 for s in scores) / len(scores)
-            top_score_gap = scores[0] - scores[1]  # chunks are sorted by score
+            top_two = sorted(scores, reverse=True)[:2]
+            top_score_gap = top_two[0] - top_two[1]
         elif len(scores) == 1:
             mean_score = scores[0]
             score_variance = 0.0

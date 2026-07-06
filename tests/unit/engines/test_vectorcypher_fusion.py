@@ -292,13 +292,104 @@ class TestAttachRelevanceScores:
         assert [r.item_id for r in results] == ids
         assert [r.rrf_score for r in results] == [0.40, 0.95, 0.60]
 
-    def test_graph_only_falls_back_to_graph_score(self) -> None:
-        """A chunk with no vector hit uses the graph score, not min-max."""
+    def test_graph_only_without_embedding_reports_zero(self) -> None:
+        """A graph-only chunk must NEVER report the graph channel's score (#1433).
+
+        The graph score is a mentions-count rank input (>= 1.0, unbounded), not a
+        bounded relevance value. Without an embedding to compute a cosine from,
+        the display score is 0.0 - "no vector-relevance measurement".
+        """
         results = [
-            FusedResult(item_id=uuid4(), item="g", rrf_score=0.02, vector_score=None, graph_score=0.42),
+            FusedResult(item_id=uuid4(), item="g", rrf_score=0.02, vector_score=None, graph_score=3.6),
         ]
         attach_relevance_scores(results)
-        assert results[0].rrf_score == 0.42
+        assert results[0].rrf_score == 0.0
+
+    def test_graph_only_with_embedding_computes_cosine(self) -> None:
+        """A graph-only chunk carrying an embedding reports its true cosine (#1433)."""
+        parallel = SimpleNamespace(content="g1", embedding=[1.0, 0.0])
+        orthogonal = SimpleNamespace(content="g2", embedding=[0.0, 1.0])
+        results = [
+            FusedResult(item_id=uuid4(), item=parallel, rrf_score=0.02, graph_score=5.0),
+            FusedResult(item_id=uuid4(), item=orthogonal, rrf_score=0.01, graph_score=9.0),
+        ]
+        attach_relevance_scores(results, query_embedding=[1.0, 0.0])
+        assert abs(results[0].rrf_score - 1.0) < 1e-6
+        assert abs(results[1].rrf_score - 0.0) < 1e-6
+
+    def test_raw_cosine_map_wins_over_hybrid_rrf_vector_score(self) -> None:
+        """With a raw-cosine map, the display is the cosine, not the tuple score.
+
+        On HYBRID stores the fusion tuple score (mirrored into ``vector_score``)
+        is the store-internal RRF blend (~1/(60+rank) = ~0.016), not a cosine.
+        The caller threads the true cosine via ``raw_cosine_by_id`` (#1433).
+        """
+        cid = uuid4()
+        results = [
+            FusedResult(item_id=cid, item="v", rrf_score=0.0164, vector_score=0.0164),
+        ]
+        attach_relevance_scores(results, raw_cosine_by_id={cid: 0.73})
+        assert results[0].rrf_score == 0.73
+
+    def test_negative_cosine_clamped_to_zero_on_all_branches(self) -> None:
+        """A negative cosine (opposite-direction embedding) displays as 0.0 on
+        the map-lookup and legacy vector_score branches, matching the
+        embedding-computed branch - bounded relevance, not signed similarity."""
+        cid = uuid4()
+        mapped = [FusedResult(item_id=cid, item="m", rrf_score=0.02, vector_score=0.01)]
+        attach_relevance_scores(mapped, raw_cosine_by_id={cid: -0.4})
+        assert mapped[0].rrf_score == 0.0
+
+        legacy = [FusedResult(item_id=uuid4(), item="l", rrf_score=0.02, vector_score=-0.2)]
+        attach_relevance_scores(legacy)
+        assert legacy[0].rrf_score == 0.0
+
+    def test_mixed_vector_graph_display_bounded(self) -> None:
+        """Graph-only display never exceeds a vector chunk's cosine unless its
+        own computed cosine actually does; sorting by score does not move the
+        top-RANKED chunk on a representative fixture (#1433).
+
+        Pre-#1433, graph-only chunks carried mentions-scale scores (>= 1.0 after
+        the engine clamp), so a caller sorting by score promoted them above
+        every genuinely-matching vector chunk.
+        """
+        v1, v2, g1 = uuid4(), uuid4(), uuid4()
+        results = [
+            FusedResult(item_id=v1, item="v1", rrf_score=0.030, vector_score=0.0164),
+            FusedResult(item_id=v2, item="v2", rrf_score=0.020, vector_score=0.0161),
+            FusedResult(item_id=g1, item="g1", rrf_score=0.015, graph_score=3.6),
+        ]
+        attach_relevance_scores(results, raw_cosine_by_id={v1: 0.72, v2: 0.55})
+
+        by_id = {r.item_id: r.rrf_score for r in results}
+        # Graph-only display (no embedding -> 0.0) stays below the vector cosines.
+        assert by_id[g1] == 0.0
+        assert by_id[g1] <= by_id[v1]
+        assert by_id[g1] <= by_id[v2]
+        # A caller sorting by display score keeps the rank-1 chunk on top
+        # (pre-fix the graph-only chunk's clamped 1.0 jumped the queue).
+        resorted = sorted(results, key=lambda r: r.rrf_score, reverse=True)
+        assert resorted[0].item_id == v1
+
+    def test_order_parity_attach_never_reorders(self) -> None:
+        """ORDER-PARITY (#1433): for a fixed fused fixture, attach changes only
+        the display VALUES - the returned chunk order is byte-identical to the
+        fusion-determined rank order."""
+        ids = [uuid4() for _ in range(4)]
+        chunks = {i: SimpleNamespace(content=f"chunk {i}") for i in ids}
+        vector_results = [(ids[0], 0.0164, chunks[ids[0]]), (ids[1], 0.0161, chunks[ids[1]])]
+        graph_results = [(ids[2], 4.2, chunks[ids[2]]), (ids[0], 2.0, chunks[ids[0]]), (ids[3], 1.0, chunks[ids[3]])]
+
+        fused = weighted_rrf_normalized(vector_results, graph_results, k=60)
+        order_before = [r.item_id for r in fused]
+
+        attach_relevance_scores(
+            fused,
+            raw_cosine_by_id={ids[0]: 0.81, ids[1]: 0.64},
+            query_embedding=[0.1, 0.2],
+        )
+
+        assert [r.item_id for r in fused] == order_before
 
     def test_no_signal_keeps_rrf_score(self) -> None:
         """With neither vector nor graph score, the existing score is untouched."""
