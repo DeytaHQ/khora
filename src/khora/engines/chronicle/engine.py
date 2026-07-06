@@ -1537,7 +1537,8 @@ class ChronicleEngine:
             extraction_config_hash: Optional hash for change detection
             chunk_strategy: Override chunking strategy for this call
             chunk_size: Override target chunk size (in tokens) for this call.
-                When None (default), uses the pipeline default.
+                When None (default), uses the configured
+                ``config.pipeline.chunk_size``.
 
         Returns:
             RememberResult with document_id and counts
@@ -3343,7 +3344,8 @@ class ChronicleEngine:
                 registered expertise name, or a YAML file path
             extraction_config_hash: Hash for change detection
             chunk_strategy: Override chunking strategy
-            chunk_size: Override target chunk size in tokens (None = pipeline default)
+            chunk_size: Override target chunk size in tokens
+                (None = configured ``config.pipeline.chunk_size``)
             extraction_batch_size: Max texts per LLM extraction call (None = pipeline default)
             extraction_max_tokens: Max tokens for extraction LLM calls (None = pipeline default)
 
