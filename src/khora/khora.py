@@ -330,6 +330,12 @@ class BatchResult:
     chunks: int
     entities: int
     relationships: int
+    # ADR-001 failure observability (#1410): mirrors RememberResult.metadata.
+    # ``extraction_errors`` (int) counts chunks whose LLM extraction failed
+    # (truncation, parse failure, retry exhaustion); ``degradations``
+    # (list[Degradation]) carries the per-failure records, aggregated across
+    # the batch. Empty dict on the happy path.
+    # See docs/architecture/failure-observability-contract.md.
     metadata: dict[str, Any] = field(default_factory=dict)
     llm_usage: list[LLMUsage] = field(default_factory=list)
     # Per-document breakdown, one entry per submitted document (input order):

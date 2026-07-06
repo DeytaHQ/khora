@@ -255,6 +255,26 @@ def _build_remember_metadata(extraction_diagnostics: dict[str, Any] | None) -> d
     return metadata
 
 
+def _merge_extraction_diagnostics(target: dict[str, Any], part: dict[str, Any] | None) -> None:
+    """Fold one diagnostics dict into a batch-level aggregate (#1410).
+
+    ``extract_entities`` OVERWRITES the ``extraction_errors`` / ``llm_chunks``
+    counters on the dict it is handed, so the batch path gives each call its
+    own dict and folds it here: counters sum, ``degradations`` extend. Also
+    accepts a ``RememberResult.metadata`` payload (same key shape) from the
+    per-document replace path. Unknown keys are ignored.
+    """
+    if not part:
+        return
+    for key in ("extraction_errors", "llm_chunks"):
+        value = part.get(key, 0)
+        if value:
+            target[key] = int(target.get(key, 0)) + int(value)
+    degradations = part.get("degradations")
+    if degradations:
+        target.setdefault("degradations", []).extend(degradations)
+
+
 _MAX_COOCCURRENCE_PER_CHUNK = 15
 
 
@@ -2959,6 +2979,11 @@ class VectorCypherEngine:
             "entities": 0,
             "relationships": 0,
         }
+        # #1410: aggregate ADR-001 extraction diagnostics across the batch so
+        # a failed extraction is visible on BatchResult.metadata instead of
+        # the batch looking successful with entities=0 (mirrors the #889
+        # remember() -> RememberResult.metadata path).
+        extraction_diagnostics: dict[str, Any] = {}
         progress_count = 0
 
         def _report_progress(n: int = 1) -> None:
@@ -3066,6 +3091,7 @@ class VectorCypherEngine:
                 results["chunks"] += result.chunks_created
                 results["entities"] += result.entities_extracted
                 results["relationships"] += result.relationships_created
+                _merge_extraction_diagnostics(extraction_diagnostics, result.metadata)
                 _record_doc(
                     idx,
                     document_id=result.document_id,
@@ -3143,7 +3169,12 @@ class VectorCypherEngine:
 
         if not active_indices:
             _resolve_intra_batch_dups()
-            return BatchResult(total=total, **results, per_document=_finalize_per_document())
+            return BatchResult(
+                total=total,
+                **results,
+                metadata=_build_remember_metadata(extraction_diagnostics),
+                per_document=_finalize_per_document(),
+            )
 
         # ── Conversation mode detection ─────────────────────────────────
         docs_with_ts = sum(1 for d in documents if "occurred_at" in d.get("metadata", {}))
@@ -3263,7 +3294,12 @@ class VectorCypherEngine:
 
         if not ok_states:
             _resolve_intra_batch_dups()
-            return BatchResult(total=total, **results, per_document=_finalize_per_document())
+            return BatchResult(
+                total=total,
+                **results,
+                metadata=_build_remember_metadata(extraction_diagnostics),
+                per_document=_finalize_per_document(),
+            )
 
         # ── Build processing windows ─────────────────────────────────────
         # When max_chunks_in_flight is set, group documents into windows so
@@ -3381,7 +3417,9 @@ class VectorCypherEngine:
             # Mirror the batch's chunks to Neo4j (skipped for SurrealDB). Chunks are
             # already durable in pgvector, so a mirror failure degrades (counter +
             # WARNING) rather than aborting the batch (ADR-001).
-            await _mirror_chunks_or_degrade(dual_nodes, all_temporal_chunks, namespace_id)
+            await _mirror_chunks_or_degrade(
+                dual_nodes, all_temporal_chunks, namespace_id, out_diagnostics=extraction_diagnostics
+            )
 
             # keyword_ppr lexical channel (#1391): persist keyword->chunk edges
             # per document slice (IDF is document-scoped, matching the skeleton
@@ -3392,7 +3430,9 @@ class VectorCypherEngine:
                     start, end = state_chunk_ranges[si]
                     doc_chunks = all_temporal_chunks[start:end]
                     if doc_chunks:
-                        await persist_keyword_chunk_edges(storage, namespace_id, doc_chunks)
+                        await persist_keyword_chunk_edges(
+                            storage, namespace_id, doc_chunks, out_diagnostics=extraction_diagnostics
+                        )
 
             _stage3_ms += (_time.perf_counter() - _t0) * 1000
 
@@ -3483,10 +3523,14 @@ class VectorCypherEngine:
 
                         async def _extract_one_doc(
                             chunks: list[Chunk], occurred_at: datetime | None = None
-                        ) -> tuple[list, list]:
+                        ) -> tuple[list, list, dict[str, Any]]:
                             ctx = {"document_created_at": occurred_at.isoformat()} if occurred_at else None
+                            # #1410: fresh dict per concurrent call -
+                            # extract_entities overwrites the counters on
+                            # the dict it is handed. Folded below.
+                            doc_diagnostics: dict[str, Any] = {}
                             async with sem:
-                                return await extract_entities(
+                                ents, rels = await extract_entities(
                                     chunks,
                                     skill_name=skill_name,
                                     expertise=expertise,
@@ -3506,7 +3550,9 @@ class VectorCypherEngine:
                                     # extract_entities.
                                     selective_extraction=False,
                                     extraction_second_pass=self._config.pipeline.extraction_second_pass,
+                                    out_diagnostics=doc_diagnostics,
                                 )
+                            return ents, rels, doc_diagnostics
 
                         extraction_results = await asyncio.gather(
                             *[
@@ -3514,9 +3560,10 @@ class VectorCypherEngine:
                                 for doc_id, cks in doc_chunks_map.items()
                             ]
                         )
-                        for ents, rels in extraction_results:
+                        for ents, rels, doc_diag in extraction_results:
                             per_doc_entities.extend(ents)
                             per_doc_relationships.extend(rels)
+                            _merge_extraction_diagnostics(extraction_diagnostics, doc_diag)
 
                         entities = per_doc_entities
                         relationships = per_doc_relationships
@@ -3524,6 +3571,9 @@ class VectorCypherEngine:
                         logger.debug(
                             f"Batch extraction: {len(all_core_chunk_objects)} core chunks from {len(window_states)} documents"
                         )
+                        # #1410: fresh dict per window - extract_entities
+                        # overwrites the counters on the dict it is handed.
+                        window_diagnostics: dict[str, Any] = {}
                         entities, relationships = await extract_entities(
                             all_core_chunk_objects,
                             skill_name=skill_name,
@@ -3545,7 +3595,9 @@ class VectorCypherEngine:
                             # signal meaningless for inner documents.
                             selective_extraction=False,
                             extraction_second_pass=self._config.pipeline.extraction_second_pass,
+                            out_diagnostics=window_diagnostics,
                         )
+                        _merge_extraction_diagnostics(extraction_diagnostics, window_diagnostics)
 
                     if entities:
                         all_entities = list(entities)
@@ -3806,6 +3858,7 @@ class VectorCypherEngine:
             chunks=results["chunks"],
             entities=results["entities"],
             relationships=results["relationships"],
+            metadata=_build_remember_metadata(extraction_diagnostics),
             per_document=_finalize_per_document(),
         )
 
@@ -3842,6 +3895,10 @@ class VectorCypherEngine:
             "relationships": 0,
         }
         results_lock = asyncio.Lock()
+        # #1410: aggregate per-document RememberResult.metadata diagnostics
+        # (extraction_errors / degradations) onto BatchResult.metadata so a
+        # failed extraction is visible on the legacy path too.
+        extraction_diagnostics: dict[str, Any] = {}
         progress_count = 0
         progress_lock = asyncio.Lock()
         doc_checksums = [hashlib.sha256(d.get("content", "").encode("utf-8")).hexdigest() for d in documents]
@@ -3940,6 +3997,7 @@ class VectorCypherEngine:
                     async with results_lock:
                         per_document[idx]["document_id"] = result.document_id
                         winner_id_by_identity[identity_key] = result.document_id
+                        _merge_extraction_diagnostics(extraction_diagnostics, result.metadata)
                         if result.metadata.get("duplicate"):
                             results["skipped"] += 1
                             per_document[idx]["skipped"] = True
@@ -3966,7 +4024,12 @@ class VectorCypherEngine:
         # (None when the winner itself failed).
         for dup_idx, identity_key in intra_batch_dups.items():
             per_document[dup_idx]["document_id"] = winner_id_by_identity.get(identity_key)
-        return BatchResult(total=total, **results, per_document=per_document)
+        return BatchResult(
+            total=total,
+            **results,
+            metadata=_build_remember_metadata(extraction_diagnostics),
+            per_document=per_document,
+        )
 
     # Compiled regex for lightweight temporal keyword detection
     _TEMPORAL_KW_RE = re.compile(
