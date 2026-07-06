@@ -116,11 +116,14 @@ def _chunk_ids(result) -> set[UUID]:
 
 
 # ---------------------------------------------------------------------------
-# Simple path, HYBRID fusion (enable_bm25_channel=True)
+# Simple path, HYBRID / ALL fusion (enable_bm25_channel=True)
 # ---------------------------------------------------------------------------
 
+_FUSION_MODES = [SearchMode.HYBRID, SearchMode.ALL]
 
-async def test_floor_excludes_bm25_only_from_simple_fusion() -> None:
+
+@pytest.mark.parametrize("mode", _FUSION_MODES)
+async def test_floor_excludes_bm25_only_from_simple_fusion(mode: SearchMode) -> None:
     """Hybrid fusion with an explicit floor drops BM25-only chunks.
 
     The chunk that passed the vector floor stays (it also appears in the BM25
@@ -134,12 +137,13 @@ async def test_floor_excludes_bm25_only_from_simple_fusion() -> None:
         bm25=[(passed, 2.0), *((c, 1.0) for c in bm25_only)],
     )
 
-    result = await _simple(retriever, min_similarity=0.5, mode=SearchMode.HYBRID)
+    result = await _simple(retriever, min_similarity=0.5, mode=mode)
 
     assert _chunk_ids(result) == {passed.id}
 
 
-async def test_floor_with_empty_vector_channel_returns_no_chunks() -> None:
+@pytest.mark.parametrize("mode", _FUSION_MODES)
+async def test_floor_with_empty_vector_channel_returns_no_chunks(mode: SearchMode) -> None:
     """Floor above every chunk's cosine => zero chunks, even with BM25 hits.
 
     This is the issue's repro shape: ``min_similarity=0.99`` on a corpus whose
@@ -150,12 +154,13 @@ async def test_floor_with_empty_vector_channel_returns_no_chunks() -> None:
         bm25=[(_chunk(f"kw{i}"), 1.0) for i in range(3)],
     )
 
-    result = await _simple(retriever, min_similarity=0.99, mode=SearchMode.HYBRID)
+    result = await _simple(retriever, min_similarity=0.99, mode=mode)
 
     assert result.chunks == []
 
 
-async def test_no_floor_keeps_union_in_simple_fusion() -> None:
+@pytest.mark.parametrize("mode", _FUSION_MODES)
+async def test_no_floor_keeps_union_in_simple_fusion(mode: SearchMode) -> None:
     """Default ``min_similarity=0.0`` keeps the historical union semantics."""
     passed = _chunk("vec")
     bm25_only = [_chunk(f"kw{i}") for i in range(3)]
@@ -165,7 +170,7 @@ async def test_no_floor_keeps_union_in_simple_fusion() -> None:
         bm25=[(c, 1.0) for c in bm25_only],
     )
 
-    result = await _simple(retriever, min_similarity=0.0, mode=SearchMode.HYBRID)
+    result = await _simple(retriever, min_similarity=0.0, mode=mode)
 
     assert _chunk_ids(result) == {passed.id, *(c.id for c in bm25_only)}
 
@@ -220,6 +225,28 @@ async def test_keyword_mode_no_floor_stays_pure_bm25() -> None:
 
     assert [c.id for c, _ in result.chunks] == [c.id for c in hits]
     retriever._vector_store.search.assert_not_awaited()
+
+
+async def test_keyword_mode_gate_failure_fails_closed_with_degradation() -> None:
+    """A gate-search failure drops the keyword hits (fail closed) + records it.
+
+    The gate is the only floor-compliance evidence in KEYWORD mode, so a
+    transient vector-store error must not leak unvetted BM25 chunks - and must
+    not crash the recall either (ADR-001: degrade observably).
+    """
+    retriever = _make_retriever(
+        vector=[],
+        bm25=[(_chunk(f"kw{i}"), 1.0) for i in range(3)],
+    )
+    retriever._vector_store.search = AsyncMock(side_effect=RuntimeError("pgvector down"))
+
+    result = await _simple(retriever, min_similarity=0.5, mode=SearchMode.KEYWORD)
+
+    assert result.chunks == []
+    degs = result.metadata["degradations"]
+    assert any(d["component"] == "vectorcypher.bm25" and d["reason"] == "floor_gate_exception" for d in degs), (
+        f"expected a floor_gate_exception degradation, got {degs!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -306,19 +333,50 @@ async def test_fuse_results_default_keeps_union() -> None:
     assert {r.item_id for r in fused} == {vec_a.id, graph_g.id, *(c.id for c in bm25_only)}
 
 
+def _make_moderate_retriever(
+    *,
+    vector: list[TemporalSearchResult],
+    bm25: list[tuple[Chunk, float]],
+    config: RetrieverConfig,
+) -> VectorCypherRetriever:
+    """Retriever wired for the MODERATE (graph) path with graph helpers stubbed.
+
+    Mirrors ``test_vectorcypher_filter_pushdown``'s harness: one entry entity
+    so the path does not fall back to ``_simple_retrieve``, Neo4j-touching
+    helpers mocked out.
+    """
+    retriever = _make_retriever(vector=vector, bm25=bm25, config=config)
+    retriever._embedder.embed = AsyncMock(return_value=[0.1] * 4)
+    retriever._storage.search_similar_entities = AsyncMock(return_value=[(uuid4(), 0.9)])
+    retriever._storage.get_entities_batch = AsyncMock(return_value={})
+    retriever._router = MagicMock()
+    retriever._router.route = AsyncMock(
+        return_value=RoutingDecision(
+            complexity=QueryComplexity.MODERATE,
+            use_graph=True,
+            graph_depth=2,
+            confidence=0.8,
+            reasoning="moderate",
+        )
+    )
+    retriever._router.compute_adaptive_depth = MagicMock(return_value=2)
+    retriever._cypher_expand = AsyncMock(return_value=({}, {}))
+    retriever._fetch_chunks_from_entities = AsyncMock(return_value=[])
+    return retriever
+
+
 async def test_main_path_threads_floor_into_fusion() -> None:
     """``_vectorcypher_retrieve`` passes ``exclude_bm25_only`` iff a floor is set.
 
-    Driven through ``retrieve()`` on the MODERATE (graph) path with the graph
-    helpers stubbed, mirroring ``test_vectorcypher_filter_pushdown``'s harness:
-    with a floor the BM25-only chunk is excluded from the result; without one
-    it survives (union).
+    Driven through ``retrieve()`` on the MODERATE (graph) path: with a floor
+    the BM25-only chunk is excluded from the result; without one it survives
+    (union).
     """
     vec_chunk = _chunk("vector-hit")
     bm25_only = _chunk("bm25-only")
 
     for floor, expect_bm25_only in ((0.5, False), (0.0, True)):
-        retriever = _make_retriever(
+        retriever = _make_moderate_retriever(
             vector=[_vector_result(vec_chunk, 0.8)],
             bm25=[(vec_chunk, 2.0), (bm25_only, 1.0)],
             config=RetrieverConfig(
@@ -327,24 +385,6 @@ async def test_main_path_threads_floor_into_fusion() -> None:
                 enable_session_aware_search=False,
             ),
         )
-        retriever._embedder.embed = AsyncMock(return_value=[0.1] * 4)
-        # Entry entity so the graph path does not fall back to _simple_retrieve.
-        retriever._storage.search_similar_entities = AsyncMock(return_value=[(uuid4(), 0.9)])
-        retriever._storage.get_entities_batch = AsyncMock(return_value={})
-        retriever._router = MagicMock()
-        retriever._router.route = AsyncMock(
-            return_value=RoutingDecision(
-                complexity=QueryComplexity.MODERATE,
-                use_graph=True,
-                graph_depth=2,
-                confidence=0.8,
-                reasoning="moderate",
-            )
-        )
-        retriever._router.compute_adaptive_depth = MagicMock(return_value=2)
-        # Stub graph helpers so the cypher-expansion path completes without Neo4j.
-        retriever._cypher_expand = AsyncMock(return_value=({}, {}))
-        retriever._fetch_chunks_from_entities = AsyncMock(return_value=[])
 
         result = await retriever.retrieve(
             "optical networks",
@@ -357,4 +397,52 @@ async def test_main_path_threads_floor_into_fusion() -> None:
         assert vec_chunk.id in returned, f"floor={floor}: vector chunk must survive"
         assert (bm25_only.id in returned) is expect_bm25_only, (
             f"floor={floor}: BM25-only chunk membership should be {expect_bm25_only}"
+        )
+
+
+async def test_recency_merged_chunks_honor_floor() -> None:
+    """Recency pool augmentation cannot smuggle chunks below the caller floor.
+
+    The recency channel gates only on ``temporal_query_relevance_floor``
+    (default 0.40); merged chunks then count as "vector" chunks in fusion.
+    With ``min_similarity`` above a recency chunk's real cosine, the merge
+    must exclude it; with no floor the merge is unchanged (review follow-up
+    on #1425).
+    """
+    from khora.query.temporal_detection import TemporalCategory, TemporalSignal
+
+    vec_chunk = _chunk("vector-hit")
+    recency_chunk = _chunk("recent-but-below-floor")
+
+    for floor, expect_recency in ((0.6, False), (0.0, True)):
+        retriever = _make_moderate_retriever(
+            vector=[_vector_result(vec_chunk, 0.8)],
+            bm25=[],
+            config=RetrieverConfig(
+                enable_reranking=False,
+                enable_session_aware_search=False,
+                temporal_recency_channel_enabled=True,
+            ),
+        )
+        # Recency channel returns a chunk whose REAL cosine (0.5) cleared the
+        # channel's own relevance floor (0.40) but sits below the caller's 0.6.
+        retriever._recency_channel_chunks = AsyncMock(return_value=[(recency_chunk.id, 0.5, recency_chunk)])
+
+        result = await retriever.retrieve(
+            "optical networks",
+            _NS,
+            limit=5,
+            min_similarity=floor,
+            temporal_signal=TemporalSignal(
+                is_temporal=True,
+                category=TemporalCategory.RECENCY,
+                confidence=0.9,
+                source="dictionary",
+            ),
+        )
+
+        returned = {c.id for c, _ in result.chunks}
+        assert vec_chunk.id in returned, f"floor={floor}: vector chunk must survive"
+        assert (recency_chunk.id in returned) is expect_recency, (
+            f"floor={floor}: recency-chunk membership should be {expect_recency}"
         )

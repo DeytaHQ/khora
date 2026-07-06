@@ -2062,6 +2062,14 @@ class VectorCypherRetriever:
             if recent_chunks:
                 existing_ids = {c[0] for c in vector_chunks}
                 merged_in = [rc for rc in recent_chunks if rc[0] not in existing_ids]
+                # #1425 review follow-up: an explicit min_similarity floor
+                # applies to the recency pool too. The channel gates only on
+                # temporal_query_relevance_floor, which may sit below the
+                # caller's floor - and merged chunks would otherwise count as
+                # floor-passing "vector" chunks in fusion. The tuples carry
+                # real cosine scores, so the floor applies directly.
+                if min_similarity > 0.0:
+                    merged_in = [rc for rc in merged_in if rc[1] >= min_similarity]
                 if merged_in:
                     vector_chunks = vector_chunks + merged_in
                     logger.debug(
@@ -3057,17 +3065,41 @@ class VectorCypherRetriever:
                     # pure-vector search and keep only ids that passed, in
                     # BM25 order - same semantics as the temporal stores'
                     # keyword mode after #1404. 0.0 keeps pure-BM25 behaviour.
+                    # The gate is a bounded top-K search (max(limit, 50), the
+                    # same cap as the KEYWORD BM25 fetch), not an unbounded
+                    # ">= floor" scan - a keyword hit ranked below the cutoff
+                    # is dropped even if its cosine clears the floor. Accepted
+                    # cost/recall tradeoff; the error direction is safe (never
+                    # leaks below-floor chunks).
                     if min_similarity > 0.0 and bm25_results:
-                        gate_results = await self._vector_store.search(
-                            namespace_id=namespace_id,
-                            query_embedding=query_embedding,
-                            limit=max(limit, 50),
-                            min_similarity=min_similarity,
-                            temporal_filter=temporal_filter,
-                            hybrid_alpha=None,
-                            query_text=query,
-                            filter_ast=filter_ast,
-                        )
+                        try:
+                            gate_results = await self._vector_store.search(
+                                namespace_id=namespace_id,
+                                query_embedding=query_embedding,
+                                limit=max(limit, 50),
+                                min_similarity=min_similarity,
+                                temporal_filter=temporal_filter,
+                                hybrid_alpha=None,
+                                query_text=query,
+                                filter_ast=filter_ast,
+                            )
+                        except Exception as e:
+                            # ADR-001: the gate is the only floor-compliance
+                            # evidence in KEYWORD mode, so fail CLOSED (drop
+                            # the keyword hits) rather than leaking chunks the
+                            # floor never vetted - and record the dropped
+                            # channel so the empty result is observable.
+                            logger.warning(f"KEYWORD floor-gate vector search failed: {e}", exc_info=True)
+                            _BM25_DEGRADED_COUNTER.add(1, attributes={"reason": "floor_gate_exception"})
+                            degradations.append(
+                                Degradation(
+                                    component="vectorcypher.bm25",
+                                    reason="floor_gate_exception",
+                                    detail=str(e)[:200] or None,
+                                    exception=type(e).__name__,
+                                )
+                            )
+                            gate_results = []
                         floor_passing_ids = {r.chunk.id for r in gate_results}
                         bm25_results = [t for t in bm25_results if t[0] in floor_passing_ids]
                     chunk_results = [(c, score) for _cid, score, c in bm25_results][:limit]
