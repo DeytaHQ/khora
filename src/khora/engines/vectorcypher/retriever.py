@@ -849,7 +849,12 @@ class VectorCypherRetriever:
                 vector channel. Chunks below this threshold are filtered at
                 the storage layer before any fusion / reranking happens.
                 ``0.0`` (the default) means "unset" and falls back to the
-                configured ``min_chunk_similarity`` (#1406).
+                configured ``min_chunk_similarity`` (#1406). An explicit
+                (resolved > 0) floor also bounds the lexical channel (#1425):
+                lexical-only chunks are excluded from fusion output (their
+                BM25 / keyword-PPR scores are not cosine similarities), and
+                ``KEYWORD`` mode gates its hits against a floored vector
+                search - mirroring the temporal stores' #1404 semantics.
             hybrid_alpha_override: Per-call vector/BM25 blend factor. Threaded
                 explicitly from the engine so the shared ``RetrieverConfig``
                 is never mutated (#1116). ``None`` keeps the configured /
@@ -2166,7 +2171,9 @@ class VectorCypherRetriever:
             if bm25_filter_plan_sink:
                 filter_channel_plans["bm25"] = bm25_filter_plan_sink[0]
 
-        # Step 7: RRF fusion with score normalization and dynamic weights
+        # Step 7: RRF fusion with score normalization and dynamic weights.
+        # An explicit min_similarity floor excludes lexical-only chunks from
+        # the fused set (#1425) - they never passed the vector floor.
         fused_results = self._fuse_results(
             vector_chunks=vector_chunks,
             graph_chunks=graph_chunks,
@@ -2174,6 +2181,7 @@ class VectorCypherRetriever:
             use_normalization=True,
             routing=routing,
             is_temporal=_tp.recency_weight > 0.2,
+            exclude_bm25_only=min_similarity > 0.0,
         )
 
         # Step 8: Apply recency boost driven by temporal signal category.
@@ -3042,6 +3050,26 @@ class VectorCypherRetriever:
                 if mode == SearchMode.KEYWORD:
                     # #833 KEYWORD: BM25-only - sole source of chunks. Skip
                     # the RRF fusion (there are no vector results to merge).
+                    # #1425: an explicit min_similarity floor applies here too.
+                    # Lexical scores (BM25 / keyword-PPR) are not cosine
+                    # similarities, so keyword hits cannot demonstrate
+                    # compliance on their own: gate them against a floored
+                    # pure-vector search and keep only ids that passed, in
+                    # BM25 order - same semantics as the temporal stores'
+                    # keyword mode after #1404. 0.0 keeps pure-BM25 behaviour.
+                    if min_similarity > 0.0 and bm25_results:
+                        gate_results = await self._vector_store.search(
+                            namespace_id=namespace_id,
+                            query_embedding=query_embedding,
+                            limit=max(limit, 50),
+                            min_similarity=min_similarity,
+                            temporal_filter=temporal_filter,
+                            hybrid_alpha=None,
+                            query_text=query,
+                            filter_ast=filter_ast,
+                        )
+                        floor_passing_ids = {r.chunk.id for r in gate_results}
+                        bm25_results = [t for t in bm25_results if t[0] in floor_passing_ids]
                     chunk_results = [(c, score) for _cid, score, c in bm25_results][:limit]
                 elif bm25_results:
                     from khora.query.fusion import reciprocal_rank_fusion as _nlist_rrf
@@ -3059,6 +3087,15 @@ class VectorCypherRetriever:
                         k=self._config.rrf_k,
                         id_extractor=lambda c: c.id,
                     )
+                    # #1425: an explicit min_similarity floor applies to the
+                    # lexical side too. Lexical-only chunks never passed the
+                    # vector floor (their scores are not cosine similarities),
+                    # so they are excluded from the fused set; lexical ranks
+                    # still contribute to the scores of floor-passing chunks.
+                    # Mirrors #1404's temporal-store fusion semantics.
+                    if min_similarity > 0.0:
+                        floor_passing_ids = {c.id for c, _s in ranked_lists["vector"]}
+                        fused_raw = [(c, s) for c, s in fused_raw if c.id in floor_passing_ids]
                     chunk_results = list(fused_raw[:limit])
                     logger.debug(
                         f"Simple path BM25 fusion: {len(bm25_results)} BM25 + "
@@ -4418,6 +4455,7 @@ class VectorCypherRetriever:
         use_normalization: bool = False,
         routing: RoutingDecision | None = None,
         is_temporal: bool = False,
+        exclude_bm25_only: bool = False,
     ) -> list[FusedResult]:
         """Fuse vector, graph, and optionally BM25 results using weighted RRF.
 
@@ -4433,6 +4471,14 @@ class VectorCypherRetriever:
             use_normalization: If True, normalize scores before fusion for better ranking
             routing: If provided, adjust weights based on query complexity
             is_temporal: If True, use temporal fusion weights (graph-heavy)
+            exclude_bm25_only: Restrict the fused set to chunks the vector or
+                graph channels surfaced (BM25 ranks still contribute to their
+                scores). Passed when the caller set an explicit
+                ``min_similarity`` floor, which BM25-only chunks never passed -
+                their scores are not cosine similarities (#1425, mirrors the
+                temporal stores' #1404 semantics). Graph membership is
+                unaffected: the graph channel introduces the same chunks with
+                or without the lexical channel.
 
         Returns:
             Fused and sorted results
@@ -4513,6 +4559,15 @@ class VectorCypherRetriever:
                     k=self._config.rrf_k,
                     id_extractor=lambda chunk: chunk.id,
                 )
+
+                # #1425: with an explicit min_similarity floor, chunks the
+                # lexical channel alone surfaced are excluded from the fused
+                # set - they never passed the vector floor and their scores
+                # are not cosine similarities. Their BM25 ranks still boosted
+                # the scores of vector/graph chunks above.
+                if exclude_bm25_only:
+                    non_lexical_ids = {cid for cid, _s, _c in vector_chunks} | {cid for cid, _s, _c in graph_chunks}
+                    fused_raw = [(chunk, score) for chunk, score in fused_raw if chunk.id in non_lexical_ids]
 
                 # Convert (Chunk, rrf_score) tuples to FusedResult objects.
                 # The N-list RRF doesn't populate per-source ranks, so we
