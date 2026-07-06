@@ -180,6 +180,13 @@ def _types_for(engine: str) -> tuple[list[str], list[str]]:
     return ["PERSON", "CONCEPT"], ["RELATES_TO"]
 
 
+def _expertise_for(engine: str) -> ExpertiseConfig | None:
+    """Skeleton refuses non-None expertise (#1431)."""
+    if engine == "skeleton":
+        return None
+    return ExpertiseConfig(name=f"denorm-{engine}")
+
+
 def _as_utc(dt: datetime | None) -> datetime | None:
     """Treat naive datetimes as UTC — the sqlite round-trip drops tzinfo."""
     if dt is None:
@@ -244,7 +251,7 @@ async def test_recall_occurred_at_does_not_collapse_onto_source_timestamp(kb: Kh
         metadata={"occurred_at": t_chunk.isoformat()},
         entity_types=entity_types,
         relationship_types=relationship_types,
-        expertise=ExpertiseConfig(name=f"denorm-{engine_name}"),
+        expertise=_expertise_for(engine_name),
     )
 
     result = await kb.recall(
@@ -308,7 +315,7 @@ async def test_denormalized_fields_written_from_document(kb: Khora) -> None:
         external_id="ext-curie-001",
         entity_types=entity_types,
         relationship_types=relationship_types,
-        expertise=ExpertiseConfig(name=f"denorm-{engine_name}"),
+        expertise=_expertise_for(engine_name),
     )
 
     db_path = str(kb._config.storage.sqlite_lance.db_path)  # type: ignore[attr-defined]
@@ -368,7 +375,7 @@ async def test_recall_occurred_at_falls_back_to_source_timestamp(kb: Khora) -> N
         # No metadata["occurred_at"] — chunk event time must fall back.
         entity_types=entity_types,
         relationship_types=relationship_types,
-        expertise=ExpertiseConfig(name=f"denorm-{engine_name}"),
+        expertise=_expertise_for(engine_name),
     )
 
     result = await kb.recall(

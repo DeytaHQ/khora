@@ -162,6 +162,56 @@ async def test_skeleton_remember_accepts_empty_type_lists() -> None:
 
 
 # ---------------------------------------------------------------------------
+# #1431: remember() refuses non-None expertise
+# ---------------------------------------------------------------------------
+
+
+async def test_skeleton_remember_raises_on_expertise_kwarg() -> None:
+    """Non-None ``expertise`` raises ``UnsupportedEngineKwargError``.
+
+    ``expertise`` is the third ontology-guidance kwarg in the same family
+    as ``entity_types`` / ``relationship_types``. #890 made those two
+    loud; ``expertise`` stayed silently accepted-and-ignored (#1431).
+    """
+    from khora.extraction.skills.base import EntityTypeConfig, ExpertiseConfig
+
+    engine, _temporal_store, _storage = _build_engine_with_stubs()
+    namespace_id = uuid4()
+
+    with pytest.raises(UnsupportedEngineKwargError) as excinfo:
+        await engine.remember(
+            "alpha beta gamma",
+            namespace_id,
+            entity_types=[],
+            relationship_types=[],
+            expertise=ExpertiseConfig(name="physics", entity_types=[EntityTypeConfig(name="PARTICLE")]),
+        )
+    assert excinfo.value.engine_name == "skeleton"
+    assert excinfo.value.kwarg == "expertise"
+    assert "extraction" in excinfo.value.reason.lower()
+
+
+async def test_skeleton_remember_raises_on_string_expertise() -> None:
+    """A string expertise (registered name / YAML path) is also refused.
+
+    The signature accepts ``ExpertiseConfig | str | None``; any non-None
+    form asks for ontology-guided extraction the engine cannot honor.
+    """
+    engine, _temporal_store, _storage = _build_engine_with_stubs()
+    namespace_id = uuid4()
+
+    with pytest.raises(UnsupportedEngineKwargError) as excinfo:
+        await engine.remember(
+            "alpha beta gamma",
+            namespace_id,
+            entity_types=[],
+            relationship_types=[],
+            expertise="lead_intel",
+        )
+    assert excinfo.value.kwarg == "expertise"
+
+
+# ---------------------------------------------------------------------------
 # #891: recall() refuses non-None recency_bias
 # ---------------------------------------------------------------------------
 

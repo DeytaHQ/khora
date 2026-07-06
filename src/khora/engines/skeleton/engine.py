@@ -256,10 +256,11 @@ class SkeletonConstructionEngine:
 
         Raises:
             UnsupportedEngineKwargError: When ``entity_types`` or
-                ``relationship_types`` is non-empty. The Skeleton engine
-                deliberately skips typed entity / relationship extraction
-                for cost efficiency; silently dropping these kwargs would
-                hide a caller bug (#890). Pass empty lists when targeting
+                ``relationship_types`` is non-empty, or ``expertise`` is
+                non-None. The Skeleton engine deliberately skips typed
+                entity / relationship extraction for cost efficiency;
+                silently dropping these kwargs would hide a caller bug
+                (#890, #1431). Pass empty lists / ``None`` when targeting
                 Skeleton.
         """
         # #890: Skeleton does not extract typed entities or relationships.
@@ -279,6 +280,16 @@ class SkeletonConstructionEngine:
                 "relationship_types",
                 "Skeleton engine does not extract typed relationships. "
                 "Use VectorCypher or Chronicle for typed relationship extraction.",
+            )
+        # #1431: expertise is the third ontology-guidance kwarg in the same
+        # family; accepting-and-ignoring it was the leftover inconsistency
+        # after #890 made the other two loud.
+        if expertise is not None:
+            raise UnsupportedEngineKwargError(
+                "skeleton",
+                "expertise",
+                "Skeleton engine does not perform ontology-guided extraction. "
+                "Use VectorCypher or Chronicle for expertise-guided extraction.",
             )
 
         # Compute checksum
@@ -316,10 +327,6 @@ class SkeletonConstructionEngine:
             external_id=external_id,
         )
         document = await storage.create_document(document)
-
-        # Note: expertise is intentionally not used by the skeleton engine —
-        # it skips full entity extraction for cost efficiency. The hash is
-        # still persisted for change-detection workflows.
 
         # Resolve occurred_at: explicit kwarg wins, then metadata["occurred_at"]
         # (parity with remember_batch), then the user-supplied source_timestamp

@@ -82,8 +82,11 @@ async with Khora("postgresql://...", engine="skeleton") as kb:
             "channel": "leadership",
             "occurred_at": "2024-01-15T10:00:00Z"
         },
-        entity_types=["PERSON", "EVENT"],
-        relationship_types=["PARTICIPATES_IN"],
+        # Skeleton does no typed / ontology-guided extraction: non-empty
+        # entity_types / relationship_types or a non-None expertise raise
+        # UnsupportedEngineKwargError (#890, #1431).
+        entity_types=[],
+        relationship_types=[],
     )
 
     # Recall with temporal filters

@@ -43,7 +43,6 @@ pytest.importorskip("surrealdb")
 
 from khora.config import KhoraConfig  # noqa: E402
 from khora.config.schema import SurrealDBConfig  # noqa: E402
-from khora.extraction.skills import ExpertiseConfig  # noqa: E402
 from khora.filter import RecallFilter, parse_to_ast  # noqa: E402
 from khora.khora import Khora  # noqa: E402
 from khora.storage.temporal.surrealdb import SurrealDBTemporalStore  # noqa: E402
@@ -112,7 +111,7 @@ def _remember(kb: Khora) -> Any:
         title="",
         entity_types=[],
         relationship_types=[],
-        expertise=ExpertiseConfig(name="skeleton-surrealdb-filter-enforcement"),
+        # No expertise: skeleton refuses non-None expertise (#1431).
     )
 
 
