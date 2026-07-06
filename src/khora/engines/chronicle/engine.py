@@ -1612,8 +1612,9 @@ class ChronicleEngine:
         )
         if chunk_strategy is not None:
             kwargs["chunk_strategy"] = chunk_strategy
-        if chunk_size is not None:
-            kwargs["chunk_size"] = chunk_size
+        # Issue #1426: fall back to the configured pipeline default (like
+        # VectorCypher/Skeleton) instead of the pipeline's hardcoded 512.
+        kwargs["chunk_size"] = chunk_size if chunk_size is not None else self._config.pipeline.chunk_size
         result = await process_document(document, storage, **kwargs)
         timings["pipeline_ms"] = (time.perf_counter() - start) * 1000
 
@@ -3434,8 +3435,9 @@ class ChronicleEngine:
         )
         if chunk_strategy is not None:
             ingest_kwargs["chunk_strategy"] = chunk_strategy
-        if chunk_size is not None:
-            ingest_kwargs["chunk_size"] = chunk_size
+        # Issue #1426: fall back to the configured pipeline default (like
+        # VectorCypher/Skeleton) instead of the pipeline's hardcoded 512.
+        ingest_kwargs["chunk_size"] = chunk_size if chunk_size is not None else self._config.pipeline.chunk_size
         if extraction_batch_size is not None:
             ingest_kwargs["extraction_batch_size"] = extraction_batch_size
         if extraction_max_tokens is not None:
