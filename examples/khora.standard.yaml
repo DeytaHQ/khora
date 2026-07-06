@@ -23,8 +23,6 @@
 #   export OPENAI_API_KEY=sk-...
 
 app_name: khora
-environment: development
-debug: false
 
 # =============================================================================
 # Database shortcuts — URLs propagate to storage.{postgresql_url, graph.*}

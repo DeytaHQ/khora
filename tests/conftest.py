@@ -23,6 +23,4 @@ def test_config() -> KhoraConfig:
     """Create a test configuration."""
     return KhoraConfig(
         app_name="khora-test",
-        environment="test",
-        debug=True,
     )

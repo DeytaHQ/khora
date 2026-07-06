@@ -66,7 +66,7 @@ def _pg_reachable() -> bool:
 
 def _config() -> KhoraConfig:
     """A real KhoraConfig — opaque to the sqlite_lance store's connect()."""
-    return KhoraConfig(app_name="khora-test", environment="test", debug=True)
+    return KhoraConfig(app_name="khora-test")
 
 
 # ===========================================================================
@@ -207,7 +207,7 @@ class TestSurrealDBResourceReuse:
         try:
             assert coord._relational._conn is conn
 
-            config = KhoraConfig(app_name="khora-test", environment="test", debug=True)
+            config = KhoraConfig(app_name="khora-test")
             config.storage.surrealdb = SurrealDBConfig(mode="memory")
 
             store = await coord.temporal_store("surrealdb", config)
