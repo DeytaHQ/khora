@@ -83,6 +83,15 @@ class Document:
     # reconstruct the original extraction intent without hardcoding defaults.
     extraction_params: dict[str, Any] | None = None
 
+    # Replace-mirror reconciler marker (#1430). Non-None means the external_id
+    # replace path committed Postgres (chunks + COMPLETED status) but the
+    # post-commit graph mirror failed - the graph is known-diverged for this
+    # document until the reconciler (or the next successful replace) heals it.
+    # The status stays COMPLETED (#887: PG data is durable and consistent);
+    # readers who must not serve over a diverged graph check this field.
+    # Payload shape: khora.storage.replace_mirror.build_replace_mirror_payload.
+    graph_mirror_pending: dict[str, Any] | None = None
+
     # Maximum length for extraction_config_hash (matches DB column String(255))
     _EXTRACTION_HASH_MAX_LEN: int = field(default=255, init=False, repr=False, compare=False)
 

@@ -2100,11 +2100,13 @@ class VectorCypherEngine:
             logger.warning(
                 "replace_document_extraction graph-mirror phase failed after "
                 "PG commit for document {} in namespace {}: {}. Returning "
-                "RememberResult with degradation; the next successful "
-                "replace heals the graph (#884).",
+                "RememberResult with degradation; pending marker persisted={} "
+                "- the reconciler (or the next successful replace) heals the "
+                "graph (#884, #1430).",
                 new_document.id,
                 namespace_id,
                 graph_mirror_err.original_exception_type,
+                graph_mirror_err.pending_persisted,
             )
             return RememberResult(
                 document_id=new_document.id,
@@ -2125,6 +2127,10 @@ class VectorCypherEngine:
                             "reason": "graph_mirror_failed_after_pg_commit",
                             "exception": graph_mirror_err.original_exception_type,
                             "issue": "884",
+                            # #1430: True when the computed graph plan was
+                            # durably queued on documents.graph_mirror_pending
+                            # for the replace-mirror reconciler.
+                            "pending_persisted": graph_mirror_err.pending_persisted,
                         },
                         *replace_diagnostics.get("degradations", []),
                     ],
@@ -2221,9 +2227,15 @@ class VectorCypherEngine:
                 await reset_rel_source_chunk_ids(namespace_id, rel_reset_rows)
 
         replace_metadata: dict[str, Any] = {"replaced": True, "old_document_id": str(existing.id)}
-        mirror_degradations = replace_diagnostics.get("degradations")
+        # Chunk-mirror degradations from step 4 plus #1430 reconciler-drain
+        # degradations (pending markers from prior failed replaces in this
+        # namespace that still could not be replayed).
+        mirror_degradations = [
+            *replace_diagnostics.get("degradations", []),
+            *replace_result.degradations,
+        ]
         if mirror_degradations:
-            replace_metadata["degradations"] = list(mirror_degradations)
+            replace_metadata["degradations"] = mirror_degradations
         return RememberResult(
             document_id=replace_result.document_id,
             namespace_id=namespace_id,

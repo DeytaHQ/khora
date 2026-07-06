@@ -58,9 +58,12 @@ class GraphMirrorFailedAfterPGCommitError(StorageError):
     as a degradation on the user-facing result without losing the
     durable-write information PG already accepted.
 
-    Out of scope for this PR: a reconciler that replays the missing
-    graph work. Until that lands the next successful replace for the
-    same ``external_id`` heals the row via the same MERGE / retire path.
+    ``pending_persisted`` (#1430) reports whether the computed graph plan
+    was durably queued on ``documents.graph_mirror_pending`` for the
+    replace-mirror reconciler. When ``False`` (marker write itself
+    failed), behavior degrades to the original #884 contract: the next
+    successful replace for the same ``external_id`` heals the row via
+    the same MERGE / retire path.
     """
 
     def __init__(
@@ -69,9 +72,11 @@ class GraphMirrorFailedAfterPGCommitError(StorageError):
         document_id: UUID,
         namespace_id: UUID,
         original: BaseException,
+        pending_persisted: bool = False,
     ) -> None:
         self.document_id = document_id
         self.namespace_id = namespace_id
+        self.pending_persisted = pending_persisted
         # Surface the original exception class name so caller-side
         # observability (RememberResult.metadata) can record it without
         # importing the underlying backend's exception types.

@@ -34,6 +34,7 @@ from khora.core.models.document import DocumentSource
 from khora.core.models.recall import DocumentProjection
 from khora.exceptions import GraphMirrorFailedAfterPGCommitError
 from khora.storage.backends.base import PaginatedResult
+from khora.storage.replace_mirror import apply_replace_mirror_payload, build_replace_mirror_payload
 from khora.telemetry import get_collector, metric_counter, trace_span
 
 if TYPE_CHECKING:
@@ -46,6 +47,25 @@ if TYPE_CHECKING:
         GraphBackendProtocol,
         RelationalBackendProtocol,
         VectorBackendProtocol,
+    )
+
+
+def _replace_partial_failure_counter() -> Any:
+    """Counter for replace graph-mirror divergence (#884) and failed
+    reconcile re-attempts (#1430) - same counter for both, mirroring how the
+    dream reconciler shares ``khora.dream.graph_mirror.partial_failure``
+    between the original mirror failure and its drain (#1272)."""
+    return metric_counter(
+        "khora.storage.replace_document.partial_failure",
+        unit="1",
+        description=(
+            "PG transaction committed (chunks + COMPLETED) but "
+            "the post-commit graph-mirror phase of "
+            "replace_document_extraction raised (or a #1430 reconcile "
+            "re-attempt of the persisted plan failed). The graph is "
+            "in a partial-mirror state; the plan is queued on "
+            "documents.graph_mirror_pending for the reconciler."
+        ),
     )
 
 
@@ -156,6 +176,10 @@ class ReplaceResult:
     lifecycle — chunks hard-replaced in pgvector, new entities/relationships
     persisted to the graph, and orphaned/surviving graph state retired or
     remapped.
+
+    ``degradations`` carries ADR-001 entries from the pre-replace reconciler
+    drain (#1430): pending graph-mirror markers from PRIOR failed replaces in
+    the same namespace that could not be replayed. Empty on the happy path.
     """
 
     document_id: UUID
@@ -166,6 +190,7 @@ class ReplaceResult:
     entities_retired: int
     relationships_created: int
     relationships_retired: int
+    degradations: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -686,9 +711,17 @@ class StorageCoordinator:
            is incremented, and the original exception is wrapped in
            ``GraphMirrorFailedAfterPGCommitError`` so the caller can
            record the divergence on its user-facing result instead of
-           presenting the failure as a full rollback. A future PR will
-           introduce a partial-state status + reconciler for the
-           graph-pending case.
+           presenting the failure as a full rollback. Additionally (#1430,
+           modeled on the dream reconciler #1272) the computed graph plan
+           is persisted to ``documents.graph_mirror_pending`` so the
+           divergence is durable-recoverable: the reconciler drain that
+           runs at the start of the next replace in the same namespace
+           (or an explicit ``reconcile_replace_graph_mirror()`` call)
+           replays it. The status deliberately stays ``COMPLETED`` (#887:
+           PG data is durable and consistent; a FAILED stamp would
+           contradict fully-written data and re-trigger self-heal paths) -
+           the non-NULL ``graph_mirror_pending`` marker is the
+           "flagged-completed" signal that the graph is known-diverged.
 
         Args:
             namespace_id: Namespace owning the document.
@@ -710,6 +743,15 @@ class StorageCoordinator:
             raise RuntimeError("Vector backend not configured")
         if not self._graph:
             raise RuntimeError("Graph backend not configured")
+
+        # 0. Reconciler drain (#1430, same trigger shape as the dream
+        #    reconciler #1272 which drains at the start of the next apply
+        #    run): replay any pending graph-mirror markers left by prior
+        #    failed replaces in this namespace BEFORE prefetching graph
+        #    state, so the retire / survive sets below are computed against
+        #    a converged graph. A still-failing marker stays queued and
+        #    surfaces as a degradation on the ReplaceResult.
+        drain_degradations = await self.reconcile_replace_graph_mirror(namespace_id)
 
         try:
             # 1. Prefetch old graph state and compute retire / survive sets
@@ -819,6 +861,27 @@ class StorageCoordinator:
                     # extraction: keep the edge, strip the old document id.
                     relationship_survivor_strip_ids.append(UUID(rel_id))
 
+            # Net-new sets are pure Python - computed here (before any
+            # mutation) so the #1430 pending-mirror payload can capture them
+            # even when the very first graph verb fails. The extracted
+            # entities/relationships are not durably stored anywhere else
+            # once the graph phase fails.
+            net_new_entities = [e for e in new_entities if (e.name, e.entity_type) not in entity_survivor_keys]
+            old_relationship_keys = {
+                (
+                    UUID(rec["source_entity_id"]),
+                    UUID(rec["target_entity_id"]),
+                    rec["relationship_type"],
+                )
+                for rec in old_relationship_records
+            }
+            net_new_relationships = [
+                r
+                for r in new_relationships
+                if (r.source_entity_id, r.target_entity_id, _sanitize_neo4j_label(r.relationship_type))
+                not in old_relationship_keys
+            ]
+
             # 2. Postgres transaction: atomic chunk hard-replace.
             #    Embedding (OpenAI roundtrip) happened before this block - the
             #    transaction deliberately wraps only DB work (ADR §Performance).
@@ -860,6 +923,21 @@ class StorageCoordinator:
                     await self._vector.create_chunks_batch(new_chunks)
                 new_document.mark_completed(len(new_chunks), len(new_entities), 0)
                 await self._relational.update_document(new_document, session=txn.session)  # type: ignore[unresolved-attribute]
+                # Clear any stale #1430 pending-mirror marker atomically with
+                # the new content. A marker left by a PRIOR failed replace of
+                # this document describes a superseded extraction - replaying
+                # it after this replace would inject stale entities. The
+                # update_document above deliberately does not touch the
+                # column (it is not in its column list), so clear explicitly.
+                new_document.graph_mirror_pending = None
+                partial_update = getattr(self._relational, "partial_update_document", None)
+                if partial_update is not None:
+                    await partial_update(
+                        new_document.id,
+                        namespace_id=namespace_id,
+                        session=txn.session,
+                        graph_mirror_pending=None,
+                    )
 
             # 3. Graph-side retirement / remap (after PG commits).  Order:
             #    retire -> remap -> upsert.  Retirement snapshots the current
@@ -911,7 +989,6 @@ class StorageCoordinator:
                         relationship_survivor_strip_ids, old_document_id, namespace_id
                     )
 
-                net_new_entities = [e for e in new_entities if (e.name, e.entity_type) not in entity_survivor_keys]
                 entities_created = 0
                 entities_updated = len(entity_survivor_remap_rows)
                 if net_new_entities:
@@ -919,20 +996,6 @@ class StorageCoordinator:
                     entities_created = sum(1 for _, is_new in upsert_results if is_new)
                     entities_updated += sum(1 for _, is_new in upsert_results if not is_new)
 
-                old_relationship_keys = {
-                    (
-                        UUID(rec["source_entity_id"]),
-                        UUID(rec["target_entity_id"]),
-                        rec["relationship_type"],
-                    )
-                    for rec in old_relationship_records
-                }
-                net_new_relationships = [
-                    r
-                    for r in new_relationships
-                    if (r.source_entity_id, r.target_entity_id, _sanitize_neo4j_label(r.relationship_type))
-                    not in old_relationship_keys
-                ]
                 relationships_created = 0
                 if net_new_relationships:
                     relationships_created = len(await self.create_relationships_batch(net_new_relationships))
@@ -945,21 +1008,51 @@ class StorageCoordinator:
                 # the caller can distinguish "graph mirror partial" from
                 # a full-rollback failure. No namespace_id label - cardinality
                 # rule (see CLAUDE.md).
-                metric_counter(
-                    "khora.storage.replace_document.partial_failure",
-                    unit="1",
-                    description=(
-                        "PG transaction committed (chunks + COMPLETED) but "
-                        "the post-commit graph-mirror phase of "
-                        "replace_document_extraction raised. The graph is "
-                        "now in a partial-mirror state; the next "
-                        "successful replace heals via MERGE / retire."
-                    ),
-                ).add(1)
+                _replace_partial_failure_counter().add(1)
+                # #1430: persist the computed graph plan as a durable
+                # pending-mirror marker so the reconciler can replay it.
+                # Best-effort - a failed marker write degrades back to the
+                # #884 behavior (observable via degradation, healed by the
+                # next successful replace) instead of masking graph_exc.
+                pending_persisted = False
+                try:
+                    payload = build_replace_mirror_payload(
+                        old_document_id=old_document_id,
+                        entity_retirement_rows=entity_retirement_rows,
+                        relationship_retirement_rows=relationship_retirement_rows,
+                        entity_survivor_remap_rows=entity_survivor_remap_rows,
+                        relationship_survivor_remap_rows=relationship_survivor_remap_rows,
+                        entity_survivor_strip_ids=entity_survivor_strip_ids,
+                        relationship_survivor_strip_ids=relationship_survivor_strip_ids,
+                        net_new_entities=net_new_entities,
+                        net_new_relationships=net_new_relationships,
+                        exception=graph_exc,
+                    )
+                    partial_update = getattr(self._relational, "partial_update_document", None)
+                    if partial_update is not None:
+                        rows = await partial_update(
+                            new_document.id,
+                            namespace_id=namespace_id,
+                            graph_mirror_pending=payload,
+                        )
+                        pending_persisted = rows > 0
+                        new_document.graph_mirror_pending = payload if pending_persisted else None
+                except Exception:
+                    logger.warning(
+                        "replace_document_extraction: failed to persist the "
+                        "graph_mirror_pending marker for document {} in "
+                        "namespace {}; divergence is observable via the #884 "
+                        "degradation but not durably queued for reconcile "
+                        "(#1430)",
+                        new_document.id,
+                        namespace_id,
+                        exc_info=True,
+                    )
                 raise GraphMirrorFailedAfterPGCommitError(
                     document_id=new_document.id,
                     namespace_id=namespace_id,
                     original=graph_exc,
+                    pending_persisted=pending_persisted,
                 ) from graph_exc
 
             return ReplaceResult(
@@ -971,6 +1064,7 @@ class StorageCoordinator:
                 entities_retired=entities_retired,
                 relationships_created=relationships_created,
                 relationships_retired=relationships_retired,
+                degradations=drain_degradations,
             )
 
         except Exception:
@@ -1002,6 +1096,120 @@ class StorageCoordinator:
                 namespace_id,
             )
             raise
+
+    async def reconcile_replace_graph_mirror(
+        self,
+        namespace_id: UUID,
+        *,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Replay pending replace graph-mirror markers for a namespace (#1430).
+
+        The replace-path equivalent of the dream reconciler's
+        ``_drain_graph_mirror_pending`` (#1272): each non-NULL
+        ``documents.graph_mirror_pending`` payload is a committed-but-
+        unmirrored replace whose graph plan is replayed here (idempotent -
+        see ``khora.storage.replace_mirror``) and cleared on success. A
+        still-failing marker stays queued, increments
+        ``khora.storage.replace_document.partial_failure``, and surfaces an
+        ADR-001 degradation entry. Runs automatically at the start of every
+        ``replace_document_extraction`` call; safe to invoke directly for
+        operator-driven repair.
+
+        Returns the degradation entries for markers that could not be
+        replayed (including a failed pending read). Never raises.
+        """
+        relational = self._relational
+        list_pending = getattr(relational, "list_documents_with_graph_mirror_pending", None)
+        partial_update = getattr(relational, "partial_update_document", None)
+        if relational is None or self._graph is None or list_pending is None or partial_update is None:
+            # Markers are only ever written on graph-backed stacks whose
+            # relational backend supports them (PostgreSQL); nothing to drain
+            # elsewhere.
+            return []
+
+        try:
+            pending_docs = await list_pending(namespace_id, limit=limit)
+        except Exception as exc:
+            # A failed pending read hides committed mirror lag - record it
+            # rather than silently returning empty (ADR-001, same shape as
+            # the dream drain's read guard).
+            _replace_partial_failure_counter().add(1)
+            logger.warning(
+                "replace mirror reconcile: pending read failed for namespace {} (mirror lag may be hidden): {}",
+                namespace_id,
+                exc,
+                exc_info=True,
+            )
+            return [
+                {
+                    "component": "coordinator.replace_mirror.reconcile",
+                    "reason": "graph_mirror_pending_read_failed",
+                    "detail": "list_documents_with_graph_mirror_pending raised",
+                    "exception": type(exc).__name__,
+                }
+            ]
+        if not pending_docs:
+            return []
+
+        degradations: list[dict[str, Any]] = []
+        for doc in pending_docs:
+            payload = doc.graph_mirror_pending
+            if not payload:
+                continue
+            try:
+                counts = await apply_replace_mirror_payload(self, payload, namespace_id=namespace_id)
+            except Exception as exc:
+                _replace_partial_failure_counter().add(1)
+                logger.warning(
+                    "replace mirror reconcile failed for document {} in namespace {} (still queued): {}",
+                    doc.id,
+                    namespace_id,
+                    exc,
+                    exc_info=True,
+                )
+                degradations.append(
+                    {
+                        "component": "coordinator.replace_mirror.reconcile",
+                        "reason": "graph_mirror_reconcile_failed",
+                        "detail": f"document_id={doc.id}",
+                        "exception": type(exc).__name__,
+                        "issue": "1430",
+                    }
+                )
+                continue
+            try:
+                await partial_update(doc.id, namespace_id=namespace_id, graph_mirror_pending=None)
+            except Exception as exc:
+                # Replay succeeded but the clear failed: the marker stays
+                # queued and the (idempotent) plan is replayed again on the
+                # next drain. Record it so the lag is observable (ADR-001).
+                _replace_partial_failure_counter().add(1)
+                logger.warning(
+                    "replace mirror reconciled for document {} in namespace {} but "
+                    "clearing the marker failed (will replay again): {}",
+                    doc.id,
+                    namespace_id,
+                    exc,
+                    exc_info=True,
+                )
+                degradations.append(
+                    {
+                        "component": "coordinator.replace_mirror.reconcile",
+                        "reason": "graph_mirror_pending_clear_failed",
+                        "detail": f"document_id={doc.id}",
+                        "exception": type(exc).__name__,
+                        "issue": "1430",
+                    }
+                )
+                continue
+            logger.info(
+                "replace mirror reconciled for document {} in namespace {}: {}",
+                doc.id,
+                namespace_id,
+                counts,
+            )
+        return degradations
 
     async def count_documents(self, namespace_id: UUID) -> int:
         """Count documents in a namespace.

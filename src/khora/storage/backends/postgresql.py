@@ -537,6 +537,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
             "error_message",
             "extraction_config_hash",
             "extraction_params",
+            "graph_mirror_pending",
             "external_id",
             "processed_at",
             "source_timestamp",
@@ -601,6 +602,31 @@ class PostgreSQLBackend(AsyncSessionMixin):
             result = await own_session.execute(stmt)
             await own_session.commit()
             return result.rowcount or 0
+
+    async def list_documents_with_graph_mirror_pending(
+        self,
+        namespace_id: UUID,
+        *,
+        limit: int = 50,
+    ) -> list[Document]:
+        """List documents whose replace graph-mirror is pending replay (#1430).
+
+        Backed by the Postgres-only partial index
+        ``ix_documents_graph_mirror_pending`` (migration 051), so the probe
+        costs O(pending markers), not O(documents). Oldest first so the
+        reconciler drains in failure order.
+        """
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(DocumentModel)
+                .where(
+                    DocumentModel.namespace_id == namespace_id,
+                    DocumentModel.graph_mirror_pending.is_not(None),
+                )
+                .order_by(DocumentModel.updated_at)
+                .limit(limit)
+            )
+            return [self._document_model_to_domain(m) for m in result.scalars().all()]
 
     @retry_on_deadlock
     async def delete_document(self, document_id: UUID, *, namespace_id: UUID) -> bool:
@@ -893,6 +919,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
             error_message=model.error_message,
             extraction_config_hash=model.extraction_config_hash,
             extraction_params=model.extraction_params,
+            graph_mirror_pending=getattr(model, "graph_mirror_pending", None),
             external_id=model.external_id,
             created_at=model.created_at,
             updated_at=model.updated_at,

@@ -160,6 +160,13 @@ class DocumentModel(Base):
     # Extraction parameters for deferred/crash-recovery processing.
     extraction_params: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
+    # Replace-mirror reconciler marker (#1430, modeled on
+    # khora_dream_runs.graph_mirror_pending from #1272). Non-NULL means the
+    # external_id replace path committed PG but the post-commit graph mirror
+    # failed; the payload carries the computed graph plan for replay. Indexed
+    # via migration 051 (Postgres-only partial index).
+    graph_mirror_pending: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(
