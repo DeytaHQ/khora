@@ -82,3 +82,24 @@ async def test_namespace_scoped_subscription_fires_on_resolved_row_id(tmp_path: 
             MemoryEvent.entity_created(namespace_id=uuid4(), entity_id=uuid4(), data={"name": "elsewhere"})
         )
         assert fired == [], "events from another namespace must not reach a scoped subscription"
+
+        # #1427: re-version the namespace. Same stable id, NEW active row id -
+        # the dispatcher's cached stable→row mapping is now stale. Post-fix the
+        # scope check re-resolves on the failed comparison and still fires.
+        ns_v2 = await kb.storage.create_namespace_version(previous_version=ns)
+        assert ns_v2.namespace_id == ns.namespace_id, "re-versioning must keep the stable namespace_id"
+        row_id_v2 = await kb.storage.resolve_namespace(ns.namespace_id)
+        assert row_id_v2 != row_id, "re-versioning must activate a NEW row id (anti-vacuity)"
+
+        fired.clear()
+        await kb.storage.dispatch_hook(
+            MemoryEvent.entity_created(namespace_id=row_id_v2, entity_id=uuid4(), data={"name": "Pierre Curie"})
+        )
+        assert len(fired) == 1, "stable-scoped subscription must survive create_namespace_version() (#1427)"
+
+        # Foreign events remain rejected after the cache self-healed.
+        fired.clear()
+        await kb.storage.dispatch_hook(
+            MemoryEvent.entity_created(namespace_id=uuid4(), entity_id=uuid4(), data={"name": "still elsewhere"})
+        )
+        assert fired == [], "namespace isolation must hold after re-versioning"
