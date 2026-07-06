@@ -1200,6 +1200,17 @@ class PgVectorBackend(AsyncSessionMixin):
         UPDATE branch, so ``(xmax = 0)`` reliably distinguishes "new" from
         "matched + updated" without a second round-trip. Matches the Neo4j
         adapter's MERGE semantics (#719).
+
+        Each input ``entity.id`` is synced in place to the persisted
+        canonical row id (#1429). ``ON CONFLICT DO UPDATE`` keeps the
+        existing row's ``id``, so an entity re-mentioned by a later document
+        arrives with a fresh extraction-time UUID that never lands in the
+        table. Callers hold references to the input ``entities`` list and
+        build relationship endpoints from ``entity.id`` - without the sync,
+        those endpoints point at the throwaway UUID and the ``relationships``
+        FK constraint aborts the ingest on graph-less chronicle+PG stacks.
+        The Neo4j (``neo4j.py``) and sqlite_lance (#806) adapters do the same
+        in-place sync for the same reason.
         """
         if not entities:
             return []
@@ -1211,10 +1222,11 @@ class PgVectorBackend(AsyncSessionMixin):
             sorted_entities = sorted(entities, key=lambda e: (str(e.namespace_id), e.name, str(e.entity_type)))
             key1, key2 = _namespace_lock_keys(namespace_id)
 
-            # (name, entity_type) → is_new. Within a single namespace batch
-            # the uq_entities_namespace_name_type constraint reduces to this
-            # pair, so it uniquely identifies each affected row.
-            is_new_by_key: dict[tuple[str, str], bool] = {}
+            # (name, entity_type) → (canonical row id, is_new). Within a
+            # single namespace batch the uq_entities_namespace_name_type
+            # constraint reduces to this pair, so it uniquely identifies
+            # each affected row.
+            row_by_key: dict[tuple[str, str], tuple[UUID, bool]] = {}
 
             async with self._get_session() as session:
                 # Acquire namespace-scoped advisory lock for the duration of this
@@ -1271,20 +1283,32 @@ class PgVectorBackend(AsyncSessionMixin):
                     # PG idiom for distinguishing INSERT vs UPDATE outcomes
                     # within a single upsert statement.
                     stmt = stmt.returning(
+                        EntityModel.id,
                         EntityModel.name,
                         EntityModel.entity_type,
                         literal_column("(xmax = 0)").label("is_new"),
                     )
                     result = await session.execute(stmt)
                     for row in result:
-                        is_new_by_key[(row.name, row.entity_type)] = bool(row.is_new)
+                        row_by_key[(row.name, row.entity_type)] = (row.id, bool(row.is_new))
 
                 # Single commit for all sub-batches under the advisory lock
                 await session.commit()
 
-            # Default to True for any input whose key didn't come back in
+            # Sync each input entity's id to the canonical stored row id
+            # (#1429) - on the ON CONFLICT DO UPDATE branch the row keeps its
+            # original id, not the fresh extraction-time UUID. Default to
+            # is_new=True for any input whose key didn't come back in
             # RETURNING (defensive — shouldn't happen in practice).
-            return [(entity, is_new_by_key.get((entity.name, entity.entity_type), True)) for entity in sorted_entities]
+            results: list[tuple] = []
+            for entity in sorted_entities:
+                stored = row_by_key.get((entity.name, entity.entity_type))
+                if stored is not None:
+                    entity.id, is_new = stored
+                else:
+                    is_new = True
+                results.append((entity, is_new))
+            return results
 
         return await _retry_on_deadlock(_do_upsert)
 

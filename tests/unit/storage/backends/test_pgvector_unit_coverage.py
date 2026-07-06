@@ -888,3 +888,77 @@ class TestDeleteChunksByDocumentWithExternalSession:
         out = await b.delete_chunks_by_document(uuid4(), namespace_id=uuid4(), session=session)
         assert out == 9
         session.commit.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# upsert_entities_batch — canonical id sync (#1429)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestUpsertEntitiesBatchIdSync:
+    """Issue #1429: ``ON CONFLICT DO UPDATE`` keeps the existing row's id,
+    so the returned entities must have ``entity.id`` synced in place to the
+    canonical stored id. Relationships built from the extraction-time UUID
+    otherwise violate the ``relationships`` FK on graph-less chronicle+PG.
+    """
+
+    @staticmethod
+    def _returning_row(row_id, name, entity_type, is_new):
+        row = MagicMock()
+        row.id = row_id
+        row.name = name
+        row.entity_type = entity_type
+        row.is_new = is_new
+        return row
+
+    @pytest.mark.asyncio
+    async def test_conflicting_entity_id_synced_to_existing_row(self) -> None:
+        from khora.core.models import Entity
+
+        ns = uuid4()
+        existing_row_id = uuid4()
+        entity = Entity(namespace_id=ns, name="Sarah Chen", entity_type="PERSON")
+        extraction_time_id = entity.id
+        assert extraction_time_id != existing_row_id
+
+        session = AsyncMock()
+        # 1st execute: advisory lock; 2nd: INSERT ... RETURNING rows.
+        session.execute = AsyncMock(
+            side_effect=[
+                MagicMock(),
+                [self._returning_row(existing_row_id, "Sarah Chen", "PERSON", False)],
+            ]
+        )
+        backend = _backend_with_session(session)
+
+        results = await backend.upsert_entities_batch(ns, [entity])
+
+        assert results == [(entity, False)]
+        assert entity.id == existing_row_id, (
+            "Issue #1429 regression: entity.id must be synced to the "
+            "canonical stored row id after ON CONFLICT DO UPDATE"
+        )
+        session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_fresh_entity_keeps_id_and_is_new(self) -> None:
+        from khora.core.models import Entity
+
+        ns = uuid4()
+        entity = Entity(namespace_id=ns, name="Marcus Webb", entity_type="PERSON")
+        original_id = entity.id
+
+        session = AsyncMock()
+        session.execute = AsyncMock(
+            side_effect=[
+                MagicMock(),
+                [self._returning_row(original_id, "Marcus Webb", "PERSON", True)],
+            ]
+        )
+        backend = _backend_with_session(session)
+
+        results = await backend.upsert_entities_batch(ns, [entity])
+
+        assert results == [(entity, True)]
+        assert entity.id == original_id

@@ -666,6 +666,68 @@ async def test_chronicle_pg_persists_extracted_relationships(kb: Khora, namespac
     )
 
 
+async def test_chronicle_pg_relationship_to_reingested_entity(kb: Khora, namespace_id: UUID) -> None:
+    """Regression for issue #1429 (follow-up to the #1066 fix).
+
+    Doc 1 stores Sarah Chen. Doc 2 re-mentions Sarah Chen as the target of a
+    REPORTS_TO relationship. The pgvector ``upsert_entities_batch`` uses
+    ``ON CONFLICT DO UPDATE`` keyed on (namespace, name, entity_type), which
+    keeps the EXISTING row's id - but before the fix the returned Entity
+    objects kept their fresh extraction-time UUIDs, so the relationship's
+    endpoint bound an id that was never inserted and remember() aborted with
+    ``ForeignKeyViolationError`` on ``relationships_target_entity_id_fkey``.
+    The same two documents ingest cleanly on sqlite_lance (its adapter syncs
+    ``entity.id`` in place, #806).
+    """
+    _plan_extraction(
+        "Sarah Chen works",
+        entities=[("Sarah Chen", "PERSON"), ("Acme Corp", "ORGANIZATION")],
+        relationships=[("Sarah Chen", "Acme Corp", "WORKS_AT")],
+    )
+    _plan_extraction(
+        "Marcus Webb reports",
+        entities=[("Marcus Webb", "PERSON"), ("Sarah Chen", "PERSON")],
+        relationships=[("Marcus Webb", "Sarah Chen", "REPORTS_TO")],
+    )
+
+    async def _ingest(content: str) -> Any:
+        return await kb.remember(
+            content=content,
+            namespace=namespace_id,
+            entity_types=["PERSON", "ORGANIZATION"],
+            relationship_types=["WORKS_AT", "REPORTS_TO"],
+            expertise=_no_extraction_expertise(),
+        )
+
+    r1 = await _ingest("Sarah Chen works at Acme Corp.")
+    assert r1.relationships_created >= 1
+
+    # Before the fix this raised IntegrityError (ForeignKeyViolationError on
+    # relationships_target_entity_id_fkey) and aborted the ingest.
+    r2 = await _ingest("Marcus Webb reports to Sarah Chen.")
+    assert r2.relationships_created >= 1, (
+        "Issue #1429 regression: the REPORTS_TO edge pointing at the "
+        "re-mentioned entity was not persisted "
+        f"(relationships_created={r2.relationships_created})."
+    )
+    assert r2.relationships_skipped == 0
+
+    # Both relationships must be queryable and every endpoint must resolve
+    # to a persisted entity row (matching sqlite_lance behavior).
+    rels = await kb.storage.list_relationships(namespace_id, limit=100)
+    assert {r.relationship_type for r in rels} == {"WORKS_AT", "REPORTS_TO"}
+
+    ents = await kb.storage.list_entities(namespace_id, limit=100)
+    entity_ids = {e.id for e in ents}
+    for rel in rels:
+        assert rel.source_entity_id in entity_ids, f"dangling source on {rel.relationship_type}"
+        assert rel.target_entity_id in entity_ids, f"dangling target on {rel.relationship_type}"
+
+    # Sarah Chen merged onto the existing row - no duplicate entity.
+    # (Entity names are normalized to lowercase at ingest.)
+    assert sum(1 for e in ents if e.name.lower() == "sarah chen") == 1
+
+
 async def test_chronicle_concurrent_remember(kb: Khora, namespace_id: UUID) -> None:
     """5 concurrent ingests in one namespace, no integrity errors."""
     contents = [f"document number {i} mentions widget-{i}" for i in range(5)]
