@@ -2133,6 +2133,11 @@ class VectorCypherEngine:
                             "pending_persisted": graph_mirror_err.pending_persisted,
                         },
                         *replace_diagnostics.get("degradations", []),
+                        # #1430: reconciler-drain degradations from the same
+                        # call (prior documents' markers that could not be
+                        # replayed) - the failure path has no ReplaceResult
+                        # to carry them.
+                        *graph_mirror_err.drain_degradations,
                     ],
                 },
             )

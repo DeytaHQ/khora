@@ -1053,6 +1053,11 @@ class StorageCoordinator:
                     namespace_id=namespace_id,
                     original=graph_exc,
                     pending_persisted=pending_persisted,
+                    # The failure path returns no ReplaceResult, so the
+                    # exception is the only channel for the drain's own
+                    # degradations (prior documents' markers that could not
+                    # be replayed in this call).
+                    drain_degradations=drain_degradations,
                 ) from graph_exc
 
             return ReplaceResult(

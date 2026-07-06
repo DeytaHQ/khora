@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+    from typing import Any
     from uuid import UUID
 
     from khora.query import SearchMode
@@ -64,6 +65,12 @@ class GraphMirrorFailedAfterPGCommitError(StorageError):
     failed), behavior degrades to the original #884 contract: the next
     successful replace for the same ``external_id`` heals the row via
     the same MERGE / retire path.
+
+    ``drain_degradations`` carries any ADR-001 entries from the pre-replace
+    reconciler drain of the same call (prior documents' markers that could
+    not be replayed). On the success path those ride on
+    ``ReplaceResult.degradations``; on this failure path the exception is
+    the only channel back to the caller's user-facing result.
     """
 
     def __init__(
@@ -73,10 +80,12 @@ class GraphMirrorFailedAfterPGCommitError(StorageError):
         namespace_id: UUID,
         original: BaseException,
         pending_persisted: bool = False,
+        drain_degradations: list[dict[str, Any]] | None = None,
     ) -> None:
         self.document_id = document_id
         self.namespace_id = namespace_id
         self.pending_persisted = pending_persisted
+        self.drain_degradations = list(drain_degradations or [])
         # Surface the original exception class name so caller-side
         # observability (RememberResult.metadata) can record it without
         # importing the underlying backend's exception types.

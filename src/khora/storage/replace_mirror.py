@@ -166,6 +166,14 @@ async def apply_replace_mirror_payload(
     if graph is None:
         raise RuntimeError("Graph backend not configured")
 
+    # Boundary validation: the payload comes back from the database and could
+    # have been written by a newer khora (e.g. after a rollback). Refuse to
+    # run graph mutations against an unknown schema - the marker stays queued
+    # and surfaces as a reconcile degradation.
+    version = payload.get("version")
+    if version != REPLACE_MIRROR_PAYLOAD_VERSION:
+        raise ValueError(f"Unsupported replace graph-mirror payload version: {version!r}")
+
     old_document_id = UUID(str(payload["old_document_id"]))
 
     entities_retired = 0

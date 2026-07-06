@@ -362,6 +362,59 @@ class TestDrainAtReplaceStart:
         assert in_tx[0].kwargs["session"] is session
 
     @pytest.mark.asyncio
+    async def test_drain_failure_rides_the_exception_when_own_mirror_also_fails(self) -> None:
+        """Compound failure: the drain degrades AND the current replace's own
+        graph mirror fails. The failure path returns no ReplaceResult, so the
+        drain degradations must ride GraphMirrorFailedAfterPGCommitError."""
+        namespace_id = uuid4()
+        prior_doc = Document(
+            namespace_id=namespace_id,
+            content="prior",
+            graph_mirror_pending=build_replace_mirror_payload(
+                old_document_id=uuid4(),
+                entity_retirement_rows=[
+                    {
+                        "current_id": str(uuid4()),
+                        "snapshot_id": str(uuid4()),
+                        "namespace_id": str(namespace_id),
+                        "retired_at": "2026-07-06T00:00:00+00:00",
+                    }
+                ],
+                relationship_retirement_rows=[],
+                entity_survivor_remap_rows=[],
+                relationship_survivor_remap_rows=[],
+                entity_survivor_strip_ids=[],
+                relationship_survivor_strip_ids=[],
+                net_new_entities=[],
+                net_new_relationships=[],
+                exception=RuntimeError("prior failure"),
+            ),
+        )
+
+        rel_backend = _relational_backend()
+        rel_backend.list_documents_with_graph_mirror_pending = AsyncMock(return_value=[prior_doc])
+        vec_backend = _vector_backend()
+        # Retire fails for the drained payload AND for the current replace's
+        # own mirror (its prefetch reports an orphan below).
+        graph_backend = _graph_backend(old_entity_records=[_orphan_entity_record(namespace_id)])
+        graph_backend.retire_orphaned_entities_batch = AsyncMock(side_effect=RuntimeError("still down"))
+
+        coord, _ = _make_coordinator(relational=rel_backend, vector=vec_backend, graph=graph_backend)
+
+        with pytest.raises(GraphMirrorFailedAfterPGCommitError) as exc_info:
+            await coord.replace_document_extraction(
+                namespace_id=namespace_id,
+                old_document_id=uuid4(),
+                new_document=Document(namespace_id=namespace_id, content="new body"),
+                new_chunks=[],
+                new_entities=[],
+                new_relationships=[],
+            )
+
+        assert len(exc_info.value.drain_degradations) == 1
+        assert exc_info.value.drain_degradations[0]["reason"] == "graph_mirror_reconcile_failed"
+
+    @pytest.mark.asyncio
     async def test_drain_failure_surfaces_on_replace_result(self) -> None:
         """A still-failing prior marker degrades the current ReplaceResult
         instead of failing the (independent) replace."""
@@ -411,6 +464,23 @@ class TestDrainAtReplaceStart:
 
         assert len(result.degradations) == 1
         assert result.degradations[0]["reason"] == "graph_mirror_reconcile_failed"
+
+
+@pytest.mark.unit
+class TestPayloadVersionGate:
+    @pytest.mark.asyncio
+    async def test_apply_rejects_unknown_payload_version(self) -> None:
+        """A payload written by an unknown schema version must not run graph
+        mutations - it stays queued and degrades at the reconcile layer."""
+        graph = _graph_backend()
+        coord = StorageCoordinator(relational=MagicMock(), vector=None, graph=graph)
+        payload = {"version": 999, "old_document_id": str(uuid4())}
+
+        with pytest.raises(ValueError, match="payload version"):
+            await apply_replace_mirror_payload(coord, payload, namespace_id=uuid4())
+
+        graph.retire_orphaned_entities_batch.assert_not_awaited()
+        graph.upsert_entities_batch.assert_not_awaited()
 
 
 @pytest.mark.unit

@@ -412,3 +412,9 @@ class TestReplaceDocumentExtractionIntegration:
         assert reconciled is not None
         assert reconciled.graph_mirror_pending is None
         assert await coord.reconcile_replace_graph_mirror(namespace_id) == []
+        # The clear must write SQL NULL, not JSON 'null' (JSONB
+        # none_as_null=True) - otherwise the IS NOT NULL drain probe and the
+        # partial index would match the "cleared" row forever.
+        rel_backend = coord._relational
+        still_pending = await rel_backend.list_documents_with_graph_mirror_pending(namespace_id)
+        assert still_pending == []
