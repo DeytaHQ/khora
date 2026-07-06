@@ -31,8 +31,6 @@
 # Any field can be overridden via env vars (e.g. KHORA_LLM_MODEL=gpt-4o).
 
 app_name: khora
-environment: development
-debug: false
 
 # =============================================================================
 # Storage — SQLite (relational + graph) + LanceDB (vectors), both in-process

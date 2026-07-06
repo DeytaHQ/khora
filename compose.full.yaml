@@ -26,7 +26,6 @@ services:
       KHORA_HOST: "0.0.0.0"
       KHORA_PORT: "8000"
       KHORA_LOG_LEVEL: "${KHORA_LOG_LEVEL:-INFO}"
-      KHORA_ENVIRONMENT: "${KHORA_ENVIRONMENT:-development}"
       KHORA_DATABASE_URL: "postgresql://khora:khora@postgres:5432/khora"
       KHORA_NEO4J_URL: "bolt://neo4j:pleaseletmein@neo4j:7687"
       KHORA_AUTH_ENABLED: "${KHORA_AUTH_ENABLED:-false}"

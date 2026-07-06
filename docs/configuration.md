@@ -78,8 +78,6 @@ go.
 | `KHORA_DATABASE_URL` | str | - | PostgreSQL URL (shortcut for `storage.postgresql_url`). |
 | `KHORA_NEO4J_URL` | str | - | Neo4j URL (shortcut for `storage.graph.url`). |
 | `KHORA_LLM_EXTRACTION_MODEL` | str | - | Override extraction model (shortcut for `llm.extraction_model`). |
-| `KHORA_DEBUG` | bool | `false` | Enable debug-level logging. |
-| `KHORA_ENVIRONMENT` | str | `development` | `development`, `staging`, or `production`. |
 | `KHORA_APP_NAME` | str | `khora` | Used in logs and telemetry. |
 
 ## Storage

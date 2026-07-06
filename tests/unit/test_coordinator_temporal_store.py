@@ -21,7 +21,7 @@ from khora.storage.coordinator import StorageCoordinator
 @pytest.fixture
 def config() -> KhoraConfig:
     """A real KhoraConfig (offline, no DB)."""
-    return KhoraConfig(app_name="khora-test", environment="test", debug=True)
+    return KhoraConfig(app_name="khora-test")
 
 
 def _make_store() -> MagicMock:

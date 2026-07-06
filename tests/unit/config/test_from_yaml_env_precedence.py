@@ -1,4 +1,4 @@
-"""Config tests for #897 (env-var precedence in from_yaml) and #908 (dead auth_enabled removal)."""
+"""Config tests for #897 (env-var precedence in from_yaml) and #908/#1432 (dead field removal)."""
 
 from __future__ import annotations
 
@@ -63,3 +63,35 @@ class TestAuthEnabledRemoved:
         # removed kwarg now raises rather than being silently dropped.
         with pytest.raises(pydantic.ValidationError):
             KhoraConfig(auth_enabled=True)  # type: ignore[call-arg]
+
+
+@pytest.mark.unit
+class TestEnvironmentDebugRemoved:
+    """#1432: environment / debug were dead fields read by nothing. Removed.
+
+    Same removal pattern as #908's auth_enabled: field gone from the model,
+    the removed constructor kwarg raises (extra='forbid'), but a stale
+    KHORA_ENVIRONMENT / KHORA_DEBUG env var (e.g. an old compose file) is
+    ignored rather than breaking config construction.
+    """
+
+    @pytest.mark.parametrize("field", ["environment", "debug"])
+    def test_field_not_on_model(self, field: str) -> None:
+        assert field not in KhoraConfig.model_fields
+
+    def test_constructing_with_environment_rejected(self) -> None:
+        with pytest.raises(pydantic.ValidationError):
+            KhoraConfig(environment="production")  # type: ignore[call-arg]
+
+    def test_constructing_with_debug_rejected(self) -> None:
+        with pytest.raises(pydantic.ValidationError):
+            KhoraConfig(debug=True)  # type: ignore[call-arg]
+
+    def test_stale_env_vars_do_not_break_construction(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("KHORA_ENVIRONMENT", "production")
+        monkeypatch.setenv("KHORA_DEBUG", "true")
+
+        config = KhoraConfig()
+
+        assert not hasattr(config, "environment")
+        assert not hasattr(config, "debug")

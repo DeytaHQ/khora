@@ -2130,15 +2130,6 @@ class KhoraConfig(BaseSettings):
         default="khora",
         description="Application name",
     )
-    environment: str = Field(
-        default="development",
-        description="Environment: development, staging, or production",
-    )
-    debug: bool = Field(
-        default=False,
-        description="Enable debug mode",
-    )
-
     # Database for Khora internal state (shortcuts for storage.* URLs)
     # These can be set via KHORA_DATABASE_URL and KHORA_NEO4J_URL environment variables
     # Programmatic values take priority over environment variables
