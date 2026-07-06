@@ -331,6 +331,19 @@ class TestAttachRelevanceScores:
         attach_relevance_scores(results, raw_cosine_by_id={cid: 0.73})
         assert results[0].rrf_score == 0.73
 
+    def test_negative_cosine_clamped_to_zero_on_all_branches(self) -> None:
+        """A negative cosine (opposite-direction embedding) displays as 0.0 on
+        the map-lookup and legacy vector_score branches, matching the
+        embedding-computed branch - bounded relevance, not signed similarity."""
+        cid = uuid4()
+        mapped = [FusedResult(item_id=cid, item="m", rrf_score=0.02, vector_score=0.01)]
+        attach_relevance_scores(mapped, raw_cosine_by_id={cid: -0.4})
+        assert mapped[0].rrf_score == 0.0
+
+        legacy = [FusedResult(item_id=uuid4(), item="l", rrf_score=0.02, vector_score=-0.2)]
+        attach_relevance_scores(legacy)
+        assert legacy[0].rrf_score == 0.0
+
     def test_mixed_vector_graph_display_bounded(self) -> None:
         """Graph-only display never exceeds a vector chunk's cosine unless its
         own computed cosine actually does; sorting by score does not move the

@@ -226,10 +226,12 @@ def attach_relevance_scores(
 
     for r in results:
         if raw_cosine_by_id is not None and r.item_id in raw_cosine_by_id:
-            r.rrf_score = raw_cosine_by_id[r.item_id]
+            # Clamp like the embedding-computed branch below: the display
+            # contract is a bounded relevance signal, not a signed similarity.
+            r.rrf_score = max(raw_cosine_by_id[r.item_id], 0.0)
             continue
         if raw_cosine_by_id is None and r.vector_score is not None:
-            r.rrf_score = r.vector_score
+            r.rrf_score = max(r.vector_score, 0.0)
             continue
         if r.vector_score is not None or r.graph_score is not None:
             embedding = getattr(r.item, "embedding", None)
