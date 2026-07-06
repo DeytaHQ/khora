@@ -125,11 +125,13 @@ def _patch_llm(monkeypatch: pytest.MonkeyPatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _expertise_for(engine: str) -> ExpertiseConfig:
+def _expertise_for(engine: str) -> ExpertiseConfig | None:
     """Disable per-chunk event/fact extraction on Chronicle to keep the
     test fast. The ``source_timestamp`` round-trip is independent of
-    those channels.
+    those channels. Skeleton refuses non-None expertise (#1431).
     """
+    if engine == "skeleton":
+        return None
     if engine == "chronicle":
         return ExpertiseConfig(
             name=f"contract-859-{engine}",
