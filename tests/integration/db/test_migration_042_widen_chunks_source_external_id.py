@@ -69,7 +69,7 @@ pytestmark = pytest.mark.integration
 
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "src" / "khora" / "db" / "migrations"
-_HEAD = "051_documents_graph_mirror_pending"
+_HEAD = "052_entities_source_chunk_ids_gin"
 _PREV = "041_khora_chunks_denormalized_columns"
 
 
