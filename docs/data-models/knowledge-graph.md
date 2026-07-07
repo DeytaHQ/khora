@@ -189,7 +189,17 @@ class Relationship:
     confidence: float = 1.0
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    # Populated at recall time (denormalized endpoint names for display)
+    source_entity_name: str | None = None
+    target_entity_name: str | None = None
 ```
+
+`source_entity_name` / `target_entity_name` are populated by the recall path so callers can render an edge without a second entity lookup.
+
+### Bi-temporal soft-delete columns (read-active since #1272)
+
+The `RelationshipModel` ORM (not the dataclass above) carries three tombstone columns added in migration 033 (#653): `valid_to`, `invalidated_at`, `invalidated_by`. These are distinct from the `valid_until` temporal window - non-NULL means the edge is dead. They are **active on read**: pgvector's `_relationship_live_filter()` filters `valid_to IS NULL AND invalidated_at IS NULL AND (valid_until IS NULL OR valid_until > now())`, and Neo4j filters `valid_until` in lockstep (dream-apply mirrors the three PG tombstones onto the graph's single `valid_until`). Entities use only the `valid_until` window (`_entity_live_filter()`), not the tombstone triple. These live on the ORM model; the lean `Relationship` dataclass above intentionally does not carry them.
 
 ### Relationship Types
 
@@ -307,6 +317,12 @@ Entities become nodes, relationships become edges:
 })-[:INVOLVES]->(:Entity {name: "Einstein"})
 ```
 
+The Cypher above is illustrative. In practice `:Entity` nodes and their edges also carry a `valid_until` property that the graph-side recall filter uses (`neo4j.py`) - nodes/edges shown without it read as always-live. Beyond the caller-defined semantic verbs, the graph carries several system verbs and node labels:
+
+- `CO_OCCURS_WITH` - the generic co-occurrence edge written by KET-RAG selective extraction and by expansion-time relationship inference.
+- `[:SUPERSEDES]` edges pointing at `:EntityVersion` snapshot nodes - traversed by CHANGE / point-in-time recall to reconstruct an entity's history.
+- `:Community` nodes with `[:HAS_MEMBER]` edges - written by the dream community-summary op (#1276).
+
 ## Source Tracking
 
 All graph elements track their sources:
@@ -414,6 +430,8 @@ DO UPDATE SET description = EXCLUDED.description, ...
 ```
 
 The dedup migration is irreversible. All entity upserts use this constraint for atomic create-or-update semantics.
+
+**Canonical-id sync on re-mention (#1429).** A re-mentioned entity arrives with a throwaway extraction-time UUID that never lands in the table: `ON CONFLICT (namespace_id, name, entity_type) DO UPDATE` keeps the *existing* row's `id`, and `upsert_entities_batch` syncs each input entity's `id` in place to the persisted canonical id (derived from the `RETURNING` row on pgvector; Neo4j and sqlite_lance apply the same remap). This matters because callers build relationship endpoints from `entity.id` - without the sync those FKs would point at the throwaway UUID and abort ingest. `is_new` is read from Postgres `xmax = 0` in the same `RETURNING`.
 
 ## Deduplication
 

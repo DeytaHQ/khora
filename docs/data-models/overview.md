@@ -283,6 +283,8 @@ Namespace
     |-- has many --> MemoryEvent
 ```
 
+> **Recall projection layer.** The models above are the storage-side models. `kb.recall()` returns a separate JSON-serializable projection layer (`RecallResult`, `RecallChunk`, `RecallEntity`, `RecallRelationship`, `DocumentProjection`) in `khora.core.models.recall`. Two contracts to know: chunk **order** is the authoritative ranking and `chunk.score` is an absolute cosine (0.0 = "no vector measurement", not "irrelevant") - do not re-sort by `score` (#1433); and `connected_entity_ids == []` means **unknown**, not "no edges". See [Recall semantics](../query-engine/recall-semantics.md).
+
 ## Working with Models
 
 ### Creating and Storing
