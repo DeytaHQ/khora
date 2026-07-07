@@ -153,14 +153,35 @@ def _namespace_lock_keys(namespace_id: UUID) -> tuple[int, int]:
     )
 
 
+def _is_retryable_db_error(exc: BaseException) -> bool:
+    """True for transient DB errors worth retrying on a fresh connection.
+
+    - Deadlocks: Postgres aborts one side; a retry usually wins the lock.
+    - Dropped connection: a pooled connection closed while idle (e.g. during a
+      long extraction phase between ingest batches) surfaces as
+      ``InterfaceError: connection is closed`` on next use. SQLAlchemy
+      invalidates the dead connection, so a retry - each retried call opens its
+      own session - checks out a fresh one. ``pool_pre_ping`` does not cover
+      this: the drop can land after the checkout ping, on first use.
+    """
+    if isinstance(exc, sa.exc.DBAPIError) and exc.connection_invalidated:
+        return True
+    msg = str(exc).lower()
+    return "deadlock" in msg or "connection is closed" in msg or "connection was closed" in msg
+
+
 async def _retry_on_deadlock(coro_fn, *args, **kwargs):
-    """Retry an async operation on deadlock with exponential backoff."""
+    """Retry an async DB op on deadlock or a dropped (stale) connection.
+
+    Each retried call must open its own session so the retry checks out a fresh
+    connection - all pgvector call sites do. See ``_is_retryable_db_error``.
+    """
     async for attempt in AsyncRetrying(
         stop=stop_after_attempt(_DEADLOCK_MAX_RETRIES),
         wait=wait_exponential(multiplier=0.1, min=0.1, max=0.4),
-        retry=retry_if_exception(lambda e: "deadlock" in str(e).lower()),
+        retry=retry_if_exception(_is_retryable_db_error),
         before_sleep=lambda retry_state: logger.warning(
-            "Retrying after deadlock (attempt {}): {!s}",
+            "Retrying transient DB error (attempt {}): {!s}",
             retry_state.attempt_number,
             retry_state.outcome.exception() if retry_state.outcome and retry_state.outcome.failed else "unknown",
         ),
