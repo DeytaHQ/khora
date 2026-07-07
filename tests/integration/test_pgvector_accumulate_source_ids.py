@@ -323,6 +323,20 @@ async def test_list_relationships_filters_by_between_entity_ids(backend: PgVecto
     # 4. Empty list → nothing.
     assert await backend.list_relationships(namespace_id, between_entity_ids=[]) == []
 
+    # 5. Composes with relationship_type (AND): matching type + [A, B] → exactly A→B.
+    composed = await backend.list_relationships(
+        namespace_id, relationship_type="KNOWS", between_entity_ids=[ent_a.id, ent_b.id]
+    )
+    assert _edges(composed) == {(ent_a.id, ent_b.id)}
+
+    # 6. Composes with relationship_type (AND): non-matching type + [A, B] → nothing (in-set edge excluded).
+    assert (
+        await backend.list_relationships(
+            namespace_id, relationship_type="WORKS_WITH", between_entity_ids=[ent_a.id, ent_b.id]
+        )
+        == []
+    )
+
 
 # =========================================================================
 # Single path (create_entity / _upsert_entity)
