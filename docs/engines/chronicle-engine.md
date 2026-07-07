@@ -210,7 +210,7 @@ The `should_abstain` flag is passive - Chronicle still returns chunks even when 
 
 The confidence score is calibrated: `0.8 * clip01(top_cosine / target_cosine) + 0.2 * clip01(top_score_gap / target_gap)`.
 
-Thresholds are tunable via `ChronicleEngine` kwargs: `abstention_min_chunks`, `abstention_min_top_score`, `abstention_combined_threshold`.
+Thresholds are tunable via `KhoraConfig.query.abstention_*` (env `KHORA_QUERY_ABSTENTION_*`), which is the source of truth since #1331; the `ChronicleEngine(...)` kwargs (`abstention_mode`, `abstention_min_chunks`, `abstention_min_top_score`, `abstention_combined_threshold`, the three `abstention_weight_*`) override per-instance and inherit from config when left `None`.
 
 ## Configuration
 
@@ -222,6 +222,13 @@ Chronicle respects standard `KHORA_QUERY_*` env vars, plus these are particularl
 | `KHORA_QUERY_TEMPORAL_HALF_LIFE_HOURS` | Half-life in hours for the exponential decay | `168.0` (7 days) |
 | `KHORA_QUERY_CHRONICLE_TEMPORAL_WINDOW_DAYS` | Temporal channel window (0 = unlimited, -1 = disable) | `0.0` |
 | `KHORA_QUERY_CHRONICLE_ENABLE_RECALL_REINFORCEMENT` | Stamp `last_accessed_at` on recall and treat `max(source_timestamp, last_accessed_at)` as the effective event time | `false` |
+| `KHORA_QUERY_ABSTENTION_MODE` | `should_abstain` derivation: `cosine_floor` or `weighted` | `cosine_floor` |
+| `KHORA_QUERY_ABSTENTION_MIN_CHUNKS` | Min chunks before `chunks_below_min` trips | (schema default) |
+| `KHORA_QUERY_ABSTENTION_MIN_TOP_SCORE` | Top-chunk cosine floor for `top_score_low` | (schema default) |
+| `KHORA_QUERY_ABSTENTION_COMBINED_THRESHOLD` | Abstain cutoff on `combined_score` (`weighted` mode only) | (schema default) |
+| `KHORA_QUERY_ABSTENTION_WEIGHT_*` | Per-signal weights folded into `combined_score` (three knobs) | (schema default) |
+
+The abstention config is the source of truth; `ChronicleEngine(...)` kwargs override per-instance.
 
 ## Related Documentation
 

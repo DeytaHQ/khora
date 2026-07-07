@@ -427,6 +427,10 @@ Migration **048** (Postgres-only, revises 047) extends `dream_conflicts` with re
 
 Dialect-portable (PostgreSQL `JSONB`, SQLite `JSON`). Adds nullable `graph_mirror_pending JSONB` to `khora_dream_runs`. Holds a JSON array of pending op entries `{"op_seq", "op_id", "op_type", "payload"}` for ops whose PG commit succeeded but whose post-commit graph mirror failed. NULL = no ops awaiting mirror. The reconciler (`_drain_graph_mirror_pending`, run at apply start) drains this column and retries failed mirrors.
 
+### Sibling replace-path reconciler - `documents.graph_mirror_pending` (migration 051, #1430)
+
+The online `remember`-replace path (`StorageCoordinator.replace_document_extraction`, triggered when an `external_id` re-ingest supersedes a document) has its own sibling of this queue: `documents.graph_mirror_pending` (migration 051), persisting the computed graph plan on the *document row* rather than the dream-run row. It is the same durable-queue-then-idempotent-replay pattern, just a different trigger - document replace instead of dream apply. Drained and replayed via `khora.storage.replace_mirror` (retire / remap / strip / upsert verbs, idempotent by id and by `(namespace_id, name, entity_type)` MERGE). Both queues close the same PG-committed / graph-mirror-failed divergence window that #884 made observable; the dream one lives on the run row, the replace one on the document row. See [storage-backends.md](architecture/storage-backends.md) for the replace reconciler payload shape.
+
 ## Concurrency
 
 A dream run holds a Postgres advisory lock - `pg_advisory_xact_lock`, ID derived from `namespace_id` via `blake2b` (domain-separated from the migration lock). A second concurrent run against the same namespace fast-fails with `DreamLockUnavailable`. Different namespaces dream in parallel without contention.
