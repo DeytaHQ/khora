@@ -61,7 +61,7 @@ entities_map, neighborhoods = await asyncio.gather(
 )
 ```
 
-Impact: 5–10% improvement. The `get_neighborhoods_batch()` method fetches all neighborhoods in a single graph query.
+Impact: 5–10% improvement. The `get_neighborhoods_batch()` method fetches all neighborhoods in a single graph query. Expansion is hop-bounded so a hub node cannot blow up a traversal: Neo4j caps at `max_hops` (default 2) and SurrealDB clamps the effective bound to 6 (#1428).
 
 ### Batch Chunk Source Lookups in Agentic Search
 
@@ -436,15 +436,16 @@ Relationship writes still use a plain semaphore (8 concurrent). Since relationsh
 
 ## Phase 10: VectorCypher Temporal Accuracy
 
-### HNSW `ef_search` Per-Transaction Tuning
+### HNSW `ef_search` Tuning
 
-pgvector's HNSW index uses a default `ef_search` of 40, which trades recall for speed. For benchmark and production accuracy, the pgvector storage backend now sets `ef_search=200` per-transaction before executing vector searches:
+pgvector's HNSW index uses a default `ef_search` of 40, which trades recall for speed. Higher `ef_search` explores more candidates during the HNSW graph traversal, improving recall at the cost of marginally higher latency. The value is config-driven (`config.storage.hnsw_ef_search`, env `KHORA_STORAGE_HNSW_EF_SEARCH`, default **40**) and applied at the **connection level** via asyncpg `server_settings`, not per-transaction:
 
-```sql
-SET LOCAL hnsw.ef_search = 200;
+```python
+# asyncpg connection kwargs
+server_settings = {"hnsw.ef_search": str(config.storage.hnsw_ef_search)}
 ```
 
-`SET LOCAL` scopes the change to the current transaction - it does not affect other connections or the server-wide default. Higher `ef_search` explores more candidates during the HNSW graph traversal, improving recall at the cost of marginally higher latency (typically <5 ms for typical index sizes). This is a pure accuracy win with negligible performance cost.
+Setting it once at connection setup avoids a per-query `SET LOCAL` round-trip. Correct recall under a caller filter no longer relies on an inflated `ef_search`: it relies on pgvector >= 0.8 iterative / relaxed-order scan (`SET LOCAL hnsw.iterative_scan = relaxed_order`), which keeps scanning the index until enough post-filter rows are found. See [storage-backends.md](storage-backends.md) (#1423).
 
 ### Entity Sort Before Upsert (Deadlock Prevention)
 

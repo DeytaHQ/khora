@@ -116,7 +116,7 @@ Greedy Maximal Marginal Relevance for diversity-aware result selection.
 **Algorithm:**
 - **Incremental max-similarity tracking** - maintains a running `max_sim[i]` for each unselected candidate, updated as new items are selected. Complexity is O(k*n) instead of O(k*n*k).
 - **Cache-friendly layout** - embeddings stored in a flat contiguous buffer for vectorized access.
-- **Safe iterator dot product** - inner `dot_f32` function uses `a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()`, a safe iterator chain that the compiler auto-vectorizes on x86-64 with SSE/AVX. Replaced a previous `unsafe get_unchecked` implementation to eliminate undefined-behavior risk while preserving equivalent codegen.
+- **Safe iterator dot product** - inner `dot_f32` function uses `a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()`, replacing a previous `unsafe get_unchecked` implementation to eliminate undefined-behavior risk. The element-wise multiply can vectorize under the SSE2 baseline, but the reduction is a sequential f32 `.sum()` (non-associative, so rustc will not reorder it into a horizontal SIMD sum without fast-math, which Rust does not enable) - so the accumulation stays effectively scalar. khora-accel ships as a source distribution, so `pip install` compiles for the baseline x86-64 target (SSE2, never AVX unless you set your own target features); there are no `target-cpu=native` / `RUSTFLAGS` in the build.
 
 **Rust techniques:**
 - **GIL release** - `py.detach(|| { ... })` during the entire selection loop.
@@ -145,7 +145,7 @@ Batch datetime comparison, recency scoring, and temporal query detection.
 - **Rayon parallel** - `batch_temporal_filter` and `batch_recency_scores` use `par_iter()` for large input batches.
 - **GIL release** - `py.detach(|| { ... })` during batch computation (pyo3 0.29 API).
 - **No datetime parsing** - timestamps arrive as pre-computed Unix epoch floats, avoiding chrono/datetime overhead.
-- **Aho-Corasick automaton** - `detect_temporal_category` uses a `LazyLock<(AhoCorasick, Vec<u8>)>` compiled from ~200 categorised patterns with `ascii_case_insensitive` matching. Single-pass multi-pattern search replaces sequential substring checks.
+- **Aho-Corasick automaton** - `detect_temporal_category` uses a `LazyLock<(AhoCorasick, Vec<u8>, Vec<String>)>` compiled from ~200 categorised patterns with `ascii_case_insensitive` matching. Single-pass multi-pattern search replaces sequential substring checks.
 - **LazyLock regex** - `detect_temporal_keywords` compiles its regex once via `LazyLock<Regex>` and reuses it across all calls.
 
 **Python consumers:**
@@ -329,8 +329,7 @@ Batch entity matching with a 3-stage cascade.
 **Rust techniques:**
 - **HashMap O(1) lookups** - Exact and alias stages build `HashMap<String, usize>` indexes from the existing names/aliases during pre-processing, replacing the previous O(n) linear scans. This reduces stages 1 and 2 from O(new × existing) to O(new + existing).
 - **Pre-lowercasing** - All existing names and aliases are lowercased once before the hot loop, outside `detach`.
-- **Rayon parallel** - `new_names.par_iter().map(...)` parallelises resolution across all new names.
-- **Rayon threshold** - Parallelism is only engaged when `new_names.len() >= 512`; smaller batches use sequential iteration to avoid thread-pool overhead.
+- **Rayon parallel** - `new_names.par_iter().map(...)` parallelises resolution across all new names. Entity resolution parallelises unconditionally (no size gate); the `>= 512` threshold applies to the string-similarity batch kernels, not here.
 - **GIL release** - `py.detach()` wraps the entire parallel resolution.
 - **Early exit** - Each name short-circuits at the first matching stage.
 
@@ -353,6 +352,8 @@ Mirrors the `_extract_keywords` method in `SkeletonIndexer`.
 - **hashbrown::HashSet** - Fast deduplication of keywords with insertion-order preserved via separate `Vec`.
 - **Rayon parallel** - `contents.par_iter().map(...)` in batch mode.
 - **GIL release** - `py.detach()` for batch extraction.
+
+> **ASCII-only tokenizer.** The Rust `extract_keywords` kernel tokenises with `\b[a-zA-Z]{3,}\b`, so non-Latin scripts (CJK, Indic) do not tokenize. Multilingual support (#1388/#1390) is handled Python-side by passing a `tokenizer` callable to `core.ranking.select_core_chunks`, which bypasses the Rust tokenizer but still uses the Rust `build_chunk_edges` + `pagerank` kernels. Likewise the experimental `keyword_ppr` lexical channel (#1391) is a Python channel layered on the same existing Rust `pagerank` / `build_chunk_edges` kernels - there is no dedicated PyO3 function for it.
 
 **Python consumers:**
 - `khora._accel.extract_keywords` - used by skeleton indexing for per-chunk keyword extraction
@@ -436,7 +437,7 @@ pip install khora-accel
 |----------|-----------|-------------------|---------------|
 | Vector math | cosine, batch cosine, pairwise cosine | **5–10x** | NumPy zero-copy, rayon, fused dot+norm |
 | String similarity | Levenshtein, Jaro-Winkler, batch variants | **10–40x** | strsim crate, rayon parallel batch (≥512 threshold) |
-| Entity resolution | 3-stage batch matching | **10–30x** | HashMap O(1) lookups, rayon (≥512), early exit |
+| Entity resolution | 3-stage batch matching | **10–30x** | HashMap O(1) lookups, rayon (always parallel), early exit |
 | BM25 search | Index + score + search | **3–8x** | Inverted index, token interning, GIL release |
 | PageRank | Weighted iterative PageRank | **5–15x** | GIL release, tight loop, no Python overhead |
 | Keyword extraction | Regex tokenise + filter | **3–5x** | Compiled regex via LazyLock, rayon batch |
@@ -469,8 +470,9 @@ cd rust/khora-accel && cargo bench
 | Bench file | Status | What it measures |
 |------------|--------|-----------------|
 | `benches/cosine_bench.rs` | **Functional** | Single-pair cosine at dimensions 128, 384, 768, 1536 |
-| `benches/bm25_bench.rs` | Placeholder (TODO) | BM25 index + search benchmarks |
-| `benches/pagerank_bench.rs` | Placeholder (TODO) | PageRank iteration benchmarks |
+| `benches/bm25_bench.rs` | **Functional** | BM25 search over a ~100-doc synthetic index (benches a reimplemented BM25, not `RustBM25Index`) |
+| `benches/pagerank_bench.rs` | **Functional** | PageRank over a real graph |
+| `benches/block_and_score_pairs.rs` | **Functional** | Candidate blocking + pair scoring for entity resolution |
 
 ## Dependencies
 
