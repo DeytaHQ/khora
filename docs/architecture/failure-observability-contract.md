@@ -136,7 +136,7 @@ expected cold-start condition for a namespace, not a degradation.
 ## Live degradation channel inventory
 
 All channels that currently emit `degraded_total` counters or attach
-`Degradation` entries to results, as of v0.20. Update this table when
+`Degradation` entries to results, as of v0.21. Update this table when
 adding a new channel.
 
 | Counter / channel                                      | Attach point                           | Notes                                           |
@@ -152,6 +152,7 @@ adding a new channel.
 | `khora.vectorcypher.chunk_mirror.degraded_total`       | `RecallResult.engine_info`             |                                                 |
 | `khora.vectorcypher.temporal_semantic_fallback.degraded_total` | `RecallResult.engine_info`   |                                                 |
 | `khora.query.hyde.degraded_total`                      | `RecallResult.engine_info`             | HyDE expansion failures                         |
+| `extraction.llm.second_pass` (no dedicated counter)    | `RememberResult` / `ExtractionResult.metadata` | Batched relationship second-pass failure (#1412); reason `second_pass_failed` |
 | `khora.dream.graph_mirror.partial_failure`             | `DreamResult.metadata`                 | Post-commit Neo4j mirror failures               |
 | `khora.dream.graph_unmirror.partial_failure`           | `DreamResult.metadata`                 | Tombstone un-mirror failures                    |
 | `khora.forget.cascade.degraded_total`                  | `RememberResult.metadata` or log only  |                                                 |
@@ -160,7 +161,7 @@ adding a new channel.
 | `khora.storage.create_entity.partial_failure`          | counter only                           | Cross-store divergence on create                |
 | `khora.storage.update_entity.partial_failure`          | counter only                           | Cross-store divergence on update                |
 | `khora.storage.upsert_entities_batch.partial_failure`  | counter only                           | Cross-store divergence on batch upsert          |
-| `khora.storage.replace_document.partial_failure`       | counter only                           | Cross-store divergence on replace               |
+| `khora.storage.replace_document.partial_failure`       | counter **and** `Degradation` dicts    | Cross-store divergence on replace. The #1430 replace-mirror reconcile drain reuses this counter and also returns `Degradation` dicts (component `coordinator.replace_mirror.reconcile`; reasons `graph_mirror_pending_read_failed`, `graph_mirror_reconcile_failed`, `graph_mirror_pending_clear_failed`) |
 
 ## Where to attach the list
 

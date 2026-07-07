@@ -51,8 +51,10 @@ A downstream service at Khora v0.7 may run against a database already migrated t
 
 ```python
 result = await run_migrations(database_url)
-# MigrationResult(success=True, skipped=True, current_revision="ab1c2d3e…")
+# MigrationResult(success=True, skipped=True, current_revision=None)
 ```
+
+On the skip-ahead path `current_revision` is `None` - the ahead DB revision is logged, not threaded into the result field.
 
 This is signalled internally by a `_DatabaseAheadError` from `env.py` to `session.py` - library code does not need to handle it explicitly. The takeaway: **do not pin different services to different Khora major versions that share a PostgreSQL database**. Use the same major across services; the skip-ahead is a safety net, not a coordination tool.
 
@@ -91,6 +93,8 @@ Current dialect-gated migrations:
 - **`047_dream_runs_graph_mirror_pending`** - Cross-dialect. Adds a nullable `graph_mirror_pending JSONB` column to `khora_dream_runs`. Holds the pending-ops list for the post-commit dream-on-graph mirror reconciler (#1274). NULL = no ops awaiting mirror; existing rows are untouched.
 - **`048_dream_conflicts_reconcile`** - Cross-dialect. Extends `dream_conflicts` (migration 036) with reconcile-outcome columns: `resolution VARCHAR(16)`, `loser_relationship_id UUID`, `winner_relationship_id UUID`, `judge_rationale_hash VARCHAR(16)`, `resolved_by_op_id UUID`. The contradiction-detection op can now record soft-delete judgements (#1281) alongside detection findings.
 - **`049_hook_subscriptions`** - Cross-dialect. Adds `khora_hook_subscriptions` for durable semantic-hook persistence (#599). Nine columns including `id`, `namespace_id`, `event_type`, `filter (JSONB)`, `delivery (JSONB)`, `created_at`, `last_delivered_at`. Enables `HookDispatcher.register_persistent` / `load_persistent` so subscriptions survive restarts.
+- **`050_keyword_chunks`** - Cross-dialect (plain SQLAlchemy DDL, no Postgres-only features; runs on both PG and `sqlite_lance`). Adds the `keyword_chunks` bipartite edge table (keyword -> chunk + ingest-time IDF) backing the experimental `keyword_ppr` retrieval channel (#1391). Written at ingest only when `query.lexical_channel == "keyword_ppr"`; default `bm25` deployments never touch it. SurrealDB is out of scope (no Alembic chain).
+- **`051_documents_graph_mirror_pending`** (#1430) - Cross-dialect column add, Postgres-only partial index. Adds nullable `graph_mirror_pending JSON(B)` to `documents`, persisting the replace-path graph plan so the replace-mirror reconciler can replay a graph write that failed after the PG commit (the `external_id` replace path). NULL = graph in lockstep. The partial index `ix_documents_graph_mirror_pending (namespace_id) WHERE graph_mirror_pending IS NOT NULL` is created via `CREATE INDEX CONCURRENTLY` in an autocommit block (skipped on SQLite). Modeled on migration 047 (`khora_dream_runs.graph_mirror_pending`).
 
 ## SurrealDB
 

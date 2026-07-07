@@ -42,15 +42,18 @@ PyPI Trusted Publishing via GitHub OIDC - no API tokens, no secrets in the repo.
    git tag v0.10.2
    git push origin v0.10.2
    ```
-3. The `release.yml` workflow triggers automatically and serializes:
+3. The `release.yml` workflow triggers automatically and serializes six jobs:
 
    | Step | Package | What it does |
    |------|---------|-------------|
    | `verify-ci-green` | - | Confirms ci.yml passed for the tagged SHA |
    | `publish-accel` | `khora-accel` | `maturin sdist` → publish to PyPI |
    | `publish-khora` | `khora` | `python -m build` (wheel + sdist) → publish to PyPI |
+   | `smoke-install` | - | Pulls the just-published `khora` wheel from PyPI and runs a remember/recall round-trip; the release page is gated on this |
+   | `github-release` | - | `gh release create --generate-notes` - auto-creates the GitHub release with notes generated from merged PRs since the previous tag |
+   | `notify` | - | Posts the release outcome to Slack |
 
-   Publish order is **accel first, then khora** so that the moment `khora==X.Y.Z` appears on PyPI, its `khora-accel==X.Y.Z` dependency is already resolvable.
+   Publish order is **accel first, then khora** so that the moment `khora==X.Y.Z` appears on PyPI, its `khora-accel==X.Y.Z` dependency is already resolvable. The `smoke-install` gate means a broken wheel blocks the GitHub release rather than surfacing only when a user installs it.
 
 ### Manual Publish
 
@@ -66,14 +69,14 @@ If you ever need to break this lockstep (e.g. ship a khora hotfix that uses an o
 
 ## Verification
 
-After the workflow completes, confirm packages are visible:
+The `smoke-install` job already verifies the published wheel end-to-end (install from PyPI + remember/recall round-trip) before the GitHub release is cut, and `github-release` publishes the release page with generated notes. To spot-check manually after the workflow completes:
 
 ```bash
 curl -s https://pypi.org/pypi/khora/json | jq '.releases | keys[-3:]'
 curl -s https://pypi.org/pypi/khora-accel/json | jq '.releases | keys[-3:]'
 ```
 
-Or open https://pypi.org/project/khora/${VERSION}/ in a browser.
+Or open https://pypi.org/project/khora/${VERSION}/ in a browser, and confirm the release at `github.com/DeytaHQ/khora/releases/tag/v${VERSION}`.
 
 ## Dev Releases
 
