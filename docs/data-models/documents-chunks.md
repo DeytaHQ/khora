@@ -375,13 +375,18 @@ CREATE TABLE chunks (
 );
 
 CREATE INDEX idx_chunks_document ON chunks(document_id);
--- The operative default is the halfvec (float16) expression index from migration 018:
+-- Full-precision HNSW index (migrations 002/007):
 CREATE INDEX ix_chunks_embedding_hnsw ON chunks
     USING hnsw (embedding vector_cosine_ops)
     WITH (m = 24, ef_construction = 128);
+-- The operative index at recall time is the halfvec (float16) expression
+-- index from migration 018, which the ORDER BY casts to match (#1423):
+CREATE INDEX ix_chunks_embedding_halfvec_hnsw ON chunks
+    USING hnsw ((embedding::halfvec(1536)) halfvec_cosine_ops)
+    WITH (m = 24, ef_construction = 128);
 ```
 
-> **Two `chunks`-shaped tables exist.** The `chunks` table above is the pgvector-backend ORM table. Migrations named `NNN_khora_chunks_*` (038, 039, 041-046) target a *separate*, runtime-created (not Alembic-managed) `khora_chunks` table owned by the VectorCypher `PgVectorTemporalStore`, which carries denormalized document-grained columns (`source_type` / `source_name` / `source_url` / `source_timestamp` / `external_id` / `content_type` / `source` / `title`, migration 041). The `Chunk` dataclass and the `chunks` ORM table do not carry those denormalized fields.
+> **Two `chunks`-shaped tables exist.** The `chunks` table above is the pgvector-backend ORM table. Migrations named `NNN_khora_chunks_*` (038, 039, 041-044) target a *separate*, runtime-created (not Alembic-managed) `khora_chunks` table owned by the VectorCypher `PgVectorTemporalStore`, which carries denormalized document-grained columns (`source_type` / `source_name` / `source_url` / `source_timestamp` / `external_id` / `content_type` / `source` / `title`, migration 041). The `Chunk` dataclass and the `chunks` ORM table do not carry those denormalized fields.
 
 ## Next Steps
 

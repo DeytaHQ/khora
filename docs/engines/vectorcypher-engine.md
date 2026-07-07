@@ -274,7 +274,7 @@ neighborhoods = await dual_nodes.get_entity_neighborhoods(
 
 **Bounded per-hop expansion (#1419).** `get_entity_neighborhoods` runs an unrolled per-hop BFS that caps each hop's new frontier at `hop_limit=200` nodes per source entity, replacing the old exponential all-paths `[*1..depth]` enumeration - hub nodes can no longer blow up a hop.
 
-**Timeout degradation (#1428, ADR-001).** On a Neo4j timeout the graph channel is no longer a silent `{}`: a structured `Degradation` (`component="vectorcypher.cypher_expand"`, `reason="neo4j_timeout"`) is recorded on `RecallResult.engine_info["degradations"]` and the `khora.vectorcypher.cypher_expand.degraded_total` counter increments.
+**Timeout degradation (#1419, ADR-001).** On a Neo4j timeout the graph channel is no longer a silent `{}`: a structured `Degradation` (`component="vectorcypher.cypher_expand"`, `reason="neo4j_timeout"`) is recorded on `RecallResult.engine_info["degradations"]` and the `khora.vectorcypher.cypher_expand.degraded_total` counter increments.
 
 The `temporal_sort` parameter controls Cypher ordering:
 

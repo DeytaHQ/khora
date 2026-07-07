@@ -438,7 +438,7 @@ Relationship writes still use a plain semaphore (8 concurrent). Since relationsh
 
 ### HNSW `ef_search` Tuning
 
-pgvector's HNSW index uses a default `ef_search` of 40, which trades recall for speed. Higher `ef_search` explores more candidates during the HNSW graph traversal, improving recall at the cost of marginally higher latency. The value is config-driven (`config.storage.hnsw_ef_search`, env `KHORA_STORAGE_HNSW_EF_SEARCH`, default **40**) and applied at the **connection level** via asyncpg `server_settings`, not per-transaction:
+pgvector's HNSW index ships a built-in `ef_search` of 40, which trades recall for speed. Higher `ef_search` explores more candidates during the HNSW graph traversal, improving recall at the cost of marginally higher latency. Khora raises it above pgvector's default: the value is config-driven (`config.storage.hnsw_ef_search`, env `KHORA_STORAGE_HNSW_EF_SEARCH`, default **100**) and applied at the **connection level** via asyncpg `server_settings`, not per-transaction:
 
 ```python
 # asyncpg connection kwargs
