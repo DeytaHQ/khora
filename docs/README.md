@@ -5,8 +5,10 @@ Khora is a knowledge memory library. This directory contains everything beyond t
 ## Getting started
 
 - [Configuration](configuration.md) - `KHORA_*` environment variables, `KhoraConfig`, installation extras.
+- [Nested env vars](nested-env-vars.md) - the full `KHORA_*` reference including the nested legacy form.
 - [API reference](api-reference.md) - public `Khora` methods and result types.
 - [Observability](observability.md) - OTel spans/metrics, `[otel]` and `[logfire]` paths, `configure_telemetry()`.
+- [Telemetry contract](telemetry-contract.md) - the public span / metric / event-field surface (explainer for `telemetry-contract.json`).
 - [Migrations](migrations.md) - Alembic workflow for library users (PostgreSQL backends only).
 - [Consumers](consumers.md) - how downstream packages consume khora's public API.
 
@@ -16,6 +18,7 @@ Khora is a knowledge memory library. This directory contains everything beyond t
 - [Storage backends](architecture/storage-backends.md) - PostgreSQL, pgvector, Neo4j, SurrealDB, AGE, Memgraph, Neptune.
 - [Multi-tenancy](architecture/multi-tenancy.md) - namespaces, isolation modes.
 - [Event sourcing](architecture/event-sourcing.md) - the immutable audit log.
+- [Failure-observability contract](architecture/failure-observability-contract.md) - ADR-001 degradation / error-record convention.
 - [Rust acceleration](architecture/rust-acceleration.md) - optional `khora-accel` extensions.
 - [Performance optimization](architecture/performance-optimization.md) - pool sizing, ef_search, batch strategies.
 
@@ -74,7 +77,7 @@ Background knowledge-consolidation cycle that runs between recalls to deduplicat
 
 ## Integrations
 
-Adapters for agentic frameworks. Install the matching extra, then import from `khora.integrations.<name>`.
+Adapters for agentic frameworks. Install the matching extra, then import from `khora.integrations.<name>`. See the [integrations index](integrations/index.md) for the adapter matrix, dependency-conflict notes, and how to write your own.
 
 - [CrewAI](integrations/crewai.md) - `KhoraMemory` for CrewAI agents (`khora[crewai]`).
 - [LangGraph](integrations/langgraph.md) - `KhoraStore` semantic long-term memory for LangGraph (`khora[langgraph]`).
