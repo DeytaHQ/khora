@@ -385,6 +385,7 @@ class SurrealDBGraphAdapter(GraphBackendBase):
         namespace_id: UUID,
         *,
         entity_type: str | None = None,
+        source_chunk_ids: list[UUID] | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[Entity]:
@@ -401,6 +402,11 @@ class SurrealDBGraphAdapter(GraphBackendBase):
         if entity_type is not None:
             where.append("entity_type = $entity_type")
             bindings["entity_type"] = entity_type
+        if source_chunk_ids is not None:
+            if not source_chunk_ids:
+                return []
+            where.append("source_chunk_ids CONTAINSANY $source_chunk_ids")
+            bindings["source_chunk_ids"] = [str(c) for c in source_chunk_ids]
 
         sql = f"SELECT * FROM entity WHERE {' AND '.join(where)} ORDER BY created_at DESC LIMIT $limit START $offset"  # noqa: S608
         rows = await self._conn.query(sql, bindings)

@@ -1675,6 +1675,7 @@ class StorageCoordinator:
         namespace_id: UUID,
         *,
         entity_type: str | None = None,
+        source_chunk_ids: list[UUID] | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[Entity]:
@@ -1686,10 +1687,20 @@ class StorageCoordinator:
         """
         namespace_id = await self._resolve_read_namespace(namespace_id)
         if self._graph:
-            return await self._graph.list_entities(namespace_id, entity_type=entity_type, limit=limit, offset=offset)
+            return await self._graph.list_entities(
+                namespace_id,
+                entity_type=entity_type,
+                source_chunk_ids=source_chunk_ids,
+                limit=limit,
+                offset=offset,
+            )
         if self._vector and hasattr(self._vector, "list_entities"):
             return await self._vector.list_entities(  # type: ignore[unresolved-attribute]
-                namespace_id, entity_type=entity_type, limit=limit, offset=offset
+                namespace_id,
+                entity_type=entity_type,
+                source_chunk_ids=source_chunk_ids,
+                limit=limit,
+                offset=offset,
             )
         return []
 

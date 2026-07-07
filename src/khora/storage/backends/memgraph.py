@@ -398,6 +398,7 @@ class MemgraphBackend(GraphBackendBase):
         namespace_id: UUID,
         *,
         entity_type: str | None = None,
+        source_chunk_ids: list[UUID] | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[Entity]:
@@ -423,6 +424,13 @@ class MemgraphBackend(GraphBackendBase):
         if entity_type:
             conditions.append("e.entity_type = $entity_type")
             params["entity_type"] = entity_type
+        if source_chunk_ids is not None:
+            if not source_chunk_ids:
+                return []
+            conditions.append(
+                "(e.source_chunk_ids IS NOT NULL AND any(cid IN e.source_chunk_ids WHERE cid IN $source_chunk_ids))"
+            )
+            params["source_chunk_ids"] = [str(c) for c in source_chunk_ids]
         query += " WHERE " + " AND ".join(conditions)
 
         query += " RETURN e ORDER BY e.name SKIP $offset LIMIT $limit"

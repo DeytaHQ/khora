@@ -222,6 +222,55 @@ async def test_batch_reextracting_same_doc_does_not_evict_prior_distinct_id(
 
 
 # =========================================================================
+# source_chunk_ids provenance filter on list_entities (#1448)
+# =========================================================================
+
+
+@pytest.mark.asyncio
+async def test_list_entities_filters_by_source_chunk_ids(backend: PgVectorBackend, namespace_id: UUID) -> None:
+    """``list_entities(source_chunk_ids=...)`` filters entities by chunk
+    provenance (any-overlap), per #1448.
+
+    Seeds two entities — A sourced from chunks c1/c2, B from c3 — then pins
+    the four contract cases: no filter returns both; a filter for one of A's
+    chunks returns only A; an unknown chunk returns nothing; and an empty
+    list matches nothing.
+    """
+    name_a = f"chunk-filter-A-{uuid4()}"
+    name_b = f"chunk-filter-B-{uuid4()}"
+    c1, c2, c3, c4 = uuid4(), uuid4(), uuid4(), uuid4()
+
+    await backend.upsert_entities_batch(
+        namespace_id,
+        [
+            _entity(namespace_id, name_a, source_chunk_ids=[c1, c2]),
+            _entity(namespace_id, name_b, source_chunk_ids=[c3]),
+        ],
+    )
+
+    # 1. No filter → both entities.
+    all_names = {e.name for e in await backend.list_entities(namespace_id)}
+    assert {name_a, name_b} <= all_names
+
+    # 2. One of A's chunks → exactly A.
+    only_a = await backend.list_entities(namespace_id, source_chunk_ids=[c1])
+    assert {e.name for e in only_a} == {name_a}
+
+    # 3. Unknown chunk id → nothing.
+    assert await backend.list_entities(namespace_id, source_chunk_ids=[c4]) == []
+
+    # 4. Empty list → matches nothing.
+    assert await backend.list_entities(namespace_id, source_chunk_ids=[]) == []
+
+    # 5. Composes with entity_type (AND): matching type + A's chunk → exactly A.
+    typed = await backend.list_entities(namespace_id, entity_type="PERSON", source_chunk_ids=[c1])
+    assert {e.name for e in typed} == {name_a}
+
+    # 6. Composes with entity_type (AND): non-matching type + A's chunk → nothing.
+    assert await backend.list_entities(namespace_id, entity_type="ORGANIZATION", source_chunk_ids=[c1]) == []
+
+
+# =========================================================================
 # Single path (create_entity / _upsert_entity)
 # =========================================================================
 

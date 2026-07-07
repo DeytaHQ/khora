@@ -3345,13 +3345,15 @@ class VectorCypherRetriever:
             # return value hardcoded ``entities=[]`` and ``relationships=[]``,
             # so backends without a Neo4j driver (sqlite_lance, surrealdb,
             # postgres-only) surfaced empty entity lists from ``recall()``
-            # even when the graph was populated. We fetch all entities /
-            # relationships in the namespace (capped at 1000) and filter by
-            # overlap with the recalled chunk ids.
-            # TODO: replace the namespace-wide list + Python filter with a
-            #       per-backend ``list_entities_by_chunk_ids`` query method
-            #       once it lands across sqlite_lance / surrealdb / pgvector
-            #       (perf follow-up to #857).
+            # even when the graph was populated. Entities are pushed down via
+            # ``source_chunk_ids`` overlap (#1448); relationships still fetch
+            # the namespace-wide list (capped at 1000) and filter by overlap
+            # with the recalled chunk ids in Python.
+            # TODO: replace the namespace-wide relationship list + Python
+            #       filter with a per-backend ``list_relationships_by_chunk_ids``
+            #       query method once it lands across sqlite_lance / surrealdb /
+            #       pgvector (perf follow-up to #857). The entity half is now
+            #       pushed down via ``list_entities(source_chunk_ids=...)``.
             entities_with_scores: list[tuple[Entity, float]] = []
             relationships_with_scores: list[tuple[Relationship, float]] = []
             if chunk_results and self._storage is not None:
@@ -3361,7 +3363,9 @@ class VectorCypherRetriever:
                     namespace_id=str(namespace_id),
                 ) as ent_span:
                     try:
-                        all_entities = await self._storage.list_entities(namespace_id, limit=1000)
+                        all_entities = await self._storage.list_entities(
+                            namespace_id, limit=1000, source_chunk_ids=list(recalled_chunk_ids)
+                        )
                     except Exception as e:
                         logger.warning(f"#857 simple-path entity projection failed: {e}")
                         all_entities = []
