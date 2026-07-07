@@ -262,6 +262,13 @@ async def test_list_entities_filters_by_source_chunk_ids(backend: PgVectorBacken
     # 4. Empty list → matches nothing.
     assert await backend.list_entities(namespace_id, source_chunk_ids=[]) == []
 
+    # 5. Composes with entity_type (AND): matching type + A's chunk → exactly A.
+    typed = await backend.list_entities(namespace_id, entity_type="PERSON", source_chunk_ids=[c1])
+    assert {e.name for e in typed} == {name_a}
+
+    # 6. Composes with entity_type (AND): non-matching type + A's chunk → nothing.
+    assert await backend.list_entities(namespace_id, entity_type="ORGANIZATION", source_chunk_ids=[c1]) == []
+
 
 # =========================================================================
 # Single path (create_entity / _upsert_entity)

@@ -427,11 +427,11 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         if source_chunk_ids is not None:
             if not source_chunk_ids:
                 return []
-            placeholders = ", ".join("?" for _ in source_chunk_ids)
             conditions.append(
-                f"EXISTS (SELECT 1 FROM json_each(entities.source_chunk_ids) WHERE json_each.value IN ({placeholders}))"  # noqa: S608
+                "EXISTS (SELECT 1 FROM json_each(entities.source_chunk_ids)"
+                " WHERE json_each.value IN (SELECT value FROM json_each(?)))"
             )
-            params.extend(uuid_to_text(c) for c in source_chunk_ids)
+            params.append(to_json_text([uuid_to_text(c) for c in source_chunk_ids]))
         sql = (
             f"SELECT {_ENTITY_COLUMNS} FROM entities "  # noqa: S608
             f"WHERE {' AND '.join(conditions)} "
