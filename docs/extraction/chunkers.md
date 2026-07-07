@@ -302,9 +302,11 @@ await kb.remember(
 )
 ```
 
-`chunk_size` isn't a per-call kwarg on `kb.remember()`; configure it
-globally via `KhoraConfig.pipelines.chunk_size` (or env var
-`KHORA_PIPELINES_CHUNK_SIZE`) at construction time.
+`chunk_size` (and `chunk_strategy`) are per-call kwargs on
+`kb.remember()` and `kb.remember_batch()` (#1416/#1426); `chunk_size=None`
+(the default) falls back to the configured `KhoraConfig.pipelines.chunk_size`
+(env var `KHORA_PIPELINES_CHUNK_SIZE`). Both the VectorCypher and Chronicle
+engines honor the per-call value.
 
 ### Direct Usage
 

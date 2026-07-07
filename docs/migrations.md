@@ -151,7 +151,7 @@ async with Khora(db_url, engine="vectorcypher",
         relationship_types=["KNOWS"],
     )
 
-# Or accept default selective extraction (recommended - 30% cheaper):
+# Or accept default selective extraction (recommended - ~50% fewer LLM extraction calls):
 async with Khora(db_url, engine="vectorcypher") as kb:
     await kb.remember(
         content,

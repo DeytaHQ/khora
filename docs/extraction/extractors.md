@@ -96,80 +96,32 @@ class ExtractedEvent:
     confidence: float            # 0.0-1.0
 ```
 
-## Default Extraction Prompt
+## Default Extraction Prompts
 
-The extractor uses a structured prompt for consistent JSON output:
+The live prompt is split in two (see `DEFAULT_SYSTEM_PROMPT` and the prompt templates in `src/khora/extraction/extractors/llm.py`):
 
-```python
-EXTRACTION_PROMPT = """Extract entities, relationships, and temporal information from the following text.
+- **`DEFAULT_SYSTEM_PROMPT`** - a fully static system message carrying only the guidelines: canonical entity names, aliases, temporal extraction, STATE_CHANGE and EVENT detection rules, and the RELATIONSHIP DENSITY instruction ("For N extracted entities, aim to identify N to 2N relationships", including implicit/co-occurrence connections).
+- **A user prompt template** carrying the dynamic content: `{entity_types}`, `{relationship_types}`, `{document_context}`, and `{text}`.
 
-Entity types to extract: {entity_types}
+Two user-prompt variants exist:
 
-Text:
-{text}
-
-Return a JSON object with the following structure:
-{
-    "entities": [
-        {
-            "name": "entity name (canonical form, properly capitalized)",
-            "entity_type": "PERSON|ORGANIZATION|...",
-            "description": "brief description",
-            "attributes": {"key": "value"},
-            "aliases": ["alternative names"],
-            "temporal": {
-                "mentioned_at": "when entity is mentioned",
-                "valid_from": "ISO date or null",
-                "valid_until": "ISO date or null"
-            }
-        }
-    ],
-    "relationships": [
-        {
-            "source_entity": "source entity name",
-            "target_entity": "target entity name",
-            "relationship_type": "WORKS_FOR|KNOWS|...",
-            "description": "brief description",
-            "temporal": {
-                "occurred_at": "when relationship occurred",
-                "valid_from": "ISO date or null",
-                "valid_until": "ISO date or null"
-            }
-        }
-    ],
-    "events": [
-        {
-            "description": "what happened",
-            "occurred_at": "when (ISO date or descriptive)",
-            "participants": ["entity names"],
-            "event_type": "MEETING|DECISION|..."
-        }
-    ]
-}
-
-Guidelines:
-- Use canonical entity names (e.g., "Jennifer Walsh" not "Jenny")
-- Include aliases for entities with multiple names
-- Extract temporal information when dates appear
-- Ensure relationship source/target names match entity names exactly
-
-Return ONLY valid JSON, no other text."""
-```
+- **`EXTRACTION_PROMPT_STRUCTURED`** - used for models on the structured-output allowlist. It contains no JSON example; the output schema is enforced through the `response_format` (`json_schema`) API parameter instead, saving ~400-500 tokens per call.
+- **`EXTRACTION_PROMPT`** - the full prompt with an inline JSON schema example, used for models without structured-output support.
 
 ## Prompt Optimization for Prefix Caching
 
-Extraction prompts are structured to maximize prefix caching hits with LLM providers. Static instruction content (entity types, guidelines, output schema) is placed in the system message, and variable content (the actual text to extract from) is placed in the user message:
+Extraction prompts are structured to maximize prefix caching hits with LLM providers. The static guidelines live in the system message; everything per-call - entity types, relationship types, document context, and the text itself - lives in the user message, and the output schema is passed via the `response_format` API parameter rather than embedded in any prompt:
 
 ```
-System: You are an entity extractor.
-        Entity types: {entity_types}
-        Guidelines: {static_instructions}
-        Output schema: {json_schema}
+System: {static guidelines - identical across all calls}
 
-User: Extract from this text: {variable_text}
+User: Extract entities ... {document_context}
+      Entity types to extract: {entity_types}
+      Relationship types to use: {relationship_types}
+      Text: {text}
 ```
 
-When processing hundreds of documents with the same extraction configuration, the system message is identical across calls. LLM providers (OpenAI, Anthropic) cache this prefix, reducing per-call latency and cost. The improvement is most significant with GPT-4o (automatic prefix caching) and Claude models.
+Keeping the system message free of per-call content is what makes the prefix cacheable even when entity types vary between calls. When processing hundreds of documents, LLM providers (OpenAI, Anthropic) cache the shared prefix, reducing per-call latency and cost. The improvement is most significant with GPT-4o (automatic prefix caching) and Claude models.
 
 ## Entity Types
 
@@ -297,6 +249,8 @@ class LLMEntityExtractor:
 
 Batch size is adaptive based on the model's context window. For unknown models the default multiplier is 3x `max_tokens` for input budget; known large-context models (gpt-4o, claude-3-opus) use up to 8x. `extract_multi` uses this budget to group texts greedily, so the effective batch size varies with input length rather than being fixed at 5.
 
+`extract_multi` dispatches batches in waves: `extraction_wave_size` (config `llm.extraction_wave_size`, env `KHORA_LLM_EXTRACTION_WAVE_SIZE`, default 20) bounds how many extraction batches dispatch concurrently per wave, and the circuit breaker is evaluated between waves. Raising it above `max_concurrent_llm_calls` has no effect - the semaphore still caps in-flight calls.
+
 ## Batch Extraction
 
 Extract from multiple texts concurrently:
@@ -330,7 +284,12 @@ This means extraction time scales with the single slowest batch, not the sum of 
 
 ### Two-Pass Relationship Extraction
 
-The extractor automatically runs a second-pass relationship extraction when `num_entities >= 2 and num_relationships < num_entities - 1`, using `RELATIONSHIP_EXTRACTION_PROMPT` (it never fires for documents with 0 or 1 entity). This targets sparse graphs where entities were extracted but relationships between them were missed. The second pass is automatic and not configurable - it triggers whenever the entity-to-relationship ratio suggests missing connections.
+A second-pass relationship extraction targets sparse graphs where entities were extracted but relationships between them were missed. The trigger is `num_entities >= 2 and num_relationships < num_entities - 1` (it never fires for texts with 0 or 1 entity). The two extraction paths differ in gating:
+
+- **Single-text `extract()`** runs the second pass automatically on the trigger, using `RELATIONSHIP_EXTRACTION_PROMPT`. Not configurable.
+- **Batched `extract_multi()`** - the path `remember()` / `remember_batch()` ingest uses - runs a batched, relationships-only second pass that is **OFF by default** (#1409/#1420). Enable it via `pipeline.extraction_second_pass` (env `KHORA_PIPELINES_EXTRACTION_SECOND_PASS=true`). When on, under-connected sections get one extra batched relationship-only LLM call, recovering ~30-40% more connections at extra cost; the default keeps the ingest cost profile flat.
+
+The second pass uses a relationships-only `response_format` schema, so the model is not forced to emit empty `entities`/`events` arrays. A failed second pass never fails the extraction: first-pass relationships are kept and an ADR-001 `Degradation` (`component="extraction.llm.second_pass"`, `reason="second_pass_failed"`) is recorded in `ExtractionResult.metadata["degradations"]` (#1412).
 
 ## JSON Parsing
 

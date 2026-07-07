@@ -267,9 +267,10 @@ await kb.remember(
 )
 ```
 
-`chunk_size`, `embedding_model`, and `extraction_model` aren't per-call
-kwargs. Set them via `KhoraConfig.pipelines.chunk_size`,
-`KhoraConfig.llm.embedding_model`, and `KhoraConfig.llm.model` (or the
+`chunk_size` is a per-call kwarg (#1416); `None` (the default) falls back
+to the configured `KhoraConfig.pipelines.chunk_size` (512).
+`embedding_model` and `extraction_model` aren't per-call kwargs - set them
+via `KhoraConfig.llm.embedding_model` and `KhoraConfig.llm.model` (or the
 matching `KHORA_*` env vars) at construction time.
 
 ### Batch Processing
