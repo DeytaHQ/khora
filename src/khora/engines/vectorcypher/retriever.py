@@ -3356,11 +3356,16 @@ class VectorCypherRetriever:
             relationships_with_scores: list[tuple[Relationship, float]] = []
             if chunk_results and self._storage is not None:
                 recalled_chunk_ids = {c.id for c, _ in chunk_results}
-                try:
-                    all_entities = await self._storage.list_entities(namespace_id, limit=1000)
-                except Exception as e:
-                    logger.warning(f"#857 simple-path entity projection failed: {e}")
-                    all_entities = []
+                with trace_span(
+                    "khora.vectorcypher.simple_projection.list_entities",
+                    namespace_id=str(namespace_id),
+                ) as ent_span:
+                    try:
+                        all_entities = await self._storage.list_entities(namespace_id, limit=1000)
+                    except Exception as e:
+                        logger.warning(f"#857 simple-path entity projection failed: {e}")
+                        all_entities = []
+                    ent_span.set_attribute("entity_count", len(all_entities))
                 for entity in all_entities:
                     src_chunks = entity.source_chunk_ids or []
                     overlap = sum(1 for cid in src_chunks if cid in recalled_chunk_ids)
@@ -3371,11 +3376,16 @@ class VectorCypherRetriever:
                         entities_with_scores.append((entity, score))
 
                 if entities_with_scores:
-                    try:
-                        all_relationships = await self._storage.list_relationships(namespace_id, limit=1000)
-                    except Exception as e:
-                        logger.warning(f"#857 simple-path relationship projection failed: {e}")
-                        all_relationships = []
+                    with trace_span(
+                        "khora.vectorcypher.simple_projection.list_relationships",
+                        namespace_id=str(namespace_id),
+                    ) as rel_span:
+                        try:
+                            all_relationships = await self._storage.list_relationships(namespace_id, limit=1000)
+                        except Exception as e:
+                            logger.warning(f"#857 simple-path relationship projection failed: {e}")
+                            all_relationships = []
+                        rel_span.set_attribute("relationship_count", len(all_relationships))
                     recalled_entity_ids = {e.id for e, _ in entities_with_scores}
                     for rel in all_relationships:
                         if rel.source_entity_id in recalled_entity_ids and rel.target_entity_id in recalled_entity_ids:
