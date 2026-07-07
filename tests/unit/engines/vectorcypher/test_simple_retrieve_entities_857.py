@@ -118,6 +118,37 @@ class TestSimpleRetrieveEntityProjection857:
         assert storage.list_entities.await_args.kwargs.get("limit") == 1000
 
     @pytest.mark.asyncio
+    async def test_list_entities_called_with_recalled_chunk_ids(self) -> None:
+        """#1448: the entity projection pushes the recalled chunk ids down to
+        ``list_entities(source_chunk_ids=...)`` rather than scanning the whole
+        namespace and filtering in Python."""
+        c1, c2 = uuid4(), uuid4()
+        sr1 = _make_search_result("c1", chunk_id=c1)
+        sr2 = _make_search_result("c2", chunk_id=c2)
+
+        ns = uuid4()
+        storage = MagicMock()
+        storage.list_entities = AsyncMock(return_value=[])
+        storage.list_relationships = AsyncMock(return_value=[])
+
+        retriever = _make_retriever(storage=storage)
+        retriever._vector_store.search = AsyncMock(return_value=[sr1, sr2])
+
+        await retriever._simple_retrieve(
+            query="q",
+            query_embedding=[0.1],
+            namespace_id=ns,
+            temporal_filter=None,
+            limit=10,
+            routing=_routing(),
+        )
+
+        storage.list_entities.assert_awaited_once()
+        pushed = storage.list_entities.await_args.kwargs.get("source_chunk_ids")
+        assert pushed is not None, "recalled chunk ids must be pushed down to list_entities"
+        assert set(pushed) == {c1, c2}
+
+    @pytest.mark.asyncio
     async def test_relationships_filtered_to_recalled_entity_endpoints(self) -> None:
         """Relationship is included only when BOTH endpoints are in the
         recalled-entity set (i.e. both source_chunk_ids overlap)."""

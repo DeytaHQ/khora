@@ -81,7 +81,7 @@ async def test_load_entities_graph_less_stack_returns_empty_list() -> None:
     result = await load_entities(ns_id, storage, limit=100)
 
     assert result == []
-    vector.list_entities.assert_awaited_once_with(ns_id, entity_type=None, limit=100, offset=0)
+    vector.list_entities.assert_awaited_once_with(ns_id, entity_type=None, source_chunk_ids=None, limit=100, offset=0)
 
 
 @pytest.mark.unit

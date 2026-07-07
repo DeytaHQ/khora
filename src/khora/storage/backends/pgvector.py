@@ -1557,6 +1557,7 @@ class PgVectorBackend(AsyncSessionMixin):
         namespace_id: UUID,
         *,
         entity_type: str | None = None,
+        source_chunk_ids: list[UUID] | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list:
@@ -1574,6 +1575,10 @@ class PgVectorBackend(AsyncSessionMixin):
             )
             if entity_type:
                 stmt = stmt.where(EntityModel.entity_type == entity_type)
+            if source_chunk_ids is not None:
+                if not source_chunk_ids:
+                    return []
+                stmt = stmt.where(EntityModel.source_chunk_ids.overlap(source_chunk_ids))
             stmt = stmt.order_by(EntityModel.name).limit(limit).offset(offset)
             result = await session.execute(stmt)
             return [self._entity_model_to_domain(model) for model in result.scalars()]

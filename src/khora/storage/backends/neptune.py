@@ -452,10 +452,15 @@ class NeptuneBackend(GraphBackendBase):
         namespace_id: UUID,
         *,
         entity_type: str | None = None,
+        source_chunk_ids: list[UUID] | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[Entity]:
         driver = self._get_driver()
+
+        # Pushdown unverified on this openCypher subset; filtered in-method (see #1448).
+        if source_chunk_ids is not None and not source_chunk_ids:
+            return []
 
         query = "MATCH (e:Entity {namespace_id: $namespace_id})"
         params: dict[str, Any] = {"namespace_id": str(namespace_id)}
@@ -464,14 +469,24 @@ class NeptuneBackend(GraphBackendBase):
             query += " WHERE e.entity_type = $entity_type"
             params["entity_type"] = entity_type
 
-        query += " RETURN e ORDER BY e.name SKIP $offset LIMIT $limit"
-        params["offset"] = offset
-        params["limit"] = limit
+        if source_chunk_ids is not None:
+            query += " RETURN e ORDER BY e.name"
+        else:
+            query += " RETURN e ORDER BY e.name SKIP $offset LIMIT $limit"
+            params["offset"] = offset
+            params["limit"] = limit
 
         async with driver.session() as session:
             result = await session.run(query, **params)
             records = await result.data()
-            return [self._record_to_entity(element_to_dict(r["e"])) for r in records]
+            entities = [self._record_to_entity(element_to_dict(r["e"])) for r in records]
+
+        if source_chunk_ids is not None:
+            wanted = {str(c) for c in source_chunk_ids}
+            entities = [e for e in entities if wanted & {str(c) for c in e.source_chunk_ids}]
+            entities = entities[offset : offset + limit]
+
+        return entities
 
     async def count_entities(self, namespace_id: UUID) -> int:
         driver = self._get_driver()

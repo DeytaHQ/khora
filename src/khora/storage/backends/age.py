@@ -560,22 +560,32 @@ class AGEBackend(GraphBackendBase):
         namespace_id: UUID,
         *,
         entity_type: str | None = None,
+        source_chunk_ids: list[UUID] | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[Entity]:
+        # Pushdown unverified on this openCypher subset; filtered in-method (see #1448).
+        if source_chunk_ids is not None and not source_chunk_ids:
+            return []
+
         ns_lit_val = self._uuid_lit(namespace_id)
         match_clause = f"MATCH (e:Entity {{namespace_id: '{ns_lit_val}'}})"
         where_clause = ""
         if entity_type:
             where_clause = f" WHERE e.entity_type = '{self._escape(entity_type)}'"
 
+        if source_chunk_ids is not None:
+            page_clause = ""
+        else:
+            page_clause = f"""
+            SKIP {offset}
+            LIMIT {limit}"""
+
         cypher = f"""
             {match_clause}
             {where_clause}
             RETURN e
-            ORDER BY e.name
-            SKIP {offset}
-            LIMIT {limit}
+            ORDER BY e.name{page_clause}
         """
         async with self._get_session_factory()() as session:
             async with session.begin():
@@ -586,7 +596,13 @@ class AGEBackend(GraphBackendBase):
                     entity = self._entity_from_agtype(row["e"])
                     if entity is not None:
                         entities.append(entity)
-                return entities
+
+        if source_chunk_ids is not None:
+            wanted = {str(c) for c in source_chunk_ids}
+            entities = [e for e in entities if wanted & {str(c) for c in e.source_chunk_ids}]
+            entities = entities[offset : offset + limit]
+
+        return entities
 
     @trace("khora.age.count_entities")
     async def count_entities(self, namespace_id: UUID) -> int:

@@ -433,6 +433,70 @@ class TestNeo4jRetireOrphanedEntitiesBatchIntegration:
             await backend.disconnect()
 
     @pytest.mark.asyncio
+    async def test_list_entities_filters_by_source_chunk_ids(self) -> None:
+        """``list_entities(source_chunk_ids=...)`` filters by chunk provenance (#1448).
+
+        Seeds two entities — A sourced from chunks c1/c2, B from c3 — then pins
+        the four contract cases: no filter returns both; a filter for one of A's
+        chunks returns only A; an unknown chunk returns nothing; and an empty
+        list matches nothing (any-overlap semantics).
+        """
+        url = os.environ.get("KHORA_NEO4J_URL", "bolt://localhost:7687")
+        user = os.environ.get("KHORA_NEO4J_USERNAME", "neo4j")
+        password = os.environ.get("KHORA_NEO4J_PASSWORD", "password")
+
+        backend = Neo4jBackend(url, user=user, password=password)
+        await backend.connect()
+
+        namespace_id = uuid4()
+        c1, c2, c3, c4 = uuid4(), uuid4(), uuid4(), uuid4()
+        entity_a = Entity(
+            namespace_id=namespace_id,
+            name=f"scid-A-{uuid4().hex[:8]}",
+            entity_type="PERSON",
+            source_chunk_ids=[c1, c2],
+        )
+        entity_b = Entity(
+            namespace_id=namespace_id,
+            name=f"scid-B-{uuid4().hex[:8]}",
+            entity_type="PERSON",
+            source_chunk_ids=[c3],
+        )
+
+        try:
+            await backend.create_entity(entity_a)
+            await backend.create_entity(entity_b)
+
+            # 1. No filter → both entities.
+            names = {e.name for e in await backend.list_entities(namespace_id)}
+            assert names == {entity_a.name, entity_b.name}
+
+            # 2. One of A's chunks → exactly A.
+            only_a = await backend.list_entities(namespace_id, source_chunk_ids=[c1])
+            assert {e.name for e in only_a} == {entity_a.name}
+
+            # 3. Unknown chunk id → nothing.
+            assert await backend.list_entities(namespace_id, source_chunk_ids=[c4]) == []
+
+            # 4. Empty list → matches nothing.
+            assert await backend.list_entities(namespace_id, source_chunk_ids=[]) == []
+
+        finally:
+            try:
+                async with backend._session() as session:
+
+                    async def _cleanup(tx):
+                        await tx.run(
+                            "MATCH (e:Entity) WHERE e.id IN $ids DETACH DELETE e",
+                            ids=[str(entity_a.id), str(entity_b.id)],
+                        )
+
+                    await session.execute_write(_cleanup)
+            except Exception:  # noqa: BLE001
+                pass
+            await backend.disconnect()
+
+    @pytest.mark.asyncio
     async def test_retire_empty_input_returns_zero(self) -> None:
         """Calling retire_orphaned_entities_batch with an empty list returns 0."""
         url = os.environ.get("KHORA_NEO4J_URL", "bolt://localhost:7687")

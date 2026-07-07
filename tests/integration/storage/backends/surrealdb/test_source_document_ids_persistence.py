@@ -51,3 +51,43 @@ async def test_surrealdb_persists_entity_source_document_ids() -> None:
         )
     finally:
         await conn.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_surrealdb_list_entities_filters_by_source_chunk_ids() -> None:
+    """``list_entities(source_chunk_ids=...)`` filters by chunk provenance (#1448).
+
+    Seeds two entities — A sourced from chunks c1/c2, B from c3 — then pins
+    the four contract cases: no filter returns both; a filter for one of A's
+    chunks returns only A; an unknown chunk returns nothing; and an empty
+    list matches nothing (CONTAINSANY / any-overlap semantics).
+    """
+    conn = SurrealDBConnection(mode="memory", namespace="khora_test", database="scids1448")
+    await conn.connect()
+    graph = SurrealDBGraphAdapter(conn)
+    relational = SurrealDBRelationalAdapter(conn)
+    try:
+        ns_id = uuid4()
+        await relational.create_namespace(
+            MemoryNamespace(id=ns_id, namespace_id=ns_id, tenancy_mode=TenancyMode.SHARED)
+        )
+        c1, c2, c3, c4 = uuid4(), uuid4(), uuid4(), uuid4()
+
+        ent_a = Entity(id=uuid4(), namespace_id=ns_id, name="A", entity_type="PERSON", source_chunk_ids=[c1, c2])
+        ent_b = Entity(id=uuid4(), namespace_id=ns_id, name="B", entity_type="PERSON", source_chunk_ids=[c3])
+        await graph.upsert_entities_batch(ns_id, [ent_a, ent_b])
+
+        # 1. No filter → both entities.
+        assert {e.name for e in await graph.list_entities(ns_id, limit=10)} == {"A", "B"}
+
+        # 2. One of A's chunks → exactly A.
+        only_a = await graph.list_entities(ns_id, source_chunk_ids=[c1], limit=10)
+        assert {e.name for e in only_a} == {"A"}
+
+        # 3. Unknown chunk id → nothing.
+        assert await graph.list_entities(ns_id, source_chunk_ids=[c4], limit=10) == []
+
+        # 4. Empty list → matches nothing.
+        assert await graph.list_entities(ns_id, source_chunk_ids=[], limit=10) == []
+    finally:
+        await conn.disconnect()

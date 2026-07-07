@@ -415,6 +415,7 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         namespace_id: UUID,
         *,
         entity_type: str | None = None,
+        source_chunk_ids: list[UUID] | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[Entity]:
@@ -423,6 +424,14 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         if entity_type is not None:
             conditions.append("entity_type = ?")
             params.append(entity_type)
+        if source_chunk_ids is not None:
+            if not source_chunk_ids:
+                return []
+            placeholders = ", ".join("?" for _ in source_chunk_ids)
+            conditions.append(
+                f"EXISTS (SELECT 1 FROM json_each(entities.source_chunk_ids) WHERE json_each.value IN ({placeholders}))"  # noqa: S608
+            )
+            params.extend(uuid_to_text(c) for c in source_chunk_ids)
         sql = (
             f"SELECT {_ENTITY_COLUMNS} FROM entities "  # noqa: S608
             f"WHERE {' AND '.join(conditions)} "

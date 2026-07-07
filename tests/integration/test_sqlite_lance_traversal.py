@@ -8,6 +8,7 @@ extraction) and exercises ``find_paths`` / ``get_neighborhood`` /
 from __future__ import annotations
 
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -168,5 +169,37 @@ class TestSQLiteLanceTraversal:
             assert b.id in {e.id for e in a_hood["entities"]}
             # D has only an inbound edge from C at depth 1 (directed chain).
             assert c.id in {e.id for e in d_hood["entities"]}
+        finally:
+            await coord.disconnect()
+
+    async def test_list_entities_filters_by_source_chunk_ids(self, tmp_path: Path) -> None:
+        """``list_entities(source_chunk_ids=...)`` filters by chunk provenance (#1448).
+
+        Seeds two entities — A sourced from chunks c1/c2, B from c3 — then pins
+        the four contract cases: no filter returns both; a filter for one of A's
+        chunks returns only A; an unknown chunk returns nothing; and an empty
+        list matches nothing (any-overlap semantics).
+        """
+        coord = await build_sqlite_lance_coordinator(tmp_path)
+        try:
+            ns = await coord.create_namespace(MemoryNamespace())
+            c1, c2, c3, c4 = uuid4(), uuid4(), uuid4(), uuid4()
+            entity_a = Entity(namespace_id=ns.id, name="A", entity_type="PERSON", source_chunk_ids=[c1, c2])
+            entity_b = Entity(namespace_id=ns.id, name="B", entity_type="PERSON", source_chunk_ids=[c3])
+            await coord.upsert_entities_batch(ns.id, [entity_a, entity_b])
+
+            # 1. No filter → both entities.
+            all_names = {e.name for e in await coord.list_entities(ns.id)}
+            assert all_names == {"A", "B"}
+
+            # 2. One of A's chunks → exactly A.
+            only_a = await coord.list_entities(ns.id, source_chunk_ids=[c1])
+            assert {e.name for e in only_a} == {"A"}
+
+            # 3. Unknown chunk id → nothing.
+            assert await coord.list_entities(ns.id, source_chunk_ids=[c4]) == []
+
+            # 4. Empty list → matches nothing.
+            assert await coord.list_entities(ns.id, source_chunk_ids=[]) == []
         finally:
             await coord.disconnect()

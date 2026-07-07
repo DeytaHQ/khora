@@ -612,10 +612,22 @@ class GraphBackendProtocol(Protocol):
         namespace_id: UUID,
         *,
         entity_type: str | None = None,
+        source_chunk_ids: list[UUID] | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[Entity]:
-        """List entities in a namespace."""
+        """List entities in a namespace.
+
+        ``source_chunk_ids`` filters by chunk provenance (#1448):
+
+        - ``None`` (default): no filter — behavior byte-identical to today.
+        - Non-empty list: return only entities whose ``source_chunk_ids``
+          contains AT LEAST ONE of the given ids (any-overlap, not subset).
+        - Empty list ``[]``: return ``[]`` (matches nothing).
+
+        Composes with AND against all existing conditions (``entity_type``,
+        live/``valid_until`` filters) and applies BEFORE ``limit``/``offset``.
+        """
         ...
 
     # Relationship operations
