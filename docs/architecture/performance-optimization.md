@@ -61,7 +61,7 @@ entities_map, neighborhoods = await asyncio.gather(
 )
 ```
 
-Impact: 5–10% improvement. The `get_neighborhoods_batch()` method fetches all neighborhoods in a single graph query. Expansion is hop-bounded so a hub node cannot blow up a traversal: Neo4j caps at `max_hops` (default 2) and SurrealDB clamps the effective bound to 6 (#1428).
+Impact: 5–10% improvement. The `get_neighborhoods_batch()` method fetches all neighborhoods in a single graph query. Expansion is bounded so a hub node cannot blow up a traversal: the traversal depth is capped (Neo4j `max_hops` default 2, SurrealDB clamps the effective bound to 6), and on the VectorCypher path each hop's new frontier is additionally capped at `hop_limit=200` per source entity (#1419).
 
 ### Batch Chunk Source Lookups in Agentic Search
 

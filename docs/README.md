@@ -84,7 +84,7 @@ Adapters for agentic frameworks. Install the matching extra, then import from `k
 - [Google ADK](integrations/google_adk.md) - `KhoraMemoryService` for Google Agent Development Kit (`khora[google-adk]`).
 - [OpenAI Agents SDK](integrations/openai_agents.md) - `KhoraSession`, `khora_recall_tool`, `KhoraMemoryHooks` (`khora[openai-agents]`).
 - [LlamaIndex](integrations/llamaindex.md) - `KhoraRetriever`, `KhoraMemoryBlock`, `KhoraChatStore` (`khora[llamaindex]`).
-- [Hermes](integrations/hermes.md) - event-bus adapter for Hermes-compatible message brokers (`khora[hermes]`).
+- [Hermes](integrations/hermes.md) - `KhoraMemoryProvider` for the Hermes agent loop. No `[hermes]` extra (dependency-pin conflict); `pip install hermes-agent` yourself - see the [integrations index](integrations/index.md#hermes-does-not-have-a-hermes-extra).
 
 ## Process
 
