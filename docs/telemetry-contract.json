@@ -440,6 +440,16 @@
       "owner": "vectorcypher"
     },
     {
+      "name": "khora.vectorcypher.simple_projection.list_entities",
+      "stability": "internal",
+      "owner": "vectorcypher"
+    },
+    {
+      "name": "khora.vectorcypher.simple_projection.list_relationships",
+      "stability": "internal",
+      "owner": "vectorcypher"
+    },
+    {
       "name": "khora.vectorcypher.cypher_expand",
       "stability": "internal",
       "owner": "vectorcypher"
