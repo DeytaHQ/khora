@@ -149,17 +149,56 @@ class TestSimpleRetrieveEntityProjection857:
         assert set(pushed) == {c1, c2}
 
     @pytest.mark.asyncio
-    async def test_relationships_filtered_to_recalled_entity_endpoints(self) -> None:
-        """Relationship is included only when BOTH endpoints are in the
-        recalled-entity set (i.e. both source_chunk_ids overlap)."""
+    async def test_list_relationships_called_with_recalled_entity_ids(self) -> None:
+        """#1451: the relationship projection pushes the recalled entity ids
+        down to ``list_relationships(between_entity_ids=...)`` — the
+        BOTH-endpoints filter now runs in the backend rather than a
+        namespace-wide scan + Python filter (the analog of the #1448 entity-side
+        chunk-id pushdown)."""
         chunk_id = uuid4()
         sr = _make_search_result("hit", chunk_id=chunk_id)
 
         ns = uuid4()
         ent_a = Entity(id=uuid4(), namespace_id=ns, name="A", source_chunk_ids=[chunk_id])
         ent_b = Entity(id=uuid4(), namespace_id=ns, name="B", source_chunk_ids=[chunk_id])
-        ent_c = Entity(id=uuid4(), namespace_id=ns, name="C", source_chunk_ids=[uuid4()])
 
+        storage = MagicMock()
+        storage.list_entities = AsyncMock(return_value=[ent_a, ent_b])
+        storage.list_relationships = AsyncMock(return_value=[])
+
+        retriever = _make_retriever(storage=storage)
+        retriever._vector_store.search = AsyncMock(return_value=[sr])
+
+        await retriever._simple_retrieve(
+            query="q",
+            query_embedding=[0.1],
+            namespace_id=ns,
+            temporal_filter=None,
+            limit=10,
+            routing=_routing(),
+        )
+
+        storage.list_relationships.assert_awaited_once()
+        pushed = storage.list_relationships.await_args.kwargs.get("between_entity_ids")
+        assert pushed is not None, "recalled entity ids must be pushed down to list_relationships"
+        assert set(pushed) == {ent_a.id, ent_b.id}
+
+    @pytest.mark.asyncio
+    async def test_relationships_from_storage_surface_verbatim(self) -> None:
+        """The endpoint filter is now pushed down to the backend (#1451): the
+        retriever passes ``between_entity_ids`` and trusts ``list_relationships``
+        to return only edges whose BOTH endpoints are in the recalled set. The
+        retriever no longer re-filters in Python — every edge the backend
+        returns must surface verbatim."""
+        chunk_id = uuid4()
+        sr = _make_search_result("hit", chunk_id=chunk_id)
+
+        ns = uuid4()
+        ent_a = Entity(id=uuid4(), namespace_id=ns, name="A", source_chunk_ids=[chunk_id])
+        ent_b = Entity(id=uuid4(), namespace_id=ns, name="B", source_chunk_ids=[chunk_id])
+
+        # Backend has already applied the between_entity_ids filter, so only the
+        # in-set edge A→B comes back.
         rel_ab = Relationship(
             id=uuid4(),
             namespace_id=ns,
@@ -167,17 +206,10 @@ class TestSimpleRetrieveEntityProjection857:
             target_entity_id=ent_b.id,
             relationship_type="KNOWS",
         )
-        rel_ac = Relationship(
-            id=uuid4(),
-            namespace_id=ns,
-            source_entity_id=ent_a.id,
-            target_entity_id=ent_c.id,  # C is not recalled
-            relationship_type="KNOWS",
-        )
 
         storage = MagicMock()
-        storage.list_entities = AsyncMock(return_value=[ent_a, ent_b, ent_c])
-        storage.list_relationships = AsyncMock(return_value=[rel_ab, rel_ac])
+        storage.list_entities = AsyncMock(return_value=[ent_a, ent_b])
+        storage.list_relationships = AsyncMock(return_value=[rel_ab])
 
         retriever = _make_retriever(storage=storage)
         retriever._vector_store.search = AsyncMock(return_value=[sr])
@@ -193,7 +225,7 @@ class TestSimpleRetrieveEntityProjection857:
 
         assert {e.name for e, _ in result.entities} == {"A", "B"}
         rel_ids = {r.id for r, _ in result.relationships}
-        assert rel_ids == {rel_ab.id}, "only the rel with both endpoints recalled should survive"
+        assert rel_ids == {rel_ab.id}, "every edge the backend returns must surface verbatim"
 
     @pytest.mark.asyncio
     async def test_empty_chunks_returns_empty_entities_no_storage_call(self) -> None:

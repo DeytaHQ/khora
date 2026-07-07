@@ -859,12 +859,23 @@ class MemgraphBackend(GraphBackendBase):
         namespace_id: UUID,
         *,
         relationship_type: str | None = None,
+        between_entity_ids: list[UUID] | None = None,
         limit: int = 1000,
         offset: int = 0,
     ) -> list[Relationship]:
+        if between_entity_ids is not None and not between_entity_ids:
+            return []
+
         driver = self._get_driver()
 
         rel_filter = f":{sanitize_cypher_label(relationship_type)}" if relationship_type else ""
+
+        # Constrain both endpoints to the given id set when requested (#1451):
+        # AND semantics — an edge surfaces only when source AND target are in
+        # the set.
+        endpoint_clause = ""
+        if between_entity_ids is not None:
+            endpoint_clause = " AND source.id IN $between_entity_ids AND target.id IN $between_entity_ids"
 
         # Both endpoints constrained to in-namespace ``:Entity`` nodes, matching
         # get_relationship() / get_entity_relationships() (IDOR family): edges
@@ -877,21 +888,24 @@ class MemgraphBackend(GraphBackendBase):
         query = f"""
         MATCH (source:Entity {{namespace_id: $namespace_id}})-[r{rel_filter}]->(target:Entity {{namespace_id: $namespace_id}})
         WHERE r.namespace_id = $namespace_id
-          AND (r.valid_until IS NULL OR r.valid_until > $now)
+          AND (r.valid_until IS NULL OR r.valid_until > $now){endpoint_clause}
         RETURN properties(r) as rel_props, source.id as source_id, target.id as target_id, type(r) as rel_type
         ORDER BY r.created_at DESC
         SKIP $offset
         LIMIT $limit
         """
 
+        params: dict[str, Any] = {
+            "namespace_id": str(namespace_id),
+            "offset": offset,
+            "limit": limit,
+            "now": datetime.now(UTC).isoformat(),
+        }
+        if endpoint_clause:
+            params["between_entity_ids"] = [str(e) for e in between_entity_ids]
+
         async with driver.session() as session:
-            result = await session.run(
-                query,
-                namespace_id=str(namespace_id),
-                offset=offset,
-                limit=limit,
-                now=datetime.now(UTC).isoformat(),
-            )
+            result = await session.run(query, **params)
             records = await result.data()
             rels = (
                 self._record_to_relationship(r["rel_props"], r["source_id"], r["target_id"], r["rel_type"])

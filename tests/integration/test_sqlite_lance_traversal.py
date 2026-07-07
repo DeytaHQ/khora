@@ -8,7 +8,7 @@ extraction) and exercises ``find_paths`` / ``get_neighborhood`` /
 from __future__ import annotations
 
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -201,5 +201,36 @@ class TestSQLiteLanceTraversal:
 
             # 4. Empty list → matches nothing.
             assert await coord.list_entities(ns.id, source_chunk_ids=[]) == []
+        finally:
+            await coord.disconnect()
+
+    async def test_list_relationships_filters_by_between_entity_ids(self, tmp_path: Path) -> None:
+        """``list_relationships(between_entity_ids=...)`` filters by endpoint membership (#1451).
+
+        Seeds A→B and B→C, then pins the four contract cases: no filter returns
+        both edges; ``[A, B]`` returns exactly A→B (B→C excluded — C outside the
+        set); ``[A]`` returns [] (no self-loops seeded); and an empty list
+        returns [] (BOTH-endpoints-in-set semantics).
+        """
+        coord = await build_sqlite_lance_coordinator(tmp_path)
+        try:
+            ns = await coord.create_namespace(MemoryNamespace())
+            a, b, c = await _seed_chain(coord, ns.id, ["a", "b", "c"])
+
+            def _edges(rels: list[Relationship]) -> set[tuple[UUID, UUID]]:
+                return {(r.source_entity_id, r.target_entity_id) for r in rels}
+
+            # 1. No filter → both edges.
+            assert _edges(await coord.list_relationships(ns.id)) == {(a.id, b.id), (b.id, c.id)}
+
+            # 2. [A, B] → exactly A→B (B→C excluded — C outside the set).
+            filtered = await coord.list_relationships(ns.id, between_entity_ids=[a.id, b.id])
+            assert _edges(filtered) == {(a.id, b.id)}
+
+            # 3. [A] → nothing (no self-loops seeded).
+            assert await coord.list_relationships(ns.id, between_entity_ids=[a.id]) == []
+
+            # 4. Empty list → nothing.
+            assert await coord.list_relationships(ns.id, between_entity_ids=[]) == []
         finally:
             await coord.disconnect()

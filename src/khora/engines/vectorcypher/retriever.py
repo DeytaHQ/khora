@@ -3345,15 +3345,11 @@ class VectorCypherRetriever:
             # return value hardcoded ``entities=[]`` and ``relationships=[]``,
             # so backends without a Neo4j driver (sqlite_lance, surrealdb,
             # postgres-only) surfaced empty entity lists from ``recall()``
-            # even when the graph was populated. Entities are pushed down via
-            # ``source_chunk_ids`` overlap (#1448); relationships still fetch
-            # the namespace-wide list (capped at 1000) and filter by overlap
-            # with the recalled chunk ids in Python.
-            # TODO: replace the namespace-wide relationship list + Python
-            #       filter with a per-backend ``list_relationships_by_chunk_ids``
-            #       query method once it lands across sqlite_lance / surrealdb /
-            #       pgvector (perf follow-up to #857). The entity half is now
-            #       pushed down via ``list_entities(source_chunk_ids=...)``.
+            # even when the graph was populated. Both halves are now pushed
+            # down: entities via ``list_entities(source_chunk_ids=...)`` overlap
+            # (#1448), relationships via ``list_relationships(between_entity_ids=...)``
+            # so only edges whose BOTH endpoints are in the recalled entity set
+            # come back (#1451) — no namespace-wide list + Python filter.
             entities_with_scores: list[tuple[Entity, float]] = []
             relationships_with_scores: list[tuple[Relationship, float]] = []
             if chunk_results and self._storage is not None:
@@ -3380,20 +3376,20 @@ class VectorCypherRetriever:
                         entities_with_scores.append((entity, score))
 
                 if entities_with_scores:
+                    matched_entity_ids = [e.id for e, _ in entities_with_scores]
                     with trace_span(
                         "khora.vectorcypher.simple_projection.list_relationships",
                         namespace_id=str(namespace_id),
                     ) as rel_span:
                         try:
-                            all_relationships = await self._storage.list_relationships(namespace_id, limit=1000)
+                            all_relationships = await self._storage.list_relationships(
+                                namespace_id, limit=1000, between_entity_ids=matched_entity_ids
+                            )
                         except Exception as e:
                             logger.warning(f"#857 simple-path relationship projection failed: {e}")
                             all_relationships = []
                         rel_span.set_attribute("relationship_count", len(all_relationships))
-                    recalled_entity_ids = {e.id for e, _ in entities_with_scores}
-                    for rel in all_relationships:
-                        if rel.source_entity_id in recalled_entity_ids and rel.target_entity_id in recalled_entity_ids:
-                            relationships_with_scores.append((rel, 1.0))
+                    relationships_with_scores = [(rel, 1.0) for rel in all_relationships]
 
             # Honest per-channel filter-pushdown plans for the simple path. Each
             # plan is the one its channel appended to the sink from the BACKEND's

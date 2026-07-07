@@ -792,21 +792,31 @@ class AGEBackend(GraphBackendBase):
         namespace_id: UUID,
         *,
         relationship_type: str | None = None,
+        between_entity_ids: list[UUID] | None = None,
         limit: int = 1000,
         offset: int = 0,
     ) -> list[Relationship]:
+        # Pushdown unverified on this openCypher subset; filtered in-method (see #1451).
+        if between_entity_ids is not None and not between_entity_ids:
+            return []
+
         rel_filter = ""
         if relationship_type:
             rel_filter = f":{self._sanitize_label(relationship_type)}"
+
+        if between_entity_ids is not None:
+            page_clause = ""
+        else:
+            page_clause = f"""
+            SKIP {offset}
+            LIMIT {limit}"""
 
         ns_lit_val = self._uuid_lit(namespace_id)
         cypher = f"""
             MATCH (source:Entity)-[r{rel_filter}]->(target:Entity)
             WHERE r.namespace_id = '{ns_lit_val}'
             RETURN r, source.id as source_id, target.id as target_id, type(r) as rel_type
-            ORDER BY r.created_at DESC
-            SKIP {offset}
-            LIMIT {limit}
+            ORDER BY r.created_at DESC{page_clause}
         """
         async with self._get_session_factory()() as session:
             async with session.begin():
@@ -821,7 +831,7 @@ class AGEBackend(GraphBackendBase):
                         "rel_type agtype",
                     ],
                 )
-                return [
+                relationships = [
                     self._relationship_from_agtype(
                         row["r"],
                         str(row["source_id"]),
@@ -830,6 +840,13 @@ class AGEBackend(GraphBackendBase):
                     )
                     for row in rows
                 ]
+
+        if between_entity_ids is not None:
+            id_set = set(between_entity_ids)
+            relationships = [r for r in relationships if r.source_entity_id in id_set and r.target_entity_id in id_set]
+            relationships = relationships[offset : offset + limit]
+
+        return relationships
 
     # ------------------------------------------------------------------
     # Episode operations

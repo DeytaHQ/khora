@@ -32,7 +32,7 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from khora.core.models import Entity
+from khora.core.models import Entity, Relationship
 from khora.storage.backends.pgvector import _SOURCE_CHUNK_IDS_CAP, PgVectorBackend
 
 # Match the schema's pgvector column dimension (Vector(1536)).
@@ -268,6 +268,60 @@ async def test_list_entities_filters_by_source_chunk_ids(backend: PgVectorBacken
 
     # 6. Composes with entity_type (AND): non-matching type + A's chunk → nothing.
     assert await backend.list_entities(namespace_id, entity_type="ORGANIZATION", source_chunk_ids=[c1]) == []
+
+
+# =========================================================================
+# between_entity_ids endpoint filter on list_relationships (#1451)
+# =========================================================================
+
+
+@pytest.mark.asyncio
+async def test_list_relationships_filters_by_between_entity_ids(backend: PgVectorBackend, namespace_id: UUID) -> None:
+    """``list_relationships(between_entity_ids=...)`` filters edges by endpoint
+    membership — BOTH endpoints must be in the set — per #1451.
+
+    Seeds A→B and B→C, then pins the four contract cases: no filter returns
+    both edges; ``[A, B]`` returns exactly A→B (B→C excluded — C outside the
+    set); ``[A]`` returns [] (no self-loops seeded); and an empty list
+    returns [].
+    """
+    ent_a = _entity(namespace_id, f"rel-A-{uuid4()}")
+    ent_b = _entity(namespace_id, f"rel-B-{uuid4()}")
+    ent_c = _entity(namespace_id, f"rel-C-{uuid4()}")
+    await backend.upsert_entities_batch(namespace_id, [ent_a, ent_b, ent_c])
+
+    rel_ab = Relationship(
+        namespace_id=namespace_id,
+        source_entity_id=ent_a.id,
+        target_entity_id=ent_b.id,
+        relationship_type="KNOWS",
+    )
+    rel_bc = Relationship(
+        namespace_id=namespace_id,
+        source_entity_id=ent_b.id,
+        target_entity_id=ent_c.id,
+        relationship_type="KNOWS",
+    )
+    await backend.create_relationships_batch([rel_ab, rel_bc])
+
+    def _edges(rels: list[Relationship]) -> set[tuple[UUID, UUID]]:
+        return {(r.source_entity_id, r.target_entity_id) for r in rels}
+
+    # 1. No filter → both edges.
+    assert _edges(await backend.list_relationships(namespace_id)) == {
+        (ent_a.id, ent_b.id),
+        (ent_b.id, ent_c.id),
+    }
+
+    # 2. [A, B] → exactly A→B (B→C excluded — C outside the set).
+    filtered = await backend.list_relationships(namespace_id, between_entity_ids=[ent_a.id, ent_b.id])
+    assert _edges(filtered) == {(ent_a.id, ent_b.id)}
+
+    # 3. [A] → nothing (no self-loops seeded).
+    assert await backend.list_relationships(namespace_id, between_entity_ids=[ent_a.id]) == []
+
+    # 4. Empty list → nothing.
+    assert await backend.list_relationships(namespace_id, between_entity_ids=[]) == []
 
 
 # =========================================================================
