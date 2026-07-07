@@ -75,6 +75,11 @@ SemanticFilter(
 )
 ```
 
+Namespace-scoped subscriptions survive `create_namespace_version()`: the
+dispatcher caches the stable-to-row-id mapping and self-heals it on a failed
+scope comparison (#1427), so a scoped subscription keeps firing after a
+namespace version bump - it does not silently go quiet.
+
 ### Level 0: Structural matching (`match` DSL)
 
 `SemanticFilter.match` accepts an [EventBridge-style](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-create-pattern-operators.html) filter pattern that runs against `event.data`. Patterns are pure-data (no code execution), evaluated in the dispatcher hot path, and cached for repeated keys.

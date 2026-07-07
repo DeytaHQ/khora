@@ -92,7 +92,7 @@ finally:
 ### Namespaces
 
 ```python
-ns = await kb.create_namespace(*, config_overrides=None)           # returns MemoryNamespace
+ns = await kb.create_namespace(*, config_overrides=None, metadata=None)  # returns MemoryNamespace
 ns = await kb.get_namespace(namespace_id: UUID)                    # returns MemoryNamespace | None
 ns = await kb.get_namespace_by_stable_id(namespace_id: str | UUID) # stable-ID lookup
 ```
@@ -118,15 +118,16 @@ result: RememberResult = await kb.remember(
     skill_name: str = "general_entities",
     entity_types: list[str],
     relationship_types: list[str],
-    expertise: ExpertiseConfig | None = None,
+    expertise: ExpertiseConfig | str | None = None,
     extraction_config_hash: str | None = None,
     chunk_strategy: ChunkStrategy | None = None,
+    chunk_size: int | None = None,
     external_id: str | None = None,
     session_id: UUID | None = None,
 )
 ```
 
-Ingests content through the 3-phase pipeline (stage → enrich → expand). `chunk_strategy` accepts `"fixed"`, `"semantic"`, `"recursive"`, or `"conversation"`. `external_id` must be `None` or a non-blank string (≤ 512 chars); otherwise `ValueError` is raised. `session_id` is propagated to `Document.session_id` and every chunk's `Chunk.session_id` so session-scoped recall hits the partial composite index (#620).
+Ingests content through the 3-phase pipeline (stage → enrich → expand). `expertise` also accepts a `str`: it is resolved as a registered expertise name or a YAML file path via `load_expertise`. `chunk_strategy` accepts `"fixed"`, `"semantic"`, `"recursive"`, or `"conversation"`. `chunk_size` overrides the target chunk size in tokens for this call only; `None` (default) uses the configured pipeline default (512). `external_id` must be `None` or a non-blank string (≤ 512 chars); otherwise `ValueError` is raised. `session_id` is propagated to `Document.session_id` and every chunk's `Chunk.session_id` so session-scoped recall hits the partial composite index (#620).
 
 `source_type` / `source_name` / `source_url` populate the typed provenance columns on the documents table. `source_type` defaults to `"library"` for direct callers; producers that ingest from a connector (API, database, object store, …) override it. `source_name` is the connector/provider identifier (e.g. `"slack"`, `"linear"`, `"s3"`); `source_url` is the canonical URL for the source row, when one exists.
 
@@ -148,9 +149,10 @@ result: BatchResult = await kb.remember_batch(
     on_progress: Callable[[int, int], None] | None = None,
     entity_types: list[str],
     relationship_types: list[str],
-    expertise: ExpertiseConfig | None = None,
+    expertise: ExpertiseConfig | str | None = None,
     extraction_config_hash: str | None = None,
     chunk_strategy: ChunkStrategy | None = None,
+    chunk_size: int | None = None,
     extraction_batch_size: int | None = None,
     extraction_max_tokens: int | None = None,
 )
@@ -183,7 +185,7 @@ handle: BatchHandle = await kb.submit_batch(
 )
 ```
 
-Deferred sibling of `remember_batch()`: persists every document as `PENDING` and returns a `BatchHandle` immediately; the pending processor picks each document up and fires `on_result` as it completes. Accepts the same provenance kwargs and per-doc dict shape as `remember_batch()` - per-doc dict values override the top-level kwargs. See [`BatchHandle`](#batchhandle) below for the wait/identity surface.
+Deferred sibling of `remember_batch()`: persists every document as `PENDING` and returns a `BatchHandle` immediately; the pending processor picks each document up and fires `on_result` as it completes. Note: unlike `remember()` / `remember_batch()`, `submit_batch()` accepts only `ExpertiseConfig | None` for `expertise` - the string (name / YAML-path) form is not resolved here. Accepts the same provenance kwargs and per-doc dict shape as `remember_batch()` - per-doc dict values override the top-level kwargs. See [`BatchHandle`](#batchhandle) below for the wait/identity surface.
 
 > **The pending processor is opt-in.** `submit_batch()` raises if `kb.start_pending_processor()` has not been called first (after `connect()`), so call it on each write-path service. The check runs after the documents are staged as `PENDING`, so a failure leaves rows in the queue.
 
@@ -206,6 +208,7 @@ result: RecallResult = await kb.recall(
 ```
 
 - `mode` - one of `SearchMode.VECTOR`, `GRAPH`, `HYBRID`, `ALL`, or `KEYWORD`.
+- `min_similarity` - a hard cosine floor honored by every mode (VECTOR / GRAPH / HYBRID / ALL / KEYWORD) as of #1438/#1445: candidates below the floor are dropped before fusion. BM25/keyword evidence can still boost a chunk that clears the floor, but cannot rescue one below it. Default `0.0` disables the floor (falling back to the configured `min_chunk_similarity`, itself `0.0` by default). See [Recall semantics](query-engine/recall-semantics.md).
 - `start_time` / `end_time` - **Deprecated.** Explicit temporal filter; bypasses NLP temporal detection. Both-naive or both-aware datetimes are required. Honored on all three engines (chronicle, vectorcypher, skeleton). Prefer the `filter` form: `filter={"occurred_at": {"$gte": ..., "$lt": ...}}`. Cannot be combined with `filter=`.
 - To skip LLM-side work (reranking, HyDE expansion), set the config flags `enable_llm_reranking=False` and `enable_hyde="never"` on `KhoraConfig.query` (env: `KHORA_QUERY_ENABLE_LLM_RERANKING`, `KHORA_QUERY_ENABLE_HYDE`).
 
@@ -267,7 +270,7 @@ document = await kb.get_document(document_id, namespace=ns.namespace_id)
 # Document | None - namespace kwarg required.
 ```
 
-`namespace` is **required** (accepts `str | UUID`, mirrors `list_entities` / `find_related_entities`). The facade fetches the row and verifies its `namespace_id` matches - cross-namespace ids resolve to `None` rather than the foreign entity. Calling without `namespace=` raises `TypeError`.
+`namespace` is **required** (accepts `str | UUID`, mirrors `list_entities` / `find_related_entities`). The facade fetches the row and verifies its `namespace_id` matches - cross-namespace ids resolve to `None` rather than the foreign entity. Calling without `namespace=` raises `TypeError`. `get_entity` also accepts `include_sources: bool = False`; when `True`, source-document metadata is populated on the returned entity.
 
 This shape applies to the whole `kb.storage` getter surface - namespace is the trust boundary, never derivable from the id alone:
 
@@ -304,6 +307,7 @@ All result types are frozen slotted dataclasses.
 | `chunks_created` | `int` |
 | `entities_extracted` | `int` |
 | `relationships_created` | `int` |
+| `relationships_skipped` | `int` - un-remappable relationships dropped during ingest because a source/target entity could not be canonicalized (ADR-001, #907); mirrored as a `Degradation` in `metadata["degradations"]` when > 0. Always `0` on engines that skip the shared pipeline. |
 | `metadata` | `dict[str, Any]` |
 | `llm_usage` | `list[LLMUsage]` |
 
@@ -315,6 +319,9 @@ All result types are frozen slotted dataclasses.
 | `chunks` / `entities` / `relationships` | `int` |
 | `metadata` | `dict[str, Any]` |
 | `llm_usage` | `list[LLMUsage]` |
+| `per_document` | `list[dict]` - one entry per submitted document (input order): `document_id` / `source` / `chunks` / `entities` / `skipped`. Checksum-skipped duplicates carry the *existing* document's id. Populated by VectorCypher; may be empty on other engines. |
+
+`metadata["extraction_errors"]` (int) and `metadata["degradations"]` (ADR-001 list) are present only when one or more chunks failed LLM extraction; `metadata` is an empty dict on the happy path.
 
 ### `BatchHandle`
 
@@ -357,6 +364,21 @@ JSON-serializable response projection. Lives at `khora.core.models.recall.Recall
 | `engine_info` | `dict[str, Any]` | Free-form engine telemetry. **Every engine emits the mandatory key `"engine": "<strategy-name>"`** (`vectorcypher` / `chronicle` / `skeleton`) so consumers can route on producer identity. |
 
 **Producer invariant:** every `chunks[i].document_id` and every id in `entities[i].source_document_ids` / `relationships[i].source_document_ids` is guaranteed to appear as some `documents[j].id`.
+
+#### `engine_info` well-known keys
+
+`engine` and `filter` are the only guaranteed keys; the rest are best-effort telemetry. Both default engines also emit (since #1331, on `engine_info`, NOT `.metadata`):
+
+| Key | Emitted by | Description |
+|---|---|---|
+| `abstention_signals` | vectorcypher, chronicle | Four boolean flags (`entities_empty`, `chunks_empty`, `chunks_below_min`, `top_score_low`) plus `combined_score` (0.0 = confident, 1.0 = should abstain) and a `should_abstain` convenience flag. Passive - recall still returns chunks when they trip. |
+| `confidence` | vectorcypher, chronicle | Calibrated `0.8 * cosine + 0.2 * gap` score in [0, 1]. |
+| `degradations` | chronicle (vectorcypher on degraded paths) | ADR-001 degradation records; empty/absent when nothing degraded. |
+| `channels_used` | vectorcypher | Channel provenance for this recall. |
+| `channels` | chronicle | Per-channel hit counts (`semantic` / `bm25` / `temporal` / `entity`). Note the key name differs from vectorcypher's `channels_used`. |
+| `routing` | vectorcypher, chronicle | Query-complexity routing decision. |
+
+See [Recall semantics](query-engine/recall-semantics.md) for how these interact with the score contract.
 
 #### `engine_info["filter"]` — honest filter-pushdown report
 
@@ -413,7 +435,7 @@ Prior to #1069 the skeleton engine derived `pushed_down` from a hardcoded `backe
 | `id` | `UUID` | Chunk id. |
 | `document_id` | `UUID` | Foreign key into `RecallResult.documents`. |
 | `content` | `str` | Chunk text. |
-| `score` | `float` | Retrieval score. |
+| `score` | `float` | Absolute relevance signal (#1433/#1441): the raw query-to-chunk cosine when available, else `0.0` meaning "no vector measurement" (e.g. graph-only hits), NOT "irrelevant". Chunk **order** is the authoritative ranking (fusion + boost + rerank) - re-sorting by `score` discards graph/rerank evidence. See [Recall semantics](query-engine/recall-semantics.md). |
 | `created_at` | `datetime` | Chunk creation timestamp. |
 | `occurred_at` | `datetime \| None` | Event-time anchor when applicable (e.g., chat message sent-at). |
 | `connected_entity_ids` | `list[UUID]` | Engine-populated entity ids linked to this chunk. |
@@ -453,6 +475,7 @@ Prior to #1069 the skeleton engine derived `pushed_down` from a hardcoded `backe
 |---|---|
 | `documents` / `chunks` / `entities` / `relationships` | `int` |
 | `last_activity_at` | `datetime \| None` |
+| `metadata` | `dict[str, Any]` - ADR-001 failure records; `metadata["errors"]` holds an `ErrorRecord` when a counter could not run (the int field stays `0`), so callers can tell "couldn't count" from "counted zero". |
 
 ### `LLMUsage`
 
