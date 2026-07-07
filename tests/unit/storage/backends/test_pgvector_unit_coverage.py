@@ -17,10 +17,15 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
+import sqlalchemy as sa
 
 from khora.core.models import Chunk
 from khora.db.models import ChunkModel
-from khora.storage.backends.pgvector import PgVectorBackend
+from khora.storage.backends.pgvector import (
+    PgVectorBackend,
+    _is_retryable_db_error,
+    _retry_on_deadlock,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -962,3 +967,61 @@ class TestUpsertEntitiesBatchIdSync:
 
         assert results == [(entity, True)]
         assert entity.id == original_id
+
+
+# ---------------------------------------------------------------------------
+# Transient-DB-error retry (deadlock + dropped connection)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestRetryableDbError:
+    def test_deadlock_message_is_retryable(self) -> None:
+        assert _is_retryable_db_error(Exception("deadlock detected")) is True
+
+    def test_dropped_connection_message_is_retryable(self) -> None:
+        # asyncpg's InterfaceError text when a pooled connection was dropped.
+        assert _is_retryable_db_error(Exception("connection is closed")) is True
+        assert _is_retryable_db_error(Exception("connection was closed")) is True
+
+    def test_connection_invalidated_flag_is_retryable(self) -> None:
+        # SQLAlchemy sets connection_invalidated on a detected disconnect even
+        # when the message text doesn't obviously say so.
+        err = sa.exc.OperationalError("SELECT 1", {}, Exception("boom"))
+        err.connection_invalidated = True
+        assert _is_retryable_db_error(err) is True
+
+    def test_unrelated_error_is_not_retryable(self) -> None:
+        assert _is_retryable_db_error(ValueError("bad value")) is False
+        assert _is_retryable_db_error(Exception("unique constraint violation")) is False
+
+
+@pytest.mark.unit
+class TestRetryOnDeadlock:
+    @pytest.mark.asyncio
+    async def test_recovers_from_dropped_connection(self) -> None:
+        # A retried call opens its own session, so the second attempt gets a
+        # fresh connection - this is the ingest crash the fix targets.
+        calls = {"n": 0}
+
+        async def flaky() -> str:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise Exception("connection is closed")
+            return "ok"
+
+        result = await _retry_on_deadlock(flaky)
+        assert result == "ok"
+        assert calls["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_reraises_non_retryable_without_retrying(self) -> None:
+        calls = {"n": 0}
+
+        async def bad() -> None:
+            calls["n"] += 1
+            raise ValueError("not a transient db error")
+
+        with pytest.raises(ValueError):
+            await _retry_on_deadlock(bad)
+        assert calls["n"] == 1
