@@ -177,6 +177,8 @@ results = await engine.recall(
 | 0.3 | 30% | 70% | Technical terms, exact phrases |
 | 0.0 | 0% | 100% | Pure keyword search |
 
+> **Note:** `hybrid_alpha` blends vector vs BM25 only. The separate vector/graph fusion weights on the VectorCypher path are runtime-adaptive on temporal queries: an empty graph channel flips them to vector-heavy 0.85/0.15, and a sparse one (< 3 chunks) falls back to the canonical 0.6/0.4 - see [VectorCypher engine](vectorcypher-engine.md#fusion-weights).
+
 ### Tuning Guidelines
 
 **Increase alpha (more vector):**

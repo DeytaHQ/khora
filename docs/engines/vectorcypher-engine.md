@@ -64,7 +64,7 @@ For comprehensive extraction over 100% of chunks, pass `engine_kwargs={"vectorcy
 
 2. **Query Routing**: Intelligent classification routes queries to optimal search paths (vector-only for simple queries, full VectorCypher for complex)
 
-3. **Skeleton-Based Extraction**: Only core chunks (identified via PageRank, default 70%) get full LLM entity extraction, balancing cost and quality
+3. **Skeleton-Based Extraction**: Only core chunks (identified via PageRank, default 50%) get full LLM entity extraction, balancing cost and quality
 
 4. **RRF Fusion**: Reciprocal Rank Fusion combines vector and graph results with configurable weights
 
@@ -176,7 +176,7 @@ class RetrieverConfig:
     complex_graph_weight: float = 0.6
 
     # Temporal settings
-    recency_weight: float = 0.2
+    recency_weight: float = 0.35
     recency_decay_days: int = 30
     recency_decay_type: str = "exponential"  # "exponential" or "linear"
 
@@ -203,8 +203,14 @@ class RetrieverConfig:
 6. **Fetch Chunks**: Get chunks via `MENTIONED_IN` relationships, with optional temporal sort
 7. **RRF Fusion**: Combine vector and graph results
 8. **Recency Boost**: Apply temporal boosting with category-specific weights and decay
+9. **Coherence Boost**: Blend a bigram-coherence signal into fused scores to demote word-shuffled confounders
+10. **Cross-Encoder Rerank**: Optional cross-encoder rescoring of the top candidates
+11. **LLM Rerank**: Optional listwise LLM rerank (default off; decisive-winner skip)
+12. **Version-Aware Scoring**: Adjust scores for entity-version validity on point-in-time queries
+13. **Attach Absolute Scores**: Replace the reported score value with the raw query-chunk cosine (order unchanged, #1433 - see [Score Reporting](#score-normalization))
+14. **MMR Diversity**: Select the final top-`limit` set with Maximal Marginal Relevance
 
-### QueryComplexityRouter (`src/khora/engines/vectorcypher/router.py`)
+### QueryComplexityRouter (`khora.query.router`)
 
 Routes queries to optimal search paths:
 
@@ -266,6 +272,10 @@ neighborhoods = await dual_nodes.get_entity_neighborhoods(
 )
 ```
 
+**Bounded per-hop expansion (#1419).** `get_entity_neighborhoods` runs an unrolled per-hop BFS that caps each hop's new frontier at `hop_limit=200` nodes per source entity, replacing the old exponential all-paths `[*1..depth]` enumeration - hub nodes can no longer blow up a hop.
+
+**Timeout degradation (#1428, ADR-001).** On a Neo4j timeout the graph channel is no longer a silent `{}`: a structured `Degradation` (`component="vectorcypher.cypher_expand"`, `reason="neo4j_timeout"`) is recorded on `RecallResult.engine_info["degradations"]` and the `khora.vectorcypher.cypher_expand.degraded_total` counter increments.
+
 The `temporal_sort` parameter controls Cypher ordering:
 
 | `temporal_sort` | Cypher `ORDER BY` | When Used |
@@ -293,7 +303,7 @@ fused_results = weighted_rrf(
 fused_results = apply_recency_boost(
     fused_results,
     recency_scores,
-    recency_weight=0.2,
+    recency_weight=0.35,
 )
 ```
 
@@ -362,7 +372,7 @@ VectorCypher uses intelligent query routing to balance performance and quality:
 
 ## Temporal Detection
 
-The VectorCypher engine includes a `TemporalDetector` (`src/khora/engines/vectorcypher/temporal_detection.py`) that classifies every query into a temporal category before retrieval begins. This replaces the previous regex-based `_detect_temporal_filter()` with a richer signal that drives multiple retrieval parameters simultaneously.
+The VectorCypher engine includes a `TemporalDetector` (canonical location `khora.query.temporal_detection`; `src/khora/engines/vectorcypher/temporal_detection.py` remains as a back-compat re-export shim) that classifies every query into a temporal category before retrieval begins. This replaces the previous regex-based `_detect_temporal_filter()` with a richer signal that drives multiple retrieval parameters simultaneously.
 
 ### How It Works
 
@@ -434,7 +444,7 @@ config = VectorCypherConfig(
     fusion_complex_graph_weight=0.6,
 
     # Temporal
-    temporal_recency_weight=0.2,
+    temporal_recency_weight=0.35,
     temporal_recency_decay_days=30,
 
     # Search thresholds
@@ -581,6 +591,8 @@ Controls blending of vector and graph results:
 | 0.4 | 0.6 | Graph-heavy (relationship queries) |
 | 0.2 | 0.8 | Mostly graph traversal |
 
+**Adaptive graph-empty fallback.** On temporal queries the weights adapt at runtime to stop a sparse graph from diluting good vector hits: if the graph channel returns 0 chunks the temporal weights (0.3/0.7) flip to vector-heavy **0.85/0.15**; if it returns fewer than 3 chunks they fall back to the canonical **0.6/0.4**.
+
 ## Adaptive Depth
 
 When `adaptive_depth_enabled=True` (the default), the retriever dynamically adjusts graph traversal depth based on how many entry entities the vector search returns:
@@ -610,11 +622,11 @@ This prevents two failure modes: (1) candidate explosion when many entities each
 
 The fusion function `weighted_rrf_normalized` normalizes vector and graph scores to [0, 1] via min-max normalization before computing Reciprocal Rank Fusion. This matters when the two sources produce scores on very different scales - for example, cosine similarity scores in [0.3, 0.9] vs graph proximity scores in [0.01, 0.5]. Without normalization, the source with larger absolute scores dominates the fusion.
 
-Both the SIMPLE and COMPLEX retrieval paths normalize final scores to [0,1] using min-max normalization.
+Min-max normalization is an **internal** step only (it feeds the coherence blend on the COMPLEX path). The score reported to callers is not a min-max [0,1] value: per the score-vs-order contract (#811/#1433/#1441), the exit of the pipeline overwrites the reported value with the **absolute raw query-chunk cosine** (`attach_relevance_scores`), so an off-topic top result reads low (e.g. ~0.1) instead of being forced to 1.0. Ordering is still decided by the internal `rrf_score` (fusion + boosts + rerank); the list is never re-sorted by the reported value. The SIMPLE path reports cosines directly from the vector store. See [Recall semantics](../query-engine/recall-semantics.md).
 
 ```
-RRF score = vector_weight / (k + vector_rank) + graph_weight / (k + graph_rank)
-Tiebreaker = normalized_score from the dominant source
+RRF score = vector_weight / (k + vector_rank) + graph_weight / (k + graph_rank)   # internal ranking
+Reported chunk.score = raw query-to-chunk cosine (0.0 when no vector measurement)
 ```
 
 ## Abstention & Confidence
@@ -664,6 +676,12 @@ uv run alembic upgrade head
 **Cross-encoder reranking.** After the initial vector + Cypher retrieval, an optional cross-encoder model rescores the top candidates for precision. The model is cached across queries to avoid reload overhead, and inference runs in `asyncio.to_thread` to keep the event loop free. Enable/disable via `KHORA_QUERY_ENABLE_RERANKING`.
 
 **Independent BM25 channel (opt-in).** When `KHORA_QUERY_ENABLE_BM25_CHANNEL=true` is set, VectorCypher runs BM25 full-text search as a separate retrieval channel alongside vector and Cypher graph traversal. Results are fused via RRF, giving keyword-exact matches a dedicated signal path rather than relying solely on embedding similarity. Default is OFF; keyword matching in HYBRID mode uses the `enable_keyword_search` path inside `HybridQueryEngine`, not this channel.
+
+**Lexical-channel selector (#1391).** `KhoraConfig.query.lexical_channel` (`Literal["bm25", "keyword_ppr"]`, default `"bm25"`) picks which retriever fills the lexical recall slot. `"keyword_ppr"` swaps in an experimental keyword-chunk PageRank channel (per-query personalized PageRank over the namespace's keyword-to-chunk bipartite graph) that feeds the **same** fusion slot as BM25, weighted by `bm25_weight` - fusion is otherwise unchanged. The selector is itself the opt-in for `keyword_ppr`; it does NOT require `enable_bm25_channel=true`. Tunables: `keyword_ppr_damping` (0.85), `keyword_ppr_max_edges` (50000). Switching to `keyword_ppr` requires a re-ingest to populate the `keyword_chunks` table.
+
+**`min_similarity` cosine floor (#1404/#1406/#1425/#1438/#1445).** A per-call `recall(..., min_similarity=...)` floors the vector channel at the storage layer; `0.0` (the default) falls back to the configured `min_chunk_similarity` / `KHORA_QUERY_MIN_CHUNK_SIMILARITY` (default `0.0` = no floor). An explicit (> 0) floor also bounds the lexical channel: lexical-only chunks are excluded from the fused set (their BM25 / keyword-PPR scores are not cosines), and KEYWORD mode gates hits against a floored vector search - mirroring the temporal stores' #1404 semantics. See [Recall semantics](../query-engine/recall-semantics.md).
+
+**Query-time Personalized PageRank (opt-in, #542).** `KHORA_QUERY_ENABLE_PPR_RETRIEVAL=true` (default OFF) replaces the BFS+RRF graph-expansion channel with the HippoRAG-2-style query-time PPR: PageRank is seeded from the entry entities, and chunks are scored by the PR-weighted mass over their mentioned entities blended with the query cosine (`mass * (1 + sim)`). It degrades to vector-only when the entity graph is empty or no entry entities are found - it never crashes the query. Knobs: `ppr_damping` (0.85), `ppr_max_iter` (50), `ppr_tol` (1e-5), `ppr_top_entities` (30), plus the #1373 seed-neighborhood augmentation caps (`ppr_neighborhood_per_seed_limit`, `ppr_max_neighborhood_entities`).
 
 **Temporal SQL pushdown.** Relative date expressions in queries ("last 7 days", "since March") are detected by the temporal classifier and translated into SQL WHERE clauses that filter at the database level before vector search. This reduces the candidate set and improves both latency and relevance for time-scoped queries. Controlled by `KHORA_QUERY_TEMPORAL_SQL_PUSHDOWN`.
 
