@@ -438,14 +438,18 @@ Relationship writes still use a plain semaphore (8 concurrent). Since relationsh
 
 ### HNSW `ef_search` Tuning
 
-pgvector's HNSW index ships a built-in `ef_search` of 40, which trades recall for speed. Higher `ef_search` explores more candidates during the HNSW graph traversal, improving recall at the cost of marginally higher latency. Khora raises it above pgvector's default: the value is config-driven (`config.storage.hnsw_ef_search`, env `KHORA_STORAGE_HNSW_EF_SEARCH`, default **100**) and applied at the **connection level** via asyncpg `server_settings`, not per-transaction:
+pgvector's HNSW index ships a built-in `ef_search` of 40, which trades recall for speed. Higher `ef_search` explores more candidates during the HNSW graph traversal, improving recall at the cost of marginally higher latency. Khora raises it above pgvector's default: the value is config-driven (`config.storage.hnsw_ef_search`, env `KHORA_STORAGE_HNSW_EF_SEARCH`, default **100**).
+
+The two pgvector backends apply it differently. The VectorCypher temporal store (`storage/temporal/pgvector.py`) sets it once at the **connection level** via asyncpg `server_settings`, avoiding a per-query round-trip:
 
 ```python
 # asyncpg connection kwargs
 server_settings = {"hnsw.ef_search": str(config.storage.hnsw_ef_search)}
 ```
 
-Setting it once at connection setup avoids a per-query `SET LOCAL` round-trip. Correct recall under a caller filter no longer relies on an inflated `ef_search`: it relies on pgvector >= 0.8 iterative / relaxed-order scan (`SET LOCAL hnsw.iterative_scan = relaxed_order`), which keeps scanning the index until enough post-filter rows are found. See [storage-backends.md](storage-backends.md) (#1423).
+The main pgvector backend (`storage/backends/pgvector.py`) instead issues a per-query `SET LOCAL hnsw.ef_search` inside the search transaction. Both paths use the same configured value.
+
+Correct recall under a caller filter no longer relies on an inflated `ef_search`: it relies on pgvector >= 0.8 iterative / relaxed-order scan (`SET LOCAL hnsw.iterative_scan = relaxed_order`), which keeps scanning the index until enough post-filter rows are found. See [storage-backends.md](storage-backends.md) (#1423).
 
 ### Entity Sort Before Upsert (Deadlock Prevention)
 

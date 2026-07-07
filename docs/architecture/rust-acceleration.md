@@ -329,7 +329,7 @@ Batch entity matching with a 3-stage cascade.
 **Rust techniques:**
 - **HashMap O(1) lookups** - Exact and alias stages build `HashMap<String, usize>` indexes from the existing names/aliases during pre-processing, replacing the previous O(n) linear scans. This reduces stages 1 and 2 from O(new × existing) to O(new + existing).
 - **Pre-lowercasing** - All existing names and aliases are lowercased once before the hot loop, outside `detach`.
-- **Rayon parallel** - `new_names.par_iter().map(...)` parallelises resolution across all new names. Entity resolution parallelises unconditionally (no size gate); the `>= 512` threshold applies to the string-similarity batch kernels, not here.
+- **Rayon parallel** - `new_names.par_iter().map(...)` parallelises resolution across all new names. Entity resolution parallelises with no size gate in the default build (the `parallel` feature, on by default, gates Rayon - see [Cargo features](#cargo-features)); the `>= 512` threshold applies to the string-similarity batch kernels, not here.
 - **GIL release** - `py.detach()` wraps the entire parallel resolution.
 - **Early exit** - Each name short-circuits at the first matching stage.
 
@@ -431,13 +431,13 @@ pip install khora-accel
 
 ### Speedup Ranges by Category
 
-> The figures below are illustrative estimates, not all benchmark-backed. Only cosine similarity has a functional Criterion bench today; the bm25 and pagerank benches are placeholders (see Benchmark Infrastructure).
+> The figures below are illustrative estimates, not all benchmark-backed. The cosine, BM25, PageRank, and block-and-score kernels have functional Criterion benches today (see Benchmark Infrastructure); the remaining kernels' figures are estimates.
 
 | Category | Operations | Estimated Speedup | Key Technique |
 |----------|-----------|-------------------|---------------|
 | Vector math | cosine, batch cosine, pairwise cosine | **5–10x** | NumPy zero-copy, rayon, fused dot+norm |
 | String similarity | Levenshtein, Jaro-Winkler, batch variants | **10–40x** | strsim crate, rayon parallel batch (≥512 threshold) |
-| Entity resolution | 3-stage batch matching | **10–30x** | HashMap O(1) lookups, rayon (always parallel), early exit |
+| Entity resolution | 3-stage batch matching | **10–30x** | HashMap O(1) lookups, rayon (no size gate, default build), early exit |
 | BM25 search | Index + score + search | **3–8x** | Inverted index, token interning, GIL release |
 | PageRank | Weighted iterative PageRank | **5–15x** | GIL release, tight loop, no Python overhead |
 | Keyword extraction | Regex tokenise + filter | **3–5x** | Compiled regex via LazyLock, rayon batch |

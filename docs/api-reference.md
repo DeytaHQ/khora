@@ -367,7 +367,7 @@ JSON-serializable response projection. Lives at `khora.core.models.recall.Recall
 
 #### `engine_info` well-known keys
 
-`engine` and `filter` are the only guaranteed keys; the rest are best-effort telemetry. Both default engines also emit (since #1331, on `engine_info`, NOT `.metadata`):
+`engine` is always present. `filter` carries a filter-pushdown report on the standard recall path - it reports what the caller filter narrowed, or "nothing narrowed" when no `filter=` was passed. The remaining keys are best-effort telemetry. Both default engines also emit (since #1331, on `engine_info`, NOT `.metadata`):
 
 | Key | Emitted by | Description |
 |---|---|---|

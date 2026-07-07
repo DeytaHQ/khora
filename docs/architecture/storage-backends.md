@@ -635,7 +635,7 @@ SurrealDB is an alternative that serves as **all three backends** - relational, 
 | Role | SurrealDB Implementation |
 |------|-------------------------|
 | **Relational** | Document/namespace storage with SurrealQL queries |
-| **Vector** | Vector similarity search; the embedded path uses brute-force cosine (KNN `<|K|>` is unreliable in embedded mode), HNSW on the remote path. The remote HNSW DDL is sized from the configured `llm.embedding_dimension` (default 1536) and `hnsw_m` = 24 / `hnsw_ef_construction` = 128 (mirroring the pgvector defaults) - not a fixed 1536 literal. Switching embedders (changed dimension) on a live SurrealDB deployment requires a **manual re-index**: `DEFINE INDEX IF NOT EXISTS` will not re-shape an existing index. |
+| **Vector** | Vector similarity search; the embedded path uses brute-force cosine (KNN `<\|K\|>` is unreliable in embedded mode), HNSW on the remote path. The remote HNSW DDL is sized from the configured `llm.embedding_dimension` (default 1536) and `hnsw_m` = 24 / `hnsw_ef_construction` = 128 (mirroring the pgvector defaults) - not a fixed 1536 literal. Switching embedders (changed dimension) on a live SurrealDB deployment requires a **manual re-index**: `DEFINE INDEX IF NOT EXISTS` will not re-shape an existing index. |
 | **Graph** | Native graph traversal via SurrealQL graph queries |
 | **Event Store** | Append-only event log with SurrealQL |
 

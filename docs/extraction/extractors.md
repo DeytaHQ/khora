@@ -112,7 +112,7 @@ Two user-prompt variants exist:
 
 Extraction prompts are structured to maximize prefix caching hits with LLM providers. The static guidelines live in the system message; everything per-call - entity types, relationship types, document context, and the text itself - lives in the user message, and the output schema is passed via the `response_format` API parameter rather than embedded in any prompt:
 
-```
+```text
 System: {static guidelines - identical across all calls}
 
 User: Extract entities ... {document_context}

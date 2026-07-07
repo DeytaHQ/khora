@@ -40,7 +40,7 @@ Say document D appears in three search results:
 
 With k=60 (the default smoothing constant):
 
-```
+```text
 Vector contribution:  0.6 / (60 + 2) = 0.6 / 62 = 0.00968
 Graph contribution:   0.4 / (60 + 5) = 0.4 / 65 = 0.00615
 Keyword contribution: 0.3 / (60 + 1) = 0.3 / 61 = 0.00492
@@ -50,7 +50,7 @@ Total RRF score: 0.00968 + 0.00615 + 0.00492 = 0.02075
 
 Now compare to document E, which only appears in vector search at rank 1:
 
-```
+```text
 Vector contribution:  0.6 / (60 + 1) = 0.6 / 61 = 0.00984
 
 Total RRF score: 0.00984
