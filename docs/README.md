@@ -49,6 +49,7 @@ Pluggable retrieval strategies that implement `MemoryEngineProtocol`.
 - [Overview](query-engine/overview.md) - how `recall()` routes through the engine.
 - [Search modes](query-engine/search-modes.md) - `vector`, `graph`, `hybrid`, `all`.
 - [Fusion](query-engine/fusion.md) - Reciprocal Rank Fusion and weighting.
+- [Recall semantics](query-engine/recall-semantics.md) - score vs order contract, `min_similarity` floors, abstention signals.
 - [Query understanding](query-engine/query-understanding.md) - HyDE, intent detection.
 - [Agentic search](query-engine/agentic-search.md) - multi-step retrieval.
 - [Temporal queries](query-engine/temporal-queries.md) - relative-date SQL pushdown.

@@ -60,9 +60,9 @@ For paraphrased queries, entity linking often found nothing (no exact or fuzzy m
 
 ### Similarity Thresholds (P0)
 
-The `Khora.recall()` default `min_similarity` changed from `0.5` to `0.0`. The `QueryConfig` defaults for `min_chunk_similarity` and `min_entity_similarity` changed from `0.3` to `0.05`.
+The `Khora.recall()` default `min_similarity` changed from `0.5` to `0.0`. The `QueryConfig` default for `min_entity_similarity` changed from `0.3` to `0.05`; `min_chunk_similarity` was later canonicalized to `0.0` in #1406 (the old `0.05` never took effect on the default recall path - `0.0` means no floor, set `KHORA_QUERY_MIN_CHUNK_SIMILARITY` to opt in).
 
-Setting `min_similarity=0.0` at the `Khora` level means: don't filter at the database level, let the ranking pipeline (RRF fusion, reranking) decide what's relevant. The small `0.05` default in `QueryConfig` is a noise floor - it filters out truly random matches without discarding anything a human might consider relevant.
+Setting `min_similarity=0.0` at the `Khora` level means: don't filter at the database level, let the ranking pipeline (RRF fusion, reranking) decide what's relevant. The small `0.05` entity default in `QueryConfig` is a noise floor - it filters out truly random matches without discarding anything a human might consider relevant.
 
 If you have a use case where you want strict filtering (e.g., only returning very confident matches), you can still pass `min_similarity=0.7` explicitly. The change only affects the default behavior.
 
@@ -70,7 +70,7 @@ Files changed:
 - `khora.py`: `min_similarity` parameter default `0.5` → `0.0`
 - `query/engine.py`: `QueryConfig.min_chunk_similarity` default `0.3` → `0.05`
 - `query/engine.py`: `QueryConfig.min_entity_similarity` default `0.3` → `0.05`
-- `config/schema.py`: `QuerySettings.min_chunk_similarity` default `0.3` → `0.05`
+- `config/schema.py`: `QuerySettings.min_chunk_similarity` default `0.3` → `0.05` (now `0.0` since #1406)
 - `config/schema.py`: `QuerySettings.min_entity_similarity` default `0.3` → `0.05`
 
 ### Keyword Search in HYBRID Mode (P0)
@@ -82,7 +82,7 @@ Keyword search now runs alongside vector and graph search in `HYBRID` mode, not 
 if cfg.mode in (SearchMode.HYBRID, SearchMode.ALL) and cfg.enable_keyword_search:
 ```
 
-This means the default `HYBRID` mode now uses all three search methods: vector similarity, graph traversal, and keyword/full-text matching. The existing RRF fusion weights still apply (vector: 0.5, graph: 0.3, keyword: 0.2), so keyword results contribute without dominating.
+This means the default `HYBRID` mode now uses all three search methods: vector similarity, graph traversal, and keyword/full-text matching. The existing RRF fusion weights still apply (vector: 0.6, graph: 0.4, keyword: 0.3), so keyword results contribute without dominating.
 
 This is arguably what `HYBRID` should have always meant. The previous behavior (vector + graph only) is now what you'd get with `SearchMode.HYBRID` and `enable_keyword_search=False`.
 
@@ -162,7 +162,7 @@ config = QueryConfig(
 
 Environment variables:
 ```bash
-KHORA_QUERY_MIN_CHUNK_SIMILARITY=0.05     # default
+KHORA_QUERY_MIN_CHUNK_SIMILARITY=0.0      # default (no floor)
 KHORA_QUERY_MIN_ENTITY_SIMILARITY=0.05    # default
 KHORA_QUERY_ENTITY_LINKING_FUZZY_THRESHOLD=0.5    # default
 KHORA_QUERY_ENTITY_LINKING_EMBEDDING_THRESHOLD=0.4
@@ -238,7 +238,7 @@ These changes should eliminate the zero-result problem and significantly improve
 - Latency: some improvement from reranking skip, but the main latency contributors (query understanding, reranking) are unchanged
 
 Further improvements to consider:
-- **HyDE (Hypothetical Document Embeddings)**: Generates a hypothetical document for the query to improve embedding similarity for descriptive queries. Mode is controlled by `KHORA_QUERY_ENABLE_HYDE` taking `auto` (default), `always`, or `never` (booleans `True`/`False` are still accepted and normalize to `always`/`never`). In `auto` mode HyDE fires when the query understanding layer flags the query as complex or temporal. RECENCY / STATE_QUERY / CHANGE queries get a time-anchored hypothetical that injects today's ISO date - see [Temporal queries](temporal-queries.md#temporal-anchored-hyde).
-- **HyDE-Cypher (opt-in)**: For *structured* RECENCY queries (e.g. "latest action items", "who works for Acme", "Phoenix and security recently"), khora can ask an LLM to pick a parameterized Cypher template and execute it against the graph backend as an additional retrieval channel. Three templates ship: `recent_by_type`, `entity_relationships`, `cooccurrence`. Slot values are validated against `ExpertiseConfig` whitelists and bound via Neo4j parameters - slot strings never reach the Cypher source. Enable via `KHORA_QUERY_ENABLE_HYDE_CYPHER=true`; cap result-set size with `KHORA_QUERY_HYDE_CYPHER_LIMIT` (default 20). **Default OFF - flip after an A/B run on a hand-curated structured-query set.**
+- **HyDE (Hypothetical Document Embeddings)**: Generates a hypothetical document for the query to improve embedding similarity for descriptive queries. Mode is controlled by `KHORA_QUERY_ENABLE_HYDE` taking `auto` (default), `always`, or `never` (booleans `True`/`False` are still accepted and normalize to `always`/`never`). In `auto` mode HyDE fires when the query understanding layer flags the query as complex or temporal. RECENCY / STATE_QUERY / CHANGE queries get a time-anchored hypothetical that injects today's ISO date - see [Temporal queries](temporal-queries.md#temporal-anchored-hyde). Cost/latency profile: HyDE adds one LLM completion (temperature 0.7, max 200 tokens) plus an embed of each hypothetical, awaited *before* the vector fetch - it sits on the critical path, not in parallel. In `auto` mode it fires on every non-SIMPLE or temporal query, so it is not free at scale; use `never` for latency-sensitive simple-query workloads. The temporal-category detection that picks the anchored prompt is Rust Aho-Corasick, sub-ms, zero LLM cost.
+- **HyDE-Cypher (implemented, not yet wired)**: For *structured* RECENCY queries (e.g. "latest action items", "who works for Acme", "Phoenix and security recently"), the `khora.query.hyde_cypher` module can ask an LLM to pick a parameterized Cypher template and execute it against the graph backend as an additional retrieval channel. Three templates ship: `recent_by_type`, `entity_relationships`, `cooccurrence`. Slot values are validated against `ExpertiseConfig` whitelists and bound via Neo4j parameters - slot strings never reach the Cypher source. **The module is not yet wired into the retrieval pipeline: `KHORA_QUERY_ENABLE_HYDE_CYPHER` / `KHORA_QUERY_HYDE_CYPHER_LIMIT` are currently inert and setting them has no effect on `recall()`.**
 - **Cross-encoder date-prefix experiment (opt-in)**: `CrossEncoderReranker(include_date_prefix=True)` prepends `[YYYY-MM-DD] ` to each candidate's content before scoring. Off-the-shelf rerankers tokenize ISO dates fine and the extra ~12 tokens per candidate are negligible vs. the model's forward pass. Source-priority: `metadata.custom.occurred_at` → `metadata.custom.sent_at` → `metadata.created_at`. **Default OFF - A/B required before flipping.**
 - **SearchMode.ALL as default**: Now that keyword search runs in HYBRID, the distinction between HYBRID and ALL is smaller - HYBRID is effectively ALL.
