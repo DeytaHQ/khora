@@ -1,6 +1,6 @@
 [package]
 name = "khora-accel"
-version = "0.21.1"
+version = "0.22.2"
 edition = "2024"
 rust-version = "1.85"
 description = "Rust-accelerated operations for Khora"
