@@ -264,21 +264,26 @@ Prefix: `KHORA_QUERY_`. See [query-engine/retrieval-tuning.md](query-engine/retr
 | Variable | Default | Description |
 |---|---|---|
 | `KHORA_QUERY_DEFAULT_MODE` | `hybrid` | `vector`, `graph`, `hybrid`, or `all`. |
-| `KHORA_QUERY_MIN_CHUNK_SIMILARITY` | `0.05` | Chunk similarity floor. |
+| `KHORA_QUERY_MIN_CHUNK_SIMILARITY` | `0.0` | Chunk-channel cosine floor (`0.0` = no floor; set to opt in). |
 | `KHORA_QUERY_MIN_ENTITY_SIMILARITY` | `0.05` | Entity similarity floor. |
-| `KHORA_QUERY_VECTOR_WEIGHT` | `0.5` | Fusion weight. |
-| `KHORA_QUERY_GRAPH_WEIGHT` | `0.3` | Fusion weight. |
-| `KHORA_QUERY_KEYWORD_WEIGHT` | `0.2` | Fusion weight. |
+| `KHORA_QUERY_VECTOR_WEIGHT` | `0.6` | Fusion weight for the vector channel. |
+| `KHORA_QUERY_GRAPH_WEIGHT` | `0.4` | Fusion weight for the graph channel. |
+| `KHORA_QUERY_KEYWORD_WEIGHT` | `0.3` | Fusion weight for the lexical channel (fills the `bm25_weight` slot; inert until the BM25/lexical channel is enabled). |
 | `KHORA_QUERY_APPLY_RECENCY_BIAS` | `false` | Bias scoring towards newer documents. |
 | `KHORA_QUERY_RECENCY_WEIGHT` | `0.35` | How strong the recency bias is. |
 | `KHORA_QUERY_ENABLE_HYDE` | `auto` | HyDE query expansion: `auto` / `always` / `never` (legacy booleans normalize to `always` / `never`). RECENCY / STATE_QUERY / CHANGE queries automatically get a time-anchored prompt - see [temporal-queries.md](query-engine/temporal-queries.md#temporal-anchored-hyde). |
 | `KHORA_QUERY_HYDE_NUM_HYPOTHETICALS` | `1` | Number of hypothetical documents to generate (1–5). |
-| `KHORA_QUERY_ENABLE_HYDE_CYPHER` | `false` | **Opt-in.** Run LLM-picked parameterized Cypher templates as an extra retrieval channel for structured RECENCY queries. See [retrieval-tuning.md](query-engine/retrieval-tuning.md). |
-| `KHORA_QUERY_HYDE_CYPHER_LIMIT` | `20` | Max entities returned per HyDE-Cypher template execution. |
+| `KHORA_QUERY_ENABLE_HYDE_CYPHER` | `false` | **Currently inert.** The `khora.query.hyde_cypher` module (LLM-picked parameterized Cypher templates) exists but is not yet wired into the retrieval pipeline - no code reads this flag, so setting it has no effect on `recall()`. |
+| `KHORA_QUERY_HYDE_CYPHER_LIMIT` | `20` | **Currently inert** - see `KHORA_QUERY_ENABLE_HYDE_CYPHER`. |
 | `KHORA_QUERY_ENABLE_RERANKING` | `true` | Cross-encoder reranking of top candidates. |
 | `KHORA_QUERY_TEMPORAL_SQL_PUSHDOWN` | `true` | Push relative-date filters into SQL WHERE clauses. |
 | `KHORA_QUERY_METADATA_OVERFETCH_MULTIPLIER` | `3` | Over-fetch multiplier (2–10) for the VectorCypher graph chunk channel when a caller filter has a metadata predicate that can't push down to Cypher and must be post-filtered in memory. The graph fetch widens to `min(limit * multiplier, 200)` so fusion still has candidates after filtering; no effect for no-filter or system-key-only filters. |
 | `KHORA_QUERY_ENABLE_BM25_CHANNEL` | `false` | **Opt-in.** Add an independent BM25 lexical channel to fusion (alongside vector + graph), so exact keyword matches surface even when semantic similarity is weak. |
+| `KHORA_QUERY_LEXICAL_CHANNEL` | `bm25` | Which retriever fills the lexical recall slot: `bm25` (default, unchanged) or `keyword_ppr` (experimental keyword-chunk PageRank channel; requires re-ingest to populate `keyword_chunks`). Either choice feeds the same fusion slot, weighted by `KHORA_QUERY_KEYWORD_WEIGHT`. |
+| `KHORA_QUERY_KEYWORD_PPR_DAMPING` | `0.85` | Damping factor for the `keyword_ppr` channel's per-query PageRank (only used when `lexical_channel=keyword_ppr`). |
+| `KHORA_QUERY_KEYWORD_PPR_MAX_EDGES` | `50000` | Max keyword-to-chunk bipartite edges loaded per query for the `keyword_ppr` channel (bounds per-query PageRank cost). |
+
+> **Default-path fusion is vector + graph only.** On the default `kb.recall()` (VectorCypher) engine only the vector and graph channels fuse by default (weights 0.6 / 0.4). The lexical/BM25 channel is opt-in via `KHORA_QUERY_ENABLE_BM25_CHANNEL=true`; when enabled it fuses at `KHORA_QUERY_KEYWORD_WEIGHT` (0.3). The legacy 3-way HYBRID with an always-on keyword channel applies to the older `HybridQueryEngine`, not the default recall path.
 
 ### Abstention signals
 
@@ -305,7 +310,34 @@ The temporal-category detector is Aho-Corasick keyword matching by default. Two 
 | `KHORA_QUERY_TEMPORAL_LLM_DISAMBIGUATION_ENABLED` | `false` | Opt-in LLM disambiguation for counterfactual/ambiguous temporal phrasing (#571). |
 | `KHORA_QUERY_TEMPORAL_LLM_DISAMBIGUATION_MODEL` | - | Model for disambiguation (falls back to `llm.model`). |
 
-The recency channel, multi-stage ranking, PPR, entity-linking, and per-source decay knobs also live under `KHORA_QUERY_*`; see the [`KHORA_QUERY_*` table in nested-env-vars.md](nested-env-vars.md) for the full set.
+### Advanced retrieval knobs
+
+The recency channel, multi-stage ranking, PPR, entity-linking, and per-source decay knobs also live under `KHORA_QUERY_*`:
+
+| Variable | Default | Description |
+|---|---|---|
+| `KHORA_QUERY_ENABLE_PPR_RETRIEVAL` | `false` | **Opt-in.** Query-time Personalized PageRank in VectorCypher retrieval (HippoRAG 2): replaces the BFS graph-expansion channel with a PPR-weighted entity walk seeded from query entities. Falls back to vector-only when the entity graph is empty (#542). |
+| `KHORA_QUERY_PPR_DAMPING` | `0.85` | PPR damping factor. |
+| `KHORA_QUERY_PPR_MAX_ITER` | `50` | Max PPR power-method iterations. |
+| `KHORA_QUERY_PPR_TOL` | `1e-5` | PPR convergence tolerance. |
+| `KHORA_QUERY_PPR_TOP_ENTITIES` | `30` | Top PR-scored entities used to score chunks. |
+| `KHORA_QUERY_PPR_NEIGHBORHOOD_PER_SEED_LIMIT` | `64` | Seed-neighborhood augmentation cap per seed when the entity slice is full (#1373). |
+| `KHORA_QUERY_PPR_MAX_NEIGHBORHOOD_ENTITIES` | `2000` | Upper bound on seed-anchored growth of the PPR entity set (#1373). |
+| `KHORA_QUERY_TEMPORAL_RECENCY_CHANNEL_ENABLED` | `false` | **Opt-in.** Fuse a parallel recency channel (newest-first SQL) for RECENCY/CHANGE queries. |
+| `KHORA_QUERY_TEMPORAL_QUERY_RELEVANCE_FLOOR` | `0.40` | Cosine floor a chunk must clear to enter recency-channel fusion. |
+| `KHORA_QUERY_TEMPORAL_RECENCY_CHANNEL_LIMIT` | `50` | Per-channel limit for the recency-channel SQL. |
+| `KHORA_QUERY_TEMPORAL_PER_SOURCE_DECAY` | `false` | **Opt-in.** Look up recency decay-days per chunk via `metadata.custom['source_system']`. |
+| `KHORA_QUERY_TEMPORAL_DEFAULT_DECAY_BY_SOURCE` | `slack:3, email:7, calendar:14, salesforce:180, _default:14` | Per-source decay-days map (JSON dict via env). |
+| `KHORA_QUERY_ENABLE_MULTI_STAGE` | `true` | Multi-stage ranking pipeline. |
+| `KHORA_QUERY_STAGE1_RECALL_LIMIT` | `200` | Stage 1 broad-recall candidate count. |
+| `KHORA_QUERY_STAGE3_FILTER_LIMIT` | `50` | Candidates surviving Stage 3 filtering. |
+| `KHORA_QUERY_STAGE4_RERANK_LIMIT` | `50` | Candidates sent to neural reranking in Stage 4. |
+| `KHORA_QUERY_ENABLE_DIVERSITY` | `true` | MMR-style diversity selection in Stage 5. |
+| `KHORA_QUERY_DIVERSITY_LAMBDA` | `0.5` | Diversity vs relevance tradeoff (0 = pure diversity, 1 = pure relevance). |
+| `KHORA_QUERY_ENABLE_ENTITY_LINKING` | `true` | Link query mentions to stored entities. |
+| `KHORA_QUERY_ENTITY_LINKING_FUZZY_THRESHOLD` | `0.5` | Minimum fuzzy match ratio. |
+| `KHORA_QUERY_ENTITY_LINKING_EMBEDDING_THRESHOLD` | `0.4` | Minimum embedding similarity. |
+| `KHORA_QUERY_RECENCY_DECAY_DAYS` | `30` | Days for the recency score to decay by half; `7` is the conversational-recency opt-in (#1421). |
 
 ## Hooks
 
@@ -316,7 +348,7 @@ Prefix: `KHORA_HOOKS_`. Semantic hook subscriptions (`kb.subscribe(...)` / `kb.s
 | `KHORA_HOOKS_LLM_EVALUATION_ENABLED` | `false` | Enable the Level-2 LLM filter evaluator (in addition to the always-on embedding pre-filter). |
 | `KHORA_HOOKS_LLM_MAX_TOKENS_PER_NAMESPACE_PER_HOUR` | `10000` | Rolling-hour LLM-token budget per namespace; a breach fails open and fires `khora.hooks.llm.throttled_total`. |
 | `KHORA_HOOKS_LLM_MAX_TOKENS_PER_SUBSCRIPTION_PER_HOUR` | `0` | Per-subscription rolling-hour budget (`0` = disabled). |
-| `KHORA_HOOKS_LLM_CACHE_SIZE` | `1000` | Cross-batch decision-cache capacity. |
+| `KHORA_HOOKS_LLM_CACHE_SIZE` | `2048` | Cross-batch decision-cache capacity (`0` disables the cache). |
 | `KHORA_HOOKS_LLM_CACHE_TTL_SECONDS` | `3600` | Decision-cache TTL. |
 
 See [hooks/semantic-hooks.md](hooks/semantic-hooks.md) for the filter API, persistent subscriptions, and the remaining `KHORA_HOOKS_*` knobs.
@@ -328,7 +360,7 @@ Prefix: `KHORA_DREAM_`. Background consolidation (entity dedup, edge prune, cont
 | Variable | Default | Description |
 |---|---|---|
 | `KHORA_DREAM_ENABLED` | `false` | Master switch for the dream phase. |
-| `KHORA_DREAM_DEFAULT_MODE` | `report` | Default `DreamMode` when `kb.dream()` is called without one (e.g. `report` / `apply`). |
+| `KHORA_DREAM_DEFAULT_MODE` | `dry-run` | Default `DreamMode` when `kb.dream()` is called without one (`dry-run` / `apply`). |
 | `KHORA_DREAM_CONTRADICTION_RECONCILE_ENABLED` | `false` | Opt-in two-LLM-judged contradiction reconciliation that soft-deletes the losing edge (#1281). |
 
 Dream has a large flat `KHORA_DREAM_*` surface (per-op toggles, the two LLM-token budgets, retention, report sinks, `redact_text`). See [dream-phase.md](dream-phase.md) for the full configuration table, per-op knobs, and defaults.

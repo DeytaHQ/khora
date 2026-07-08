@@ -46,7 +46,7 @@ See the [docs](https://docs.deyta.ai/khora) for the full extras list and env-var
 
 Knowledge repositories for long-horizon agents - copilots, customer-support bots, research assistants - hit two problems that pure vector search doesn't solve:
 
-1. **Ingest is more than chunking.** A useful repository needs entities, relationships, and temporal anchors extracted from the raw text. Khora runs a 3-phase ingest pipeline (stage → enrich → expand) with selective LLM extraction (default 70% of chunks, configurable) and cross-batch entity resolution.
+1. **Ingest is more than chunking.** A useful repository needs entities, relationships, and temporal anchors extracted from the raw text. Khora runs a 3-phase ingest pipeline (stage → enrich → expand) with selective LLM extraction (default 50% of chunks, configurable) and cross-batch entity resolution.
 2. **Retrieval is more than cosine.** Real queries mix semantic similarity, multi-hop entity reasoning, freshness, and keyword precision. Khora combines vector + Cypher graph traversal + BM25 + RRF fusion + temporal-anchored reranking, routed per query.
 
 ## Storage stacks

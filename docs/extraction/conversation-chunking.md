@@ -162,3 +162,10 @@ pipelines:
 ```
 
 Or programmatically when calling the ingestion pipeline, pass `chunk_strategy="conversation"` to use this chunker instead of the default semantic chunker.
+
+## Conversation-Mode Extraction Tuning
+
+When the VectorCypher engine detects conversation mode on a batch (timestamped messages), it adjusts two extraction knobs so short messages still yield graph entities:
+
+- The skeleton keeps a higher fraction of chunks for LLM extraction: `conversation_skeleton_ratio` (default **0.90**) replaces the standard `skeleton_core_ratio` (0.50).
+- The short-chunk skip floor drops from `min_extraction_tokens` (50 words) to 15 words.

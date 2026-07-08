@@ -118,6 +118,10 @@ Public API methods accept `namespace_id` and resolve to the active version's `id
 
 Child table foreign keys (documents, chunks, entities) reference `id`, not `namespace_id`.
 
+### Hook-side resolution asymmetry (#1399 / #1427)
+
+The dual-ID scheme creates one asymmetry the namespace-scoped hooks path has to reconcile. Ingest emits `MemoryEvent`s stamped with the **active version's row `id`** (extraction resolves stable -> row up front), whereas `HookDispatcher.subscribe(namespace_id=…)` stores the caller's **stable** id. The dispatcher's scope check runs both through the idempotent `resolve_namespace` (which maps either id form to the active row id) and caches the mapping. #1427 makes that cache **self-heal** on a failed scope comparison after `create_namespace_version()`, so a version swap does not silently drop hook deliveries - a scoped subscription keeps firing after a version bump instead of going quiet.
+
 ## Finding Namespaces
 
 ```python

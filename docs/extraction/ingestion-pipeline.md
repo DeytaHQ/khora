@@ -281,9 +281,13 @@ PENDING → PROCESSING → COMPLETED
 
 If processing fails, the error message is stored in the document's metadata, and other documents continue processing.
 
-### Selective Extraction with Importance Scoring
+### Selective Extraction
 
-Not all chunks are worth sending to an LLM for entity extraction. The `ChunkImportanceScorer` (in `src/khora/extraction/importance.py`) scores each chunk on four signals:
+Not all chunks are worth sending to an LLM for entity extraction. Which selector applies depends on the ingest path:
+
+**Default path (VectorCypher `remember()` / `remember_batch()`).** Skeleton PageRank is the single core-chunk selector (#1408/#1420): chunks are ranked by keyword-graph PageRank and the top `vectorcypher.skeleton_core_ratio` fraction (default **0.50**) gets full LLM extraction. `selective_extraction` gates the mechanism; the `ChunkImportanceScorer` described below is explicitly disabled on this path (the engine passes `selective_extraction=False` down to `extract_entities` so chunks are not double-selected). Chunks the skeleton skips get **no** graph edges - they stay retrievable through the vector and lexical channels.
+
+**Generic `ingest_documents()` path.** The `ChunkImportanceScorer` (in `src/khora/extraction/importance.py`) scores each chunk on four signals:
 
 | Signal | Weight | What It Measures |
 |--------|--------|-----------------|
@@ -292,16 +296,32 @@ Not all chunks are worth sending to an LLM for entity extraction. The `ChunkImpo
 | Position | 20% | First/last chunks score highest |
 | Length | 20% | 50-300 words is the sweet spot |
 
-When `selective_extraction=True` (the default), only the top chunks by importance score get full LLM extraction. Remaining chunks get lightweight co-occurrence edges (`CO_OCCURS_WITH` relationships) extracted via regex, at confidence 0.4. This reduces LLM extraction costs by 30-50% with minimal recall loss.
+When `selective_extraction=True` (the default), only the top chunks by importance score get full LLM extraction. Remaining chunks get lightweight co-occurrence edges (`CO_OCCURS_WITH` relationships) extracted via regex, at confidence 0.4.
 
 ```python
 result = await ingest_documents(
     namespace_id, documents, storage,
     selective_extraction=True,        # default
-    extraction_importance_ratio=0.7,  # top 70% get LLM extraction
+    extraction_importance_ratio=0.7,  # top 70% get LLM extraction (generic path only)
     extraction_min_importance=0.2,    # minimum score threshold
 )
 ```
+
+### Cost vs quality knobs
+
+The default ingest is tuned for a flat cost profile: the skeleton selects ~50% of chunks for LLM extraction, second-pass relationship extraction is off, and importance scoring is bypassed on the VectorCypher path. The knobs:
+
+| Knob | Default | Effect |
+|------|---------|--------|
+| `selective_extraction` | `True` | Master gate for selective extraction (both paths). `False` = every chunk gets LLM extraction. |
+| `vectorcypher.skeleton_core_ratio` | `0.50` | Fraction of chunks the skeleton sends to the LLM on the default path. Raise for quality, lower for cost. |
+| `extraction_importance_ratio` | `0.7` | Generic-path importance cut (unused on the VectorCypher path). |
+| `extraction_min_importance` | `0.2` | Generic-path minimum importance score. |
+| `pipeline.extraction_second_pass` | `False` | Opt-in batched second-pass relationship extraction (see below). |
+| `llm.extraction_wave_size` | `20` | Concurrent extraction batches dispatched per wave; the circuit breaker is evaluated between waves. |
+| `vectorcypher.min_extraction_tokens` | `50` | Short-chunk skip floor: if every chunk in a batch is <= N *words* (`.split()`, not tokens), entity extraction is skipped for the batch. Conversation batches use a lower floor (15) so short messages still get entities. |
+
+**Second-pass relationship extraction (opt-in, #1409/#1420).** A batched second-pass relationship extraction is available on the batch ingest path, gated by `pipeline.extraction_second_pass` (env `KHORA_PIPELINES_EXTRACTION_SECOND_PASS`), default OFF. When on, under-connected sections (relationships < entities - 1) get one extra batched relationship-only LLM call, recovering ~30-40% more connections at extra cost. Default off keeps the ingest cost profile flat. See [extractors.md](extractors.md#two-pass-relationship-extraction) for mechanics.
 
 ## Phase 3: Expansion (Optional)
 
@@ -487,7 +507,7 @@ result = await kb.remember_batch(
 )
 ```
 
-`remember_batch` delegates to `ingest_documents` internally, which means batch calls get all the benefits of the full pipeline: shared `EntityIndex` for cross-document entity deduplication, smart mode resolution, and parallel document processing. This is a significant improvement over calling `remember()` in a loop, which would miss cross-document dedup entirely.
+On the default VectorCypher engine, `remember_batch` runs the engine's own batched skeleton path (`_remember_batch_impl`), not `ingest_documents` - chunking, embedding, and skeleton-selected extraction are batched across the whole document set, and entity upserts dedupe across documents via the `(namespace_id, name, entity_type)` constraint. This is still a significant improvement over calling `remember()` in a loop. The generic `ingest_documents` flow (shared `EntityIndex`, smart mode resolution) is only reached via the direct-pipeline path shown below.
 
 ### With Custom Configuration
 
@@ -501,16 +521,15 @@ result = await kb.remember(
 )
 ```
 
-`chunk_size`, `embedding_model`, and `extraction_model` aren't per-call
-kwargs on `kb.remember()`. Configure them at construction time via
-`KhoraConfig.pipelines.chunk_size`, `KhoraConfig.llm.embedding_model`,
-and `KhoraConfig.llm.model` (or the corresponding env vars
-`KHORA_PIPELINES_CHUNK_SIZE`, `KHORA_LLM_EMBEDDING_MODEL`,
-`KHORA_LLM_MODEL`). The `expertise` kwarg on `kb.remember` accepts an
-`ExpertiseConfig` instance, not a string - for ad-hoc per-call
-expertise without setting up the config object, use the lower-level
-`ingest_documents()` direct path shown below, which accepts the
-string form.
+`chunk_size` and `chunk_strategy` are per-call kwargs on `kb.remember()`
+and `kb.remember_batch()` (#1416/#1426): `chunk_size=None` (the default)
+falls back to the configured `KhoraConfig.pipelines.chunk_size`.
+`embedding_model` and `extraction_model` are still config-only - set
+`KhoraConfig.llm.embedding_model` and `KhoraConfig.llm.model` (env
+`KHORA_LLM_EMBEDDING_MODEL`, `KHORA_LLM_MODEL`). The `expertise` kwarg
+accepts an `ExpertiseConfig` instance **or a string** - strings are
+resolved as a registered expertise name or a YAML file path via
+`load_expertise` (#1417).
 
 ### Direct Pipeline Call
 
@@ -554,6 +573,15 @@ print(f"Updated {result['entities_updated']} entities")
 This is a one-time migration for existing data.
 
 ## Result Structure
+
+`kb.remember_batch()` returns a `BatchResult` dataclass, not the `ingest_documents()` dict below:
+
+- `total` / `processed` / `skipped` / `failed` / `chunks` / `entities` / `relationships` - aggregate counts.
+- `metadata` - empty on the happy path; on failures it carries `extraction_errors` (int, chunks whose LLM extraction failed) and `degradations` (the per-failure ADR-001 records, aggregated across the batch) (#1410).
+- `per_document` - one entry per submitted document in input order (`document_id`, `source`, `chunks`, `entities`, `skipped`). Checksum-skipped duplicates carry the *existing* document's id, so every input maps back to a stored document (#1416).
+- `llm_usage` - per-call LLM token accounting.
+
+The direct `ingest_documents()` call returns a dict:
 
 ```python
 {

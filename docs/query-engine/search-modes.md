@@ -128,9 +128,11 @@ results = await kb.recall(
 **Why it works**: A document ranked #5 in vector and #3 in graph will beat one ranked #1 in vector alone. Consensus across methods signals relevance. Keyword search catches exact terms that vector search might miss.
 
 Default weights:
-- Vector: 50% (semantic similarity usually matters most)
-- Graph: 30% (relationships add important context)
-- Keyword: 20% (catches exact terms, proper nouns, dates)
+- Vector: 0.6 (semantic similarity usually matters most)
+- Graph: 0.4 (relationships add important context)
+- Keyword: 0.3 (catches exact terms, proper nouns, dates; only fuses when the lexical channel is enabled)
+
+On the default `kb.recall()` (VectorCypher) engine only vector + graph fuse by default - the keyword channel is OFF unless `KHORA_QUERY_ENABLE_BM25_CHANNEL=true` (see the note below).
 
 > **Note**: HYBRID includes keyword search alongside vector + graph. [Benchmark analysis](retrieval-tuning.md) showed that without the keyword fallback, 25% of descriptive queries returned zero results. `enable_keyword_search` gates keyword search inside `HybridQueryEngine`. On the default `kb.recall()` (VectorCypher) path it is inert; use `SearchMode.KEYWORD` for pure keyword recall or `KHORA_QUERY_ENABLE_BM25_CHANNEL=true` to add a BM25 channel alongside vector+graph in VectorCypher.
 
@@ -165,9 +167,9 @@ print(f"Graph: {by_method.get('graph', {}).get('count', 0)} chunks")
 **Why it works**: Some queries benefit from semantic understanding, others from relationships, others from exact terms. ALL mode lets each method contribute what it's good at.
 
 Default weights:
-- Vector: 50%
-- Graph: 30%
-- Keyword: 20%
+- Vector: 0.6
+- Graph: 0.4
+- Keyword: 0.3
 
 ## Quick Reference
 

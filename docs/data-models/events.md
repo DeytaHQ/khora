@@ -275,6 +275,7 @@ CREATE TABLE memory_events (
     actor_type VARCHAR(50) DEFAULT 'system',
     correlation_id UUID,
     version INTEGER DEFAULT 1,
+    session_id UUID,               -- migration 030 (#620); on the ORM, not the MemoryEvent dataclass
     metadata JSONB
 );
 

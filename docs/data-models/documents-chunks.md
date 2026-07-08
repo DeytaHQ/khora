@@ -47,7 +47,12 @@ class Document:
 
     # Session attribution (#620)
     session_id: UUID | None = None
+
+    # Replace-path graph-mirror queue (migration 051, #1430)
+    graph_mirror_pending: dict[str, Any] | None = None
 ```
+
+A non-NULL `graph_mirror_pending` means the `external_id` replace path committed Postgres (new chunks + `COMPLETED` status) but the post-commit graph mirror failed; **status stays `COMPLETED`** and the payload carries the computed graph plan for the replace-mirror reconciler to replay. NULL/absent = the graph is in lockstep with PG for that document. The payload shape comes from `khora.storage.replace_mirror.build_replace_mirror_payload`; the column is `JSONB(none_as_null=True)`, so clearing it writes SQL `NULL` and the partial index `ix_documents_graph_mirror_pending WHERE graph_mirror_pending IS NOT NULL` stays drainable. Modeled on the dream reconciler's `khora_dream_runs.graph_mirror_pending` (migration 047).
 
 ### Document Status
 
@@ -320,6 +325,8 @@ See [Chunkers](../extraction/chunkers.md) for details.
 
 Documents are stored in PostgreSQL:
 
+The DDL below is illustrative and abbreviated. The `DocumentModel` ORM (`db/models.py`) carries additional columns: typed provenance (`source_type`, `source_name`, `source_url`, `content_type`, `title`, `author`, `language`, `size_bytes`), `error_message`, `extraction_config_hash`, `extraction_params`, `relationship_count`, `source_timestamp`, `session_id` (#620), and `graph_mirror_pending JSONB` (migration 051, #1430 - the replace-path graph plan; NULL when the graph is in lockstep with PG).
+
 ```sql
 CREATE TABLE documents (
     id UUID PRIMARY KEY,
@@ -331,6 +338,8 @@ CREATE TABLE documents (
     checksum VARCHAR(64),          -- SHA-256 for deduplication
     chunk_count INTEGER DEFAULT 0,
     entity_count INTEGER DEFAULT 0,
+    session_id UUID,               -- #620 session-scoped recall
+    graph_mirror_pending JSONB,    -- migration 051 (#1430); NULL = graph in lockstep
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     processed_at TIMESTAMPTZ
@@ -341,9 +350,11 @@ CREATE INDEX idx_documents_status ON documents(namespace_id, status);
 CREATE INDEX ix_documents_namespace_checksum ON documents(namespace_id, checksum);
 CREATE UNIQUE INDEX ix_documents_namespace_external_id_unique
     ON documents(namespace_id, external_id) WHERE external_id IS NOT NULL;
+CREATE INDEX ix_documents_graph_mirror_pending
+    ON documents(namespace_id) WHERE graph_mirror_pending IS NOT NULL;
 ```
 
-Chunks with embeddings are stored in pgvector:
+Chunks with embeddings are stored in pgvector. Again abbreviated - the `ChunkModel` ORM also has `chunker_info JSONB` (migration 038), `embedding_model`, a generated `content_tsv TSVECTOR` + GIN index (039), `source_timestamp`, `last_accessed_at` (040), `occurred_at` (046), and `session_id` (030):
 
 ```sql
 CREATE TABLE chunks (
@@ -357,14 +368,25 @@ CREATE TABLE chunks (
     end_char INTEGER,
     token_count INTEGER,
     metadata JSONB,
+    chunker_info JSONB,            -- migration 038
+    occurred_at TIMESTAMPTZ,       -- migration 046 event-time anchor
+    session_id UUID,               -- migration 030
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE INDEX idx_chunks_document ON chunks(document_id);
-CREATE INDEX ix_khora_chunks_embedding_hnsw ON chunks
+-- Full-precision HNSW index (migrations 002/007):
+CREATE INDEX ix_chunks_embedding_hnsw ON chunks
     USING hnsw (embedding vector_cosine_ops)
-    WITH (ef_construction = 128);
+    WITH (m = 24, ef_construction = 128);
+-- The operative index at recall time is the halfvec (float16) expression
+-- index from migration 018, which the ORDER BY casts to match (#1423):
+CREATE INDEX ix_chunks_embedding_halfvec_hnsw ON chunks
+    USING hnsw ((embedding::halfvec(1536)) halfvec_cosine_ops)
+    WITH (m = 24, ef_construction = 128);
 ```
+
+> **Two `chunks`-shaped tables exist.** The `chunks` table above is the pgvector-backend ORM table. Migrations named `NNN_khora_chunks_*` (038, 039, 041-044) target a *separate*, runtime-created (not Alembic-managed) `khora_chunks` table owned by the VectorCypher `PgVectorTemporalStore`, which carries denormalized document-grained columns (`source_type` / `source_name` / `source_url` / `source_timestamp` / `external_id` / `content_type` / `source` / `title`, migration 041). The `Chunk` dataclass and the `chunks` ORM table do not carry those denormalized fields.
 
 ## Next Steps
 

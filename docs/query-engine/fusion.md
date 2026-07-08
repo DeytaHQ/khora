@@ -34,29 +34,29 @@ Say document D appears in three search results:
 
 | Source | Rank | Weight |
 |--------|------|--------|
-| Vector | 2 | 0.5 |
-| Graph | 5 | 0.3 |
-| Keyword | 1 | 0.2 |
+| Vector | 2 | 0.6 |
+| Graph | 5 | 0.4 |
+| Keyword | 1 | 0.3 |
 
 With k=60 (the default smoothing constant):
 
-```
-Vector contribution:  0.5 / (60 + 2) = 0.5 / 62 = 0.00806
-Graph contribution:   0.3 / (60 + 5) = 0.3 / 65 = 0.00462
-Keyword contribution: 0.2 / (60 + 1) = 0.2 / 61 = 0.00328
+```text
+Vector contribution:  0.6 / (60 + 2) = 0.6 / 62 = 0.00968
+Graph contribution:   0.4 / (60 + 5) = 0.4 / 65 = 0.00615
+Keyword contribution: 0.3 / (60 + 1) = 0.3 / 61 = 0.00492
 
-Total RRF score: 0.00806 + 0.00462 + 0.00328 = 0.01596
+Total RRF score: 0.00968 + 0.00615 + 0.00492 = 0.02075
 ```
 
 Now compare to document E, which only appears in vector search at rank 1:
 
-```
-Vector contribution:  0.5 / (60 + 1) = 0.5 / 61 = 0.00820
+```text
+Vector contribution:  0.6 / (60 + 1) = 0.6 / 61 = 0.00984
 
-Total RRF score: 0.00820
+Total RRF score: 0.00984
 ```
 
-Document D scores higher (0.01596 vs 0.00820) because it appears in multiple sources, even though E ranked #1 in vector search.
+Document D scores higher (0.02075 vs 0.00984) because it appears in multiple sources, even though E ranked #1 in vector search.
 
 This is the behavior we're after: **documents found by multiple methods get boosted**.
 
@@ -109,10 +109,19 @@ Use this when you want to give lower-ranked results more of a chance.
 Khora's defaults prioritize semantic similarity while still benefiting from other methods:
 
 ```python
-vector_weight = 0.5   # Semantic similarity is usually most valuable
-graph_weight = 0.3    # Relationships add important context
-keyword_weight = 0.2  # Catches exact matches that embeddings miss
+vector_weight = 0.6   # Semantic similarity is usually most valuable
+graph_weight = 0.4    # Relationships add important context
+keyword_weight = 0.3  # Catches exact matches that embeddings miss
 ```
+
+Weights don't need to sum to 1.0 - RRF only cares about relative magnitudes.
+
+Note that on the default `kb.recall()` (VectorCypher) engine only the vector
+and graph channels fuse by default (0.6 / 0.4). The lexical/BM25 channel is
+opt-in via `KHORA_QUERY_ENABLE_BM25_CHANNEL=true`; when enabled it fuses at
+`keyword_weight` (0.3), which fills the `bm25_weight` slot. The always-on
+3-way keyword fusion described above applies to the older `HybridQueryEngine`
+path.
 
 ## Tuning Weights for Your Use Case
 

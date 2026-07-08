@@ -374,7 +374,9 @@ The public `coordinator.{relational,vector,graph,event_store}` attributes are de
 
 ### Graph-less fallback for list_entities / list_relationships
 
-When no graph backend is configured (PostgreSQL-only chronicle stacks), `StorageCoordinator.list_entities` and `list_relationships` fall back to the pgvector backend (`PgvectorBackend.list_entities` / `list_relationships`) rather than raising. This path was introduced in #587 to prevent `AttributeError` crashes in the expansion pipeline on graph-less stacks. The relationships fallback returns `[]` because the relationships table on a PG-only stack receives no writes from the ingest pipeline.
+When no graph backend is configured (PostgreSQL-only chronicle stacks), `StorageCoordinator.list_entities` and `list_relationships` fall back to the pgvector backend (`PgvectorBackend.list_entities` / `list_relationships`) rather than raising. This path was introduced in #587 to prevent `AttributeError` crashes in the expansion pipeline on graph-less stacks.
+
+Since #1066, extracted relationships are persisted to the pgvector relationships mirror on the graph-less chronicle+PG path (previously they were silently dropped: `remember()` reported success while `stats().relationships` stayed `0`), so the `list_relationships` fallback now returns the stored edges rather than `[]`. The #1429 canonical-id sync (above) is what keeps that write FK-safe when an entity is re-mentioned across documents.
 
 A structural signature gate (`tests/security/test_cross_namespace_idor_signatures.py`) walks every concrete backend at collection time and asserts that every `get_*` / `entity_exists` / `find_paths` / `get_neighborhood*` / `delete_*` / `update_entity*` / `supersede_*` method with a required id-typed parameter declares `*, namespace_id: UUID` kwarg-only. A new method that violates this contract fails CI at collection time. See `docs/architecture/multi-tenancy.md` for the structural invariant rationale.
 
@@ -447,16 +449,25 @@ For bulk ingestion, batch methods significantly reduce database round-trips. The
 ### Entity Batch Upsert
 
 ```python
-# Upsert up to 50 entities per batch
+# batch_size is keyword-only (default 200 on pgvector / coordinator, 100 on Neo4j / base)
 results = await coordinator.upsert_entities_batch(
     namespace_id,
     entities,
-    batch_size=50,
+    batch_size=200,
 )
 # Returns: list of (entity, is_new) tuples, one per unique MERGE key.
 # Duplicate entities in the caller-supplied list that share the same
 # (namespace_id, name, entity_type) MERGE key collapse to a single
 # result tuple - hooks fire once, not once per input (#1329).
+#
+# Canonical-id sync (#1429 / #806): on a re-mention, an entity arrives
+# with a fresh extraction-time UUID. ON CONFLICT DO UPDATE / MERGE keeps
+# the *existing* row id, and the input entity.id is synced in place to
+# that canonical stored id before return - pgvector derives it from the
+# RETURNING row, Neo4j and sqlite_lance apply the same remap. Callers
+# build relationship endpoints from entity.id, so without this the FK
+# would point at a throwaway UUID and abort ingest on graph-less
+# chronicle+PG stacks.
 ```
 
 **Neo4j implementation** uses `UNWIND + MERGE`:
@@ -476,7 +487,7 @@ ON MATCH SET n.description = e.description, n.updated_at = e.updated_at, ...
 ### Relationship Batch Create
 
 ```python
-# Create relationships in batches, grouped by type
+# Create relationships in batches, grouped by type (batch_size keyword-only)
 results = await coordinator.create_relationships_batch(
     relationships,
     batch_size=50,
@@ -533,18 +544,21 @@ class GraphBackendProtocol(Protocol):
         depth: int = 1,
     ) -> dict[str, Any]: ...
     async def delete_entity(self, entity_id: UUID, *, namespace_id: UUID) -> bool: ...
-    # Batch operations
+    # Batch operations (params are keyword-only)
     async def upsert_entities_batch(
         self,
         namespace_id: UUID,
         entities: list[Entity],
-        batch_size: int = 50,
+        *,
+        batch_size: int = 100,       # pgvector / coordinator default 200
+        bulk_mode: bool = False,
     ) -> list[tuple[Entity, bool]]: ...
     async def create_relationships_batch(
         self,
         relationships: list[Relationship],
-        batch_size: int = 50,
-    ) -> int: ...
+        *,
+        batch_size: int = 100,       # neo4j default 200, coordinator 50
+    ) -> list[tuple[Relationship, bool]]: ...
 ```
 
 This means you can swap pgvector for SurrealDB, or Neo4j for Memgraph, without changing the rest of the system. The protocols define the contract; implementations fulfill it.
@@ -621,7 +635,7 @@ SurrealDB is an alternative that serves as **all three backends** - relational, 
 | Role | SurrealDB Implementation |
 |------|-------------------------|
 | **Relational** | Document/namespace storage with SurrealQL queries |
-| **Vector** | Vector similarity search; the embedded path uses brute-force cosine (KNN `<|K|>` is unreliable in embedded mode), HNSW on the remote path |
+| **Vector** | Vector similarity search; the embedded path uses brute-force cosine (KNN `<\|K\|>` is unreliable in embedded mode), HNSW on the remote path. The remote HNSW DDL is sized from the configured `llm.embedding_dimension` (default 1536) and `hnsw_m` = 24 / `hnsw_ef_construction` = 128 (mirroring the pgvector defaults) - not a fixed 1536 literal. Switching embedders (changed dimension) on a live SurrealDB deployment requires a **manual re-index**: `DEFINE INDEX IF NOT EXISTS` will not re-shape an existing index. |
 | **Graph** | Native graph traversal via SurrealQL graph queries |
 | **Event Store** | Append-only event log with SurrealQL |
 
@@ -801,7 +815,7 @@ After bulk loading completes:
 from khora.storage.optimize import ensure_hnsw_indexes
 
 # Rebuild deferred indexes (idempotent)
-await ensure_hnsw_indexes(engine, schema="public")
+await ensure_hnsw_indexes(engine)
 
 # Re-enable Neo4j constraints
 await neo4j_backend.ensure_constraints()

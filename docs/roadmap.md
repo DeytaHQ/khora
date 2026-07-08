@@ -63,8 +63,8 @@ These additions would significantly expand what you can do with Khora.
 | Item | Why It Matters |
 |------|----------------|
 | **Graph Visualization** | An interactive explorer for browsing entities and relationships. Hard to understand a knowledge graph without seeing it. |
-| **Community Detection** | Automatically identify clusters of related entities. "These 15 people form a research group." |
-| **Temporal Views** | See how the graph looked at a specific point in time. Replay knowledge evolution. |
+| **Community Detection** | Shipped - the dream `community_summary` op (`OpKind.VECTORCYPHER_COMMUNITY_SUMMARY`) clusters related entities and writes `:Community` nodes; the clustering kernel is `khora-accel`-accelerated. See [dream phase](dream-phase.md). |
+| **Temporal Views** | Partial - bi-temporal columns are active on read and point-in-time recall exists (embedded backends degrade rather than raise). Full time-travel replay is still in progress. |
 
 ### Multi-Tenancy & Operations
 
@@ -141,7 +141,7 @@ Longer-term ideas we're exploring. Less certain timelines.
 
 | Area | What We're Exploring |
 |------|----------------------|
-| **HyDE (Hypothetical Document Embedding)** | Done. Disabled by default (`enable_hyde=False`). Generate a hypothetical answer, embed that, search for similar real content. Improves recall for question-style queries. |
+| **HyDE (Hypothetical Document Embedding)** | Done. Runs in `auto` mode by default (fires on complex / temporal queries); set `enable_hyde='never'` to disable. Generate a hypothetical answer, embed that, search for similar real content. Improves recall for question-style queries. |
 | **Self-Query** | Let the LLM write its own filters based on the query. "Find documents about AI from last month" → automatic date filter. |
 | **Contextual Compression** | Before returning chunks, compress them to just the relevant parts. Reduces noise in results. |
 
@@ -151,14 +151,14 @@ Longer-term ideas we're exploring. Less certain timelines.
 |------|----------------------|
 | **Ontology Learning** | Automatically discover entity types and relationship patterns from data. No manual schema definition. |
 | **Link Prediction** | Predict likely relationships that aren't explicitly stated. "If Alice works with Bob at Acme, they probably know each other." |
-| **Temporal Reasoning** | Answer questions about "what was true when" - not just current state. |
+| **Temporal Reasoning** | Partial - point-in-time entity-version recall and bi-temporal read filtering already ship (embedded backends degrade); richer "what was true when" reasoning is still being explored. |
 
 ### Semantic Understanding
 
 | Area | What We're Exploring |
 |------|----------------------|
 | **Claim Extraction** | Extract verifiable claims: "X said Y about Z on date D." Foundation for fact-checking. |
-| **Contradiction Detection** | Find conflicting information across documents. Critical for accuracy. |
+| **Contradiction Detection** | Shipped - the dream `contradiction_detect` op finds conflicting edges, with opt-in two-LLM-judged reconciliation that soft-deletes the losing edge (#1281). See [dream phase](dream-phase.md). |
 | **Multi-Document Summarization** | Synthesize information from many sources into coherent summaries. |
 
 ## Contributing

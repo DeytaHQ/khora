@@ -171,15 +171,20 @@ RRF_score(chunk) = sum of (weight / (60 + rank)) for each source
 
 A chunk ranked #1 in vector and #3 in graph:
 ```
-score = 0.5/(60+1) + 0.3/(60+3) = 0.0082 + 0.0048 = 0.013
+score = 0.6/(60+1) + 0.4/(60+3) = 0.0098 + 0.0063 = 0.016
 ```
 
 Chunks appearing in multiple sources get boosted. The `k=60` constant smooths out differences between top ranks.
 
 Default weights:
-- Vector: 0.5 (semantic similarity is usually most valuable)
-- Graph: 0.3 (relationships add crucial context)
-- Keyword: 0.2 (catches exact matches others might miss)
+- Vector: 0.6 (semantic similarity is usually most valuable)
+- Graph: 0.4 (relationships add crucial context)
+- Keyword: 0.3 (catches exact matches others might miss)
+
+On the default `kb.recall()` (VectorCypher) engine only the vector and graph
+channels fuse by default - the lexical/BM25 channel is opt-in via
+`KHORA_QUERY_ENABLE_BM25_CHANNEL=true`, and the keyword weight fills the
+`bm25_weight` fusion slot only once that channel is enabled.
 
 ## Step 5: Temporal Filtering
 

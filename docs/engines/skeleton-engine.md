@@ -525,7 +525,7 @@ from khora.config import KhoraConfig, QueryConfig
 config = KhoraConfig(
     database_url="postgresql://localhost/khora",
     query=QueryConfig(
-        recency_decay_days=7,
+        recency_decay_days=30,  # global default; 7 is a conversational-recency opt-in (#1421)
     ),
 )
 # Engine selection is a Khora() constructor kwarg, not a config field:
@@ -551,7 +551,7 @@ to `kb.recall(...)` and has no env-var equivalent.
 ```yaml
 # config/skeleton/khora.yaml
 query:
-  recency_decay_days: 7
+  recency_decay_days: 30   # global default; set 7 only for conversational-recency workloads (#1421)
 
 temporal:
   default_lookback_days: 90
