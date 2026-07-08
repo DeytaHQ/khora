@@ -104,7 +104,9 @@ async def test_load_relationships_graph_less_stack_returns_empty_list() -> None:
     result = await load_relationships(ns_id, storage, limit=200)
 
     assert result == []
-    vector.list_relationships.assert_awaited_once_with(ns_id, relationship_type=None, limit=200, offset=0)
+    vector.list_relationships.assert_awaited_once_with(
+        ns_id, relationship_type=None, between_entity_ids=None, limit=200, offset=0
+    )
 
 
 # ---------------------------------------------------------------------------

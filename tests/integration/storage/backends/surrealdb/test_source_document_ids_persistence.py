@@ -19,7 +19,7 @@ import pytest
 
 pytest.importorskip("surrealdb")
 
-from khora.core.models import Entity, MemoryNamespace, TenancyMode  # noqa: E402
+from khora.core.models import Entity, MemoryNamespace, Relationship, TenancyMode  # noqa: E402
 from khora.storage.backends.surrealdb.connection import SurrealDBConnection  # noqa: E402
 from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter  # noqa: E402
 from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter  # noqa: E402
@@ -89,5 +89,59 @@ async def test_surrealdb_list_entities_filters_by_source_chunk_ids() -> None:
 
         # 4. Empty list → matches nothing.
         assert await graph.list_entities(ns_id, source_chunk_ids=[], limit=10) == []
+    finally:
+        await conn.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_surrealdb_list_relationships_filters_by_between_entity_ids() -> None:
+    """``list_relationships(between_entity_ids=...)`` filters by endpoint membership (#1451).
+
+    Seeds A→B and B→C, then pins the four contract cases: no filter returns
+    both edges; ``[A, B]`` returns exactly A→B (B→C excluded — C outside the
+    set); ``[A]`` returns [] (no self-loops seeded); and an empty list
+    returns [] (BOTH-endpoints-in-set semantics).
+    """
+    conn = SurrealDBConnection(mode="memory", namespace="khora_test", database="beid1451")
+    await conn.connect()
+    graph = SurrealDBGraphAdapter(conn)
+    relational = SurrealDBRelationalAdapter(conn)
+    try:
+        ns_id = uuid4()
+        await relational.create_namespace(
+            MemoryNamespace(id=ns_id, namespace_id=ns_id, tenancy_mode=TenancyMode.SHARED)
+        )
+
+        ent_a = Entity(id=uuid4(), namespace_id=ns_id, name="A", entity_type="PERSON")
+        ent_b = Entity(id=uuid4(), namespace_id=ns_id, name="B", entity_type="PERSON")
+        ent_c = Entity(id=uuid4(), namespace_id=ns_id, name="C", entity_type="PERSON")
+        await graph.upsert_entities_batch(ns_id, [ent_a, ent_b, ent_c])
+
+        rel_ab = Relationship(
+            namespace_id=ns_id, source_entity_id=ent_a.id, target_entity_id=ent_b.id, relationship_type="KNOWS"
+        )
+        rel_bc = Relationship(
+            namespace_id=ns_id, source_entity_id=ent_b.id, target_entity_id=ent_c.id, relationship_type="KNOWS"
+        )
+        await graph.create_relationships_batch([rel_ab, rel_bc])
+
+        def _edges(rels: list[Relationship]) -> set[tuple]:
+            return {(r.source_entity_id, r.target_entity_id) for r in rels}
+
+        # 1. No filter → both edges.
+        assert _edges(await graph.list_relationships(ns_id)) == {
+            (ent_a.id, ent_b.id),
+            (ent_b.id, ent_c.id),
+        }
+
+        # 2. [A, B] → exactly A→B (B→C excluded — C outside the set).
+        filtered = await graph.list_relationships(ns_id, between_entity_ids=[ent_a.id, ent_b.id])
+        assert _edges(filtered) == {(ent_a.id, ent_b.id)}
+
+        # 3. [A] → nothing (no self-loops seeded).
+        assert await graph.list_relationships(ns_id, between_entity_ids=[ent_a.id]) == []
+
+        # 4. Empty list → nothing.
+        assert await graph.list_relationships(ns_id, between_entity_ids=[]) == []
     finally:
         await conn.disconnect()

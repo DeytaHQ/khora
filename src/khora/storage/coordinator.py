@@ -1987,6 +1987,7 @@ class StorageCoordinator:
         namespace_id: UUID,
         *,
         relationship_type: str | None = None,
+        between_entity_ids: list[UUID] | None = None,
         limit: int = 1000,
         offset: int = 0,
     ) -> list[Relationship]:
@@ -2000,11 +2001,19 @@ class StorageCoordinator:
         namespace_id = await self._resolve_read_namespace(namespace_id)
         if self._graph:
             return await self._graph.list_relationships(
-                namespace_id, relationship_type=relationship_type, limit=limit, offset=offset
+                namespace_id,
+                relationship_type=relationship_type,
+                between_entity_ids=between_entity_ids,
+                limit=limit,
+                offset=offset,
             )
         if self._vector and hasattr(self._vector, "list_relationships"):
             return await self._vector.list_relationships(  # type: ignore[unresolved-attribute]
-                namespace_id, relationship_type=relationship_type, limit=limit, offset=offset
+                namespace_id,
+                relationship_type=relationship_type,
+                between_entity_ids=between_entity_ids,
+                limit=limit,
+                offset=offset,
             )
         return []
 

@@ -657,10 +657,15 @@ class NeptuneBackend(GraphBackendBase):
         namespace_id: UUID,
         *,
         relationship_type: str | None = None,
+        between_entity_ids: list[UUID] | None = None,
         limit: int = 1000,
         offset: int = 0,
     ) -> list[Relationship]:
         driver = self._get_driver()
+
+        # Pushdown unverified on this openCypher subset; filtered in-method (see #1451).
+        if between_entity_ids is not None and not between_entity_ids:
+            return []
 
         rel_filter = f":{sanitize_cypher_label(relationship_type)}" if relationship_type else ""
 
@@ -672,17 +677,15 @@ class NeptuneBackend(GraphBackendBase):
         WHERE r.namespace_id = $namespace_id
         RETURN properties(r) as rel_props, source.id as source_id, target.id as target_id, type(r) as rel_type
         ORDER BY r.created_at DESC
-        SKIP $offset
-        LIMIT $limit
         """
+        params: dict[str, Any] = {"namespace_id": str(namespace_id)}
+        if between_entity_ids is None:
+            query += " SKIP $offset LIMIT $limit"
+            params["offset"] = offset
+            params["limit"] = limit
 
         async with driver.session() as session:
-            result = await session.run(
-                query,
-                namespace_id=str(namespace_id),
-                offset=offset,
-                limit=limit,
-            )
+            result = await session.run(query, **params)
             records = await result.data()
             rels = (
                 self._record_to_relationship(
@@ -693,7 +696,14 @@ class NeptuneBackend(GraphBackendBase):
                 )
                 for r in records
             )
-            return [rel for rel in rels if rel is not None]
+            relationships = [rel for rel in rels if rel is not None]
+
+        if between_entity_ids is not None:
+            id_set = set(between_entity_ids)
+            relationships = [r for r in relationships if r.source_entity_id in id_set and r.target_entity_id in id_set]
+            relationships = relationships[offset : offset + limit]
+
+        return relationships
 
     # ------------------------------------------------------------------
     # Episode operations

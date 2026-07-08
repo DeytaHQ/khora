@@ -722,6 +722,7 @@ class SurrealDBGraphAdapter(GraphBackendBase):
         namespace_id: UUID,
         *,
         relationship_type: str | None = None,
+        between_entity_ids: list[UUID] | None = None,
         limit: int = 1000,
         offset: int = 0,
     ) -> list[Relationship]:
@@ -736,6 +737,12 @@ class SurrealDBGraphAdapter(GraphBackendBase):
         if relationship_type is not None:
             conditions.append("relationship_type = $rt")
             bindings["rt"] = relationship_type
+
+        if between_entity_ids is not None:
+            if not between_entity_ids:
+                return []
+            conditions.append("in IN $between_eids AND out IN $between_eids")
+            bindings["between_eids"] = [_rid("entity", e) for e in between_entity_ids]
 
         sql = (
             f"SELECT * FROM relates_to WHERE {' AND '.join(conditions)} "  # noqa: S608

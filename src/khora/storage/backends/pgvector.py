@@ -1609,6 +1609,7 @@ class PgVectorBackend(AsyncSessionMixin):
         namespace_id: UUID,
         *,
         relationship_type: str | None = None,
+        between_entity_ids: list[UUID] | None = None,
         limit: int = 1000,
         offset: int = 0,
     ) -> list:
@@ -1628,6 +1629,13 @@ class PgVectorBackend(AsyncSessionMixin):
             )
             if relationship_type:
                 stmt = stmt.where(RelationshipModel.relationship_type == relationship_type)
+            if between_entity_ids is not None:
+                if not between_entity_ids:
+                    return []
+                stmt = stmt.where(
+                    RelationshipModel.source_entity_id.in_(between_entity_ids),
+                    RelationshipModel.target_entity_id.in_(between_entity_ids),
+                )
             stmt = stmt.order_by(RelationshipModel.created_at.desc()).limit(limit).offset(offset)
             result = await session.execute(stmt)
             return [

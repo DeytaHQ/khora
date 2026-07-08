@@ -680,10 +680,22 @@ class GraphBackendProtocol(Protocol):
         namespace_id: UUID,
         *,
         relationship_type: str | None = None,
+        between_entity_ids: list[UUID] | None = None,
         limit: int = 1000,
         offset: int = 0,
     ) -> list[Relationship]:
-        """List all relationships in a namespace."""
+        """List all relationships in a namespace.
+
+        ``between_entity_ids`` filters by endpoint membership (#1451):
+
+        - ``None`` (default): no filter — behavior byte-identical to today.
+        - Non-empty list: return only relationships whose BOTH endpoints
+          (source AND target) are in the given id set.
+        - Empty list ``[]``: return ``[]`` (matches nothing).
+
+        Composes with AND against all existing conditions (``relationship_type``,
+        live/tombstone filters) and applies BEFORE ``limit``/``offset``.
+        """
         ...
 
     # Episode operations

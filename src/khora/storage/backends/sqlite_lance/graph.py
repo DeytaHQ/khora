@@ -628,6 +628,7 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         namespace_id: UUID,
         *,
         relationship_type: str | None = None,
+        between_entity_ids: list[UUID] | None = None,
         limit: int = 1000,
         offset: int = 0,
     ) -> list[Relationship]:
@@ -636,6 +637,15 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         if relationship_type is not None:
             conditions.append("relationship_type = ?")
             params.append(relationship_type)
+        if between_entity_ids is not None:
+            if not between_entity_ids:
+                return []
+            id_texts = [uuid_to_text(e) for e in between_entity_ids]
+            placeholders = ", ".join("?" for _ in id_texts)
+            conditions.append(f"source_entity_id IN ({placeholders})")
+            conditions.append(f"target_entity_id IN ({placeholders})")
+            params.extend(id_texts)
+            params.extend(id_texts)
         sql = (
             f"SELECT {_RELATIONSHIP_COLUMNS} FROM relationships "  # noqa: S608
             f"WHERE {' AND '.join(conditions)} "

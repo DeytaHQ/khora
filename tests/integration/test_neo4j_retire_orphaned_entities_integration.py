@@ -21,7 +21,7 @@ from uuid import uuid4
 
 import pytest
 
-from khora.core.models.entity import Entity
+from khora.core.models.entity import Entity, Relationship
 from khora.storage.backends.neo4j import Neo4jBackend
 
 
@@ -489,6 +489,77 @@ class TestNeo4jRetireOrphanedEntitiesBatchIntegration:
                         await tx.run(
                             "MATCH (e:Entity) WHERE e.id IN $ids DETACH DELETE e",
                             ids=[str(entity_a.id), str(entity_b.id)],
+                        )
+
+                    await session.execute_write(_cleanup)
+            except Exception:  # noqa: BLE001
+                pass
+            await backend.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_list_relationships_filters_by_between_entity_ids(self) -> None:
+        """``list_relationships(between_entity_ids=...)`` filters by endpoint membership (#1451).
+
+        Seeds A→B and B→C, then pins the four contract cases: no filter returns
+        both edges; ``[A, B]`` returns exactly A→B (B→C excluded — C outside the
+        set); ``[A]`` returns [] (no self-loops seeded); and an empty list
+        returns [] (BOTH-endpoints-in-set semantics).
+        """
+        url = os.environ.get("KHORA_NEO4J_URL", "bolt://localhost:7687")
+        user = os.environ.get("KHORA_NEO4J_USERNAME", "neo4j")
+        password = os.environ.get("KHORA_NEO4J_PASSWORD", "password")
+
+        backend = Neo4jBackend(url, user=user, password=password)
+        await backend.connect()
+
+        namespace_id = uuid4()
+        entity_a = Entity(namespace_id=namespace_id, name=f"beid-A-{uuid4().hex[:8]}", entity_type="PERSON")
+        entity_b = Entity(namespace_id=namespace_id, name=f"beid-B-{uuid4().hex[:8]}", entity_type="PERSON")
+        entity_c = Entity(namespace_id=namespace_id, name=f"beid-C-{uuid4().hex[:8]}", entity_type="PERSON")
+        rel_ab = Relationship(
+            namespace_id=namespace_id,
+            source_entity_id=entity_a.id,
+            target_entity_id=entity_b.id,
+            relationship_type="KNOWS",
+        )
+        rel_bc = Relationship(
+            namespace_id=namespace_id,
+            source_entity_id=entity_b.id,
+            target_entity_id=entity_c.id,
+            relationship_type="KNOWS",
+        )
+
+        def _edges(rels):
+            return {(r.source_entity_id, r.target_entity_id) for r in rels}
+
+        try:
+            await backend.upsert_entities_batch(namespace_id, [entity_a, entity_b, entity_c])
+            await backend.create_relationships_batch([rel_ab, rel_bc])
+
+            # 1. No filter → both edges.
+            assert _edges(await backend.list_relationships(namespace_id)) == {
+                (entity_a.id, entity_b.id),
+                (entity_b.id, entity_c.id),
+            }
+
+            # 2. [A, B] → exactly A→B (B→C excluded — C outside the set).
+            filtered = await backend.list_relationships(namespace_id, between_entity_ids=[entity_a.id, entity_b.id])
+            assert _edges(filtered) == {(entity_a.id, entity_b.id)}
+
+            # 3. [A] → nothing (no self-loops seeded).
+            assert await backend.list_relationships(namespace_id, between_entity_ids=[entity_a.id]) == []
+
+            # 4. Empty list → nothing.
+            assert await backend.list_relationships(namespace_id, between_entity_ids=[]) == []
+
+        finally:
+            try:
+                async with backend._session() as session:
+
+                    async def _cleanup(tx):
+                        await tx.run(
+                            "MATCH (e:Entity) WHERE e.id IN $ids DETACH DELETE e",
+                            ids=[str(entity_a.id), str(entity_b.id), str(entity_c.id)],
                         )
 
                     await session.execute_write(_cleanup)
