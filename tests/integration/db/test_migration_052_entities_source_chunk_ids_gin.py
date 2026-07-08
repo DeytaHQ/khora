@@ -111,8 +111,10 @@ class TestMigration052GinIndex:
             command.downgrade(cfg, _PREV)
             assert asyncio.run(_index_rows(DATABASE_URL)) == []
         finally:
-            # Always restore head so the shared dev DB is never left rewound.
-            command.upgrade(cfg, _HEAD)
+            # Always restore the true chain head so the shared dev DB is never
+            # left rewound — "head" (not the pinned _HEAD) stays correct once a
+            # future migration lands on top of 052.
+            command.upgrade(cfg, "head")
 
         # Re-running the upgrade re-creates the index — proves IF NOT EXISTS
         # re-run safety.
