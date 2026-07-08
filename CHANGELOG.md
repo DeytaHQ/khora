@@ -6,9 +6,44 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ## [Unreleased]
 
+## [0.22.2] - recall-quality correctness, HNSW index-backed search, durable reconcilers
+
+### Added
+
+- **Per-call `expertise` / `chunk_size` overrides + per-document batch breakdown** (#1416): `remember` / `remember_batch` accept per-call `expertise` and `chunk_size`, and `BatchResult.per_document` reports a per-document breakdown.
+- **`source_chunk_ids` overlap pushdown for entity recall** (#1449, #1453): `list_entities` gains a `source_chunk_ids` overlap filter across all storage backends, backed by a GIN index on `entities.source_chunk_ids`.
+- **`between_entity_ids` filter for `list_relationships`** (#1454) across all storage backends.
+
 ### Changed
 
-- **Breaking:** `weaviate` and `turbopuffer` temporal-store backends are now config-driven. `SkeletonConstructionEngine`, `StorageCoordinator.temporal_store()`, and `create_temporal_store()` no longer accept `weaviate_url` / `turbopuffer_config` kwargs. Configure via `KHORA_STORAGE_WEAVIATE_*` / `KHORA_STORAGE_TURBOPUFFER_*` env vars or by populating `config.storage.weaviate` / `config.storage.turbopuffer` (`WeaviateConfig` / `TurbopufferConfig`). See `docs/engines/skeleton-engine.md`.
+- **Breaking:** `weaviate` and `turbopuffer` temporal-store backends are now config-driven (#1359). `SkeletonConstructionEngine`, `StorageCoordinator.temporal_store()`, and `create_temporal_store()` no longer accept `weaviate_url` / `turbopuffer_config` kwargs. Configure via `KHORA_STORAGE_WEAVIATE_*` / `KHORA_STORAGE_TURBOPUFFER_*` env vars or by populating `config.storage.weaviate` / `config.storage.turbopuffer` (`WeaviateConfig` / `TurbopufferConfig`). See `docs/engines/skeleton-engine.md`.
+- **Query fusion / recency / floor knobs now reach the VectorCypher retriever** (#1406): `query.vector_weight` / `graph_weight` / `recency_weight` / `recency_decay_days` / `min_chunk_similarity` and `keyword_weight` are wired into the executed retriever config. Canonical fusion defaults are 0.6 / 0.4 (lexical 0.3).
+- **`recency_decay_days` default restored to 30** (#1421); the 7-day half-life remains available as a conversational-recency opt-in (or via per-source decay).
+- **Default ingest LLM cost profile restored** (#1420): higher extraction coverage and the relationship second pass are now explicit opt-ins (`KHORA_PIPELINES_EXTRACTION_SECOND_PASS`, default off).
+- **Skeleton PageRank is the single core-chunk selector on the VectorCypher path** (#1408): the redundant `ChunkImportanceScorer` re-selection is gone.
+- **`RecallChunk.score` is now an absolute cosine** (#1433): the returned order is the authoritative ranking, the display score no longer mixes vector and graph scales, and abstention/confidence inputs are cosine-scaled.
+
+### Fixed
+
+- **`min_similarity` floor honored on every recall path** (#1404, #1425, #1444): the keyword/BM25 fallback, hybrid RRF fusion, the VectorCypher lexical channel, the recency pool, and the SurrealDB pure-BM25 route all respect the floor; the KEYWORD gate fails closed with an ADR-001 degradation.
+- **Namespace-scoped hook subscriptions** fire on ingest events (#1399) and survive `create_namespace_version()` (#1427).
+- **`remember_batch()`** dispatches entity/relationship hooks (#1401) and surfaces extraction diagnostics on `BatchResult.metadata` (#1410).
+- **Two-pass relationship extraction** now runs on the batch ingest path (#1409).
+- **Chronicle** honors the configured `pipeline.chunk_size` (#1426) and no longer raises a relationship FK violation when a later document re-mentions an entity (#1429).
+- **Skeleton** refuses a non-`None` `expertise` kwarg loudly, matching the `entity_types` / `relationship_types` contract (#1431).
+- **Durable replace-path graph-mirror reconciler** (#1430): a mid-replace graph failure is recorded on `documents.graph_mirror_pending` and drained on the next replace, instead of silently diverging Postgres from the graph.
+- **pgvector batch upserts** retry on a dropped pooled connection (#1450).
+
+### Performance
+
+- **pgvector vector search is HNSW index-backed** (#1407): the `ORDER BY` no longer defeats the HNSW index, `hnsw_ef_search` is wired end-to-end, and `hnsw.iterative_scan` keeps filtered recall correct at scale.
+- **Bounded per-hop neighborhood expansion** (#1419): replaces the exponential all-paths `[*1..depth]` enumeration with a per-hop BFS capped at `hop_limit`, and records an ADR-001 degradation on Neo4j timeout instead of returning silently empty.
+- Added trace spans to the simple-path entity/relationship projection (#1447).
+
+### Removed
+
+- **Dead `KhoraConfig.environment` and `debug` fields** (#1432) - breaking for any code reading them off the config object.
+
 ## [0.21.1] - keyword-PPR retrieval, KET-RAG foundation, namespace metadata
 
 ### Added
