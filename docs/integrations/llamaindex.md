@@ -11,6 +11,18 @@ surfaces in one extra:
 - `KhoraChatStore` - **deprecated** legacy `BaseChatStore` for
   `ChatMemoryBuffer` users. New code should use `KhoraMemoryBlock`.
 
+!!! important "Namespace contract: per-user / per-agent, NOT per-session"
+
+    `KhoraRetriever`, `KhoraMemoryBlock`, and `KhoraChatStore` all take a
+    caller-supplied `namespace_id` and do no derivation. A khora namespace
+    is the **tenancy** boundary: entity dedup, canonical ids, and long-term
+    recall all operate *within* one namespace. Derive it from a **stable
+    per-user or per-agent identity** and reuse it across conversations. Do
+    **not** mint a fresh namespace per session / conversation / thread -
+    that isolates every conversation into its own memory and voids
+    cross-session recall. The conversation scope belongs in khora's
+    first-class `session_id` (see #620), not the namespace.
+
 ## Install
 
 ```bash

@@ -84,27 +84,67 @@ the only place `Khora.shared()` is wired in.
 
 ## Namespace mapping
 
-Each `(agent_identity, session_id)` pair maps to a deterministic khora
-namespace UUID5, so two providers for the same agent + session share
-memory across processes without a shared registry. The derivation
-lives in `khora.integrations.hermes._mapping`:
+!!! important "The namespace is per-agent, NOT per-session"
+
+    A khora namespace is the **tenancy** boundary: entity dedup, canonical
+    ids, and long-term recall all operate *within* one namespace. Put the
+    session in the namespace and every conversation gets its own isolated
+    memory - which defeats the entire point of long-term agent memory.
+    The namespace contract for **every** khora adapter is: derive it from
+    a **stable per-user / per-agent identity**, never from a per-session
+    or per-conversation id.
+
+The stable `(agent_identity, user_id)` identity maps to a deterministic
+khora namespace UUID5, so every session for that agent (and user) shares
+one long-term memory across processes without a shared registry. The
+derivation lives in `khora.integrations.hermes._mapping`:
 
 ```python
 # UUID_NAMESPACE_HERMES = uuid5(NAMESPACE_OID, "khora.integrations.hermes")
 
-def derive_namespace_uuid(agent_identity: str, session_id: str) -> UUID:
-    return uuid5(UUID_NAMESPACE_HERMES, f"hermes:{agent_identity}:{session_id}")
+def derive_namespace_uuid(agent_identity: str, user_id: str | None = None) -> UUID:
+    return uuid5(UUID_NAMESPACE_HERMES, f"hermes:{agent_identity}:{user_id or ''}")
 ```
 
-`agent_identity` is the tenancy key - different agents stay isolated
-even when they share a `session_id`. The session id is the
-conversation scope; switching sessions for the same agent (via
-`on_session_switch`) re-binds the provider to a fresh namespace.
+`agent_identity` (plus `user_id` when Hermes supplies one in
+`initialize` kwargs) is the tenancy key - different agents (and different
+users of the same agent) stay isolated. `session_id` is deliberately NOT
+folded in: switching sessions for the same agent (via
+`on_session_switch`) keeps the **same** namespace, so memory accumulates
+across conversations.
 
-The Hermes provider also stamps the same `session_id` onto every
-stored document so `Khora.forget_session(namespace, session_id)`
-cleanly drops a whole conversation (see #620 for the
-session-id-as-first-class-column work).
+The conversation scope lives in khora's first-class `session_id` column
+(#620) instead. The provider derives a stable session UUID from the
+free-form Hermes session string (`derive_session_uuid`) and threads it
+onto every stored document's `session_id`, so
+`Khora.forget_session(namespace, derive_session_uuid(session_id))`
+cleanly drops a single conversation while leaving the rest of the
+agent's memory intact. `memory_search` / `memory_recall` recall across
+the whole namespace (all sessions) by design - that is the cross-session
+memory this adapter exists to provide.
+
+### Migration note (behavior change in this release)
+
+Before this release the namespace was derived from
+`hermes:{agent_identity}:{session_id}`, so each session got its own
+namespace. If you ran an earlier version, memories written under those
+old per-session namespaces are **still in the database** but are no
+longer visible to new sessions, which now all resolve to the stable
+`hermes:{agent_identity}:{user_id}` namespace. Nothing is deleted.
+
+Guidance:
+
+- **Recommended: accept the reset.** New conversations start
+  accumulating into the correct stable namespace immediately. Old
+  per-session data ages out naturally (or via
+  `khora.gc.expire_sessions`). No action required.
+- **If you must preserve old memory**, re-ingest the affected
+  conversations through the new provider (they land in the stable
+  namespace with a proper `session_id`), or copy the old per-session
+  namespaces' documents into the stable namespace with your own script
+  using `kb.storage`. There is no automatic data migration - the old
+  namespace UUIDs cannot be recomputed without the original session
+  strings.
 
 ## The threading model
 
@@ -199,7 +239,7 @@ All under the public stability tag in `docs/telemetry-contract.json`:
 
 | Name | Kind | Labels | Notes |
 |---|---|---|---|
-| `khora.integrations.hermes.initialize` | span | `hermes.agent_identity_hash`, `hermes.session_id_hash`, `hermes.platform` | One span per provider bind. |
+| `khora.integrations.hermes.initialize` | span | `hermes.agent_identity_hash`, `hermes.user_id_hash`, `hermes.session_id_hash`, `hermes.platform` | One span per provider bind. |
 | `khora.integrations.hermes.prefetch` | span | `cache_hit`, `result_count`, `hermes.query_hash` | Wraps the sync prefetch entry point. |
 | `khora.integrations.hermes.sync_turn` | span | `hermes.user_content_hash`, `hermes.assistant_content_hash` | Wraps the enqueue step; real I/O happens after the span closes. |
 | `khora.hermes.remember.success_total` | counter | `op` ∈ {`remember`, `remember_batch`} | Successful background writes. |
@@ -291,9 +331,11 @@ async def main() -> None:
         #    only place that defaults to it.
         provider = KhoraMemoryProvider(kb=kb, drain_timeout_s=20.0)
 
-        # 2) Bind to a (agent_identity, session_id) pair. This is the
-        #    Hermes-side tenancy key; the adapter derives the khora
-        #    namespace UUID5 from it.
+        # 2) Bind to the agent session. The khora namespace is derived
+        #    from the STABLE identity (agent_identity, and user_id when
+        #    Hermes supplies one) - NOT the session_id. That is what lets
+        #    memory persist across sessions. session_id is the
+        #    conversation scope; it flows to khora's session_id column.
         hermes_home = tempfile.mkdtemp(prefix="hermes-example-")
         provider.initialize(
             session_id="demo-session",

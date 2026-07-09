@@ -161,21 +161,96 @@ def test_name_property_is_khora() -> None:
 
 @pytest.mark.unit
 def test_initialize_resolves_namespace() -> None:
-    """``initialize`` stamps the namespace UUID derived from (agent, session)."""
+    """``initialize`` stamps the namespace UUID derived from stable identity."""
     kb = _make_kb()
     runtime = _make_runtime()
     provider = KhoraMemoryProvider(kb=kb, runtime=runtime)
 
-    provider.initialize("session-XYZ", agent_identity="agent-Beta")
+    provider.initialize("session-XYZ", agent_identity="agent-Beta", user_id="user-9")
 
-    expected = derive_namespace_uuid("agent-Beta", "session-XYZ")
+    expected = derive_namespace_uuid("agent-Beta", "user-9")
     assert provider._namespace_id == expected
     assert provider._session_id == "session-XYZ"
     assert provider._agent_identity == "agent-Beta"
+    assert provider._user_id == "user-9"
     # _build_namespace probed and found the row (mocked resolve succeeds),
     # so no create_namespace call.
     kb._resolve_namespace.assert_awaited()
     kb.storage.create_namespace.assert_not_awaited()
+
+
+@pytest.mark.unit
+def test_initialize_namespace_is_stable_across_sessions() -> None:
+    """Regression (#1466): two sessions for one agent share ONE namespace.
+
+    This is the whole point of the fix — folding session_id into the
+    namespace gave every conversation a fresh tenancy and voided
+    cross-session entity dedup + long-term recall. Re-binding to a second
+    session (via initialize) MUST keep the same namespace so memory
+    accumulates across conversations.
+    """
+    kb = _make_kb()
+    runtime = _make_runtime()
+    provider = KhoraMemoryProvider(kb=kb, runtime=runtime)
+
+    provider.initialize("session-one", agent_identity="agent-A", user_id="user-1")
+    ns_first = provider._namespace_id
+
+    provider.initialize("session-two", agent_identity="agent-A", user_id="user-1")
+    ns_second = provider._namespace_id
+
+    assert ns_first == ns_second
+    # The conversation scope changed even though the tenancy did not.
+    assert provider._session_id == "session-two"
+
+
+@pytest.mark.unit
+def test_on_session_switch_keeps_namespace_and_preserves_identity() -> None:
+    """A session switch keeps the identity-scoped namespace (#1466).
+
+    ``on_session_switch`` carries agent_identity / user_id forward so a
+    switch that omits them doesn't silently re-tenant the memory.
+    """
+    kb = _make_kb()
+    runtime = _make_runtime()
+    provider = KhoraMemoryProvider(kb=kb, runtime=runtime)
+
+    provider.initialize("session-one", agent_identity="agent-A", user_id="user-1")
+    ns_before = provider._namespace_id
+
+    # Switch supplies only the new session id — identity must be preserved.
+    provider.on_session_switch("session-two")
+
+    assert provider._namespace_id == ns_before
+    assert provider._agent_identity == "agent-A"
+    assert provider._user_id == "user-1"
+    assert provider._session_id == "session-two"
+
+
+@pytest.mark.unit
+def test_sync_turn_threads_session_id_to_khora_document() -> None:
+    """#1466: the enqueued document carries the first-class session_id.
+
+    The Hermes session string is derived to a stable UUID and set on both
+    ``Document.session_id`` (the ``remember`` path) and top-level
+    ``metadata['session_id']`` (the ``remember_batch`` coerce path), so
+    session-scoped queries / ``forget_session`` work while recall still
+    spans the whole namespace.
+    """
+    from khora.integrations.hermes._mapping import derive_session_uuid
+
+    kb = _make_kb()
+    runtime = _make_runtime()
+    provider = KhoraMemoryProvider(kb=kb, runtime=runtime)
+    provider.initialize("conversation-77", agent_identity="agent-A", user_id="user-1")
+
+    provider.sync_turn("hi", "hello")
+
+    runtime.enqueue_remember.assert_called_once()
+    _kb, _ns, doc = runtime.enqueue_remember.call_args.args
+    expected_session = derive_session_uuid("conversation-77")
+    assert doc.session_id == expected_session
+    assert doc.metadata["session_id"] == str(expected_session)
 
 
 @pytest.mark.unit

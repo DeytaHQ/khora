@@ -21,6 +21,7 @@ from khora.integrations.hermes._mapping import (
     KEY_TURN_SEQ,
     KEY_USER_CONTENT,
     derive_namespace_uuid,
+    derive_session_uuid,
     format_memory_context,
     message_pair_iter,
     turn_external_id,
@@ -34,27 +35,86 @@ from khora.integrations.hermes._mapping import (
 
 @pytest.mark.unit
 def test_derive_namespace_uuid_is_stable_across_calls() -> None:
-    """Same (agent_identity, session_id) → same UUID, every call."""
-    ns1 = derive_namespace_uuid("agent-alpha", "session-123")
-    ns2 = derive_namespace_uuid("agent-alpha", "session-123")
+    """Same (agent_identity, user_id) → same UUID, every call."""
+    ns1 = derive_namespace_uuid("agent-alpha", "user-1")
+    ns2 = derive_namespace_uuid("agent-alpha", "user-1")
     assert ns1 == ns2
     assert isinstance(ns1, UUID)
 
 
 @pytest.mark.unit
 def test_derive_namespace_uuid_differs_by_agent_identity() -> None:
-    """Different agent_identity → different UUID for the same session."""
-    ns_a = derive_namespace_uuid("agent-alpha", "session-123")
-    ns_b = derive_namespace_uuid("agent-beta", "session-123")
+    """Different agent_identity → different UUID for the same user."""
+    ns_a = derive_namespace_uuid("agent-alpha", "user-1")
+    ns_b = derive_namespace_uuid("agent-beta", "user-1")
     assert ns_a != ns_b
 
 
 @pytest.mark.unit
-def test_derive_namespace_uuid_differs_by_session_id() -> None:
-    """Different session_id → different UUID for the same agent."""
-    ns_1 = derive_namespace_uuid("agent-alpha", "session-1")
-    ns_2 = derive_namespace_uuid("agent-alpha", "session-2")
+def test_derive_namespace_uuid_differs_by_user_id() -> None:
+    """Different user_id → different UUID for the same agent (per-user isolation)."""
+    ns_1 = derive_namespace_uuid("agent-alpha", "user-1")
+    ns_2 = derive_namespace_uuid("agent-alpha", "user-2")
     assert ns_1 != ns_2
+
+
+@pytest.mark.unit
+def test_derive_namespace_uuid_ignores_session_id() -> None:
+    """Regression (#1466): the namespace is session-independent.
+
+    Two sessions for the same agent MUST resolve to the same namespace,
+    otherwise cross-session entity dedup and long-term recall are voided.
+    ``derive_namespace_uuid`` no longer takes a session_id at all — this
+    pins that the identity-only derivation is stable regardless of which
+    session drives it.
+    """
+    ns_default = derive_namespace_uuid("agent-alpha")
+    ns_user_none = derive_namespace_uuid("agent-alpha", None)
+    assert ns_default == ns_user_none
+    assert isinstance(ns_default, UUID)
+
+
+@pytest.mark.unit
+def test_derive_namespace_uuid_does_not_accept_session_positionally() -> None:
+    """The old ``derive_namespace_uuid(agent, session)`` signature is gone.
+
+    A caller that still passes a *session* string as the second positional
+    arg now silently binds it to ``user_id`` — this test documents that the
+    session value no longer participates in a distinct third dimension, so
+    two sessions with an unset user land in one namespace.
+    """
+    # No user_id supplied for either "session" — both collapse to the same
+    # agent-scoped namespace.
+    ns_a = derive_namespace_uuid("agent-alpha")
+    ns_b = derive_namespace_uuid("agent-alpha")
+    assert ns_a == ns_b
+
+
+# ---------------------------------------------------------------------------
+# derive_session_uuid
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_derive_session_uuid_is_stable_and_deterministic() -> None:
+    """Same free-form session string → same UUID, every call."""
+    s1 = derive_session_uuid("demo-session")
+    s2 = derive_session_uuid("demo-session")
+    assert s1 == s2
+    assert isinstance(s1, UUID)
+
+
+@pytest.mark.unit
+def test_derive_session_uuid_differs_by_session_string() -> None:
+    """Different session strings → different session UUIDs."""
+    assert derive_session_uuid("session-1") != derive_session_uuid("session-2")
+
+
+@pytest.mark.unit
+def test_derive_session_uuid_passes_through_uuid_strings() -> None:
+    """A caller-supplied UUID string is honoured verbatim (mirrors google_adk)."""
+    raw = uuid4()
+    assert derive_session_uuid(str(raw)) == raw
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +161,33 @@ def test_turn_to_document_populates_metadata_and_namespace() -> None:
     assert isinstance(custom[KEY_OCCURRED_AT], str)
     # ISO 8601 with timezone offset — sanity check it parses back.
     assert "T" in custom[KEY_OCCURRED_AT]
+
+
+@pytest.mark.unit
+def test_turn_to_document_threads_session_id_to_first_class_column() -> None:
+    """#1466: the Hermes session string maps to khora's first-class session_id.
+
+    Both ingest paths must find it: ``remember`` reads ``Document.session_id``
+    (a UUID), ``remember_batch`` coerces top-level ``metadata['session_id']``
+    (a UUID string). The raw string stays under ``custom`` for round-trip.
+    """
+    ns = uuid4()
+    doc = turn_to_document(
+        "hi",
+        "hello",
+        session_id="conversation-42",
+        turn_seq=1,
+        namespace_id=ns,
+    )
+
+    expected_session = derive_session_uuid("conversation-42")
+    # First-class column set for the single-remember path.
+    assert doc.session_id == expected_session
+    assert isinstance(doc.session_id, UUID)
+    # Top-level metadata UUID string for the batch path's coerce.
+    assert doc.metadata["session_id"] == str(expected_session)
+    # Raw Hermes string preserved under custom for lossless round-trip.
+    assert doc.metadata["custom"][KEY_SESSION_ID] == "conversation-42"
 
 
 # ---------------------------------------------------------------------------

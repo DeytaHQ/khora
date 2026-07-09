@@ -103,7 +103,7 @@ def _get_runtime() -> type[_KhoraRuntime]:
     return _KhoraRuntime
 
 
-def _build_namespace(kb: Khora, namespace_id: UUID, *, agent_identity: str, session_id: str) -> None:
+def _build_namespace(kb: Khora, namespace_id: UUID, *, agent_identity: str, user_id: str | None) -> None:
     """Best-effort namespace creation — mirrors google_adk._ensure_namespace.
 
     Khora has no ``get_or_create_namespace`` primitive: ``_resolve_namespace``
@@ -111,6 +111,10 @@ def _build_namespace(kb: Khora, namespace_id: UUID, *, agent_identity: str, sess
     is the actual create. We probe-then-create with a race-tolerant
     re-probe on failure, then swallow only the create error if the row
     really did materialise (concurrent provider).
+
+    The namespace metadata records the *tenancy* key (agent_identity +
+    user_id). ``session_id`` is intentionally NOT stored here — the
+    namespace spans every session for this identity (issue #1466).
     """
     from khora.core.models.tenancy import MemoryNamespace  # noqa: PLC0415
 
@@ -135,7 +139,7 @@ def _build_namespace(kb: Khora, namespace_id: UUID, *, agent_identity: str, sess
             metadata={
                 "source": "khora.integrations.hermes",
                 "agent_identity": agent_identity,
-                "session_id": session_id,
+                "user_id": user_id,
             },
         )
         try:
@@ -228,6 +232,7 @@ def KhoraMemoryProvider(  # noqa: N802 — factory function masquerading as a cl
             self._namespace_id: UUID | None = None
             self._session_id: str = ""
             self._agent_identity: str = ""
+            self._user_id: str | None = None
             self._turn_seq: int = 0
 
             # Try to call the upstream ABC's __init__ if it expects one.
@@ -271,32 +276,40 @@ def KhoraMemoryProvider(  # noqa: N802 — factory function masquerading as a cl
             return bool(getattr(self.kb, "_connected", True))
 
         def initialize(self, session_id: str, **kwargs: Any) -> None:
-            """Bind the provider to a (agent_identity, session_id) pair.
+            """Bind the provider to a Hermes agent session.
 
             Hermes always passes ``agent_identity``, ``hermes_home``, and
             ``platform`` in ``kwargs``; ``agent_context``, ``user_id``,
-            etc. may also be present. We only use ``agent_identity`` for
-            tenancy — the rest is logged for debuggability.
+            etc. may also be present. The khora *namespace* is derived from
+            the stable ``(agent_identity, user_id)`` identity ONLY — the
+            ``session_id`` is the conversation scope and is threaded to
+            khora's ``session_id`` column via the document mapping, not the
+            namespace. Folding ``session_id`` into the namespace would give
+            every session a fresh tenancy and void cross-session memory
+            (issue #1466).
             """
             agent_identity = kwargs.get("agent_identity", "unknown")
+            user_id = kwargs.get("user_id")
             with trace_span(
                 "khora.integrations.hermes.initialize",
                 **{
                     "hermes.agent_identity_hash": bounded_text_hash(agent_identity),
+                    "hermes.user_id_hash": bounded_text_hash(str(user_id or "")),
                     "hermes.session_id_hash": bounded_text_hash(session_id),
                     "hermes.platform": str(kwargs.get("platform", "")),
                 },
             ):
                 self._agent_identity = agent_identity
+                self._user_id = user_id
                 self._session_id = session_id
-                self._namespace_id = derive_namespace_uuid(agent_identity, session_id)
+                self._namespace_id = derive_namespace_uuid(agent_identity, user_id)
                 self._turn_seq = 0
 
                 _build_namespace(
                     self.kb,
                     self._namespace_id,
                     agent_identity=agent_identity,
-                    session_id=session_id,
+                    user_id=user_id,
                 )
 
                 # Build runtime lazily so test injection wins over the
@@ -309,8 +322,9 @@ def KhoraMemoryProvider(  # noqa: N802 — factory function masquerading as a cl
                     )
 
                 logger.info(
-                    "KhoraMemoryProvider initialized agent_identity={} session_id={}",
+                    "KhoraMemoryProvider initialized agent_identity={} user_id={} session_id={}",
                     agent_identity,
+                    user_id,
                     session_id,
                 )
 
@@ -530,10 +544,17 @@ def KhoraMemoryProvider(  # noqa: N802 — factory function masquerading as a cl
                 )
 
         def on_session_switch(self, new_session_id: str, **kwargs: Any) -> None:
-            """Re-bind the provider to a different session under the same agent."""
-            # Reuses ``initialize`` — Hermes contract is that the agent
-            # identity stays put across session switches.
-            self.initialize(new_session_id, agent_identity=self._agent_identity, **kwargs)
+            """Re-bind the provider to a different session under the same agent.
+
+            The namespace is identity-scoped now (issue #1466), so switching
+            sessions keeps the SAME khora namespace — only the ``session_id``
+            column on subsequently-ingested turns changes. We carry the
+            remembered ``agent_identity`` / ``user_id`` forward so a switch
+            that omits them doesn't silently re-tenant the memory.
+            """
+            kwargs.setdefault("agent_identity", self._agent_identity)
+            kwargs.setdefault("user_id", self._user_id)
+            self.initialize(new_session_id, **kwargs)
 
         def on_turn_start(self, *_args: Any, **_kwargs: Any) -> None:
             """No-op — we drive turn bookkeeping through ``sync_turn`` instead."""
