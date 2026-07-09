@@ -375,6 +375,7 @@ async def _seed_leak_corpus(kb: Khora, namespace_id) -> None:
 )
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason="entity filter leak on the graph path (#1457): a graph-path recall surfaces an uncovered "
     "entity surface the date filter never constrained, so the report flags the filter unenforced; "
     "flips to xpass when the fix filters the entity surface",
@@ -395,7 +396,8 @@ async def test_report_invariant_graph_entity_bearing_date_filter_vc_full(vectorc
     # Anti-vacuity gate: the GRAPH channel really surfaced entities (fails loud if
     # the graph never fired — then the leak below would be vacuous).
     gate = await _harness.assert_graph_contributes(kb, namespace_id, _LEAK_MARKER)
-    assert gate.engine_info.get("graph_chunk_count", 0) > 0
+    if gate.engine_info.get("graph_chunk_count", 0) <= 0:
+        pytest.fail("graph channel spliced no chunks — the graph-path leak is not exercised (vacuous)")
 
     result = await kb.recall(
         _LEAK_MARKER,
@@ -405,7 +407,8 @@ async def test_report_invariant_graph_entity_bearing_date_filter_vc_full(vectorc
         min_similarity=_RECALL_MIN_SIMILARITY,
         filter=_LEAK_DATE_FILTER,
     )
-    assert result.entities, "graph recall surfaced no entities — the surface-coverage rule is inert (vacuous)"
+    if not result.entities:
+        pytest.fail("graph recall surfaced no entities — the surface-coverage rule is inert (vacuous)")
     _assert_report(result, _LEAK_DATE_FILTER)
 
 
@@ -415,6 +418,7 @@ async def test_report_invariant_graph_entity_bearing_date_filter_vc_full(vectorc
 )
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason="entity filter leak on the chronicle path (#1458): a HYBRID recall surfaces an uncovered "
     "entity surface the date filter never constrained, so the report flags the filter unenforced; "
     "flips to xpass when the fix filters the entity surface",
@@ -441,5 +445,6 @@ async def test_report_invariant_entity_bearing_date_filter_chronicle(chronicle_k
         filter=_LEAK_DATE_FILTER,
     )
     # Anti-vacuity gate: the entity channel really surfaced entities.
-    assert result.entities, "chronicle recall surfaced no entities — the surface-coverage rule is inert (vacuous)"
+    if not result.entities:
+        pytest.fail("chronicle recall surfaced no entities — the surface-coverage rule is inert (vacuous)")
     _assert_report(result, _LEAK_DATE_FILTER)

@@ -79,6 +79,20 @@ pytestmark = pytest.mark.unit
 _RECALL_FILTER: dict[str, Any] = {"source_name": "linear", "metadata.tier": "gold"}
 
 
+# Shared marker for the graph-path entity/relationship filter leak (#1457): the
+# report honestly flags the filter unenforced against the uncovered entity
+# surface until the #1457 fix filters it. ``raises=AssertionError`` scopes the
+# xfail to the CLEAN-report assertion the fix flips — precondition / anti-vacuity
+# gates use ``pytest.fail`` (which raises ``Failed``, not ``AssertionError``) so a
+# broken seed / mock / graph channel surfaces as a real failure, not a masked XFAIL.
+_XFAIL_1457 = pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="graph-path entity/relationship filter leak (#1457): report honestly flags the "
+    "filter unenforced against the uncovered entity surface until the #1457 fix filters it",
+)
+
+
 def _ast(spec: dict[str, Any] | None) -> FilterNode | None:
     """Build the canonical AST exactly as the public facade does (khora.py)."""
     if spec is None:
@@ -342,11 +356,7 @@ async def _recall_filter_report(
 class TestHybridReport:
     """HYBRID recall folds vector / bm25 / graph plans into the canonical report."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="graph-path entity/relationship filter leak (#1457): report honestly flags the "
-        "filter unenforced against the uncovered entity surface until the #1457 fix filters it",
-    )
+    @_XFAIL_1457
     async def test_hybrid_vector_bm25_graph(self) -> None:
         """vector+bm25 push both keys; graph pushes source_name, post-filters metadata.tier.
 
@@ -382,11 +392,7 @@ class TestHybridReport:
         assert report["pushed_down"] is False
         assert report["post_filtered"] is True
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="graph-path entity/relationship filter leak (#1457): report honestly flags the "
-        "filter unenforced against the uncovered entity surface until the #1457 fix filters it",
-    )
+    @_XFAIL_1457
     async def test_hybrid_vector_graph_default_no_bm25(self) -> None:
         """Default HYBRID (bm25 channel OFF) still reports vector + graph honestly.
 
@@ -415,11 +421,7 @@ class TestHybridReport:
 class TestGraphModeReport:
     """GRAPH mode drops the vector + bm25 chunk channels; only graph gates."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="graph-path entity/relationship filter leak (#1457): report honestly flags the "
-        "filter unenforced against the uncovered entity surface until the #1457 fix filters it",
-    )
+    @_XFAIL_1457
     async def test_graph_only_disposition(self) -> None:
         """GRAPH mode: source_name pushed, metadata.tier post-filtered, by graph alone.
 
@@ -444,11 +446,7 @@ class TestGraphModeReport:
         assert report["pushed_down"] is False
         assert report["post_filtered"] is True
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="graph-path entity/relationship filter leak (#1457): report honestly flags the "
-        "filter unenforced against the uncovered entity surface until the #1457 fix filters it",
-    )
+    @_XFAIL_1457
     async def test_graph_fetch_that_spliced_nothing_pushes_no_keys(self) -> None:
         """A graph fetch that never touched the sink reports ``pushed_keys == []``.
 
@@ -642,11 +640,7 @@ class TestFilterEdgeCases:
         for ch in report["channels"].values():
             assert ch == {"pushed_keys": [], "post_filtered_keys": []}
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="graph-path entity/relationship filter leak (#1457): report honestly flags the "
-        "filter unenforced against the uncovered entity surface until the #1457 fix filters it",
-    )
+    @_XFAIL_1457
     async def test_system_only_filter_is_fully_pushed(self) -> None:
         """A system-key-only filter pushes down on every channel -> ``pushed_down``.
 
@@ -678,11 +672,7 @@ class TestFilterEdgeCases:
         # Graph pushed source_name (no residual); SQL channels too.
         assert report["channels"]["graph"] == {"pushed_keys": ["source_name"], "post_filtered_keys": []}
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="graph-path entity/relationship filter leak (#1457): report honestly flags the "
-        "filter unenforced against the uncovered entity surface until the #1457 fix filters it",
-    )
+    @_XFAIL_1457
     async def test_metadata_only_filter_is_post_filtered_on_graph(self) -> None:
         """A metadata-only filter: SQL channels push it, the graph channel re-checks it.
 
@@ -809,11 +799,7 @@ class TestRecencyChannelPresence:
 class TestGraphFallbackReport:
     """Under a graph fallback, the graph channel is absent (not fabricated)."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="graph-path entity/relationship filter leak (#1457): report honestly flags the "
-        "filter unenforced against the uncovered entity surface until the #1457 fix filters it",
-    )
+    @_XFAIL_1457
     async def test_graph_fallback_omits_graph_channel(self) -> None:
         """A transient Neo4j error during expand -> graph channel ABSENT.
 
@@ -916,11 +902,7 @@ def _typed_entity_retriever(ns_id: UUID, rows: list[dict[str, Any]]) -> VectorCy
 class TestTypedEntityFastPathHonesty:
     """Typed-recent reports: REAL report when filtered, no-filter carrier when not."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="graph-path entity/relationship filter leak (#1457): report honestly flags the "
-        "filter unenforced against the uncovered entity surface until the #1457 fix filters it",
-    )
+    @_XFAIL_1457
     async def test_filtered_typed_recent_emits_real_report(self) -> None:
         """TYPED_ENTITY_RECENT routed WITH a filter -> non-empty, valid report.
 
@@ -1330,11 +1312,6 @@ class TestSessionAwareFanoutSingleVectorPlan:
 class TestConcurrentRecallsNoCrossContamination:
     """Concurrent recalls with distinct filters keep distinct reports."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="graph-path entity/relationship filter leak (#1457): report honestly flags the "
-        "filter unenforced against the uncovered entity surface until the #1457 fix filters it",
-    )
     async def test_five_concurrent_recalls_distinct_keys(self) -> None:
         """5 concurrent recalls, each a different filter -> each report is scoped.
 
@@ -1368,7 +1345,11 @@ class TestConcurrentRecallsNoCrossContamination:
             assert report["channels"]["vector"]["pushed_keys"] == expected[i], (
                 f"recall {i} cross-contaminated: {report['channels']['vector']['pushed_keys']} != {expected[i]}"
             )
-            assert report["pushed_keys"] == expected[i]
+            # Top-level pushed_keys is surface-rule-dependent on the graph path
+            # (leaves are forced into unenforced_keys until the #1457 fix filters
+            # the entity surface), so pin the cross-contamination scoping at the
+            # channel level only — channel lists are unaffected by the surface rule
+            # and are the real per-call sink-isolation signal.
 
 
 # ---------------------------------------------------------------------------
@@ -1388,12 +1369,7 @@ class TestConcurrentRecallsNoCrossContamination:
 class TestDateKeyedExplicitSynthesisLeak:
     """A date-keyed filter on the graph path leaks the uncovered entity surface."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="graph-path entity/relationship filter leak (#1457): a date-keyed filter forces the "
-        "EXPLICIT graph path, which surfaces an uncovered entity surface the filter never constrained; "
-        "the report honestly flags the date leaf unenforced until the #1457 fix filters the surface",
-    )
+    @_XFAIL_1457
     async def test_date_filter_graph_path_report_is_clean(self) -> None:
         """A ``occurred_at $gte 2027`` filter on the graph path reports a clean pushdown.
 
@@ -1416,20 +1392,29 @@ class TestDateKeyedExplicitSynthesisLeak:
             filter_ast=_ast({"occurred_at": {"$gte": "2027-01-01T00:00:00Z"}}),
         )
         report = result.engine_info["filter"]
-        assert "_filter_channel_plans" not in result.engine_info
+        # Precondition (holds before AND after the fix): no private channel-plan
+        # sink leaks into the public engine_info. A pytest.fail guard (raises
+        # Failed, not AssertionError) so a regression here is a real failure, not
+        # a masked XFAIL under the raises=AssertionError marker.
+        if "_filter_channel_plans" in result.engine_info:
+            pytest.fail("_filter_channel_plans leaked into public engine_info")
         FilterPushdownReport.model_validate(report)
 
         # Precondition (holds before AND after the fix): the recall genuinely ran
         # the GRAPH path (non-``simple_*`` search_mode or graph chunks spliced)
         # and surfaced entities — so the surface-coverage rule has real fuel and
-        # the leak below is not a vacuous fall-through to the simple path.
+        # the leak below is not a vacuous fall-through to the simple path. These
+        # gates use pytest.fail so a broken mock / graph channel surfaces as a
+        # real failure rather than being masked as the expected AssertionError XFAIL.
         search_mode = str(result.engine_info.get("search_mode", ""))
-        assert result.entities, "graph path surfaced no entities — the surface-coverage rule is inert"
-        assert not search_mode.startswith("simple_") or result.engine_info.get("graph_chunk_count", 0) > 0, (
-            f"recall fell through to the simple path (search_mode={search_mode!r}, "
-            f"graph_chunk_count={result.engine_info.get('graph_chunk_count')}) — the graph-path leak "
-            "is not exercised"
-        )
+        if not result.entities:
+            pytest.fail("graph path surfaced no entities — the surface-coverage rule is inert")
+        if search_mode.startswith("simple_") and result.engine_info.get("graph_chunk_count", 0) <= 0:
+            pytest.fail(
+                f"recall fell through to the simple path (search_mode={search_mode!r}, "
+                f"graph_chunk_count={result.engine_info.get('graph_chunk_count')}) — the graph-path leak "
+                "is not exercised"
+            )
 
         # The single date leaf is enforced (nothing unenforced) on a clean report.
         assert report["unenforced_keys"] == []

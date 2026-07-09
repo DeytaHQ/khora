@@ -729,6 +729,7 @@ def _engine_with_entity(
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason="entity filter leak on the chronicle path (#1458): the recall surfaces an uncovered "
     "entity surface the date filter never constrained, so the report honestly flags the filter "
     "unenforced until the fix filters the entity surface",
@@ -766,8 +767,11 @@ async def test_filter_report_entity_bearing_date_filter_is_clean() -> None:
     _validates(report)
 
     # The recall genuinely surfaced entities (the leak precondition) — guards
-    # against a vacuous pass where the entity channel silently no-opped.
-    assert result.entities, "entity channel produced no entities — the surface-coverage rule is inert"
+    # against a vacuous pass where the entity channel silently no-opped. pytest.fail
+    # (raises Failed, not AssertionError) so a no-op channel surfaces as a real
+    # failure rather than being masked as the expected AssertionError XFAIL.
+    if not result.entities:
+        pytest.fail("entity channel produced no entities — the surface-coverage rule is inert")
     # CLEAN report the #1458 fix restores: the date leaf is enforced against the
     # (then-filtered) entity surface, so nothing is left unenforced.
     assert report["unenforced_keys"] == []
