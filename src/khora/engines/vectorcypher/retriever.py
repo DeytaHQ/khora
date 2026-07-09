@@ -225,6 +225,28 @@ _RECENCY_DEGRADED_COUNTER = metric_counter(
     ),
 )
 
+# Session fan-out degradation counter (issue #1467, ADR-001). The
+# session-aware fan-out gathers one per-session vector search per channel plus
+# an unscoped fallback with ``return_exceptions=True`` and previously logged a
+# bare WARNING for any that raised, silently dropping that session's chunks - a
+# recall that lost several session channels looked healthy on
+# ``RecallResult.engine_info``. Now each failed channel records a Degradation
+# and bumps this counter; the recall still degrades to the merged surviving
+# channels + unscoped fallback, but observably. NO namespace_id label -
+# cardinality rule.
+_SESSION_FANOUT_DEGRADED_COUNTER = metric_counter(
+    "khora.vectorcypher.session_fanout.degraded_total",
+    unit="1",
+    description=(
+        "Issue #1467 (ADR-001). VectorCypher session fan-out per-channel silent "
+        "fallbacks. Incremented when a per-session (or unscoped fallback) vector "
+        "search in the session-aware fan-out raises and its chunks are dropped "
+        "from the merged result. The same event is also appended to "
+        "RecallResult.engine_info['degradations']. Labels: reason "
+        "(channel_exception). NO namespace_id label - cardinality rule."
+    ),
+)
+
 
 def _decode_chunker_info(value: Any) -> dict[str, Any]:
     """Normalize the value of ``chunker_info`` returned by a record dict.
@@ -1730,8 +1752,26 @@ class VectorCypherRetriever:
                 merged: dict[UUID, tuple[UUID, float, Chunk]] = {}
                 for i, result in enumerate(all_session_results):
                     if isinstance(result, Exception):
+                        # ADR-001 (#1467): a per-session (or fallback) channel
+                        # raised; its chunks are dropped from the merge. Record a
+                        # Degradation + bump the counter so a recall that lost
+                        # session channels is observable rather than silently
+                        # healthy. Recall still degrades to the surviving channels
+                        # + unscoped fallback below.
                         ch_label = fanout_channels[i] if i < len(fanout_channels) else "fallback"
-                        logger.warning(f"Session search failed for channel={ch_label}: {result}")
+                        logger.warning(
+                            f"Session search failed for channel={ch_label}: {result}",
+                            exc_info=result,
+                        )
+                        _SESSION_FANOUT_DEGRADED_COUNTER.add(1, attributes={"reason": "channel_exception"})
+                        degradations.append(
+                            Degradation(
+                                component="vectorcypher.session_fanout",
+                                reason=type(result).__name__,
+                                detail=f"channel={ch_label}: {str(result)[:200]}",
+                                exception=type(result).__name__,
+                            )
+                        )
                         continue
                     for chunk_id, score, chunk in result:
                         if chunk_id not in merged or score > merged[chunk_id][1]:
