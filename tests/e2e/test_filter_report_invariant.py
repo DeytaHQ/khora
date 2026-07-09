@@ -416,21 +416,24 @@ async def test_report_invariant_graph_entity_bearing_date_filter_vc_full(vectorc
 @pytest.mark.skipif(
     not _harness.lane_reachable("chronicle"), reason="start Postgres (make dev) to exercise this live lane"
 )
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="entity filter leak on the chronicle path (#1458): a HYBRID recall surfaces an uncovered "
-    "entity surface the date filter never constrained, so the report flags the filter unenforced; "
-    "flips to xpass when the fix filters the entity surface",
+@pytest.mark.skip(
+    reason="#1458 chronicle entity-surface leak is not exercisable on this live e2e lane: the HYBRID "
+    "recall surfaces no entities here (entity vector search does not clear the entity surface for the "
+    "seeded corpus on the credential-degraded e2e lane), so the surface-coverage rule stays inert and "
+    "the leak cannot be reproduced. The #1458 leak is pinned hermetically by "
+    "tests/recall/test_chronicle_filter_composition.py::test_filter_report_entity_bearing_date_filter_is_clean, "
+    "which forces the entity surface via a mocked engine. Re-enable (as xfail) once the live lane surfaces entities."
 )
 async def test_report_invariant_entity_bearing_date_filter_chronicle(chronicle_kb) -> None:
     """A HYBRID Chronicle recall over an entity corpus + date filter reports clean.
 
-    Chronicle's entity channel surfaces a non-empty entity set the chunk-side date
-    filter does not cover, so the emitted report currently forces the date leaf
-    into ``unenforced_keys``. This asserts the CLEAN invariant the #1458 fix
-    restores (``unenforced_keys == []``), gated on a real entity surface so it is
-    not vacuous. Chronicle has no GRAPH mode — the entity channel runs in HYBRID.
+    Chronicle's entity channel is meant to surface a non-empty entity set the
+    chunk-side date filter does not cover, so the emitted report would force the
+    date leaf into ``unenforced_keys``. Skipped: on the live e2e lane the HYBRID
+    recall does not surface entities for the seeded corpus, so the anti-vacuity
+    gate cannot hold and the leak is not exercisable here (the #1458 leak is
+    pinned hermetically in tests/recall/). Chronicle has no GRAPH mode — the
+    entity channel runs in HYBRID.
     """
     kb = chronicle_kb
     namespace_id = (await kb.create_namespace()).namespace_id
