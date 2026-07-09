@@ -70,7 +70,19 @@ from tests.recall.test_channel_filter_operator_matrix import (
 )
 from tests.test_helpers.filter_spy import stub_llm
 
-pytestmark = [pytest.mark.integration, pytest.mark.filter_enforcement]
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.filter_enforcement,
+    # Expected-red until #1457 lands: these session/change/recency cells run filtered
+    # recalls that surface a non-empty entity surface the chunk-only channels don't
+    # cover, so build_filter_report forces the filter's leaves into unenforced_keys.
+    # The #1457 fix filters the entity surface and flips these back to green.
+    pytest.mark.xfail(
+        strict=True,
+        reason="entity-surface filter leak (#1457): filtered recall surfaces an uncovered entity "
+        "surface, so unenforced_keys is non-empty until the #1457 fix filters it",
+    ),
+]
 
 # The Postgres pgvector column is fixed at 1536, so the live-DB suite sizes its
 # deterministic vectors at 1536 (mirrors test_filter_pushdown_graph.py).

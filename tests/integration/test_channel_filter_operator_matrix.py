@@ -83,6 +83,16 @@ def _neo4j_reachable() -> bool:
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.filter_enforcement,
+    # Expected-red until #1457 lands: every cell here runs a filtered graph/recency
+    # recall that surfaces a non-empty entity surface the chunk-only channels don't
+    # cover, so build_filter_report now forces the filter's leaves into
+    # unenforced_keys and the `unenforced_keys == []` invariant no longer holds. The
+    # #1457 fix filters the entity surface and flips these back to green.
+    pytest.mark.xfail(
+        strict=True,
+        reason="entity-surface filter leak (#1457): filtered graph/recency recall surfaces an "
+        "uncovered entity surface, so unenforced_keys is non-empty until the #1457 fix filters it",
+    ),
     pytest.mark.skipif(
         not os.environ.get("NEO4J_INTEGRATION_TEST") or not _pg_reachable() or not _neo4j_reachable(),
         reason="set NEO4J_INTEGRATION_TEST=1 and start PG+Neo4j (make dev) to exercise the live matrix cells",

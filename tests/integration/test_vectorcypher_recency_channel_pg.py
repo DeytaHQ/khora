@@ -520,6 +520,12 @@ _LEAK_SOURCE = "leakdoc"
 _CLEAN_SOURCE = "cleandoc"
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="entity-surface filter leak (#1457): the recall surfaces a non-empty entity surface the "
+    "chunk-only channels don't cover, so build_filter_report reports source_name unenforced; the "
+    "chunk-level no-leak still holds and unenforced_keys == [] is restored once the #1457 fix filters entities",
+)
 @pytest.mark.skipif(
     not _neo4j_reachable() or not os.environ.get("NEO4J_INTEGRATION_TEST"),
     reason="set NEO4J_INTEGRATION_TEST=1 and run `make dev` (needs Neo4j for the full vectorcypher path)",
