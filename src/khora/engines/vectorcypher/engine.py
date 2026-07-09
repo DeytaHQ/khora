@@ -2658,6 +2658,18 @@ class VectorCypherEngine:
 
         filter_channel_plans = result.metadata.pop("_filter_channel_plans", {})
 
+        # Surface coverage for the honest filter report: the filter channels gate
+        # the chunk surface on every recall. Only "simple_" search modes (vector /
+        # vector+bm25, no graph path) return entities / relationships that the same
+        # chunk-side filter narrowed; a graph-path recall emits graph-derived
+        # entities / relationships the chunk filter never touched, so those
+        # surfaces stay uncovered and force the filter's leaves unenforced.
+        covered = {"chunks"} | (
+            {"entities", "relationships"}
+            if str(result.metadata.get("search_mode", "")).startswith("simple_")
+            else set()
+        )
+
         # Project materialized dream communities (#1276) onto the result (#1308):
         # the GraphRAG query-time payoff. Backend-capability-gated and zero-cost
         # when no entities matched, no communities are materialized, or the
@@ -2688,7 +2700,16 @@ class VectorCypherEngine:
                 "engine": "vectorcypher",
                 "mode": mode.name.lower(),
                 "channels_used": channels_used,
-                "filter": build_filter_report(filter_ast, filter_channel_plans).model_dump(mode="json"),
+                "filter": build_filter_report(
+                    filter_ast,
+                    filter_channel_plans,
+                    surface_sizes={
+                        "chunks": len(recall_chunks),
+                        "entities": len(recall_entities),
+                        "relationships": len(recall_relationships),
+                    },
+                    covered_surfaces=covered,
+                ).model_dump(mode="json"),
                 "rrf_k": self._vc_config.fusion_rrf_k,
                 "temporal_signal": (
                     {"category": temporal_signal.category.value, "source": temporal_signal.source}

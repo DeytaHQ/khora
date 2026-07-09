@@ -2386,6 +2386,16 @@ class ChronicleEngine:
                     defensive_recheck=(filter_ast is not None and bool(filter_ast.children)),
                 )
             },
+            # Chronicle is a single "chunks" channel with no relationships; the
+            # entity surface is co-derived from the same chunk-side filter, so
+            # only "chunks" is covered and the rule is inert unless entities are
+            # ever emitted uncovered.
+            surface_sizes={
+                "chunks": len(recall_chunks),
+                "entities": len(recall_entities),
+                "relationships": 0,
+            },
+            covered_surfaces={"chunks"},
         )
 
         return RecallResult(

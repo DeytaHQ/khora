@@ -47,6 +47,7 @@ from khora import Khora
 from khora.filter.conformance import ConformanceCase
 from khora.query import SearchMode
 from tests.e2e import _harness
+from tests.test_helpers.filter_spy import plan_extraction
 
 pytestmark = [pytest.mark.e2e, pytest.mark.slow]
 
@@ -321,3 +322,124 @@ async def test_report_invariants_rowset_chronicle(chronicle_kb, case) -> None:
 async def test_report_invariants_empty_chronicle(chronicle_kb, spec) -> None:
     """A no-filter / filter={} recall on live Chronicle is the canonical empty carrier."""
     await _assert_empty_carrier(chronicle_kb, spec)
+
+
+# --------------------------------------------------------------------------- #
+# Entity-bearing graph/chronicle leak cases (#1457 / #1458).
+#
+# The row-set cases above seed generic ``"conformance anchor"`` content with the
+# extractor staging NOTHING (no ``plan_extraction``), so those recalls return an
+# EMPTY entity surface and the surface-coverage rule stays inert — they remain
+# invariant-clean. These two cases are the opposite: they stage a real entity
+# corpus so the graph (VectorCypher) / entity (Chronicle) channel surfaces
+# entities the date filter never constrained. On a graph-path VectorCypher recall
+# and a HYBRID Chronicle recall the engine covers only the ``chunks`` surface, so
+# the non-empty uncovered entity surface forces every filter leaf into
+# ``unenforced_keys`` — the cross-engine ``unenforced_keys == []`` invariant is
+# genuinely violated until the #1457 / #1458 fix filters the entity surface.
+#
+# Marked ``xfail(strict=True)``: the body asserts the CLEAN invariant the fix
+# restores (so the fix flips it to xpass), and an anti-vacuity gate asserts the
+# recall actually surfaced entities first (so a no-entity path cannot pass the
+# ``unenforced_keys == []`` assertion for the wrong reason). Both self-skip on a
+# no-Docker run via the lane reachability marks, exactly like the row-set cases.
+# --------------------------------------------------------------------------- #
+
+_LEAK_MARKER = "leakmark"
+_LEAK_ENTITIES = [("Falcon", "PERSON"), ("Orbit", "ORG")]
+_LEAK_RELATIONSHIPS = [("Falcon", "Orbit", "WORKS_ON")]
+# A date filter on a beyond-corpus horizon is the #1457 repro trigger: it is a
+# date-key predicate (drives the VectorCypher EXPLICIT graph path) that the
+# entity surface never gates. The seed corpus carries no occurred_at, so the
+# clean recall would keep the chunks via COALESCE fallback; the leaf is the one
+# forced unenforced by the uncovered entity surface.
+_LEAK_DATE_FILTER: dict = {"occurred_at": {"$gte": "2020-01-01T00:00:00Z"}}
+
+
+async def _seed_leak_corpus(kb: Khora, namespace_id) -> None:
+    """Seed an entity-bearing corpus through the real ingest path (populates entities)."""
+    plan_extraction(_LEAK_MARKER, _LEAK_ENTITIES, _LEAK_RELATIONSHIPS)
+    for content in _harness.entity_seed_docs(_LEAK_MARKER, count=3):
+        await kb.remember(
+            content=content,
+            namespace=namespace_id,
+            entity_types=[t for _, t in _LEAK_ENTITIES],
+            relationship_types=[rt for _, _, rt in _LEAK_RELATIONSHIPS],
+        )
+
+
+@_harness.lane_skip("vc_full")
+@pytest.mark.skipif(
+    not _harness.lane_reachable("vc_full"),
+    reason="set NEO4J_INTEGRATION_TEST=1 and start PG+Neo4j (make dev) to exercise the live graph lane",
+)
+@pytest.mark.xfail(
+    strict=True,
+    reason="entity filter leak on the graph path (#1457): a graph-path recall surfaces an uncovered "
+    "entity surface the date filter never constrained, so the report flags the filter unenforced; "
+    "flips to xpass when the fix filters the entity surface",
+)
+async def test_report_invariant_graph_entity_bearing_date_filter_vc_full(vectorcypher_kb) -> None:
+    """A graph-path VectorCypher recall over an entity corpus + date filter reports clean.
+
+    The seeded entities make the graph channel surface a non-empty entity set the
+    chunk-side date filter does not cover, so the emitted report currently forces
+    the date leaf into ``unenforced_keys``. This asserts the CLEAN invariant the
+    #1457 fix restores (``unenforced_keys == []``), gated on a real entity surface
+    so it is not vacuous.
+    """
+    kb = vectorcypher_kb
+    namespace_id = (await kb.create_namespace()).namespace_id
+    await _seed_leak_corpus(kb, namespace_id)
+
+    # Anti-vacuity gate: the GRAPH channel really surfaced entities (fails loud if
+    # the graph never fired — then the leak below would be vacuous).
+    gate = await _harness.assert_graph_contributes(kb, namespace_id, _LEAK_MARKER)
+    assert gate.engine_info.get("graph_chunk_count", 0) > 0
+
+    result = await kb.recall(
+        _LEAK_MARKER,
+        namespace=namespace_id,
+        mode=SearchMode.GRAPH,
+        limit=_RECALL_LIMIT,
+        min_similarity=_RECALL_MIN_SIMILARITY,
+        filter=_LEAK_DATE_FILTER,
+    )
+    assert result.entities, "graph recall surfaced no entities — the surface-coverage rule is inert (vacuous)"
+    _assert_report(result, _LEAK_DATE_FILTER)
+
+
+@_harness.lane_skip("chronicle")
+@pytest.mark.skipif(
+    not _harness.lane_reachable("chronicle"), reason="start Postgres (make dev) to exercise this live lane"
+)
+@pytest.mark.xfail(
+    strict=True,
+    reason="entity filter leak on the chronicle path (#1458): a HYBRID recall surfaces an uncovered "
+    "entity surface the date filter never constrained, so the report flags the filter unenforced; "
+    "flips to xpass when the fix filters the entity surface",
+)
+async def test_report_invariant_entity_bearing_date_filter_chronicle(chronicle_kb) -> None:
+    """A HYBRID Chronicle recall over an entity corpus + date filter reports clean.
+
+    Chronicle's entity channel surfaces a non-empty entity set the chunk-side date
+    filter does not cover, so the emitted report currently forces the date leaf
+    into ``unenforced_keys``. This asserts the CLEAN invariant the #1458 fix
+    restores (``unenforced_keys == []``), gated on a real entity surface so it is
+    not vacuous. Chronicle has no GRAPH mode — the entity channel runs in HYBRID.
+    """
+    kb = chronicle_kb
+    namespace_id = (await kb.create_namespace()).namespace_id
+    await _seed_leak_corpus(kb, namespace_id)
+
+    result = await kb.recall(
+        _LEAK_MARKER,
+        namespace=namespace_id,
+        mode=SearchMode.HYBRID,
+        limit=_RECALL_LIMIT,
+        min_similarity=_RECALL_MIN_SIMILARITY,
+        filter=_LEAK_DATE_FILTER,
+    )
+    # Anti-vacuity gate: the entity channel really surfaced entities.
+    assert result.entities, "chronicle recall surfaced no entities — the surface-coverage rule is inert (vacuous)"
+    _assert_report(result, _LEAK_DATE_FILTER)

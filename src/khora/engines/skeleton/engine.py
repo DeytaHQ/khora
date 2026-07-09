@@ -637,6 +637,14 @@ class SkeletonConstructionEngine:
         engine_info["filter"] = build_filter_report(
             filter_ast,
             {self._backend_type: backend_plan},
+            # Skeleton emits chunks only (no entities / relationships), and the
+            # single backend channel gates the chunk surface, so covered_surfaces
+            # defaults to {"chunks"} and the surface-coverage rule is inert here.
+            surface_sizes={
+                "chunks": len(recall_chunks),
+                "entities": 0,
+                "relationships": 0,
+            },
         ).model_dump(mode="json")
 
         return RecallResult(
