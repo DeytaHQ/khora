@@ -373,13 +373,6 @@ async def _seed_leak_corpus(kb: Khora, namespace_id) -> None:
     not _harness.lane_reachable("vc_full"),
     reason="set NEO4J_INTEGRATION_TEST=1 and start PG+Neo4j (make dev) to exercise the live graph lane",
 )
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="entity filter leak on the graph path (#1457): a graph-path recall surfaces an uncovered "
-    "entity surface the date filter never constrained, so the report flags the filter unenforced; "
-    "flips to xpass when the fix filters the entity surface",
-)
 async def test_report_invariant_graph_entity_bearing_date_filter_vc_full(vectorcypher_kb) -> None:
     """A graph-path VectorCypher recall over an entity corpus + date filter reports clean.
 

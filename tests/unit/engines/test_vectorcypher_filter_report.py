@@ -49,6 +49,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
@@ -57,6 +58,7 @@ import pytest
 from neo4j.exceptions import ServiceUnavailable
 
 from khora.core.models import Chunk
+from khora.core.models.entity import Entity
 from khora.engines.vectorcypher.engine import VectorCypherConfig, VectorCypherEngine
 from khora.engines.vectorcypher.retriever import (
     RetrieverConfig,
@@ -77,20 +79,6 @@ pytestmark = pytest.mark.unit
 # channel cannot push and re-checks in memory. The SQL chunk channels (vector /
 # bm25) push BOTH.
 _RECALL_FILTER: dict[str, Any] = {"source_name": "linear", "metadata.tier": "gold"}
-
-
-# Shared marker for the graph-path entity/relationship filter leak (#1457): the
-# report honestly flags the filter unenforced against the uncovered entity
-# surface until the #1457 fix filters it. ``raises=AssertionError`` scopes the
-# xfail to the CLEAN-report assertion the fix flips — precondition / anti-vacuity
-# gates use ``pytest.fail`` (which raises ``Failed``, not ``AssertionError``) so a
-# broken seed / mock / graph channel surfaces as a real failure, not a masked XFAIL.
-_XFAIL_1457 = pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="graph-path entity/relationship filter leak (#1457): report honestly flags the "
-    "filter unenforced against the uncovered entity surface until the #1457 fix filters it",
-)
 
 
 def _ast(spec: dict[str, Any] | None) -> FilterNode | None:
@@ -120,6 +108,37 @@ def _graph_chunk(ns_id: UUID, *, tier: str) -> Chunk:
         content=f"graph chunk tier={tier}",
         metadata={"tier": tier},
     )
+
+
+def _wire_graph_entity(
+    retriever: VectorCypherRetriever,
+    entity: Entity,
+    *,
+    provenance_chunks: list[Chunk],
+    score: float = 0.9,
+) -> None:
+    """Wire the graph-path entity seams so ``entity`` surfaces with real provenance.
+
+    The #1457 ∃-over-provenance filter (``retriever._filter_surfaces_by_provenance``)
+    keeps a graph-derived entity iff ≥1 of its ``source_chunk_ids`` chunk passes the
+    ``compile_python("Chunk")`` predicate. To exercise that on the unit retriever we
+    must give the graph path a REAL ``Entity`` (not the empty-provenance stub the
+    default ``_make_retriever`` builds when ``get_entities_batch`` returns ``{}``):
+
+    * ``search_similar_entities`` returns ``entity.id`` as the single entry entity,
+    * ``get_entities_batch`` resolves that id to ``entity`` (so its
+      ``source_chunk_ids`` reach the ∃ filter), and
+    * ``get_chunks_batch`` returns ``provenance_chunks`` keyed by id (the chunks the
+      predicate is applied to).
+
+    The caller sets each provenance chunk's fields (``occurred_at`` /
+    ``source_document`` / ``metadata``) so it passes — or fails — the filter under
+    test. Order-preserving; the entity's own ``source_chunk_ids`` must reference the
+    provided chunk ids.
+    """
+    retriever._storage.search_similar_entities = AsyncMock(return_value=[(entity.id, score)])
+    retriever._storage.get_entities_batch = AsyncMock(return_value={entity.id: entity})
+    retriever._storage.get_chunks_batch = AsyncMock(return_value={c.id: c for c in provenance_chunks})
 
 
 def _make_retriever(
@@ -356,7 +375,6 @@ async def _recall_filter_report(
 class TestHybridReport:
     """HYBRID recall folds vector / bm25 / graph plans into the canonical report."""
 
-    @_XFAIL_1457
     async def test_hybrid_vector_bm25_graph(self) -> None:
         """vector+bm25 push both keys; graph pushes source_name, post-filters metadata.tier.
 
@@ -392,7 +410,6 @@ class TestHybridReport:
         assert report["pushed_down"] is False
         assert report["post_filtered"] is True
 
-    @_XFAIL_1457
     async def test_hybrid_vector_graph_default_no_bm25(self) -> None:
         """Default HYBRID (bm25 channel OFF) still reports vector + graph honestly.
 
@@ -421,7 +438,6 @@ class TestHybridReport:
 class TestGraphModeReport:
     """GRAPH mode drops the vector + bm25 chunk channels; only graph gates."""
 
-    @_XFAIL_1457
     async def test_graph_only_disposition(self) -> None:
         """GRAPH mode: source_name pushed, metadata.tier post-filtered, by graph alone.
 
@@ -446,7 +462,6 @@ class TestGraphModeReport:
         assert report["pushed_down"] is False
         assert report["post_filtered"] is True
 
-    @_XFAIL_1457
     async def test_graph_fetch_that_spliced_nothing_pushes_no_keys(self) -> None:
         """A graph fetch that never touched the sink reports ``pushed_keys == []``.
 
@@ -640,7 +655,6 @@ class TestFilterEdgeCases:
         for ch in report["channels"].values():
             assert ch == {"pushed_keys": [], "post_filtered_keys": []}
 
-    @_XFAIL_1457
     async def test_system_only_filter_is_fully_pushed(self) -> None:
         """A system-key-only filter pushes down on every channel -> ``pushed_down``.
 
@@ -672,7 +686,6 @@ class TestFilterEdgeCases:
         # Graph pushed source_name (no residual); SQL channels too.
         assert report["channels"]["graph"] == {"pushed_keys": ["source_name"], "post_filtered_keys": []}
 
-    @_XFAIL_1457
     async def test_metadata_only_filter_is_post_filtered_on_graph(self) -> None:
         """A metadata-only filter: SQL channels push it, the graph channel re-checks it.
 
@@ -799,7 +812,6 @@ class TestRecencyChannelPresence:
 class TestGraphFallbackReport:
     """Under a graph fallback, the graph channel is absent (not fabricated)."""
 
-    @_XFAIL_1457
     async def test_graph_fallback_omits_graph_channel(self) -> None:
         """A transient Neo4j error during expand -> graph channel ABSENT.
 
@@ -902,7 +914,6 @@ def _typed_entity_retriever(ns_id: UUID, rows: list[dict[str, Any]]) -> VectorCy
 class TestTypedEntityFastPathHonesty:
     """Typed-recent reports: REAL report when filtered, no-filter carrier when not."""
 
-    @_XFAIL_1457
     async def test_filtered_typed_recent_emits_real_report(self) -> None:
         """TYPED_ENTITY_RECENT routed WITH a filter -> non-empty, valid report.
 
@@ -1353,35 +1364,68 @@ class TestConcurrentRecallsNoCrossContamination:
 
 
 # ---------------------------------------------------------------------------
-# The #1457 repro shape, pinned: a date-keyed filter drives the graph path via
+# The #1457 fix, pinned green: a date-keyed filter drives the graph path via
 # EXPLICIT temporal synthesis (engine.py's ``filter_constrains_date_key`` gate),
 # so the recall surfaces graph-derived entities the chunk filter never touched.
-# The engine passes ``covered_surfaces={"chunks"}`` on the graph path, so the
-# uncovered entity surface forces the date leaf into ``unenforced_keys``.
+# Before #1457 the engine passed ``covered_surfaces={"chunks"}`` unconditionally,
+# so an uncovered entity surface forced the date leaf into ``unenforced_keys``
+# (the leak the #1462 xfail pinned).
 #
-# This is the same leak the Task-of-record graph/hybrid tests above encode; this
-# test pins the SPECIFIC trigger the fix targets — a date predicate on a
-# beyond-corpus horizon (2027 against a 2026-ish corpus) — so the #1457 fix, which
-# filters the entity surface, flips it to xpass.
+# #1457 applies the SAME ``"Chunk"`` predicate to each entity's provenance chunks
+# (via ``khora.filter.provenance.filter_items_by_provenance``): an entity survives
+# iff ≥1 of its ``source_chunk_ids`` chunk passes the date filter. A date filter on
+# a BEYOND-CORPUS horizon (2027 against a 2026-ish corpus) matches nothing, so every
+# surface empties — the CORRECT end state — and the graph channel that ran under the
+# filter leaves the single ``occurred_at`` leaf enforced, so the report is CLEAN
+# (``unenforced_keys == []``). Empty entities is the RIGHT behavior for that filter,
+# not a leak: no entity's provenance cleared the horizon, so none is surfaced.
 # ---------------------------------------------------------------------------
 
 
 class TestDateKeyedExplicitSynthesisLeak:
-    """A date-keyed filter on the graph path leaks the uncovered entity surface."""
+    """A beyond-corpus date filter empties every surface and leaves a clean report."""
 
-    @_XFAIL_1457
     async def test_date_filter_graph_path_report_is_clean(self) -> None:
-        """A ``occurred_at $gte 2027`` filter on the graph path reports a clean pushdown.
+        """A ``occurred_at $gte 2027`` filter on a 2026 corpus -> four empty surfaces, clean report.
 
         The date predicate trips ``filter_constrains_date_key`` -> EXPLICIT
-        temporal synthesis -> the full graph path (``search_mode`` is NOT
-        ``simple_*``). The mocked entity search returns an entity, so the recall's
-        ``entities`` surface is non-empty and uncovered on the graph path. The
-        CLEAN report the #1457 fix restores enforces the single ``occurred_at``
-        leaf on the (then-filtered) entity surface, so nothing is unenforced.
+        temporal synthesis and the full graph path. NOTHING clears the 2027 horizon
+        on a 2026 corpus: the SQL chunk channels push down and match zero rows, the
+        graph channel's post-filter drops its 2026 chunk, and the ∃-over-provenance
+        filter drops the graph entity (its provenance is 2026). So chunks / entities
+        / relationships / documents are ALL empty — the correct zero-match end state
+        — and the graph channel that ran under the filter leaves ``occurred_at``
+        enforced, so ``unenforced_keys == []`` (no surface leaked). Empty entities is
+        CORRECT here, so this pins the zero-match end state directly (no fabricated
+        surviving entity, no non-empty-surface precondition).
         """
         ns_id = uuid4()
-        retriever = _make_retriever(ns_id, enable_bm25=True, graph_chunks=[_graph_chunk(ns_id, tier="gold")])
+        # The graph channel returns a 2026 chunk (its post-filter drops it under the
+        # 2027 bound) so the graph channel runs + records that it enforced the leaf.
+        graph_2026 = _graph_chunk(ns_id, tier="gold")
+        graph_2026.occurred_at = datetime(2026, 6, 1, tzinfo=UTC)
+        retriever = _make_retriever(ns_id, enable_bm25=True, graph_chunks=[graph_2026])
+        # The SQL chunk channels push down and match zero rows (2027 bound, 2026 corpus).
+        retriever._vector_store.search = AsyncMock(return_value=[])
+        retriever._vector_store.search_fulltext = AsyncMock(return_value=[])
+        # An entry entity exists in the traversal (so the graph channel runs and the
+        # ∃ filter fires), but its provenance chunk is 2026 -> it DROPS. This is the
+        # correct behavior, not a fabricated survivor.
+        prov_2026 = Chunk(
+            id=uuid4(),
+            namespace_id=ns_id,
+            document_id=uuid4(),
+            content="provenance chunk (2026)",
+            occurred_at=datetime(2026, 6, 1, tzinfo=UTC),
+        )
+        entity = Entity(
+            id=uuid4(),
+            namespace_id=ns_id,
+            name="Ancient",
+            entity_type="EVENT",
+            source_chunk_ids=[prov_2026.id],
+        )
+        _wire_graph_entity(retriever, entity, provenance_chunks=[prov_2026])
         engine = _build_engine(retriever)
 
         result = await engine.recall(
@@ -1392,29 +1436,15 @@ class TestDateKeyedExplicitSynthesisLeak:
             filter_ast=_ast({"occurred_at": {"$gte": "2027-01-01T00:00:00Z"}}),
         )
         report = result.engine_info["filter"]
-        # Precondition (holds before AND after the fix): no private channel-plan
-        # sink leaks into the public engine_info. A pytest.fail guard (raises
-        # Failed, not AssertionError) so a regression here is a real failure, not
-        # a masked XFAIL under the raises=AssertionError marker.
-        if "_filter_channel_plans" in result.engine_info:
-            pytest.fail("_filter_channel_plans leaked into public engine_info")
+        # The private channel-plan sink never leaks into the public engine_info.
+        assert "_filter_channel_plans" not in result.engine_info, "_filter_channel_plans leaked into engine_info"
         FilterPushdownReport.model_validate(report)
 
-        # Precondition (holds before AND after the fix): the recall genuinely ran
-        # the GRAPH path (non-``simple_*`` search_mode or graph chunks spliced)
-        # and surfaced entities — so the surface-coverage rule has real fuel and
-        # the leak below is not a vacuous fall-through to the simple path. These
-        # gates use pytest.fail so a broken mock / graph channel surfaces as a
-        # real failure rather than being masked as the expected AssertionError XFAIL.
-        search_mode = str(result.engine_info.get("search_mode", ""))
-        if not result.entities:
-            pytest.fail("graph path surfaced no entities — the surface-coverage rule is inert")
-        if search_mode.startswith("simple_") and result.engine_info.get("graph_chunk_count", 0) <= 0:
-            pytest.fail(
-                f"recall fell through to the simple path (search_mode={search_mode!r}, "
-                f"graph_chunk_count={result.engine_info.get('graph_chunk_count')}) — the graph-path leak "
-                "is not exercised"
-            )
+        # Zero-match end state: every result surface is empty.
+        assert result.chunks == []
+        assert result.entities == []
+        assert result.relationships == []
+        assert result.documents == []
 
         # The single date leaf is enforced (nothing unenforced) on a clean report.
         assert report["unenforced_keys"] == []

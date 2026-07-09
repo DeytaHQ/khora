@@ -86,6 +86,7 @@ __all__ = [
     "SurrealExecutor",
     "WeaviateExecutor",
     "assert_case",
+    "assert_recall_conformance",
     "f_array_cases",
     "f_coerce_cases",
     "f_dates_cases",
@@ -625,6 +626,79 @@ def oracle_survivors(case: ConformanceCase) -> frozenset[str]:
     expectation to whatever it currently computes.
     """
     return run_case_for_backend(case, "python", executor=PythonExecutor())
+
+
+# --------------------------------------------------------------------------- #
+# Recall-result conformance oracle (implementation-blind).
+#
+# The executors above check a filter's COMPILE against seed records — the SQL/
+# Cypher WHERE agrees with the Python oracle. This oracle instead checks a real
+# recall's OUTPUT against the same Python predicate, WITHOUT knowing how the engine
+# produced it: given the filter and the recall's returned chunk records + the
+# per-entity provenance-chunk records, it asserts the two surface invariants a
+# correctly-filtered multi-surface recall must satisfy:
+#
+#   1. every RETURNED chunk passes the compiled ``"Chunk"`` predicate (the chunk
+#      surface was narrowed), and
+#   2. every RETURNED entity has ≥1 provenance chunk that passes the predicate
+#      (the ∃-over-provenance rule #1457 enforces on the graph-derived surface).
+#
+# It is engine-agnostic and reuses the SAME ``compile_python`` predicate the
+# production filter path compiles, so a green oracle is evidence about the real
+# recall, not a parallel re-implementation. A record is anything ``compile_python``
+# can read — a ``Chunk`` dataclass or a plain mapping (the predicate resolves a
+# system key off the object attribute, its ``source_document`` projection, or a
+# mapping key, indifferently).
+# --------------------------------------------------------------------------- #
+
+
+def _chunk_predicate(filter_ast: FilterNode) -> Callable[[Any], bool]:
+    """Compile the recall filter to the ``"Chunk"`` predicate the engine applies.
+
+    ``@internal``. Uses the SAME context the production chunk channels + the #1457
+    provenance filter compile with (``build_compile_context("Chunk",
+    on_unsupported="split")``), so the oracle re-checks with the exact predicate the
+    recall path enforced — never a divergent re-derivation.
+    """
+    return compile_python(filter_ast, build_compile_context("Chunk", on_unsupported="split")).predicate
+
+
+def assert_recall_conformance(
+    filter_ast: FilterNode,
+    *,
+    returned_chunks: Sequence[Any],
+    entity_provenance: Sequence[Sequence[Any]],
+) -> None:
+    """Assert a filtered recall's surfaces conform to the compiled predicate.
+
+    ``@internal``. Implementation-blind: it inspects only the recall OUTPUT, not how
+    the engine produced it.
+
+    * ``returned_chunks`` — the chunk records the recall returned. EVERY one must
+      pass the compiled ``"Chunk"`` predicate (the chunk surface was narrowed).
+    * ``entity_provenance`` — one provenance-chunk-record sequence per RETURNED
+      entity, in the same order as the recall's ``entities``. For each entity, ≥1 of
+      its provenance chunks must pass the predicate (the ∃-over-provenance rule).
+      An entity with an EMPTY provenance sequence fails the existential — a
+      correctly-filtered recall never surfaces such an entity under a filter.
+
+    Raises :class:`AssertionError` on the first violation, naming the offending
+    surface + index so a failure is diagnosable.
+    """
+    predicate = _chunk_predicate(filter_ast)
+
+    for i, chunk in enumerate(returned_chunks):
+        assert predicate(chunk), (
+            f"returned chunk #{i} does not pass the recall filter predicate — the "
+            f"chunk surface was not narrowed by the filter"
+        )
+
+    for e, provenance in enumerate(entity_provenance):
+        assert any(predicate(chunk) for chunk in provenance), (
+            f"returned entity #{e} has no provenance chunk passing the recall filter "
+            f"predicate (∃ over {len(provenance)} provenance chunk(s) failed) — the "
+            f"entity surface was not enforced by the ∃-over-provenance rule"
+        )
 
 
 # --------------------------------------------------------------------------- #

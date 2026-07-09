@@ -46,6 +46,10 @@ _FILTER_AWARE_METHODS = frozenset(
         "_lexical_search_chunks",
         "_keyword_ppr_search_chunks",
         "_vector_only_fallback",
+        # #1457 entity/relationship ∃-over-provenance SURFACE post-filter. Not a
+        # chunk channel (runs after chunk fusion, on the entity/relationship
+        # surfaces) — classified in the matrix's _EXCLUDED_CHANNELS.
+        "_filter_surfaces_by_provenance",
     }
 )
 
