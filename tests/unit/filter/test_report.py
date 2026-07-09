@@ -472,12 +472,16 @@ def test_model_json_schema_snapshot() -> None:
             "gates it pushed it into the backend query; in ``post_filtered_keys`` when at\n"
             "least one gating channel had to re-check it in memory; and in\n"
             "``unenforced_keys`` when no channel gates it at all (the filter constrains it\n"
-            "but nothing — pushdown nor in-memory re-check — actually enforces it). On a\n"
-            "correct recall every leaf is enforced, so ``unenforced_keys == []``. A\n"
-            "single-channel engine like skeleton (whose one channel gates every leaf)\n"
-            "always reports ``unenforced_keys == []``; the list is defined for\n"
-            "multi-channel engines where a leaf may slip past every channel. All three\n"
-            "lists are sorted and JSON-stable."
+            "but nothing — pushdown nor in-memory re-check — actually enforces it), OR when\n"
+            "the recall returned a non-empty result surface (``entities`` /\n"
+            "``relationships``) that the filter's channels do not cover, so the filter's\n"
+            "leaves went unenforced against that surface's rows. On a correct recall every\n"
+            "leaf is enforced, so ``unenforced_keys == []``. A single-channel engine like\n"
+            "skeleton (whose one channel gates every leaf) always reports\n"
+            "``unenforced_keys == []``; the list is defined for multi-channel /\n"
+            "multi-surface engines where a leaf may slip past every channel or go\n"
+            "unenforced on an uncovered result surface. All three lists are sorted and\n"
+            "JSON-stable."
         ),
         "properties": {
             "pushed_down": {
@@ -572,3 +576,128 @@ def test_hand_built_ast_folds_identically_to_wire_round_trip() -> None:
     assert build_filter_report(hand, plan).model_dump(mode="json") == build_filter_report(wire, plan).model_dump(
         mode="json"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Surface coverage (opt-in via ``surface_sizes`` / ``covered_surfaces``).
+#
+# A non-empty result surface (``chunks`` / ``entities`` / ``relationships``) that
+# the filter's channels do NOT cover means the filter went unenforced against
+# that surface's rows, so ALL of the filter's leaves are forced into
+# ``unenforced_keys`` and ``pushed_down`` becomes ``False``. The rule is opt-in:
+# ``surface_sizes=None`` is byte-for-byte the legacy fold, and an empty surface
+# leaves the rule inert.
+# --------------------------------------------------------------------------- #
+
+
+def test_uncovered_nonempty_surface_forces_every_leaf_unenforced() -> None:
+    """A non-empty UNCOVERED entity surface forces every leaf into ``unenforced_keys``.
+
+    The channel pushed both leaves cleanly (a fully-pushed chunk filter), but the
+    recall returned 2 entities and the covered set is only ``{"chunks"}`` — the
+    filter never constrained those entity rows, so the report cannot claim a
+    pushdown. Every leaf is forced into ``unenforced_keys``, ``pushed_keys`` /
+    ``post_filtered_keys`` are emptied, and ``pushed_down`` flips ``False``.
+    """
+    leaves = _two_leaf_keys()
+    report = build_filter_report(
+        _ast(_TWO_LEAF_DOC),
+        {"vector": ChannelPlan(pushed_keys=leaves)},
+        surface_sizes={"chunks": 3, "entities": 2},
+        covered_surfaces=frozenset({"chunks"}),
+    )
+
+    assert set(report.unenforced_keys) == set(leaves)
+    assert report.pushed_keys == []
+    assert report.post_filtered_keys == []
+    assert report.pushed_down is False
+
+
+def test_covered_surface_leaves_the_fold_unchanged() -> None:
+    """When the non-empty surface IS covered, the rule is inert (legacy fold).
+
+    With ``covered_surfaces`` including ``entities``, the returned entity rows are
+    accounted for by the filter's channels, so the surface rule does not fire: the
+    fully-pushed report is byte-identical to the same fold with ``surface_sizes``
+    absent.
+    """
+    leaves = _two_leaf_keys()
+    plan = {"vector": ChannelPlan(pushed_keys=leaves)}
+
+    covered = build_filter_report(
+        _ast(_TWO_LEAF_DOC),
+        plan,
+        surface_sizes={"chunks": 3, "entities": 2},
+        covered_surfaces=frozenset({"chunks", "entities", "relationships"}),
+    )
+    legacy = build_filter_report(_ast(_TWO_LEAF_DOC), plan)
+
+    assert covered.model_dump(mode="json") == legacy.model_dump(mode="json")
+    assert covered.pushed_down is True
+    assert set(covered.pushed_keys) == set(leaves)
+    assert covered.unenforced_keys == []
+
+
+def test_surface_sizes_none_is_byte_for_byte_legacy() -> None:
+    """``surface_sizes=None`` folds byte-for-byte identically to omitting the param.
+
+    The signal is opt-in: passing ``surface_sizes=None`` explicitly must produce
+    the exact same JSON as a call that never mentions it, so the rule is provably
+    inert on the legacy path.
+    """
+    leaves = _two_leaf_keys()
+    plan = {"vector": ChannelPlan(pushed_keys=leaves)}
+
+    explicit_none = build_filter_report(_ast(_TWO_LEAF_DOC), plan, surface_sizes=None)
+    no_param = build_filter_report(_ast(_TWO_LEAF_DOC), plan)
+
+    assert explicit_none.model_dump(mode="json") == no_param.model_dump(mode="json")
+
+
+def test_empty_uncovered_surface_leaves_rule_inert() -> None:
+    """A ZERO-row uncovered surface does not fire the rule (legacy fold).
+
+    ``surface_sizes={"entities": 0}`` reports no entity rows, so there is nothing
+    the filter failed to constrain — the rule keys off ``> 0``. The report is the
+    fully-pushed legacy shape, identical to omitting ``surface_sizes``.
+    """
+    leaves = _two_leaf_keys()
+    plan = {"vector": ChannelPlan(pushed_keys=leaves)}
+
+    report = build_filter_report(
+        _ast(_TWO_LEAF_DOC),
+        plan,
+        surface_sizes={"chunks": 3, "entities": 0},
+        covered_surfaces=frozenset({"chunks"}),
+    )
+    legacy = build_filter_report(_ast(_TWO_LEAF_DOC), plan)
+
+    assert report.model_dump(mode="json") == legacy.model_dump(mode="json")
+    assert report.pushed_down is True
+    assert report.unenforced_keys == []
+
+
+def test_surface_rule_lands_leaf_only_in_unenforced_not_pushed_or_post() -> None:
+    """A would-be-pushed leaf under an uncovered surface lands ONLY in unenforced.
+
+    Disjointness guard: ``source_name`` WOULD be pushed for the chunk surface (the
+    channel consumed it), but the non-empty uncovered entity surface forces it
+    into ``unenforced_keys`` — and it appears in NEITHER ``pushed_keys`` nor
+    ``post_filtered_keys``. The three top-level lists stay a total, disjoint
+    partition and ``pushed_down`` is ``False``.
+    """
+    report = build_filter_report(
+        _ast({"source_name": "linear"}),
+        {"vector": ChannelPlan(pushed_keys=frozenset({"source_name"}))},
+        surface_sizes={"chunks": 1, "entities": 4},
+        covered_surfaces=frozenset({"chunks"}),
+    )
+
+    assert report.unenforced_keys == ["source_name"]
+    assert "source_name" not in report.pushed_keys
+    assert "source_name" not in report.post_filtered_keys
+    assert report.pushed_keys == []
+    assert report.post_filtered_keys == []
+    # Total, disjoint partition preserved.
+    assert set(report.pushed_keys) | set(report.post_filtered_keys) | set(report.unenforced_keys) == {"source_name"}
+    assert report.pushed_down is False

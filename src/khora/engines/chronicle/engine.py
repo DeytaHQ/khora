@@ -2386,6 +2386,17 @@ class ChronicleEngine:
                     defensive_recheck=(filter_ast is not None and bool(filter_ast.children)),
                 )
             },
+            # Chronicle covers only the "chunks" surface: the entity channel
+            # (search_similar_entities) receives no filter_ast (#1458), so a HYBRID
+            # recall that surfaces entities emits an UNCOVERED entity surface and the
+            # builder honestly forces the filter's leaves into unenforced_keys. The
+            # #1458 fix filters the entity surface and adds it to covered_surfaces.
+            surface_sizes={
+                "chunks": len(recall_chunks),
+                "entities": len(recall_entities),
+                "relationships": 0,
+            },
+            covered_surfaces={"chunks"},
         )
 
         return RecallResult(

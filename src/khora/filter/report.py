@@ -17,6 +17,18 @@ and whether it ran a defensive in-memory re-check over the full predicate even
 though every leaf compiled down (``defensive_recheck``). :func:`build_filter_report`
 folds those plans into the top-level partition and the per-channel breakdown.
 
+Beyond the per-channel plans, the builder honours an optional *surface-coverage*
+signal: an engine may report the row counts of each result surface (``chunks`` /
+``entities`` / ``relationships``) and the set of surfaces the filter's channels
+actually gate. When a surface came back non-empty but is NOT in the covered set,
+the filter did not constrain the rows on that surface, so every leaf of the
+filter is *unenforced* for that surface — the builder forces those leaves into
+``unenforced_keys`` (out of ``pushed_keys`` / ``post_filtered_keys``) and clears
+``pushed_down``. This keeps the report honest for multi-surface engines that push
+a filter through the chunk channel but emit entities / relationships the filter
+never touched. The signal is opt-in: with ``surface_sizes=None`` the builder is
+byte-for-byte its legacy self.
+
 The module is **pure**: it imports only the filter AST + the canonical leaf
 enumerator (:func:`khora.filter.execute.filter_leaf_keys`) and never an engine
 or a backend. Engines construct the :class:`ChannelPlan` carriers from their own
@@ -26,6 +38,7 @@ compile results and call :func:`build_filter_report`.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -69,12 +82,16 @@ class FilterPushdownReport(BaseModel):
     gates it pushed it into the backend query; in ``post_filtered_keys`` when at
     least one gating channel had to re-check it in memory; and in
     ``unenforced_keys`` when no channel gates it at all (the filter constrains it
-    but nothing — pushdown nor in-memory re-check — actually enforces it). On a
-    correct recall every leaf is enforced, so ``unenforced_keys == []``. A
-    single-channel engine like skeleton (whose one channel gates every leaf)
-    always reports ``unenforced_keys == []``; the list is defined for
-    multi-channel engines where a leaf may slip past every channel. All three
-    lists are sorted and JSON-stable.
+    but nothing — pushdown nor in-memory re-check — actually enforces it), OR when
+    the recall returned a non-empty result surface (``entities`` /
+    ``relationships``) that the filter's channels do not cover, so the filter's
+    leaves went unenforced against that surface's rows. On a correct recall every
+    leaf is enforced, so ``unenforced_keys == []``. A single-channel engine like
+    skeleton (whose one channel gates every leaf) always reports
+    ``unenforced_keys == []``; the list is defined for multi-channel /
+    multi-surface engines where a leaf may slip past every channel or go
+    unenforced on an uncovered result surface. All three lists are sorted and
+    JSON-stable.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -99,11 +116,14 @@ class FilterPushdownReport(BaseModel):
     ``post_filtered=True`` but does NOT move a fully-pushed leaf here."""
 
     unenforced_keys: list[str] = Field(default_factory=list)
-    """Constraint-leaf keys that NO channel gates — neither pushed down nor
-    re-checked in memory — so the filter constrains them but nothing enforces
-    them (sorted). Together with ``pushed_keys`` and ``post_filtered_keys`` this
-    forms a total, disjoint partition of every constraint leaf. A correct recall
-    enforces every leaf, so this list is empty (``unenforced_keys == []``)."""
+    """Constraint-leaf keys the filter did not enforce (sorted). A leaf lands here
+    when NO channel gates it — neither pushed down nor re-checked in memory — or
+    when the recall returned a non-empty result surface not covered by the
+    filter's channels (an uncovered ``entities`` / ``relationships`` surface makes
+    every filter leaf unenforced against that surface's rows). Together with
+    ``pushed_keys`` and ``post_filtered_keys`` this forms a total, disjoint
+    partition of every constraint leaf. A correct recall enforces every leaf, so
+    this list is empty (``unenforced_keys == []``)."""
 
     channels: dict[str, FilterChannelReport] = Field(default_factory=dict)
     """Per-channel breakdown, keyed by channel name. One entry per channel the
@@ -137,6 +157,9 @@ class ChannelPlan:
 def build_filter_report(
     filter_ast: FilterNode | None,
     channel_inputs: Mapping[str, ChannelPlan],
+    *,
+    surface_sizes: Mapping[str, int] | None = None,
+    covered_surfaces: AbstractSet[str] = frozenset({"chunks"}),
 ) -> FilterPushdownReport:
     """Fold per-channel :class:`ChannelPlan` facts into a :class:`FilterPushdownReport`.
 
@@ -150,7 +173,8 @@ def build_filter_report(
     * Top-level ``pushed_keys`` — leaves pushed on *every* gating channel.
     * Top-level ``post_filtered_keys`` — leaves re-checked in memory on *any*
       gating channel.
-    * Top-level ``unenforced_keys`` — leaves that no channel gates at all.
+    * Top-level ``unenforced_keys`` — leaves that no channel gates at all, plus
+      any leaf forced unenforced by the surface-coverage rule below.
 
     These three lists form a TOTAL, disjoint partition of the constraint leaves:
     every leaf lands in exactly one. A leaf that no channel gates lands in
@@ -160,6 +184,20 @@ def build_filter_report(
     pushed). ``post_filtered`` is ``True`` when any leaf was post-filtered OR any
     channel ran a defensive full-predicate re-check (which does NOT demote a
     fully-pushed leaf — NO-DEMOTE).
+
+    **Surface coverage** (opt-in via ``surface_sizes``): an engine may emit rows
+    on more than one result surface (``chunks`` / ``entities`` /
+    ``relationships``) while its filter channels only gate some of them. Pass
+    ``surface_sizes`` mapping each surface to its returned row count and
+    ``covered_surfaces`` naming the surfaces the filter actually constrains
+    (default ``{"chunks"}``). When any of the three known surfaces came back
+    non-empty (``surface_sizes.get(s, 0) > 0``) but is not in ``covered_surfaces``,
+    the filter went unenforced against that surface's rows, so ALL of the filter's
+    leaves are forced into ``unenforced_keys`` (removed from ``pushed_keys`` /
+    ``post_filtered_keys``) and ``pushed_down`` becomes ``False``. With
+    ``surface_sizes=None`` this rule is inert and the builder is byte-for-byte its
+    legacy self. The rule only applies on the non-empty-leaves path — an empty /
+    constraint-free filter has no leaves to force.
 
     A constraint-free filter (``None``, or a root with no children) carries no
     leaves: ``pushed_keys`` / ``post_filtered_keys`` are empty and ``pushed_down``
@@ -201,13 +239,28 @@ def build_filter_report(
         elif gating:  # all gating channels pushed it (NO-DEMOTE: stays pushed)
             pushed.add(leaf)
 
+    # Surface coverage (opt-in): a non-empty result surface the filter's channels
+    # do not cover means the filter went unenforced against that surface's rows,
+    # so ALL filter leaves are forced unenforced. Inert when surface_sizes is None.
+    surface_unenforced: frozenset[str] = frozenset()
+    if surface_sizes is not None and any(
+        surface_sizes.get(s, 0) > 0 and s not in covered_surfaces for s in ("chunks", "entities", "relationships")
+    ):
+        surface_unenforced = frozenset(all_leaves)
+
+    # Keep the three top-level lists a total, disjoint partition: forced-unenforced
+    # leaves leave both pushed and post_filtered.
+    pushed -= surface_unenforced
+    post_filtered -= surface_unenforced
+
     return FilterPushdownReport(
         # Fully pushed only when nothing was post-filtered AND every constraint
-        # leaf landed in pushed_keys (so all leaves were gated + pushed).
+        # leaf landed in pushed_keys (so all leaves were gated + pushed). Any
+        # surface-forced unenforced leaf drops it out of pushed, so this is False.
         pushed_down=not post_filtered and pushed == set(all_leaves),
         post_filtered=bool(post_filtered) or any_defensive,
         pushed_keys=sorted(pushed),
         post_filtered_keys=sorted(post_filtered),
-        unenforced_keys=sorted(all_leaves - pushed - post_filtered),
+        unenforced_keys=sorted((all_leaves - pushed - post_filtered) | surface_unenforced),
         channels=channels,
     )

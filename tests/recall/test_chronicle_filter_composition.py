@@ -685,3 +685,93 @@ async def test_filter_report_source_timestamp_under_not_is_post_filter_only() ->
     assert report["pushed_down"] is False
     assert report["post_filtered"] is True
     assert report["channels"][_CHUNKS_CHANNEL] == {"pushed_keys": [], "post_filtered_keys": ["source_timestamp"]}
+
+
+# ===========================================================================
+# Cross-engine gate: an entity-bearing Chronicle recall under a date filter
+# emits an uncovered ``entities`` surface, so the top-level report honestly
+# flags the filter unenforced (#1458).
+#
+# The Chronicle engine feeds ``build_filter_report`` a single ``"chunks"``
+# channel with ``covered_surfaces={"chunks"}`` and ``surface_sizes["entities"] =
+# len(recall_entities)`` (engine.py). The entity channel gates only the chunk
+# surface, so when a HYBRID recall surfaces entities the date-keyed filter never
+# constrained, the surface-coverage rule forces every filter leaf into
+# ``unenforced_keys`` and clears ``pushed_down`` — the cross-engine
+# ``unenforced_keys == []`` invariant is genuinely violated until the #1458 fix
+# filters the entity surface. Marked ``xfail(strict=True)``: the assertion body
+# encodes the CLEAN report the fix restores, so the fix flips it to xpass.
+# ===========================================================================
+
+
+def _engine_with_entity(
+    chunk_results: list[tuple[Chunk, float]],
+    entity: Any,
+    entity_score: float,
+) -> ChronicleEngine:
+    """A connected ChronicleEngine whose entity channel resolves one Entity.
+
+    Extends :func:`_engine_with_semantic` with the two entity-channel seams
+    (``search_similar_entities`` → one ``(id, score)`` hit, ``get_entities_batch``
+    → the resolved record) so a HYBRID recall surfaces ``result.entities``.
+    ``_router_enabled`` is turned OFF so the always-on ``run_entity`` gate is not
+    routed away to SIMPLE (which would skip the entity channel) — the entity
+    channel only runs in HYBRID/ALL mode, and this keeps that path live.
+    """
+    engine = _engine_with_semantic(chunk_results)
+    engine._storage.search_similar_entities = AsyncMock(return_value=[(entity.id, entity_score)])
+    engine._storage.get_entities_batch = AsyncMock(return_value={entity.id: entity})
+    engine._storage.get_chunks_batch = AsyncMock(return_value={})
+    engine._storage.get_entities_by_names_batch = AsyncMock(return_value={})
+    engine._router_enabled = False
+    return engine
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="entity filter leak on the chronicle path (#1458): the recall surfaces an uncovered "
+    "entity surface the date filter never constrained, so the report honestly flags the filter "
+    "unenforced until the fix filters the entity surface",
+)
+@pytest.mark.asyncio
+async def test_filter_report_entity_bearing_date_filter_is_clean() -> None:
+    from khora.core.models import Entity
+
+    in_scope = _chunk(
+        "alpha recent",
+        source_timestamp=datetime(2026, 6, 1, tzinfo=UTC),
+        created_at=datetime(2026, 6, 1, tzinfo=UTC),
+    )
+    entity = Entity(
+        id=uuid4(),
+        namespace_id=uuid4(),
+        name="Falcon",
+        entity_type="EVENT",
+        description="d",
+        attributes={},
+        mention_count=1,
+        source_document_ids=[],
+        source_chunk_ids=[],
+    )
+    engine = _engine_with_entity([(in_scope, 0.9)], entity, 0.95)
+
+    result = await engine.recall(
+        "Falcon",
+        uuid4(),
+        limit=10,
+        mode=SearchMode.HYBRID,
+        filter_ast=_filter_ast({"occurred_at": {"$gte": "2026-01-01T00:00:00Z"}}),
+    )
+    report = result.engine_info["filter"]
+    _validates(report)
+
+    # The recall genuinely surfaced entities (the leak precondition) — guards
+    # against a vacuous pass where the entity channel silently no-opped. pytest.fail
+    # (raises Failed, not AssertionError) so a no-op channel surfaces as a real
+    # failure rather than being masked as the expected AssertionError XFAIL.
+    if not result.entities:
+        pytest.fail("entity channel produced no entities — the surface-coverage rule is inert")
+    # CLEAN report the #1458 fix restores: the date leaf is enforced against the
+    # (then-filtered) entity surface, so nothing is left unenforced.
+    assert report["unenforced_keys"] == []
