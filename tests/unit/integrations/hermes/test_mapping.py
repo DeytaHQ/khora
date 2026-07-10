@@ -83,11 +83,11 @@ def test_derive_namespace_uuid_does_not_accept_session_positionally() -> None:
     session value no longer participates in a distinct third dimension, so
     two sessions with an unset user land in one namespace.
     """
-    # No user_id supplied for either "session" — both collapse to the same
-    # agent-scoped namespace.
-    ns_a = derive_namespace_uuid("agent-alpha")
-    ns_b = derive_namespace_uuid("agent-alpha")
-    assert ns_a == ns_b
+    # A value that used to be a distinct `session_id` dimension now binds
+    # positionally to `user_id` — passing it explicitly must match.
+    ns_positional = derive_namespace_uuid("agent-alpha", "old-session-value")
+    ns_as_user_id = derive_namespace_uuid("agent-alpha", user_id="old-session-value")
+    assert ns_positional == ns_as_user_id
 
 
 # ---------------------------------------------------------------------------

@@ -288,7 +288,19 @@ def KhoraMemoryProvider(  # noqa: N802 — factory function masquerading as a cl
             every session a fresh tenancy and void cross-session memory
             (issue #1466).
             """
-            agent_identity = kwargs.get("agent_identity", "unknown")
+            agent_identity = kwargs.get("agent_identity")
+            if not agent_identity:
+                # Missing agent_identity now has a larger blast radius than
+                # before #1466: the namespace no longer includes session_id,
+                # so every identity-less bind collapses into one shared
+                # ``hermes:unknown:{user_id}`` bucket instead of a
+                # per-session one. Hermes contracts to always supply it;
+                # warn loudly if it doesn't rather than merge silently.
+                logger.warning(
+                    "KhoraMemoryProvider.initialize called without agent_identity; "
+                    "falling back to a shared 'unknown' namespace bucket"
+                )
+                agent_identity = "unknown"
             user_id = kwargs.get("user_id")
             with trace_span(
                 "khora.integrations.hermes.initialize",
@@ -322,9 +334,9 @@ def KhoraMemoryProvider(  # noqa: N802 — factory function masquerading as a cl
                     )
 
                 logger.info(
-                    "KhoraMemoryProvider initialized agent_identity={} user_id={} session_id={}",
+                    "KhoraMemoryProvider initialized agent_identity={} user_id_hash={} session_id={}",
                     agent_identity,
-                    user_id,
+                    bounded_text_hash(str(user_id or "")),
                     session_id,
                 )
 

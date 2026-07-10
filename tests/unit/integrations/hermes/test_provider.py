@@ -270,6 +270,40 @@ def test_initialize_creates_namespace_when_resolve_misses() -> None:
     kb.storage.create_namespace.assert_awaited_once()
 
 
+@pytest.mark.unit
+def test_initialize_warns_and_uses_unknown_when_agent_identity_missing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Missing ``agent_identity`` warns loudly, then falls back to 'unknown'.
+
+    Post-#1466 the namespace no longer includes session_id, so an
+    identity-less bind collapses every such call into one shared
+    ``hermes:unknown:{user_id}`` bucket. The provider must surface that
+    misconfiguration (WARN) rather than merge conversations silently.
+    """
+    kb = _make_kb()
+    runtime = _make_runtime()
+    provider = KhoraMemoryProvider(kb=kb, runtime=runtime)
+
+    from loguru import logger as _loguru_logger
+
+    handler_id = _loguru_logger.add(
+        lambda msg: logging.getLogger("khora.test.hermes.noident").warning(msg),
+        level="WARNING",
+    )
+    try:
+        with caplog.at_level(logging.WARNING, logger="khora.test.hermes.noident"):
+            provider.initialize("session-1")  # no agent_identity kwarg
+    finally:
+        _loguru_logger.remove(handler_id)
+
+    assert provider._agent_identity == "unknown"
+    assert provider._namespace_id == derive_namespace_uuid("unknown", None)
+    assert any("without agent_identity" in r.getMessage() for r in caplog.records), (
+        f"expected a WARN about the missing agent_identity; got {[r.getMessage() for r in caplog.records]}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # prefetch / queue_prefetch  — cache coherency + abstention
 # ---------------------------------------------------------------------------
