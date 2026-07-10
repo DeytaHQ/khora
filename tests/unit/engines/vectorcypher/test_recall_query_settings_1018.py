@@ -77,6 +77,7 @@ def test_query_settings_defaults_match_retriever_defaults() -> None:
     assert rc.enable_hyde == "auto"
     assert rc.enable_diversity is True
     assert rc.diversity_lambda == 0.5
+    assert rc.diversity_min_gap == 0.35
     assert rc.stage1_recall_limit == 200
 
 
@@ -153,7 +154,8 @@ async def test_mmr_diversity_select_prefers_diverse_chunk() -> None:
         _fused(b, [0.99, 0.01], 0.8),
         _fused(c, [0.0, 1.0], 0.5),
     ]
-    out = retriever._mmr_select_fused(fused, [1.0, 0.0], k=2, lambda_param=0.0)
+    # #1463 signature: relevance_scores is one post-boost score per candidate.
+    out = retriever._mmr_select_fused(fused, [0.9, 0.8, 0.5], k=2, lambda_param=0.0)
     top_two = {out[0].item_id, out[1].item_id}
     assert top_two == {a, c}
 
@@ -165,8 +167,103 @@ async def test_mmr_falls_back_to_score_order_without_embeddings() -> None:
     retriever = _diversity_retriever(enable_diversity=True)
     a, b, c = _u(), _u(), _u()
     fused = [_fused(a, None, 0.9), _fused(b, None, 0.8), _fused(c, None, 0.5)]
-    out = retriever._mmr_select_fused(fused, [1.0, 0.0], k=2, lambda_param=0.5)
+    out = retriever._mmr_select_fused(fused, [0.9, 0.8, 0.5], k=2, lambda_param=0.5)
     assert [r.item_id for r in out] == [a, b, c]
+
+
+# --------------------------------------------------------------------------- #
+# #1463 — MMR must use the POST-boost/rerank relevance, not a fresh cosine, and
+# must not float embedding-less chunks via a fake 1.0 relevance.
+# --------------------------------------------------------------------------- #
+
+
+async def test_mmr_relevance_uses_ranking_score_not_raw_cosine() -> None:
+    """#1463 regression: with pure-relevance lambda (1.0) MMR must honor the
+    passed ranking scores (post-boost/rerank), NOT a recomputed query-chunk
+    cosine. The fixture makes the two DISAGREE: the chunk closest to the query
+    by cosine is ranked LAST by rerank, and vice-versa. MMR must keep the
+    rerank winner on top."""
+    from uuid import uuid4 as _u
+
+    retriever = _diversity_retriever(enable_diversity=True, lambda_param=1.0)
+    # a is nearest the query direction [1,0] by cosine, but rerank scored it
+    # LOWEST. c is orthogonal (lowest cosine) but rerank scored it HIGHEST.
+    # If MMR (wrongly) recomputed cosine it would pick a first; with the real
+    # ranking scores it must pick c first.
+    a, b, c = _u(), _u(), _u()
+    fused = [
+        _fused(a, [1.0, 0.0], 0.9),  # list position = pre-existing rank
+        _fused(b, [0.7, 0.3], 0.8),
+        _fused(c, [0.0, 1.0], 0.5),
+    ]
+    # Ranking scores INVERT the cosine order (rerank disagrees with cosine).
+    ranking_scores = [0.1, 0.4, 0.9]  # c highest, a lowest
+    out = retriever._mmr_select_fused(fused, ranking_scores, k=2, lambda_param=1.0)
+    assert out[0].item_id == c  # rerank winner, not the cosine winner (a)
+
+
+async def test_mmr_graph_only_chunk_does_not_float_via_fake_relevance() -> None:
+    """#1463 regression: an embedding-less (graph-only) chunk must NOT be
+    promoted to the top by a fake relevance of 1.0 (the old code backfilled its
+    embedding with the query embedding -> cosine 1.0). It gets a neutral
+    (median) relevance and stays below genuinely high-scoring embedded chunks."""
+    from uuid import uuid4 as _u
+
+    retriever = _diversity_retriever(enable_diversity=True, lambda_param=1.0)
+    hi, mid, graph = _u(), _u(), _u()
+    fused = [
+        _fused(hi, [1.0, 0.0], 0.95),  # genuinely relevant embedded chunk
+        _fused(mid, [0.0, 1.0], 0.55),  # moderately relevant embedded chunk
+        _fused(graph, None, 0.60),  # graph-only: NO embedding
+    ]
+    ranking_scores = [0.95, 0.55, 0.60]
+    out = retriever._mmr_select_fused(fused, ranking_scores, k=2, lambda_param=1.0)
+    # The high-scoring embedded chunk must lead; the graph-only chunk must NOT
+    # jump to #1 on a fabricated 1.0 relevance.
+    assert out[0].item_id == hi
+    assert out[0].item_id != graph
+
+
+def test_mmr_disabled_path_unchanged() -> None:
+    """#1463: with diversity OFF the retriever never invokes MMR — the fused
+    order is preserved verbatim (the gate is only consulted when enabled)."""
+    # enable_diversity=False -> the retrieve() guard skips the whole block, so
+    # _mmr_select_fused is never called. We assert the config gate is off; the
+    # order-preservation is guaranteed by the untouched fused_results slice.
+    retriever = _diversity_retriever(enable_diversity=False)
+    assert retriever._config.enable_diversity is False
+
+
+def _gate_retriever(min_gap: float) -> VectorCypherRetriever:
+    retriever = VectorCypherRetriever.__new__(VectorCypherRetriever)
+    retriever._config = RetrieverConfig(enable_diversity=True, diversity_min_gap=min_gap)
+    return retriever
+
+
+def test_adaptive_gate_skips_on_decisive_winner() -> None:
+    """#1463: a decisive top score (gap > diversity_min_gap) skips MMR."""
+    r = _gate_retriever(min_gap=0.35)
+    # top 1.0, second 0.5 -> gap 0.5 > 0.35 -> decisive -> skip.
+    assert r._diversity_decisive([1.0, 0.5, 0.4, 0.3]) is True
+
+
+def test_adaptive_gate_runs_when_scores_are_close() -> None:
+    """#1463: a near-tie at the top (gap <= diversity_min_gap) runs MMR."""
+    r = _gate_retriever(min_gap=0.35)
+    # top 1.0, second 0.9 -> gap 0.1 <= 0.35 -> not decisive -> run.
+    assert r._diversity_decisive([1.0, 0.9, 0.8, 0.7]) is False
+
+
+def test_adaptive_gate_skips_when_too_few_candidates() -> None:
+    """#1463: fewer than 3 candidates -> diversity is moot -> skip MMR."""
+    r = _gate_retriever(min_gap=0.35)
+    assert r._diversity_decisive([1.0, 0.99]) is True
+
+
+def test_adaptive_gate_disabled_with_zero_gap() -> None:
+    """#1463: diversity_min_gap=0.0 disables the gate (MMR always runs)."""
+    r = _gate_retriever(min_gap=0.0)
+    assert r._diversity_decisive([1.0, 0.1, 0.05, 0.01]) is False
 
 
 def _fetch_limit_retriever(**config_kwargs) -> VectorCypherRetriever:

@@ -49,6 +49,7 @@ from khora.telemetry.metrics import metric_counter
 from .dual_nodes import DualNodeManager
 from .fusion import (
     FusedResult,
+    _min_max_normalize,
     apply_coherence_boost,
     apply_recency_boost,
     attach_relevance_scores,
@@ -104,6 +105,14 @@ _LLM_RERANKING_SKIPPED_COUNTER = metric_counter(
         "Number of times the VectorCypher LLM rerank step was skipped, "
         "by reason (not_temporal / no_version_metadata / decisive_winner)."
     ),
+)
+
+# MMR diversity skip counter (issue #1463). Tracks how often the adaptive
+# diversity gate skips MMR because a decisive winner exists. No ``namespace_id``
+# label — cardinality rule (see CLAUDE.md).
+_MMR_SKIPPED_COUNTER = metric_counter(
+    "khora.vectorcypher.mmr_diversity.skipped_total",
+    description="Number of times MMR diversity selection was skipped by the adaptive gate, by reason.",
 )
 
 # Relationship-fetch degradation counter (issue #904, ADR-001). The
@@ -494,6 +503,9 @@ class RetrieverConfig:
     # setting is no longer inert on the default recall() path.
     enable_diversity: bool = True
     diversity_lambda: float = 0.5
+    # #1463 — adaptive diversity gate: skip MMR when the top vs 2nd normalized
+    # ranking-score gap exceeds this (decisive winner). 0.0 disables the gate.
+    diversity_min_gap: float = 0.35
 
     # Personalized PageRank retrieval path (Issue #542 — HippoRAG 2).
     # Default OFF — when ON, _vectorcypher_retrieve replaces the BFS+RRF
@@ -794,19 +806,29 @@ class VectorCypherRetriever:
     def _mmr_select_fused(
         self,
         fused_results: list[FusedResult],
-        query_embedding: list[float],
+        relevance_scores: list[float],
         *,
         k: int,
         lambda_param: float,
     ) -> list[FusedResult]:
-        """Reorder fused results so the MMR-selected top-``k`` lead (#1018).
+        """Reorder fused results so the MMR-selected top-``k`` lead (#1018, #1463).
 
         Maximal Marginal Relevance balances relevance to the query against
         diversity among selected chunks. Falls back to score order when chunk
         embeddings are unavailable (the embedded path may not hydrate them).
         Mirrors ``QueryEngine._mmr_diversity_select``.
+
+        #1463: the relevance term is the POST-boost/rerank ranking score
+        (``relevance_scores``, normalized to [0, 1] over the candidate set by the
+        caller), NOT a fresh query-chunk cosine — recomputing cosine here
+        discarded both rerankers and every boost for the selected top-k.
+        Embedding-less chunks (graph-only) get a NEUTRAL (median) relevance and a
+        zero embedding row, so they are neither promoted by a fake 1.0 relevance
+        nor treated as redundant with anything; their real ``rrf_score`` still
+        ranks them via the tail-order fallback.
         """
-        from khora._accel import batch_dot_product as _bdp
+        import numpy as np
+
         from khora._accel import mmr_diversity_select, normalize_embeddings_batch
 
         if len(fused_results) <= k:
@@ -816,19 +838,47 @@ class VectorCypherRetriever:
         if all(e is None for e in chunk_embeddings):
             return fused_results
 
-        filled = [emb if emb is not None else query_embedding for emb in chunk_embeddings]
-        normalized = normalize_embeddings_batch([query_embedding, *filled])
-        norm_query, norm_embeddings = normalized[0], normalized[1:]
+        # Neutral relevance for embedding-less rows: the median of the embedded
+        # candidates' relevances (falls back to 0.0 when every row lacks one).
+        embedded_rel = [s for s, e in zip(relevance_scores, chunk_embeddings) if e is not None]
+        neutral = float(np.median(embedded_rel)) if embedded_rel else 0.0
+        scores = [s if e is not None else neutral for s, e in zip(relevance_scores, chunk_embeddings)]
 
-        scores = [0.0] * len(norm_embeddings)
-        for idx, sim in _bdp(norm_query, norm_embeddings, threshold=0.0):
-            scores[idx] = sim
+        # L2-normalize only the real embeddings (dot product == cosine in the
+        # kernel), then assemble ONE numpy array (#1463 part 3 — asarray of the
+        # candidate matrix is the latency win at large N). Embedding-less rows are
+        # zero vectors: they contribute no similarity to any selected item.
+        present = [emb for emb in chunk_embeddings if emb is not None]
+        normalized = iter(normalize_embeddings_batch(present))
+        dim = len(present[0])
+        rows = [next(normalized) if emb is not None else [0.0] * dim for emb in chunk_embeddings]
+        norm_embeddings = np.asarray(rows, dtype=np.float32)
 
         selected = mmr_diversity_select(norm_embeddings, scores, lambda_param, k)
         selected_set = set(selected)
         # Selected (MMR order) first, then the remaining results in their
         # existing score order so nothing is dropped.
         return [fused_results[i] for i in selected] + [r for i, r in enumerate(fused_results) if i not in selected_set]
+
+    def _diversity_decisive(self, ranking_scores: list[float]) -> bool:
+        """Adaptive diversity gate (#1463, #1018 "Experiment A").
+
+        Returns ``True`` when MMR should be SKIPPED because a decisive winner
+        exists: the top ranking score leads the runner-up by more than the
+        configured ``diversity_min_gap``, or there are too few candidates for
+        diversity to matter. Re-ranking a decisive result set for diversity only
+        risks demoting the clear winner, so we keep pure score order instead.
+
+        ``ranking_scores`` are the post-boost/rerank scores normalized to [0, 1]
+        over the candidate set. A ``diversity_min_gap`` of 0.0 disables the gate.
+        """
+        gap = self._config.diversity_min_gap
+        if gap <= 0.0:
+            return False
+        if len(ranking_scores) < 3:
+            return True
+        top_two = sorted(ranking_scores, reverse=True)[:2]
+        return (top_two[0] - top_two[1]) > gap
 
     def _effective_min_similarity(self, min_similarity: float) -> float:
         """Resolve the chunk-channel cosine floor (#1406).
@@ -2370,6 +2420,13 @@ class VectorCypherRetriever:
                                     r.rrf_score *= 1.0 - _VERSION_DECAY * (1.0 - ratio)
                                     break
 
+        # Capture the POST-boost/rerank ranking score BEFORE attach_relevance_scores
+        # overwrites rrf_score with the display cosine (#1463). MMR's relevance
+        # term must be this ranking signal (which carries every boost + both
+        # rerankers), not a freshly recomputed query-chunk cosine. Normalized to
+        # [0, 1] over the candidate set below so lambda behaves consistently.
+        mmr_ranking_scores = [r.rrf_score for r in fused_results]
+
         # Surface an ABSOLUTE relevance score (raw vector cosine) on each chunk
         # instead of the per-result-set min-max normalized RRF score (#811).
         # Min-max forced the top chunk to 1.0 and the bottom to 0.0 regardless
@@ -2388,18 +2445,24 @@ class VectorCypherRetriever:
             query_embedding=query_embedding,
         )
 
-        # Step 8f: MMR diversity selection (#1018). When enabled, choose the
-        # top-``limit`` fused results by Maximal Marginal Relevance over the
+        # Step 8f: MMR diversity selection (#1018, #1463). When enabled, choose
+        # the top-``limit`` fused results by Maximal Marginal Relevance over the
         # broad-recall pool instead of pure score order, so near-duplicate
         # chunks don't crowd out diverse-but-relevant ones. Honors
         # ``query.enable_diversity`` / ``query.diversity_lambda`` (previously
-        # inert on VectorCypher). Reorders ``fused_results`` so the selected
-        # results lead; the existing ``[:limit]`` slices below pick them up.
+        # inert on VectorCypher). The adaptive gate (#1463) skips MMR when a
+        # decisive winner exists so diversity re-ranking cannot demote it.
+        # Reorders ``fused_results`` so the selected results lead; the existing
+        # ``[:limit]`` slices below pick them up.
         if self._config.enable_diversity and len(fused_results) > limit:
-            with trace_span("khora.vectorcypher.mmr_diversity", candidate_count=len(fused_results), k=limit):
-                fused_results = self._mmr_select_fused(
-                    fused_results, query_embedding, k=limit, lambda_param=self._config.diversity_lambda
-                )
+            normalized_scores = _min_max_normalize(mmr_ranking_scores)
+            if self._diversity_decisive(normalized_scores):
+                _MMR_SKIPPED_COUNTER.add(1, attributes={"reason": "decisive_winner"})
+            else:
+                with trace_span("khora.vectorcypher.mmr_diversity", candidate_count=len(fused_results), k=limit):
+                    fused_results = self._mmr_select_fused(
+                        fused_results, normalized_scores, k=limit, lambda_param=self._config.diversity_lambda
+                    )
 
         # Build result
         chunk_results = [(r.item, r.rrf_score) for r in fused_results[:limit]]
