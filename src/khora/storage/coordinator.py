@@ -1250,11 +1250,15 @@ class StorageCoordinator:
             raise RuntimeError("Relational backend not configured")
         return await self._relational.get_document_stats(namespace_id)
 
-    async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
+    async def get_document_by_checksum(
+        self, namespace_id: UUID, checksum: str, *, pending_stale_before: datetime | None = None
+    ) -> Document | None:
         """Get a document by its content checksum."""
         if not self._relational:
             raise RuntimeError("Relational backend not configured")
-        return await self._relational.get_document_by_checksum(namespace_id, checksum)
+        return await self._relational.get_document_by_checksum(
+            namespace_id, checksum, pending_stale_before=pending_stale_before
+        )
 
     async def get_document_by_external_id(
         self,
@@ -1287,7 +1291,9 @@ class StorageCoordinator:
             raise RuntimeError("Relational backend not configured")
         return await self._relational.get_documents_by_external_ids(external_ids, namespace_id=namespace_id)
 
-    async def get_documents_by_checksums(self, namespace_id: UUID, checksums: list[str]) -> dict[str, Document]:
+    async def get_documents_by_checksums(
+        self, namespace_id: UUID, checksums: list[str], *, pending_stale_before: datetime | None = None
+    ) -> dict[str, Document]:
         """Fetch documents by content checksums in a single query.
 
         Used for batch deduplication to avoid N serial DB queries.
@@ -1295,13 +1301,16 @@ class StorageCoordinator:
         Args:
             namespace_id: Namespace to search in
             checksums: List of content checksums to look up
+            pending_stale_before: Cutoff for reclaiming stale PENDING half-ingests (#1464)
 
         Returns:
             Dictionary mapping checksum to Document (only for existing documents)
         """
         if not self._relational:
             raise RuntimeError("Relational backend not configured")
-        return await self._relational.get_documents_by_checksums(namespace_id, checksums)  # type: ignore[unresolved-attribute]
+        return await self._relational.get_documents_by_checksums(  # type: ignore[unresolved-attribute]
+            namespace_id, checksums, pending_stale_before=pending_stale_before
+        )
 
     # =========================================================================
     # Chunk operations (delegated to vector)

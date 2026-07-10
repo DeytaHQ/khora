@@ -35,6 +35,34 @@ def _none_if_empty(v: str | None) -> str | None:
     return v if v else None
 
 
+def _reingestable_exclusion(pending_stale_before: datetime | None):
+    """Build the checksum-dedup exclusion clause for re-ingestable documents (#1464).
+
+    A checksum hit counts as a dedup *skip* only when the existing row is NOT
+    re-ingestable. Re-ingestable rows are:
+
+    * FAILED — always (previously-failed content must re-ingest); and
+    * PENDING older than ``pending_stale_before`` — a crash-abandoned half-ingest
+      (chunks committed at stage 3, entities never written) that would otherwise
+      stay a permanent dedup hit and never repair.
+
+    A *fresh* PENDING row (updated at/after the cutoff) is still treated as a
+    dedup hit, preserving the concurrent in-flight guard: two workers ingesting
+    the same checksum at once must not both full-ingest it. When
+    ``pending_stale_before`` is ``None`` only FAILED is excluded (legacy
+    behavior — no staleness reclaim).
+    """
+    if pending_stale_before is None:
+        return DocumentModel.status != DocumentStatus.FAILED
+    return and_(
+        DocumentModel.status != DocumentStatus.FAILED,
+        or_(
+            DocumentModel.status != DocumentStatus.PENDING,
+            DocumentModel.updated_at >= pending_stale_before,
+        ),
+    )
+
+
 class PostgreSQLBackend(AsyncSessionMixin):
     """PostgreSQL backend for relational data.
 
@@ -677,18 +705,24 @@ class PostgreSQLBackend(AsyncSessionMixin):
             row = result.one()
             return row[0], row[1]
 
-    async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
+    async def get_document_by_checksum(
+        self, namespace_id: UUID, checksum: str, *, pending_stale_before: datetime | None = None
+    ) -> Document | None:
         """Get a document by its content checksum (for deduplication).
 
         Returns the first matching document if multiple exist with the same checksum.
-        FAILED documents are excluded to allow re-ingestion of previously failed content.
+        FAILED documents are always excluded so previously-failed content re-ingests.
+        When ``pending_stale_before`` is given, PENDING documents older than that
+        cutoff are also excluded so a crash-abandoned half-ingest (#1464) re-ingests
+        instead of being treated as a permanent dedup hit; fresh PENDING rows stay
+        a dedup hit, preserving the concurrent in-flight guard.
         """
         async with self._get_session() as session:
             result = await session.execute(
                 select(DocumentModel).where(
                     DocumentModel.namespace_id == namespace_id,
                     DocumentModel.checksum == checksum,
-                    DocumentModel.status != DocumentStatus.FAILED,
+                    _reingestable_exclusion(pending_stale_before),
                 )
             )
             model = result.scalars().first()
@@ -767,15 +801,22 @@ class PostgreSQLBackend(AsyncSessionMixin):
             models = result.scalars().all()
             return {m.external_id: self._document_model_to_domain(m) for m in models if m.external_id}
 
-    async def get_documents_by_checksums(self, namespace_id: UUID, checksums: list[str]) -> dict[str, Document]:
+    async def get_documents_by_checksums(
+        self, namespace_id: UUID, checksums: list[str], *, pending_stale_before: datetime | None = None
+    ) -> dict[str, Document]:
         """Fetch documents by content checksums in a single query.
 
         Used for batch deduplication to avoid N serial DB queries.
-        FAILED documents are excluded to allow re-ingestion of previously failed content.
+        FAILED documents are always excluded so previously-failed content re-ingests.
+        When ``pending_stale_before`` is given, PENDING documents older than that
+        cutoff are also excluded so a crash-abandoned half-ingest (#1464) re-ingests
+        instead of being treated as a permanent dedup hit; fresh PENDING rows stay
+        a dedup hit, preserving the concurrent in-flight guard.
 
         Args:
             namespace_id: Namespace to search in
             checksums: List of content checksums to look up
+            pending_stale_before: Cutoff for reclaiming stale PENDING half-ingests
 
         Returns:
             Dictionary mapping checksum to Document (only for existing documents)
@@ -788,7 +829,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
                 select(DocumentModel).where(
                     DocumentModel.namespace_id == namespace_id,
                     DocumentModel.checksum.in_(checksums),
-                    DocumentModel.status != DocumentStatus.FAILED,
+                    _reingestable_exclusion(pending_stale_before),
                 )
             )
             models = result.scalars().all()

@@ -972,6 +972,23 @@ class VectorCypherEngine:
         """Get the dual node manager. Returns None for SurrealDB unified backend."""
         return self._dual_nodes
 
+    def _pending_stale_cutoff(self) -> datetime:
+        """Cutoff for treating a PENDING checksum hit as a re-ingestable half-ingest (#1464).
+
+        A PENDING document whose ``updated_at`` predates this cutoff is a
+        crash-abandoned half-ingest (chunks committed, entities never written)
+        and must re-ingest rather than be skipped forever as a dedup hit. A
+        fresher PENDING row is assumed in-flight and still deduped, preserving
+        the concurrent-worker guard. Reuses the pending-processor grace period
+        so the checksum path and ``claim_orphaned_documents`` agree on staleness.
+        """
+        from datetime import timedelta
+
+        grace_minutes = self._config.pipelines.pending_processor_grace_period_minutes
+        if not isinstance(grace_minutes, (int, float)):
+            grace_minutes = 5  # schema default (PipelineSettings.pending_processor_grace_period_minutes)
+        return datetime.now(UTC) - timedelta(minutes=grace_minutes)
+
     # =========================================================================
     # Core API: remember, recall, forget
     # =========================================================================
@@ -1075,7 +1092,9 @@ class VectorCypherEngine:
         # checksum hit on a document stored under a different external_id or
         # session_id is a distinct logical document, not a duplicate.
         session_id = _coerce_session_id_from_metadata(metadata)
-        existing = await storage.get_document_by_checksum(namespace_id, checksum)
+        existing = await storage.get_document_by_checksum(
+            namespace_id, checksum, pending_stale_before=self._pending_stale_cutoff()
+        )
         if existing and _checksum_dedup_applies(existing, external_id=external_id, session_id=session_id):
             logger.debug(f"Document already exists (checksum={checksum[:8]}..., status={existing.status})")
             return RememberResult(
@@ -3159,7 +3178,9 @@ class VectorCypherEngine:
         doc_checksums = [hashlib.sha256(d.get("content", "").encode("utf-8")).hexdigest() for d in documents]
         existing_docs: dict[str, Any] = {}
         if deduplicate:
-            existing_docs = await storage.get_documents_by_checksums(namespace_id, doc_checksums)
+            existing_docs = await storage.get_documents_by_checksums(
+                namespace_id, doc_checksums, pending_stale_before=self._pending_stale_cutoff()
+            )
 
         # Filter to non-duplicate documents, preserving original index.
         # Docs already dispatched via external_id above are excluded here.
@@ -3953,7 +3974,9 @@ class VectorCypherEngine:
         doc_checksums = [hashlib.sha256(d.get("content", "").encode("utf-8")).hexdigest() for d in documents]
         existing_docs: dict[str, Any] = {}
         if deduplicate:
-            existing_docs = await storage.get_documents_by_checksums(namespace_id, doc_checksums)
+            existing_docs = await storage.get_documents_by_checksums(
+                namespace_id, doc_checksums, pending_stale_before=self._pending_stale_cutoff()
+            )
         identities_in_flight: set[tuple[str, str | None, str | None]] = set()
         identities_lock = asyncio.Lock()
         semaphore = asyncio.Semaphore(max_concurrent)

@@ -34,6 +34,21 @@ def _none_if_empty(v: str | None) -> str | None:
     return v if v else None
 
 
+def _checksum_reingestable_clause(pending_stale_before: datetime | None) -> tuple[str, dict[str, Any]]:
+    """Build the checksum-dedup exclusion clause + binds for SurrealDB (#1464).
+
+    FAILED rows are always excluded (re-ingestable). When ``pending_stale_before``
+    is given, PENDING rows older than that cutoff are also excluded so a
+    crash-abandoned half-ingest re-ingests; fresh PENDING rows stay a dedup hit,
+    preserving the concurrent in-flight guard. When ``None`` only FAILED is
+    excluded (legacy behavior).
+    """
+    if pending_stale_before is None:
+        return "status != 'failed'", {}
+    clause = "status != 'failed' AND (status != 'pending' OR updated_at >= $pending_stale_before)"
+    return clause, {"pending_stale_before": pending_stale_before.isoformat()}
+
+
 class SurrealDBRelationalAdapter:
     """Relational backend backed by SurrealDB.
 
@@ -527,15 +542,22 @@ class SurrealDBRelationalAdapter:
             return 0, None
         return (row["cnt"] or 0), row["latest"]
 
-    async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
+    async def get_document_by_checksum(
+        self, namespace_id: UUID, checksum: str, *, pending_stale_before: datetime | None = None
+    ) -> Document | None:
         """Get a document by content checksum within a namespace.
 
-        FAILED documents are excluded to allow re-ingestion of previously failed content.
+        FAILED documents are always excluded so previously-failed content
+        re-ingests. When ``pending_stale_before`` is given, PENDING documents
+        older than that cutoff are also excluded so a crash-abandoned
+        half-ingest (#1464) re-ingests; fresh PENDING rows stay a dedup hit,
+        preserving the concurrent in-flight guard.
         """
         ns_str = str(namespace_id)
+        where, binds = _checksum_reingestable_clause(pending_stale_before)
         row = await self._conn.query_one(
-            "SELECT * FROM document WHERE namespace_id = $ns AND checksum = $checksum AND status != 'failed' LIMIT 1",
-            {"ns": ns_str, "checksum": checksum},
+            f"SELECT * FROM document WHERE namespace_id = $ns AND checksum = $checksum AND {where} LIMIT 1",  # noqa: S608
+            {"ns": ns_str, "checksum": checksum, **binds},
         )
         if row is None:
             return None
@@ -558,15 +580,22 @@ class SurrealDBRelationalAdapter:
             return None
         return self._row_to_document(row)
 
-    async def get_documents_by_checksums(self, namespace_id: UUID, checksums: list[str]) -> dict[str, Document]:
+    async def get_documents_by_checksums(
+        self, namespace_id: UUID, checksums: list[str], *, pending_stale_before: datetime | None = None
+    ) -> dict[str, Document]:
         """Fetch documents by content checksums in a single query.
 
         Used for batch deduplication to avoid N serial DB queries.
-        FAILED documents are excluded to allow re-ingestion of previously failed content.
+        FAILED documents are always excluded so previously-failed content
+        re-ingests. When ``pending_stale_before`` is given, PENDING documents
+        older than that cutoff are also excluded so a crash-abandoned
+        half-ingest (#1464) re-ingests; fresh PENDING rows stay a dedup hit,
+        preserving the concurrent in-flight guard.
 
         Args:
             namespace_id: Namespace to search in
             checksums: List of content checksums to look up
+            pending_stale_before: Cutoff for reclaiming stale PENDING half-ingests
 
         Returns:
             Dictionary mapping checksum to Document (only for existing documents)
@@ -574,9 +603,10 @@ class SurrealDBRelationalAdapter:
         if not checksums:
             return {}
         ns_str = str(namespace_id)
+        where, binds = _checksum_reingestable_clause(pending_stale_before)
         rows = await self._conn.query(
-            "SELECT * FROM document WHERE namespace_id = $ns AND checksum IN $checksums AND status != 'failed'",
-            {"ns": ns_str, "checksums": checksums},
+            f"SELECT * FROM document WHERE namespace_id = $ns AND checksum IN $checksums AND {where}",  # noqa: S608
+            {"ns": ns_str, "checksums": checksums, **binds},
         )
         result: dict[str, Document] = {}
         for r in rows:

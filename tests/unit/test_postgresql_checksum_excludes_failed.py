@@ -1,13 +1,15 @@
-"""Tests for: PostgreSQL backend excludes FAILED documents from checksum lookups.
+"""Tests for: PostgreSQL backend checksum-lookup dedup predicate.
 
-Verifies that get_document_by_checksum() and get_documents_by_checksums() filter out
-FAILED documents so they can be re-ingested.
+Verifies that get_document_by_checksum() and get_documents_by_checksums() exclude
+FAILED documents so they can be re-ingested, and (with a ``pending_stale_before``
+cutoff, #1464) also exclude stale PENDING half-ingests while keeping fresh
+PENDING / PROCESSING rows as dedup hits (concurrent in-flight guard).
 """
 
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -15,7 +17,7 @@ import pytest
 
 from khora.core.models.document import DocumentStatus
 from khora.db.models import DocumentModel
-from khora.storage.backends.postgresql import PostgreSQLBackend
+from khora.storage.backends.postgresql import PostgreSQLBackend, _reingestable_exclusion
 
 
 def _mock_document_model(*, namespace_id, checksum="abc123", status=DocumentStatus.COMPLETED):
@@ -175,3 +177,28 @@ class TestGetDocumentsByChecksumsExcludesFailed:
 
         assert result == {}
         session.execute.assert_not_awaited()
+
+
+@pytest.mark.unit
+class TestReingestableExclusionPredicate:
+    """#1464: the predicate re-ingests stale PENDING (crash-abandoned half-ingest)
+    without dropping the fresh-PENDING / PROCESSING in-flight dedup guard.
+    """
+
+    def test_none_cutoff_only_excludes_failed(self) -> None:
+        """Legacy behavior: without a cutoff, only FAILED is excluded (backward compat)."""
+        compiled = str(_reingestable_exclusion(None).compile(compile_kwargs={"literal_binds": True})).upper()
+        # Just the FAILED guard, no PENDING/updated_at staleness clause.
+        assert "STATUS" in compiled
+        assert "FAILED" in compiled
+        assert "PENDING" not in compiled
+        assert "UPDATED_AT" not in compiled
+
+    def test_cutoff_adds_stale_pending_clause(self) -> None:
+        """With a cutoff, FAILED and stale PENDING are excluded; fresh PENDING kept."""
+        cutoff = datetime.now(UTC) - timedelta(minutes=5)
+        compiled = str(_reingestable_exclusion(cutoff).compile(compile_kwargs={"literal_binds": True})).upper()
+        # FAILED always excluded, plus the (NOT PENDING OR updated_at >= cutoff) guard.
+        assert "FAILED" in compiled
+        assert "PENDING" in compiled
+        assert "UPDATED_AT" in compiled
