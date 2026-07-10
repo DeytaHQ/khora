@@ -3774,25 +3774,35 @@ class VectorCypherEngine:
                 # zero hooks. Mirror the single-doc payload + created-vs-updated
                 # split (the ``is_new`` flag); entities span multiple documents
                 # here, so ``document_id`` is derived per entity.
-                for entity, is_new in upsert_results:
-                    await storage.dispatch_hook(
-                        MemoryEvent(
-                            namespace_id=namespace_id,
-                            event_type=EventType.ENTITY_CREATED if is_new else EventType.ENTITY_UPDATED,
-                            resource_type="entity",
-                            resource_id=entity.id,
-                            data={
-                                "name": entity.name,
-                                "entity_type": entity.entity_type,
-                                "description": entity.description,
-                                "confidence": entity.confidence,
-                                "is_new": is_new,
-                                "document_id": (
-                                    str(entity.source_document_ids[0]) if entity.source_document_ids else None
-                                ),
-                                "embedding": entity.embedding,
-                            },
-                        )
+                #
+                # #1471: skip MemoryEvent construction entirely when nothing is
+                # subscribed (a no-subscriber dispatch is already a no-op), and
+                # gather the dispatches so a window's entity hooks run
+                # concurrently instead of serially awaiting each one.
+                if storage.should_dispatch_hooks():
+                    await asyncio.gather(
+                        *[
+                            storage.dispatch_hook(
+                                MemoryEvent(
+                                    namespace_id=namespace_id,
+                                    event_type=EventType.ENTITY_CREATED if is_new else EventType.ENTITY_UPDATED,
+                                    resource_type="entity",
+                                    resource_id=entity.id,
+                                    data={
+                                        "name": entity.name,
+                                        "entity_type": entity.entity_type,
+                                        "description": entity.description,
+                                        "confidence": entity.confidence,
+                                        "is_new": is_new,
+                                        "document_id": (
+                                            str(entity.source_document_ids[0]) if entity.source_document_ids else None
+                                        ),
+                                        "embedding": entity.embedding,
+                                    },
+                                )
+                            )
+                            for entity, is_new in upsert_results
+                        ]
                     )
 
                 # Extend id_remap with post-upsert canonicalisations.
@@ -3838,26 +3848,32 @@ class VectorCypherEngine:
 
                     # Emit relationship.created / relationship.updated hooks
                     # (#1401), mirroring the single-doc path's payload + split.
-                    for rel, is_new in rel_results:
-                        await storage.dispatch_hook(
-                            MemoryEvent(
-                                namespace_id=namespace_id,
-                                event_type=(
-                                    EventType.RELATIONSHIP_CREATED if is_new else EventType.RELATIONSHIP_UPDATED
-                                ),
-                                resource_type="relationship",
-                                resource_id=rel.id,
-                                data={
-                                    "relationship_type": rel.relationship_type,
-                                    "source_entity_id": str(rel.source_entity_id),
-                                    "target_entity_id": str(rel.target_entity_id),
-                                    "confidence": rel.confidence,
-                                    "is_new": is_new,
-                                    "document_id": (
-                                        str(rel.source_document_ids[0]) if rel.source_document_ids else None
-                                    ),
-                                },
-                            )
+                    # #1471: skip construction when unsubscribed, gather when not.
+                    if storage.should_dispatch_hooks():
+                        await asyncio.gather(
+                            *[
+                                storage.dispatch_hook(
+                                    MemoryEvent(
+                                        namespace_id=namespace_id,
+                                        event_type=(
+                                            EventType.RELATIONSHIP_CREATED if is_new else EventType.RELATIONSHIP_UPDATED
+                                        ),
+                                        resource_type="relationship",
+                                        resource_id=rel.id,
+                                        data={
+                                            "relationship_type": rel.relationship_type,
+                                            "source_entity_id": str(rel.source_entity_id),
+                                            "target_entity_id": str(rel.target_entity_id),
+                                            "confidence": rel.confidence,
+                                            "is_new": is_new,
+                                            "document_id": (
+                                                str(rel.source_document_ids[0]) if rel.source_document_ids else None
+                                            ),
+                                        },
+                                    )
+                                )
+                                for rel, is_new in rel_results
+                            ]
                         )
 
                 if all_entity_chunk_links and dual_nodes is not None:

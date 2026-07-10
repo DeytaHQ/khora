@@ -126,3 +126,79 @@ async def test_batch_and_single_doc_hook_parity(tmp_path: Path, monkeypatch: pyt
     assert single_ent > 0, "control: single-doc path must fire entity hooks"
     assert batch_ent == single_ent, f"batch entity hooks ({batch_ent}) must match single-doc ({single_ent})"
     assert batch_rel == single_rel, f"batch relationship hooks ({batch_rel}) must match single-doc ({single_rel})"
+
+
+async def test_batch_entity_hooks_dispatch_concurrently(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#1471: the batch path gathers the per-entity hook dispatches so they run
+    concurrently. With a callback that yields the event loop, all entity
+    callbacks must have started before any finishes (impossible under a serial
+    ``await`` loop, where each callback runs to completion before the next
+    starts)."""
+    import asyncio
+
+    stub_llm(monkeypatch, dim=EMBED_DIM)
+    plan_extraction(_MARKER, entities=_ENTITIES, relationships=_RELATIONSHIPS)
+
+    from khora import Khora
+
+    started = 0
+    max_concurrent = 0
+    delivered = 0
+
+    async def on_entity(event: MemoryEvent) -> None:
+        nonlocal started, max_concurrent, delivered
+        started += 1
+        max_concurrent = max(max_concurrent, started)
+        # Yield so sibling dispatches interleave when gathered.
+        await asyncio.sleep(0.02)
+        started -= 1
+        delivered += 1
+
+    async with Khora(_config(tmp_path), run_migrations=True) as kb:
+        ns = await kb.create_namespace()
+        kb.subscribe("entity.created", on_entity)
+        await kb.remember_batch(
+            [{"content": _DOC}],
+            namespace=ns.namespace_id,
+            entity_types=["PERSON", "ELEMENT"],
+            relationship_types=["DISCOVERED"],
+        )
+
+    assert delivered == len(_ENTITIES), f"every entity hook must be delivered, got {delivered}"
+    assert max_concurrent > 1, (
+        f"entity hook dispatches must run concurrently (peak in-flight={max_concurrent}); "
+        "a serial await loop would peak at 1"
+    )
+
+
+async def test_batch_skips_dispatch_when_unsubscribed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#1471: with no subscribers the batch path must not call dispatch_hook at
+    all (skips MemoryEvent construction), and ingest must still succeed."""
+    stub_llm(monkeypatch, dim=EMBED_DIM)
+    plan_extraction(_MARKER, entities=_ENTITIES, relationships=_RELATIONSHIPS)
+
+    from khora import Khora
+    from khora.storage.coordinator import StorageCoordinator
+
+    dispatch_calls = 0
+    orig_dispatch = StorageCoordinator.dispatch_hook
+
+    async def _counting_dispatch(self: StorageCoordinator, event: object) -> None:
+        nonlocal dispatch_calls
+        dispatch_calls += 1
+        await orig_dispatch(self, event)
+
+    monkeypatch.setattr(StorageCoordinator, "dispatch_hook", _counting_dispatch)
+
+    async with Khora(_config(tmp_path), run_migrations=True) as kb:
+        ns = await kb.create_namespace()
+        # No kb.subscribe(...) calls -> zero subscribers.
+        result = await kb.remember_batch(
+            [{"content": _DOC}],
+            namespace=ns.namespace_id,
+            entity_types=["PERSON", "ELEMENT"],
+            relationship_types=["DISCOVERED"],
+        )
+
+    assert result.processed == 1, "ingest must still succeed with no subscribers"
+    assert dispatch_calls == 0, f"no subscribers -> dispatch_hook must not be called, got {dispatch_calls}"
