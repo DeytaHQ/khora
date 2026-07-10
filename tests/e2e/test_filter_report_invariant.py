@@ -332,17 +332,17 @@ async def test_report_invariants_empty_chronicle(chronicle_kb, spec) -> None:
 # EMPTY entity surface and the surface-coverage rule stays inert — they remain
 # invariant-clean. These two cases are the opposite: they stage a real entity
 # corpus so the graph (VectorCypher) / entity (Chronicle) channel surfaces
-# entities the date filter never constrained. On a graph-path VectorCypher recall
-# and a HYBRID Chronicle recall the engine covers only the ``chunks`` surface, so
-# the non-empty uncovered entity surface forces every filter leaf into
-# ``unenforced_keys`` — the cross-engine ``unenforced_keys == []`` invariant is
-# genuinely violated until the #1457 / #1458 fix filters the entity surface.
+# entities the date filter never constrained. Before the #1457 / #1458 fix the
+# non-empty uncovered entity surface forced every filter leaf into
+# ``unenforced_keys``; the fix re-applies the "Chunk" predicate to each entity's
+# provenance (∃-over-provenance) and marks the entity surface covered, so the
+# report is CLEAN again.
 #
-# Marked ``xfail(strict=True)``: the body asserts the CLEAN invariant the fix
-# restores (so the fix flips it to xpass), and an anti-vacuity gate asserts the
-# recall actually surfaced entities first (so a no-entity path cannot pass the
-# ``unenforced_keys == []`` assertion for the wrong reason). Both self-skip on a
-# no-Docker run via the lane reachability marks, exactly like the row-set cases.
+# Each body asserts the CLEAN post-fix invariant (``unenforced_keys == []``)
+# directly, with an anti-vacuity gate that fails loud unless the recall actually
+# surfaced entities first (so a no-entity path cannot pass the assertion for the
+# wrong reason). Both self-skip on a no-Docker run via the lane reachability
+# marks, exactly like the row-set cases.
 # --------------------------------------------------------------------------- #
 
 _LEAK_MARKER = "leakmark"
@@ -409,26 +409,30 @@ async def test_report_invariant_graph_entity_bearing_date_filter_vc_full(vectorc
 @pytest.mark.skipif(
     not _harness.lane_reachable("chronicle"), reason="start Postgres (make dev) to exercise this live lane"
 )
-@pytest.mark.skip(
-    reason="#1458 chronicle entity-surface leak is not exercisable on this live e2e lane: the HYBRID "
-    "recall surfaces no entities here (entity vector search does not clear the entity surface for the "
-    "seeded corpus on the credential-degraded e2e lane), so the surface-coverage rule stays inert and "
-    "the leak cannot be reproduced. The #1458 leak is pinned hermetically by "
-    "tests/recall/test_chronicle_filter_composition.py::test_filter_report_entity_bearing_date_filter_is_clean, "
-    "which forces the entity surface via a mocked engine. Re-enable (as xfail) once the live lane surfaces entities."
-)
 async def test_report_invariant_entity_bearing_date_filter_chronicle(chronicle_kb) -> None:
     """A HYBRID Chronicle recall over an entity corpus + date filter reports clean.
 
-    Chronicle's entity channel is meant to surface a non-empty entity set the
-    chunk-side date filter does not cover, so the emitted report would force the
-    date leaf into ``unenforced_keys``. Skipped: on the live e2e lane the HYBRID
-    recall does not surface entities for the seeded corpus, so the anti-vacuity
-    gate cannot hold and the leak is not exercisable here (the #1458 leak is
-    pinned hermetically in tests/recall/). Chronicle has no GRAPH mode — the
-    entity channel runs in HYBRID.
+    Chronicle's entity channel surfaces a non-empty entity set the chunk-side date
+    filter does not cover, so before the #1458 fix the emitted report forced the
+    date leaf into ``unenforced_keys``. The fix re-applies the "Chunk" predicate to
+    each entity's provenance (∃-over-provenance) and marks the entity surface
+    covered, so the report is CLEAN (``unenforced_keys == []``). Chronicle has no
+    GRAPH mode — the entity channel runs in HYBRID.
+
+    The #1462 vacuity skip diagnosed the wrong cause (it blamed the entity-similarity
+    floor / a credential-degraded lane). The real reason the entity surface was empty
+    is that the single-token ``_LEAK_MARKER`` query routes SIMPLE through the query
+    complexity router, which sets ``run_entity=False`` and skips the entity channel
+    entirely in HYBRID. Disabling the router keeps all channels live (the product knob
+    for "run every channel", and exactly what the hermetic composition test does), so
+    the entity channel resolves the seeded entities and the coverage rule is exercised.
     """
     kb = chronicle_kb
+    # Keep every channel live: the single-token marker query would otherwise route
+    # SIMPLE and skip the entity channel (run_entity=False), leaving result.entities
+    # empty and the surface-coverage rule inert. Turning the router off is the
+    # documented "run all channels" knob (mirrors the hermetic composition test).
+    kb._engine._router_enabled = False
     namespace_id = (await kb.create_namespace()).namespace_id
     await _seed_leak_corpus(kb, namespace_id)
 

@@ -2419,12 +2419,17 @@ class ChronicleEngine:
             # entity's provenance, so the entity/relationship surfaces are enforced
             # and added to covered_surfaces — otherwise a HYBRID recall surfacing
             # entities the filter never constrained would honestly force the filter's
-            # leaves into unenforced_keys. Chronicle keeps relationships=[].
+            # leaves into unenforced_keys.
             surface_sizes={
                 "chunks": len(recall_chunks),
                 "entities": len(recall_entities),
                 "relationships": 0,
             },
+            # Chronicle's relationships surface is ALWAYS empty (size 0), so
+            # including "relationships" in covered_surfaces is harmless either way —
+            # build_filter_report only forces a filter's leaves into unenforced_keys
+            # for an uncovered surface with size > 0. Listed for parity with the
+            # VectorCypher pass, which covers both surfaces together.
             covered_surfaces={"chunks"} | ({"entities", "relationships"} if provenance_pass_ran else set()),
         )
 
