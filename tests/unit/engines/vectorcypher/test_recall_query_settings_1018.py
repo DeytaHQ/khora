@@ -90,8 +90,11 @@ def _hyde_probe_retriever(enable_hyde: str) -> VectorCypherRetriever:
     retriever = VectorCypherRetriever.__new__(VectorCypherRetriever)
     retriever._config = RetrieverConfig(enable_hyde=enable_hyde)
     retriever._embedder = AsyncMock()
+    # #1469: HyDE now runs as generate (LLM+embed) then combine. The probe's
+    # hypothetical embedding is [17,17,17,17]; averaged with a [1,1,1,1] base it
+    # yields [9,9,9,9], so the fold output pins the same expand-vs-noop contract.
     retriever._hyde_expander = AsyncMock()
-    retriever._hyde_expander.expand_query_embedding = AsyncMock(return_value=[9.0] * 4)
+    retriever._hyde_expander.generate_hypothetical_embeddings = AsyncMock(return_value=[[17.0] * 4])
     return retriever
 
 
@@ -106,17 +109,21 @@ _COMPLEX_ROUTING = RoutingDecision(
 async def test_hyde_always_fires_and_expands_embedding() -> None:
     """enable_hyde='always' expands the embedding even for a SIMPLE query."""
     retriever = _hyde_probe_retriever("always")
-    out = await retriever._maybe_expand_hyde("q", [1.0] * 4, routing=_SIMPLE_ROUTING, temporal_signal=None)
+    task = retriever._maybe_launch_hyde("q", routing=_SIMPLE_ROUTING, temporal_signal=None)
+    assert task is not None
+    out = await retriever._fold_hyde([1.0] * 4, task)
     assert out == [9.0] * 4
-    retriever._hyde_expander.expand_query_embedding.assert_awaited_once()
+    retriever._hyde_expander.generate_hypothetical_embeddings.assert_awaited_once()
 
 
 async def test_hyde_never_leaves_embedding_unchanged() -> None:
     """enable_hyde='never' is a no-op (no LLM call, original embedding kept)."""
     retriever = _hyde_probe_retriever("never")
-    out = await retriever._maybe_expand_hyde("q", [1.0] * 4, routing=_COMPLEX_ROUTING, temporal_signal=None)
+    task = retriever._maybe_launch_hyde("q", routing=_COMPLEX_ROUTING, temporal_signal=None)
+    assert task is None
+    out = await retriever._fold_hyde([1.0] * 4, task)
     assert out == [1.0] * 4
-    retriever._hyde_expander.expand_query_embedding.assert_not_awaited()
+    retriever._hyde_expander.generate_hypothetical_embeddings.assert_not_awaited()
 
 
 async def test_hyde_auto_fires_for_complex_not_simple() -> None:
@@ -124,6 +131,37 @@ async def test_hyde_auto_fires_for_complex_not_simple() -> None:
     retriever = _hyde_probe_retriever("auto")
     assert retriever._should_hyde(_COMPLEX_ROUTING, None) is True
     assert retriever._should_hyde(_SIMPLE_ROUTING, None) is False
+
+
+async def test_hyde_launch_starts_llm_before_base_embed_resolves() -> None:
+    """#1469 speculative HyDE: the hypothetical generation is in flight before
+    the base embed resolves, proving the LLM round-trip overlaps the embed."""
+    import asyncio
+
+    retriever = VectorCypherRetriever.__new__(VectorCypherRetriever)
+    retriever._config = RetrieverConfig(enable_hyde="always")
+    retriever._embedder = AsyncMock()
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def gated_generate(_query, *, out_diagnostics=None):
+        started.set()
+        await release.wait()
+        return [[17.0] * 4]
+
+    retriever._hyde_expander = AsyncMock()
+    retriever._hyde_expander.generate_hypothetical_embeddings = AsyncMock(side_effect=gated_generate)
+
+    task = retriever._maybe_launch_hyde("q", routing=_SIMPLE_ROUTING, temporal_signal=None)
+    assert task is not None
+    # The launch scheduled the coroutine; yield so it can start running.
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    assert not task.done()  # still awaiting the release -> genuinely in flight
+
+    release.set()
+    out = await retriever._fold_hyde([1.0] * 4, task)
+    assert out == [9.0] * 4
 
 
 def _diversity_retriever(*, enable_diversity: bool, lambda_param: float = 0.5) -> VectorCypherRetriever:

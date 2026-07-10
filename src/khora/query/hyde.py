@@ -157,6 +157,63 @@ class HyDEExpander:
             _telemetry_op="hyde",
         )
 
+    async def generate_hypothetical_embeddings(
+        self,
+        query: str,
+        *,
+        temporal_category: TemporalCategory | None = None,
+        out_diagnostics: list[Degradation] | None = None,
+    ) -> list[list[float]] | None:
+        """Generate + embed the hypothetical documents for ``query`` (#1469).
+
+        This is the LLM-and-embed half of :meth:`expand_query_embedding`. It
+        depends only on the query text and temporal category - NOT on the base
+        query embedding - so a caller can launch it as a task at t0 and overlap
+        the (expensive) LLM round-trip with the base query embed and the rest of
+        the front-matter, then average the results in with
+        :meth:`combine_with_query_embedding` once both are ready.
+
+        Returns the list of hypothetical-document embeddings, or ``None`` on any
+        failure (recording a :class:`Degradation` on ``out_diagnostics`` and
+        incrementing the degraded counter, ADR-001) so the caller can fall back
+        to the un-expanded embedding.
+        """
+        from khora.core.diagnostics import Degradation
+        from khora.telemetry.instrument import pipeline_stage
+
+        if temporal_category is None:
+            temporal_category = _detect_category(query, out_diagnostics=out_diagnostics)
+
+        try:
+            async with pipeline_stage("query", "hyde", extra_metadata={"num_hypotheticals": self._num_hypotheticals}):
+                hyde_embeddings: list[list[float]] = []
+                for _ in range(self._num_hypotheticals):
+                    doc = await self.generate_hypothetical(query, temporal_category=temporal_category)
+                    hyde_embeddings.append(await self._embedder.embed(doc))
+                return hyde_embeddings
+        except Exception as e:
+            logger.warning("HyDE expansion failed, using original embedding: {}", e, exc_info=True)
+            _HYDE_DEGRADED_COUNTER.add(1, attributes={"channel": "query_embedding", "reason": "hyde_embedding_failed"})
+            if out_diagnostics is not None:
+                out_diagnostics.append(
+                    Degradation(
+                        component="query.hyde",
+                        reason="hyde_embedding_failed",
+                        detail=str(e)[:200] or None,
+                        exception=type(e).__name__,
+                    )
+                )
+            return None
+
+    @staticmethod
+    def combine_with_query_embedding(
+        query_embedding: list[float],
+        hyde_embeddings: list[list[float]],
+    ) -> list[float]:
+        """Average the base query embedding with the hypothetical embeddings."""
+        avg = np.mean([query_embedding, *hyde_embeddings], axis=0)
+        return avg.tolist()
+
     async def expand_query_embedding(
         self,
         query: str,
@@ -178,40 +235,11 @@ class HyDEExpander:
         the silent fallback is observable on
         ``RecallResult.engine_info['degradations']`` (ADR-001, issue #1324).
         """
-        from khora.core.diagnostics import Degradation
-        from khora.telemetry.instrument import pipeline_stage
-
-        if temporal_category is None:
-            temporal_category = _detect_category(query, out_diagnostics=out_diagnostics)
-
-        try:
-            async with pipeline_stage("query", "hyde", extra_metadata={"num_hypotheticals": self._num_hypotheticals}):
-                hypotheticals: list[str] = []
-                for _ in range(self._num_hypotheticals):
-                    doc = await self.generate_hypothetical(query, temporal_category=temporal_category)
-                    hypotheticals.append(doc)
-
-                # Embed hypothetical documents
-                hyde_embeddings: list[list[float]] = []
-                for doc in hypotheticals:
-                    emb = await self._embedder.embed(doc)
-                    hyde_embeddings.append(emb)
-
-                # Average: original query embedding + hypothetical embeddings
-                all_embeddings = [query_embedding, *hyde_embeddings]
-                avg = np.mean(all_embeddings, axis=0)
-                return avg.tolist()
-
-        except Exception as e:
-            logger.warning("HyDE expansion failed, using original embedding: {}", e, exc_info=True)
-            _HYDE_DEGRADED_COUNTER.add(1, attributes={"channel": "query_embedding", "reason": "hyde_embedding_failed"})
-            if out_diagnostics is not None:
-                out_diagnostics.append(
-                    Degradation(
-                        component="query.hyde",
-                        reason="hyde_embedding_failed",
-                        detail=str(e)[:200] or None,
-                        exception=type(e).__name__,
-                    )
-                )
+        hyde_embeddings = await self.generate_hypothetical_embeddings(
+            query,
+            temporal_category=temporal_category,
+            out_diagnostics=out_diagnostics,
+        )
+        if not hyde_embeddings:
             return query_embedding
+        return self.combine_with_query_embedding(query_embedding, hyde_embeddings)
