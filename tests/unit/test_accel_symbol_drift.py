@@ -171,6 +171,24 @@ def test_partial_wheel_degrades_only_missing_symbol(reload_accel_with):
     assert mod.RustBM25Index is not None
 
 
+def test_partial_wheel_kernel_behaviour_splits(reload_accel_with):
+    """A degraded kernel falls back while an unaffected kernel uses Rust.
+
+    The fake Rust stubs return a ``("rust", attr)`` sentinel, so a kernel that
+    stays on the Rust path yields the sentinel while a kernel whose symbol is
+    missing returns a genuinely computed fallback value.
+    """
+    fake = _make_fake_khora_accel(missing={"levenshtein_similarity"})
+    mod, _ = reload_accel_with(fake)
+
+    # cosine_similarity keeps its Rust symbol -> returns the fake Rust sentinel.
+    assert mod.cosine_similarity([1.0, 0.0], [1.0, 0.0]) == ("rust", "cosine_similarity")
+    # levenshtein_similarity lost its symbol -> falls back to a real float score.
+    result = mod.levenshtein_similarity("kitten", "kitten")
+    assert isinstance(result, float)
+    assert result == pytest.approx(1.0)
+
+
 def test_partial_wheel_logs_warning_naming_missing_symbol(reload_accel_with):
     """A partial wheel logs a WARNING naming the missing symbol(s)."""
     fake = _make_fake_khora_accel(missing={"block_and_score_pairs"})
