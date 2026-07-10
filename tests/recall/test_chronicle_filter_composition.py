@@ -689,25 +689,45 @@ async def test_filter_report_source_timestamp_under_not_is_post_filter_only() ->
 
 # ===========================================================================
 # Cross-engine gate: an entity-bearing Chronicle recall under a date filter
-# emits an uncovered ``entities`` surface, so the top-level report honestly
-# flags the filter unenforced (#1458).
+# used to emit an uncovered ``entities`` surface, so the top-level report
+# honestly flagged the filter unenforced. The #1458 fix re-applies the SAME
+# "Chunk" predicate to each entity's provenance (∃-over-provenance): an entity
+# survives iff ≥1 of its ``source_chunk_ids`` passes, and the entity surface is
+# then marked covered.
 #
 # The Chronicle engine feeds ``build_filter_report`` a single ``"chunks"``
-# channel with ``covered_surfaces={"chunks"}`` and ``surface_sizes["entities"] =
-# len(recall_entities)`` (engine.py). The entity channel gates only the chunk
-# surface, so when a HYBRID recall surfaces entities the date-keyed filter never
-# constrained, the surface-coverage rule forces every filter leaf into
-# ``unenforced_keys`` and clears ``pushed_down`` — the cross-engine
-# ``unenforced_keys == []`` invariant is genuinely violated until the #1458 fix
-# filters the entity surface. Marked ``xfail(strict=True)``: the assertion body
-# encodes the CLEAN report the fix restores, so the fix flips it to xpass.
+# channel with ``covered_surfaces = {"chunks"} | {"entities","relationships"}``
+# (the latter iff the ∃-over-provenance pass ran) and ``surface_sizes["entities"]
+# = len(recall_entities)`` (engine.py). With the pass covering the entity surface,
+# a HYBRID recall that surfaces filter-passing entities emits a CLEAN report
+# (``unenforced_keys == []``).
 # ===========================================================================
+
+
+def _prov_chunk(*, year: int, source: str | None = None) -> Chunk:
+    """A provenance chunk whose ``occurred_at`` sits in ``year`` (+ optional source).
+
+    ``occurred_at`` decides whether the chunk clears an ``occurred_at`` date bound;
+    ``source`` (via a ``DocumentSource`` projection) decides a ``source``-keyed
+    filter. Mirrors the sibling ``_prov_chunk`` in
+    ``tests/unit/engines/test_vectorcypher_provenance_filter.py``.
+    """
+    return Chunk(
+        id=uuid4(),
+        namespace_id=uuid4(),
+        document_id=uuid4(),
+        content=f"provenance chunk ({year})",
+        occurred_at=datetime(year, 6, 1, tzinfo=UTC),
+        source_document=(DocumentSource(id=uuid4(), source=source) if source is not None else None),
+    )
 
 
 def _engine_with_entity(
     chunk_results: list[tuple[Chunk, float]],
     entity: Any,
     entity_score: float,
+    *,
+    provenance_chunks: list[Chunk] | None = None,
 ) -> ChronicleEngine:
     """A connected ChronicleEngine whose entity channel resolves one Entity.
 
@@ -717,23 +737,21 @@ def _engine_with_entity(
     ``_router_enabled`` is turned OFF so the always-on ``run_entity`` gate is not
     routed away to SIMPLE (which would skip the entity channel) — the entity
     channel only runs in HYBRID/ALL mode, and this keeps that path live.
+
+    ``provenance_chunks`` feed the #1458 ∃-over-provenance ``get_chunks_batch``
+    seam: the entity survives the filter iff one of them passes the "Chunk"
+    predicate. Left empty by default (the entity then carries no provenance and
+    is dropped under a filter).
     """
     engine = _engine_with_semantic(chunk_results)
     engine._storage.search_similar_entities = AsyncMock(return_value=[(entity.id, entity_score)])
     engine._storage.get_entities_batch = AsyncMock(return_value={entity.id: entity})
-    engine._storage.get_chunks_batch = AsyncMock(return_value={})
+    engine._storage.get_chunks_batch = AsyncMock(return_value={c.id: c for c in (provenance_chunks or [])})
     engine._storage.get_entities_by_names_batch = AsyncMock(return_value={})
     engine._router_enabled = False
     return engine
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="entity filter leak on the chronicle path (#1458): the recall surfaces an uncovered "
-    "entity surface the date filter never constrained, so the report honestly flags the filter "
-    "unenforced until the fix filters the entity surface",
-)
 @pytest.mark.asyncio
 async def test_filter_report_entity_bearing_date_filter_is_clean() -> None:
     from khora.core.models import Entity
@@ -743,6 +761,9 @@ async def test_filter_report_entity_bearing_date_filter_is_clean() -> None:
         source_timestamp=datetime(2026, 6, 1, tzinfo=UTC),
         created_at=datetime(2026, 6, 1, tzinfo=UTC),
     )
+    # The entity's sole provenance chunk clears the 2026 bound, so the
+    # ∃-over-provenance pass keeps it: the entity surface is enforced and covered.
+    prov = _prov_chunk(year=2026)
     entity = Entity(
         id=uuid4(),
         namespace_id=uuid4(),
@@ -752,9 +773,9 @@ async def test_filter_report_entity_bearing_date_filter_is_clean() -> None:
         attributes={},
         mention_count=1,
         source_document_ids=[],
-        source_chunk_ids=[],
+        source_chunk_ids=[prov.id],
     )
-    engine = _engine_with_entity([(in_scope, 0.9)], entity, 0.95)
+    engine = _engine_with_entity([(in_scope, 0.9)], entity, 0.95, provenance_chunks=[prov])
 
     result = await engine.recall(
         "Falcon",
@@ -766,12 +787,119 @@ async def test_filter_report_entity_bearing_date_filter_is_clean() -> None:
     report = result.engine_info["filter"]
     _validates(report)
 
-    # The recall genuinely surfaced entities (the leak precondition) — guards
-    # against a vacuous pass where the entity channel silently no-opped. pytest.fail
-    # (raises Failed, not AssertionError) so a no-op channel surfaces as a real
-    # failure rather than being masked as the expected AssertionError XFAIL.
+    # The recall genuinely surfaced entities (the enforcement precondition) —
+    # guards against a vacuous pass where the entity channel silently no-opped, or
+    # the ∃ filter dropped every entity so the CLEAN report is trivially clean.
+    # pytest.fail (raises Failed, not AssertionError) so a no-op surfaces as a real
+    # failure rather than being masked.
     if not result.entities:
         pytest.fail("entity channel produced no entities — the surface-coverage rule is inert")
-    # CLEAN report the #1458 fix restores: the date leaf is enforced against the
-    # (then-filtered) entity surface, so nothing is left unenforced.
+    # The #1458 fix: the date leaf is enforced against the (now-filtered) entity
+    # surface, so nothing is left unenforced.
+    assert report["unenforced_keys"] == []
+
+
+@pytest.mark.asyncio
+async def test_entity_filter_partial_match_narrows_by_provenance() -> None:
+    # #1458 partial match: two entities differing only in provenance source. A
+    # ``source``-keyed filter keeps ONLY the entity whose provenance carries the
+    # matching source; the other drops. Pins that the ∃ filter narrows to exactly
+    # the matching provenance, not merely "any surviving chunk".
+    from khora.core.models import Entity
+
+    in_scope = _chunk("alpha recent", source_timestamp=datetime(2026, 6, 1, tzinfo=UTC))
+    linear_chunk = _prov_chunk(year=2026, source="linear")
+    slack_chunk = _prov_chunk(year=2026, source="slack")
+    linear_entity = Entity(
+        id=uuid4(),
+        namespace_id=uuid4(),
+        name="LinearEvent",
+        entity_type="EVENT",
+        source_chunk_ids=[linear_chunk.id],
+    )
+    slack_entity = Entity(
+        id=uuid4(),
+        namespace_id=uuid4(),
+        name="SlackEvent",
+        entity_type="EVENT",
+        source_chunk_ids=[slack_chunk.id],
+    )
+    engine = _engine_with_semantic([(in_scope, 0.9)])
+    engine._storage.search_similar_entities = AsyncMock(return_value=[(linear_entity.id, 0.95), (slack_entity.id, 0.9)])
+    engine._storage.get_entities_batch = AsyncMock(
+        return_value={linear_entity.id: linear_entity, slack_entity.id: slack_entity}
+    )
+    engine._storage.get_chunks_batch = AsyncMock(
+        return_value={linear_chunk.id: linear_chunk, slack_chunk.id: slack_chunk}
+    )
+    engine._storage.get_entities_by_names_batch = AsyncMock(return_value={})
+    engine._router_enabled = False
+
+    result = await engine.recall(
+        "event",
+        uuid4(),
+        limit=10,
+        mode=SearchMode.HYBRID,
+        filter_ast=_filter_ast({"source": "linear"}),
+    )
+
+    # Exactly the linear-provenance entity survives; the slack one is dropped.
+    assert [e.name for e in result.entities] == ["LinearEvent"]
+    report = result.engine_info["filter"]
+    _validates(report)
+    assert report["unenforced_keys"] == []
+
+
+@pytest.mark.asyncio
+async def test_entity_filter_fail_closed_drops_entity_and_records_degradation() -> None:
+    # #1458 fail-closed (ADR-001): a ``get_chunks_batch`` raise means the entity's
+    # provenance cannot be verified, so it is DROPPED rather than returned unverified
+    # (which would re-introduce the leak). A structured Degradation
+    # (component="chronicle.entity_filter", reason="provenance_fetch_failed") rides
+    # engine_info["degradations"]. Because every RETURNED entity is verified (here:
+    # none), the report stays clean.
+    from khora.core.models import Entity
+
+    in_scope = _chunk("alpha recent", source_timestamp=datetime(2026, 6, 1, tzinfo=UTC))
+    prov = _prov_chunk(year=2026)
+    entity = Entity(
+        id=uuid4(),
+        namespace_id=uuid4(),
+        name="Unverifiable",
+        entity_type="EVENT",
+        source_chunk_ids=[prov.id],
+    )
+    engine = _engine_with_semantic([(in_scope, 0.9)])
+    engine._storage.search_similar_entities = AsyncMock(return_value=[(entity.id, 0.95)])
+    engine._storage.get_entities_batch = AsyncMock(return_value={entity.id: entity})
+    engine._storage.get_chunks_batch = AsyncMock(side_effect=RuntimeError("provenance store down"))
+    engine._storage.get_entities_by_names_batch = AsyncMock(return_value={})
+    engine._router_enabled = False
+
+    result = await engine.recall(
+        "event",
+        uuid4(),
+        limit=10,
+        mode=SearchMode.HYBRID,
+        filter_ast=_filter_ast({"occurred_at": {"$gte": "2026-01-01T00:00:00Z"}}),
+    )
+
+    # Fail-closed: the unverified entity is DROPPED, not returned.
+    assert result.entities == [], "an unverified entity leaked into the result on the degraded path"
+
+    # A structured Degradation names the chronicle entity-filter component + reason.
+    degradations = result.engine_info.get("degradations", [])
+    provenance_degs = [
+        d
+        for d in degradations
+        if d.get("component") == "chronicle.entity_filter" and d.get("reason") == "provenance_fetch_failed"
+    ]
+    assert provenance_degs, (
+        f"expected a chronicle.entity_filter / provenance_fetch_failed Degradation, "
+        f"got: {[(d.get('component'), d.get('reason')) for d in degradations]}"
+    )
+
+    # Every returned entity is verified (here: none), so the report stays clean.
+    report = result.engine_info["filter"]
+    _validates(report)
     assert report["unenforced_keys"] == []
