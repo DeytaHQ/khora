@@ -503,9 +503,10 @@ async def test_report_invariant_graph_source_name_narrows_entities_vc_full(vecto
     gate = await _harness.assert_graph_contributes(kb, namespace_id, _SRC_RECALL_MARKER)
     if gate.engine_info.get("graph_chunk_count", 0) <= 0:
         pytest.fail("graph channel spliced no chunks — the source-narrowing leak is not exercised (vacuous)")
-    gate_names = {e.name for e in gate.entities}
-    linear_names = {n for n, _ in _SRC_ENTITIES_LINEAR}
-    slack_names = {n for n, _ in _SRC_ENTITIES_SLACK}
+    # Ingest canonicalizes entity names to lowercase, so compare case-insensitively.
+    gate_names = {e.name.lower() for e in gate.entities}
+    linear_names = {n.lower() for n, _ in _SRC_ENTITIES_LINEAR}
+    slack_names = {n.lower() for n, _ in _SRC_ENTITIES_SLACK}
     if not (linear_names <= gate_names and slack_names <= gate_names):
         pytest.fail(
             f"both sources' entities must surface UNFILTERED for the narrowing to be meaningful; "
@@ -521,7 +522,7 @@ async def test_report_invariant_graph_source_name_narrows_entities_vc_full(vecto
         filter=_SRC_COMPOUND_FILTER,
     )
 
-    filtered_names = {e.name for e in result.entities}
+    filtered_names = {e.name.lower() for e in result.entities}
     if not filtered_names:
         pytest.fail("filtered graph recall surfaced no entities — the surface-coverage rule is inert (vacuous)")
     # Narrowed to exactly the linear source's entities; the slack ones dropped.
