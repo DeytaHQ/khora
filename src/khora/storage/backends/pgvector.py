@@ -1249,15 +1249,29 @@ class PgVectorBackend(AsyncSessionMixin):
             # each affected row.
             row_by_key: dict[tuple[str, str], tuple[UUID, bool]] = {}
 
-            async with self._get_session() as session:
-                # Acquire namespace-scoped advisory lock for the duration of this
-                # transaction.  pg_advisory_xact_lock auto-releases on commit/rollback.
-                await session.execute(
-                    text("SELECT pg_advisory_xact_lock(:key1, :key2)"),
-                    {"key1": key1, "key2": key2},
-                )
+            # Commit per sub-batch so the namespace advisory lock releases
+            # between sub-batches instead of being held for the batch's full
+            # write duration (#1471). Each sub-batch runs in its own
+            # transaction that re-acquires ``pg_advisory_xact_lock`` and commits
+            # (commit auto-releases the xact-scoped lock). The lock still
+            # serialises every multi-row ``INSERT ... ON CONFLICT DO UPDATE``
+            # against concurrent same-namespace upserts, which is where the
+            # hub-node deadlock lives: a multi-row upsert takes its row locks in
+            # the order Postgres chooses (not our sorted-key order), so two
+            # concurrent statements touching a shared entity could grab rows in
+            # opposite orders and deadlock without the serialiser. Committing
+            # between sub-batches only drops whole-batch atomicity - never
+            # promised; a mid-batch failure re-runs the entire upsert
+            # idempotently via ON CONFLICT (``_retry_on_deadlock``) - and lets a
+            # concurrent same-namespace ingest interleave at sub-batch
+            # granularity instead of blocking on the whole write.
+            for start in range(0, len(sorted_entities), batch_size):
+                async with self._get_session() as session:
+                    await session.execute(
+                        text("SELECT pg_advisory_xact_lock(:key1, :key2)"),
+                        {"key1": key1, "key2": key2},
+                    )
 
-                for start in range(0, len(sorted_entities), batch_size):
                     batch = sorted_entities[start : start + batch_size]
                     values = [
                         {
@@ -1313,8 +1327,8 @@ class PgVectorBackend(AsyncSessionMixin):
                     for row in result:
                         row_by_key[(row.name, row.entity_type)] = (row.id, bool(row.is_new))
 
-                # Single commit for all sub-batches under the advisory lock
-                await session.commit()
+                    # Commit (and release the advisory lock) per sub-batch.
+                    await session.commit()
 
             # Sync each input entity's id to the canonical stored row id
             # (#1429) - on the ON CONFLICT DO UPDATE branch the row keeps its
@@ -1712,13 +1726,19 @@ class PgVectorBackend(AsyncSessionMixin):
             key1, key2 = _namespace_lock_keys(namespace_id)
             is_new_by_id: dict[Any, bool] = {}
 
-            async with self._get_session() as session:
-                await session.execute(
-                    text("SELECT pg_advisory_xact_lock(:key1, :key2)"),
-                    {"key1": key1, "key2": key2},
-                )
+            # Commit per sub-batch so the namespace advisory lock releases
+            # between sub-batches instead of being held for the whole write
+            # (#1471); mirrors upsert_entities_batch. Each sub-batch's own
+            # transaction re-acquires and (on commit) releases the lock, which
+            # still serialises every multi-row upsert against concurrent
+            # same-namespace inserts.
+            for start in range(0, len(relationships), batch_size):
+                async with self._get_session() as session:
+                    await session.execute(
+                        text("SELECT pg_advisory_xact_lock(:key1, :key2)"),
+                        {"key1": key1, "key2": key2},
+                    )
 
-                for start in range(0, len(relationships), batch_size):
                     batch = relationships[start : start + batch_size]
                     values = [
                         {
@@ -1770,7 +1790,8 @@ class PgVectorBackend(AsyncSessionMixin):
                     for row in result.mappings():
                         is_new_by_id[row["id"]] = bool(row["is_new"])
 
-                await session.commit()
+                    # Commit (and release the advisory lock) per sub-batch.
+                    await session.commit()
 
             return [(rel, is_new_by_id.get(rel.id, True)) for rel in relationships]
 
