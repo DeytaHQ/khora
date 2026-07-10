@@ -119,7 +119,11 @@ class TestNeo4jRetireOrphanedEntitiesBatchIntegration:
                     )
                     ent_records = await r.data()
                     assert len(ent_records) == 1
-                    assert ent_records[0]["valid_until"] == retired_at
+                    # valid_until is stored as a native ZONED DATETIME (#1472),
+                    # so it reads back as a neo4j DateTime, not the ISO string.
+                    # version_valid_to / updated_at stay ISO strings.
+                    stored_vu = ent_records[0]["valid_until"]
+                    assert stored_vu.to_native() == datetime.fromisoformat(retired_at)
                     assert ent_records[0]["version_valid_to"] == retired_at
                     assert ent_records[0]["updated_at"] == retired_at
 

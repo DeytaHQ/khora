@@ -18,7 +18,7 @@ from typing import Any, TypedDict
 from uuid import UUID, uuid4
 
 from loguru import logger
-from neo4j import AsyncDriver, AsyncGraphDatabase, AsyncManagedTransaction, unit_of_work
+from neo4j import AsyncDriver, AsyncGraphDatabase, AsyncManagedTransaction, Query, unit_of_work
 from neo4j.exceptions import ClientError, ConnectionAcquisitionTimeoutError
 
 from khora.core.models import CommunityNode, Entity, Episode, Relationship
@@ -912,6 +912,12 @@ class Neo4jBackend(GraphBackendBase):
             # cannot create duplicate nodes, and implicitly creates the composite index.
             "CREATE CONSTRAINT community_id_ns_unique IF NOT EXISTS "
             "FOR (com:Community) REQUIRE (com.id, com.namespace_id) IS UNIQUE",
+            # Migration sentinel (#1472): a unique constraint makes the sentinel
+            # MERGE atomic so concurrent pods racing the backfill gate on cold
+            # start cannot create duplicate :_KhoraGraphMigration nodes (same
+            # MERGE-non-atomicity reasoning as the constraints above).
+            "CREATE CONSTRAINT khora_graph_migration_id_unique IF NOT EXISTS "
+            "FOR (m:_KhoraGraphMigration) REQUIRE m.id IS UNIQUE",
         ]
 
         # Relationship property indexes require Neo4j ≥5.7 or Enterprise Edition
@@ -1054,6 +1060,11 @@ class Neo4jBackend(GraphBackendBase):
     # Bump the version suffix if a future migration must re-run over the same
     # properties.
     _VALID_DT_BACKFILL_SENTINEL = "valid_until_native_v1"
+    # Per-statement ceiling for the backfill so a large legacy graph can't hang
+    # connect() (and its readiness/liveness probe) unboundedly. A timeout defers
+    # to the next connect - the conversion is idempotent and the sentinel stays
+    # unset, so no progress is lost.
+    _VALID_DT_BACKFILL_TIMEOUT_S = 300.0
 
     async def _backfill_native_valid_datetimes(self) -> None:
         """Convert legacy ISO-string ``valid_from`` / ``valid_until`` to native (#1472).
@@ -1161,7 +1172,10 @@ class Neo4jBackend(GraphBackendBase):
             async with self._session() as session:
                 for label, stmt in statements:
                     try:
-                        result = await session.run(stmt)
+                        # Bound each statement so a huge legacy graph can't hang
+                        # connect() forever; a timeout raises here, is caught
+                        # below, and the sentinel stays unset for a later retry.
+                        result = await session.run(Query(stmt, timeout=self._VALID_DT_BACKFILL_TIMEOUT_S))
                         summary = await result.consume()
                         n = summary.counters.properties_set
                         total_converted += n
