@@ -1168,6 +1168,17 @@
       "description": "ADR-001. VectorCypher recency channel silent fallback - incremented when _recency_channel_chunks catches an operational fault from search_recent_chunks and returns [], dropping the recency pool-augmentation contribution from RRF fusion. A RecallFilterUnsupportedError is NOT counted here - it propagates (fail-loud). The same event is also appended to RecallResult.engine_info['degradations']. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
     },
     {
+      "name": "khora.vectorcypher.session_fanout.degraded_total",
+      "type": "counter",
+      "stability": "public",
+      "unit": "1",
+      "owner": "vectorcypher",
+      "labels": [
+        {"name": "reason", "values": ["channel_exception"], "_comment": "Low-cardinality enum; extend when adding new session fan-out fallback paths. The exception type name goes on the Degradation.reason/exception fields, NOT this metric label (cardinality rule)."}
+      ],
+      "description": "Issue #1467 (ADR-001). VectorCypher session fan-out per-channel silent fallback - incremented once per per-session (or unscoped fallback) vector search that raises in the session-aware fan-out gather (return_exceptions=True) and has its chunks dropped from the merged result. The recall still degrades to the surviving channels + unscoped fallback. The same event is also appended to RecallResult.engine_info['degradations']. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
+    },
+    {
       "name": "khora.query.hyde.degraded_total",
       "type": "counter",
       "stability": "internal",
