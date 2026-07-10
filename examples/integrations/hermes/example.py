@@ -67,9 +67,11 @@ async def main() -> None:
         #    only place that defaults to it.
         provider = KhoraMemoryProvider(kb=kb, drain_timeout_s=20.0)
 
-        # 2) Bind to a (agent_identity, session_id) pair. This is the
-        #    Hermes-side tenancy key; the adapter derives the khora
-        #    namespace UUID5 from it.
+        # 2) Bind to the agent session. The khora namespace is derived
+        #    from the STABLE identity (agent_identity, and user_id when
+        #    Hermes supplies one) - NOT the session_id. That is what lets
+        #    memory persist across sessions. session_id is the
+        #    conversation scope; it flows to khora's session_id column.
         hermes_home = tempfile.mkdtemp(prefix="hermes-example-")
         provider.initialize(
             session_id="demo-session",

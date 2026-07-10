@@ -10,6 +10,18 @@ memory = KhoraMemory(kb=kb, namespace=ns_id, user_id="user-…")
 agent = Agent(role="…", memory=memory)
 ```
 
+!!! important "Namespace contract: per-user / per-agent, NOT per-session"
+
+    `KhoraMemory` takes a caller-supplied `namespace` and does no
+    derivation - you pick the UUID. A khora namespace is the **tenancy**
+    boundary: entity dedup, canonical ids, and long-term recall all
+    operate *within* one namespace. Derive it from a **stable per-user or
+    per-agent identity** and reuse it across conversations. Do **not**
+    mint a fresh namespace per session / conversation / thread - that
+    isolates every conversation into its own memory and voids
+    cross-session recall. The conversation scope belongs in khora's
+    first-class `session_id` (see #620), not the namespace.
+
 Stability: experimental. Will be promoted to stable after one full
 khora minor ships without a breaking change to the adapter surface.
 

@@ -3,17 +3,26 @@
 Hermes drives a long-running agent session and calls
 ``MemoryProvider.initialize(session_id, **kwargs)`` once per session. The
 ``kwargs`` always include ``agent_identity`` (a stable string per agent)
-plus ``hermes_home`` and ``platform``. Together with ``session_id``,
-``agent_identity`` is the natural tenancy key: two sessions for the same
-agent share long-term memory, while sessions across different agents
-stay isolated. khora speaks documents + chunks scoped by a single
-``namespace_id`` with a first-class ``session_id`` column (#620); this
-module is the single place those shapes meet.
+plus ``hermes_home`` and ``platform``; ``user_id`` may also be present.
+The *stable* identity — ``agent_identity`` (and ``user_id`` when Hermes
+supplies one) — is the tenancy key: every session for the same agent (and
+user) shares one long-term memory namespace, so cross-session entity
+dedup and recall work. ``session_id`` is the *conversation scope*, not a
+tenancy key; it maps to khora's first-class ``session_id`` column (#620)
+so session-scoped queries stay possible without fragmenting the
+namespace. khora speaks documents + chunks scoped by a single
+``namespace_id`` with that ``session_id`` column; this module is the
+single place those shapes meet.
 
 Mapping summary:
 
-* ``(agent_identity, session_id)`` → ``khora namespace_id`` via
-  :func:`derive_namespace_uuid` (UUID5 of ``"hermes:{agent_identity}:{session_id}"``).
+* ``(agent_identity, user_id)`` → ``khora namespace_id`` via
+  :func:`derive_namespace_uuid` (UUID5 of ``"hermes:{agent_identity}:{user_id}"``).
+  ``session_id`` is deliberately NOT folded in — doing so would give every
+  session a fresh namespace and void cross-session memory (issue #1466).
+* ``session_id`` (free-form Hermes string) → ``khora session_id`` UUID via
+  :func:`derive_session_uuid` (raw UUIDs pass through; other strings hash
+  to a deterministic UUID5). Mirrors the google_adk ``session_uuid`` helper.
 * One Hermes conversation turn = one ``Document`` whose ``content`` is
   ``"USER: {user}\\n\\nASSISTANT: {assistant}"``. The verbatim user and
   assistant text are preserved under ``metadata.custom`` so the original
@@ -42,6 +51,11 @@ if TYPE_CHECKING:
 # a hard-coded UUID literal in source.
 UUID_NAMESPACE_HERMES: UUID = uuid5(NAMESPACE_OID, "khora.integrations.hermes")
 
+# Separate root for deriving khora session UUIDs from free-form Hermes
+# session-id strings. Distinct from the namespace root so a session string
+# and an agent identity that happen to share text can never collide.
+UUID_NAMESPACE_HERMES_SESSION: UUID = uuid5(NAMESPACE_OID, "khora.integrations.hermes.session")
+
 # Metadata keys this adapter owns under ``Document.metadata``. Prefix
 # with ``hermes_`` so caller-supplied metadata cannot collide.
 KEY_SOURCE = "source"
@@ -54,16 +68,37 @@ KEY_OAI_SEQ = "oai_seq"  # ordering key, mirrors openai_agents convention
 KEY_OCCURRED_AT = "occurred_at"
 
 
-def derive_namespace_uuid(agent_identity: str, session_id: str) -> UUID:
-    """Derive the khora namespace UUID for a Hermes (agent_identity, session_id) pair.
+def derive_namespace_uuid(agent_identity: str, user_id: str | None = None) -> UUID:
+    """Derive the khora namespace UUID for a Hermes agent (+ optional user).
 
     Two ``KhoraMemoryProvider`` calls with the same ``agent_identity``
-    and ``session_id`` map to the same khora namespace. This is the
-    Hermes equivalent of the ADK ``namespace_uuid(app_name, user_id)``
-    helper — agent identity is the tenancy key, session id is the
-    conversation scope.
+    and ``user_id`` map to the same khora namespace regardless of which
+    session they run in — that's what makes cross-session entity dedup
+    and long-term recall work. This is the Hermes equivalent of the ADK
+    ``namespace_uuid(app_name, user_id)`` helper — stable identity is the
+    tenancy key; the conversation-scoping ``session_id`` is threaded to
+    khora's ``session_id`` column instead (see :func:`derive_session_uuid`).
+
+    ``user_id`` is folded in when Hermes supplies it so two users driving
+    the same agent get isolated memory. When absent it defaults to the
+    empty string, giving one namespace per agent.
     """
-    return uuid5(UUID_NAMESPACE_HERMES, f"hermes:{agent_identity}:{session_id}")
+    return uuid5(UUID_NAMESPACE_HERMES, f"hermes:{agent_identity}:{user_id or ''}")
+
+
+def derive_session_uuid(session_id: str) -> UUID:
+    """Map a free-form Hermes session-id string to a stable khora session UUID.
+
+    Hermes session ids are arbitrary strings. khora's ``session_id``
+    column is a UUID, so we derive a deterministic UUID5 for non-UUID
+    strings (and honour a caller-supplied UUID string verbatim). Mirrors
+    the google_adk ``session_uuid`` helper so ``forget_session`` and
+    session-scoped queries always hit the same rows for the same string.
+    """
+    try:
+        return UUID(session_id)
+    except (ValueError, AttributeError, TypeError):
+        return uuid5(UUID_NAMESPACE_HERMES_SESSION, session_id)
 
 
 def turn_external_id(session_id: str, turn_seq: int) -> str:
@@ -92,9 +127,18 @@ def turn_to_document(
     content so vector recall has a single coherent turn to match
     against; the verbatim originals live in ``metadata.custom`` so the
     turn can be reconstructed losslessly on read.
+
+    The Hermes ``session_id`` string is threaded to khora's first-class
+    session scope two ways so both ingest paths pick it up: the derived
+    session UUID is set on ``Document.session_id`` (the ``remember`` path
+    passes it straight through) and stamped as a top-level
+    ``metadata["session_id"]`` UUID string (the ``remember_batch`` path
+    coerces it from there). The raw string stays under
+    ``metadata.custom`` for lossless round-trip.
     """
     content = f"USER: {user_content}\n\nASSISTANT: {assistant_content}"
     occurred_at = datetime.now(UTC).isoformat()
+    session_uuid = derive_session_uuid(session_id)
     custom: dict[str, Any] = {
         KEY_EXTERNAL_ID: turn_external_id(session_id, turn_seq),
         KEY_SOURCE: "hermes",
@@ -109,7 +153,8 @@ def turn_to_document(
         namespace_id=namespace_id,
         content=content,
         source_type="conversation",
-        metadata={"custom": custom},
+        session_id=session_uuid,
+        metadata={"session_id": str(session_uuid), "custom": custom},
     )
 
 
@@ -205,7 +250,9 @@ __all__ = [
     "KEY_TURN_SEQ",
     "KEY_USER_CONTENT",
     "UUID_NAMESPACE_HERMES",
+    "UUID_NAMESPACE_HERMES_SESSION",
     "derive_namespace_uuid",
+    "derive_session_uuid",
     "format_memory_context",
     "message_pair_iter",
     "turn_external_id",

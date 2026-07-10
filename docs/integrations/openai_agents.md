@@ -19,6 +19,18 @@ a caller mixes and matches against the OpenAI Agents SDK:
 The three are designed to compose - a typical setup wires all of them
 into one `Agent` / `Runner` call.
 
+!!! important "Namespace contract: per-user / per-agent, NOT per-session"
+
+    Every primitive here takes a caller-supplied `namespace` UUID and does
+    no derivation. A khora namespace is the **tenancy** boundary: entity
+    dedup, canonical ids, and long-term recall all operate *within* one
+    namespace. Derive it from a **stable per-user or per-agent identity**
+    and reuse it across conversations. Do **not** mint a fresh namespace
+    per session / conversation / thread - that isolates every conversation
+    into its own memory and voids cross-session recall. Use `KhoraSession`'s
+    `session_id` (khora's first-class session column, #620) for the
+    conversation scope; keep it out of the namespace.
+
 ## Install
 
 ```bash
