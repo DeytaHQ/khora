@@ -439,8 +439,10 @@ async def test_report_invariant_graph_entity_bearing_date_filter_vc_full(vectorc
 _SRC_RECALL_MARKER = "srcnarrow"
 _SRC_MARKER_LINEAR = "srcnarrow-linear"
 _SRC_MARKER_SLACK = "srcnarrow-slack"
-_SRC_ENTITIES_LINEAR = [("Meridian", "PERSON")]
-_SRC_ENTITIES_SLACK = [("Cascade", "ORG")]
+_SRC_ENTITIES_LINEAR = [("Meridian", "PERSON"), ("Beacon", "ORG")]
+_SRC_RELATIONSHIPS_LINEAR = [("Meridian", "Beacon", "WORKS_ON")]
+_SRC_ENTITIES_SLACK = [("Cascade", "PERSON"), ("Summit", "ORG")]
+_SRC_RELATIONSHIPS_SLACK = [("Cascade", "Summit", "WORKS_ON")]
 _SRC_SOURCE_NAME_LINEAR = "linear"
 _SRC_SOURCE_NAME_SLACK = "slack"
 # ``source_name`` for the matching source + a date bound the seed's event time clears
@@ -458,11 +460,11 @@ async def _seed_two_source_corpus(kb: Khora, namespace_id) -> None:
     source ``_SRC_ENTITIES_SLACK``; each document carries the shared
     ``_SRC_RECALL_MARKER`` so one GRAPH recall surfaces both sources' entities.
     """
-    plan_extraction(_SRC_MARKER_LINEAR, _SRC_ENTITIES_LINEAR)
-    plan_extraction(_SRC_MARKER_SLACK, _SRC_ENTITIES_SLACK)
-    for marker, source_name, entities in (
-        (_SRC_MARKER_LINEAR, _SRC_SOURCE_NAME_LINEAR, _SRC_ENTITIES_LINEAR),
-        (_SRC_MARKER_SLACK, _SRC_SOURCE_NAME_SLACK, _SRC_ENTITIES_SLACK),
+    plan_extraction(_SRC_MARKER_LINEAR, _SRC_ENTITIES_LINEAR, _SRC_RELATIONSHIPS_LINEAR)
+    plan_extraction(_SRC_MARKER_SLACK, _SRC_ENTITIES_SLACK, _SRC_RELATIONSHIPS_SLACK)
+    for marker, source_name, entities, relationships in (
+        (_SRC_MARKER_LINEAR, _SRC_SOURCE_NAME_LINEAR, _SRC_ENTITIES_LINEAR, _SRC_RELATIONSHIPS_LINEAR),
+        (_SRC_MARKER_SLACK, _SRC_SOURCE_NAME_SLACK, _SRC_ENTITIES_SLACK, _SRC_RELATIONSHIPS_SLACK),
     ):
         for content in _harness.entity_seed_docs(marker, count=3):
             await kb.remember(
@@ -471,6 +473,7 @@ async def _seed_two_source_corpus(kb: Khora, namespace_id) -> None:
                 source_name=source_name,
                 source_timestamp=_LEAK_SOURCE_TIMESTAMP,
                 entity_types=[t for _, t in entities],
+                relationship_types=[rt for _, _, rt in relationships],
             )
 
 
