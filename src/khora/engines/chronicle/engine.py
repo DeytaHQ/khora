@@ -2320,6 +2320,12 @@ class ChronicleEngine:
                 storage=storage,
                 component="chronicle.entity_filter",
                 degradations=degradations,
+                # Enforce the filter against each provenance chunk with the SAME
+                # field semantics the chunk channel uses (COALESCE(occurred_at,
+                # source_timestamp) etc.), so an entity is not false-dropped on an
+                # occurred_at predicate its provenance chunk satisfies only through
+                # source_timestamp — the chunk post-filter above keeps that chunk.
+                chunk_record_adapter=_chunk_to_record,
             )
             entity_hits = [(entity, score_by_id[entity.id]) for entity in kept_entities]
 

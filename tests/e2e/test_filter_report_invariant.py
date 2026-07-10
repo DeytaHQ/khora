@@ -41,6 +41,8 @@ while the conftest tripwire still enforces the live store per leg.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from khora import Khora
@@ -348,11 +350,18 @@ async def test_report_invariants_empty_chronicle(chronicle_kb, spec) -> None:
 _LEAK_MARKER = "leakmark"
 _LEAK_ENTITIES = [("Falcon", "PERSON"), ("Orbit", "ORG")]
 _LEAK_RELATIONSHIPS = [("Falcon", "Orbit", "WORKS_ON")]
-# A date filter on a beyond-corpus horizon is the #1457 repro trigger: it is a
-# date-key predicate (drives the VectorCypher EXPLICIT graph path) that the
-# entity surface never gates. The seed corpus carries no occurred_at, so the
-# clean recall would keep the chunks via COALESCE fallback; the leaf is the one
-# forced unenforced by the uncovered entity surface.
+# The seed's event time, seeded via ``source_timestamp`` so every chunk carries a
+# real event-time anchor after the filter horizon below. VectorCypher chunks pick
+# up an event time from ingest either way; Chronicle chunks only carry one when
+# ``source_timestamp`` is supplied (its recall resolves ``occurred_at`` as
+# ``COALESCE(occurred_at, source_timestamp)``), so an anchor-less seed would make
+# the ``occurred_at`` filter empty every chunk AND drop every provenance entity.
+_LEAK_SOURCE_TIMESTAMP = datetime(2025, 6, 1, tzinfo=UTC)
+# A date filter whose horizon predates the seed's event time: a date-key predicate
+# (drives the VectorCypher EXPLICIT graph path) that the entity surface never
+# gates. The seed's ``source_timestamp`` clears it, so the clean recall keeps the
+# chunks; the leaf is the one forced unenforced by an uncovered entity surface
+# before the #1457 / #1458 provenance fix.
 _LEAK_DATE_FILTER: dict = {"occurred_at": {"$gte": "2020-01-01T00:00:00Z"}}
 
 
@@ -363,6 +372,7 @@ async def _seed_leak_corpus(kb: Khora, namespace_id) -> None:
         await kb.remember(
             content=content,
             namespace=namespace_id,
+            source_timestamp=_LEAK_SOURCE_TIMESTAMP,
             entity_types=[t for _, t in _LEAK_ENTITIES],
             relationship_types=[rt for _, _, rt in _LEAK_RELATIONSHIPS],
         )
@@ -419,13 +429,22 @@ async def test_report_invariant_entity_bearing_date_filter_chronicle(chronicle_k
     covered, so the report is CLEAN (``unenforced_keys == []``). Chronicle has no
     GRAPH mode — the entity channel runs in HYBRID.
 
-    The #1462 vacuity skip diagnosed the wrong cause (it blamed the entity-similarity
-    floor / a credential-degraded lane). The real reason the entity surface was empty
-    is that the single-token ``_LEAK_MARKER`` query routes SIMPLE through the query
-    complexity router, which sets ``run_entity=False`` and skips the entity channel
-    entirely in HYBRID. Disabling the router keeps all channels live (the product knob
-    for "run every channel", and exactly what the hermetic composition test does), so
-    the entity channel resolves the seeded entities and the coverage rule is exercised.
+    Two conditions must both hold for the entity surface to be non-empty here (so
+    the coverage rule is exercised, not vacuously inert):
+
+    1. The query-complexity router is disabled. The single-token ``_LEAK_MARKER``
+       query routes SIMPLE, which sets ``run_entity=False`` and skips the entity
+       channel entirely in HYBRID; turning the router off is the documented
+       "run all channels" knob (mirrors the hermetic composition test).
+    2. The seed carries an event time after the filter horizon. Chronicle chunks
+       land with ``occurred_at=NULL`` and take their event time from
+       ``source_timestamp`` (its recall resolves ``occurred_at`` as
+       ``COALESCE(occurred_at, source_timestamp)``). ``_seed_leak_corpus`` stamps
+       ``source_timestamp=_LEAK_SOURCE_TIMESTAMP`` (2025, past the 2020 horizon), so
+       the ∃-over-provenance pass keeps the entities instead of dropping them for a
+       missing event time. The pass evaluates each provenance chunk through the same
+       ``_chunk_to_record`` COALESCE view the chunk channel uses (#1458), so the
+       entity surface enforces ``occurred_at`` identically to the chunk surface.
     """
     kb = chronicle_kb
     # Keep every channel live: the single-token marker query would otherwise route
