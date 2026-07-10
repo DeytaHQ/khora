@@ -6,10 +6,6 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ## [Unreleased]
 
-### Fixed
-
-- **Chronicle filtered recalls enforce `occurred_at` consistently across the chunk and entity surfaces** (#1458, #1487): the `∃`-over-provenance entity filter now evaluates each provenance chunk through the same `COALESCE(occurred_at, source_timestamp)` view chronicle's chunk post-filter uses, so an `occurred_at` predicate the chunk channel satisfies no longer false-drops the provenance entity whose chunk carries its event time only in `source_timestamp` (chronicle's shape — the raw `occurred_at` column is NULL). VectorCypher is unaffected (its chunks carry `occurred_at` natively; the shared `filter_items_by_provenance` helper defaults to the raw-chunk view).
-
 ## [0.22.2] - recall-quality correctness, HNSW index-backed search, durable reconcilers
 
 ### Added
