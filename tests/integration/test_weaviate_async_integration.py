@@ -83,6 +83,7 @@ async def test_create_get_delete_roundtrip(store: WeaviateTemporalStore) -> None
         source_system="test",
         author="Alice",
         tags=["release"],
+        chunker_info={"chunker": "semantic"},
     )
 
     out = await store.create_chunk(chunk)
@@ -92,6 +93,7 @@ async def test_create_get_delete_roundtrip(store: WeaviateTemporalStore) -> None
     assert fetched is not None
     assert fetched.content == chunk.content
     assert fetched.author == "Alice"
+    assert fetched.chunker_info == {"chunker": "semantic"}
 
     deleted = await store.delete_chunk(chunk_id, namespace_id)
     assert deleted is True
