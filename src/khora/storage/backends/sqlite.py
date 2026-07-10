@@ -571,12 +571,26 @@ class SQLiteRelationalBackend:
             return 0, None
         return row["cnt"], _parse_dt(row["last_at"])
 
-    async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
-        """Get a document by content checksum. FAILED documents are excluded."""
+    async def get_document_by_checksum(
+        self, namespace_id: UUID, checksum: str, *, pending_stale_before: datetime | None = None
+    ) -> Document | None:
+        """Get a document by content checksum.
+
+        FAILED documents are always excluded so previously-failed content
+        re-ingests. When ``pending_stale_before`` is given, PENDING documents
+        older than that cutoff are also excluded so a crash-abandoned
+        half-ingest (#1464) re-ingests; fresh PENDING rows stay a dedup hit,
+        preserving the concurrent in-flight guard.
+        """
         # Note: SQLite (dev/test only) relies on full table scan; no partial index optimization
+        params: list[str] = [str(namespace_id), checksum]
+        clause = "status != 'failed'"
+        if pending_stale_before is not None:
+            clause += " AND (status != 'pending' OR updated_at >= ?)"
+            params.append(pending_stale_before.isoformat())
         cursor = await self._conn.execute(
-            "SELECT * FROM documents WHERE namespace_id = ? AND checksum = ? AND status != 'failed' LIMIT 1",
-            (str(namespace_id), checksum),
+            f"SELECT * FROM documents WHERE namespace_id = ? AND checksum = ? AND {clause} LIMIT 1",  # noqa: S608
+            tuple(params),
         )
         row = await cursor.fetchone()
         if row is None:

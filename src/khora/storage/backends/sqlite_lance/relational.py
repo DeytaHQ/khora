@@ -53,6 +53,7 @@ from khora.engines.chronicle.compression import MemoryFact
 from khora.engines.chronicle.events import ChronicleEvent
 from khora.storage.backends.base import PaginatedResult
 from khora.storage.backends.mixins import AsyncSessionMixin
+from khora.storage.backends.postgresql import _reingestable_exclusion
 
 from ..._log_safe import _safe_url_for_log
 
@@ -569,18 +570,23 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
             row = result.one()
             return row[0], row[1]
 
-    async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
-        """Return the first non-failed document matching ``checksum``.
+    async def get_document_by_checksum(
+        self, namespace_id: UUID, checksum: str, *, pending_stale_before: datetime | None = None
+    ) -> Document | None:
+        """Return the first re-ingestable-excluded document matching ``checksum``.
 
-        Failed documents are excluded so re-ingestion of previously failed
-        content is allowed, matching the PostgreSQL backend semantics.
+        FAILED documents are always excluded so re-ingestion of previously
+        failed content is allowed. When ``pending_stale_before`` is given,
+        PENDING documents older than that cutoff are also excluded so a
+        crash-abandoned half-ingest (#1464) re-ingests. Matches the PostgreSQL
+        backend semantics.
         """
         async with self._get_session() as session:
             result = await session.execute(
                 select(DocumentModel).where(
                     DocumentModel.namespace_id == namespace_id,
                     DocumentModel.checksum == checksum,
-                    DocumentModel.status != DocumentStatus.FAILED,
+                    _reingestable_exclusion(pending_stale_before),
                 )
             )
             model = result.scalars().first()
@@ -622,7 +628,9 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
             models = result.scalars().all()
             return {m.id: self._document_model_to_domain(m) for m in models}
 
-    async def get_documents_by_checksums(self, namespace_id: UUID, checksums: list[str]) -> dict[str, Document]:
+    async def get_documents_by_checksums(
+        self, namespace_id: UUID, checksums: list[str], *, pending_stale_before: datetime | None = None
+    ) -> dict[str, Document]:
         if not checksums:
             return {}
         async with self._get_session() as session:
@@ -630,7 +638,7 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
                 select(DocumentModel).where(
                     DocumentModel.namespace_id == namespace_id,
                     DocumentModel.checksum.in_(checksums),
-                    DocumentModel.status != DocumentStatus.FAILED,
+                    _reingestable_exclusion(pending_stale_before),
                 )
             )
             models = result.scalars().all()

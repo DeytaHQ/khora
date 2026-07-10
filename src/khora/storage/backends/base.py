@@ -222,8 +222,16 @@ class RelationalBackendProtocol(Protocol):
         return count, last_activity
 
     @abstractmethod
-    async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
-        """Get a document by its content checksum (for deduplication)."""
+    async def get_document_by_checksum(
+        self, namespace_id: UUID, checksum: str, *, pending_stale_before: datetime | None = None
+    ) -> Document | None:
+        """Get a document by its content checksum (for deduplication).
+
+        FAILED documents are always excluded. When ``pending_stale_before`` is
+        given, PENDING documents older than that cutoff are also excluded so a
+        crash-abandoned half-ingest (#1464) re-ingests instead of being a
+        permanent dedup hit.
+        """
         ...
 
     @abstractmethod
