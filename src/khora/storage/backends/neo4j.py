@@ -291,6 +291,32 @@ def _derive_version_valid_from(entity: Entity) -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _coerce_neo4j_datetime(value: Any) -> datetime | None:
+    """Read a temporal property back into a Python ``datetime`` (dual-read, #1472).
+
+    ``valid_from`` / ``valid_until`` are now written as native Neo4j ZONED
+    DATETIME properties (the driver returns a ``neo4j.time.DateTime``), but
+    graphs written before this change - and any not yet backfilled - still carry
+    ISO-8601 STRINGs. Accept both forms so recall never breaks during rollout:
+
+    - ``None``                       -> ``None``
+    - ``neo4j.time.DateTime``        -> ``.to_native()`` (native form, preferred)
+    - ``str`` (legacy ISO-8601)      -> ``datetime.fromisoformat``
+    - ``datetime``                   -> passthrough
+    """
+    if value is None:
+        return None
+    to_native = getattr(value, "to_native", None)
+    if callable(to_native):
+        return to_native()
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        return datetime.fromisoformat(value)
+    # Unexpected type: fail loud rather than silently drop the temporal window.
+    raise TypeError(f"Cannot coerce Neo4j temporal property of type {type(value).__name__!r} to datetime")
+
+
 def _entity_to_cypher_params(entity: Entity) -> dict[str, Any]:
     """Convert Entity to Cypher-compatible parameter dict."""
     return {
@@ -303,8 +329,14 @@ def _entity_to_cypher_params(entity: Entity) -> dict[str, Any]:
         "source_document_ids": [str(d) for d in entity.source_document_ids],
         "source_chunk_ids": [str(c) for c in entity.source_chunk_ids],
         "mention_count": entity.mention_count,
-        "valid_from": entity.valid_from.isoformat() if entity.valid_from else None,
-        "valid_until": entity.valid_until.isoformat() if entity.valid_until else None,
+        # valid_from / valid_until are passed as native ``datetime`` objects so
+        # the neo4j driver stores them as native ZONED DATETIME properties (#1472).
+        # This makes the temporal traversal comparison ``e.valid_until > $now``
+        # a cast-free indexed range (IndexSeek on entity_ns_valid_until) instead
+        # of the former non-sargable ``datetime(e.valid_until) > $now`` per-row
+        # cast over an ISO-8601 STRING. NULL stays NULL (live entity).
+        "valid_from": entity.valid_from,
+        "valid_until": entity.valid_until,
         "confidence": entity.confidence,
         "metadata": _serialize_dict(entity.metadata),
         "created_at": entity.created_at.isoformat(),
@@ -325,8 +357,9 @@ def _relationship_to_cypher_params(rel: Relationship) -> dict[str, Any]:
         "properties": _serialize_dict(rel.properties),
         "source_document_ids": [str(d) for d in rel.source_document_ids],
         "source_chunk_ids": [str(c) for c in rel.source_chunk_ids],
-        "valid_from": rel.valid_from.isoformat() if rel.valid_from else None,
-        "valid_until": rel.valid_until.isoformat() if rel.valid_until else None,
+        # Native ZONED DATETIME so the edge temporal filter is index-friendly (#1472).
+        "valid_from": rel.valid_from,
+        "valid_until": rel.valid_until,
         "confidence": rel.confidence,
         "weight": rel.weight,
         "metadata": _serialize_dict(rel.metadata),
@@ -774,6 +807,7 @@ class Neo4jBackend(GraphBackendBase):
         if self._driver is not None:
             # Already connected (either by connect() or from_driver())
             await self._create_indexes()
+            await self._backfill_native_valid_datetimes()
             self._register_pool_metrics()
             self._start_pool_sampler()
             self._start_pool_keepalive()
@@ -795,6 +829,9 @@ class Neo4jBackend(GraphBackendBase):
 
         # Create indexes for performance
         await self._create_indexes()
+        # One-time backfill of legacy ISO-string valid_from/valid_until to native
+        # ZONED DATETIME (#1472). Idempotent + cheap once complete.
+        await self._backfill_native_valid_datetimes()
         self._register_pool_metrics()
         self._start_pool_sampler()
         self._start_pool_keepalive()
@@ -1012,6 +1049,145 @@ class Neo4jBackend(GraphBackendBase):
                     await session.run(index)
                 except Exception as e:
                     logger.warning(f"Relationship index creation skipped: {e}")
+
+    # Sentinel node id gating the one-time valid_from/valid_until backfill.
+    # Bump the version suffix if a future migration must re-run over the same
+    # properties.
+    _VALID_DT_BACKFILL_SENTINEL = "valid_until_native_v1"
+
+    async def _backfill_native_valid_datetimes(self) -> None:
+        """Convert legacy ISO-string ``valid_from`` / ``valid_until`` to native (#1472).
+
+        Neo4j has no Alembic; ``connect()`` is the one-time graph-schema hook.
+        Before #1472 these temporal properties were stored as ISO-8601 STRINGs;
+        they are now native ZONED DATETIME so the recall temporal filter is a
+        cast-free indexed range. A graph written by an older Khora carries the
+        string form, and the string-vs-native comparison
+        ``string_valid_until > native_now`` yields NULL - which the WHERE clause
+        treats as *not true* and **drops the row**. So the backfill is
+        MANDATORY for correctness on existing deployments, not merely an index
+        optimization: without it, live future-dated entities/edges silently
+        vanish from recall. Running it at ``connect()`` (before any recall in
+        this process) guarantees the read side never observes a mixed graph -
+        which is why it is coupled to the code that needs it rather than a
+        separately-sequenced operator migration.
+
+        Cheap and safe to call on every connect():
+
+        - A sentinel node (``:_KhoraGraphMigration {id: <version>}``, marked
+          ``completed``) short-circuits the whole thing after the first run - so
+          steady-state connects (every pod, every worker fork) do a single
+          indexed sentinel lookup, never a scan. This is what keeps the
+          repeated-connect cost flat and avoids N pods re-scanning the graph.
+        - The conversion selects only not-yet-native values
+          (``valueType(x) STARTS WITH 'STRING'``) narrowed by the index-backed
+          ``x.valid_until IS NOT NULL``, so even the first run touches only the
+          (small) temporally-bounded subset, not the whole graph.
+        - ``CALL { ... } IN TRANSACTIONS`` commits in batches so a large legacy
+          graph does not take one graph-wide lock.
+
+        Best-effort (ADR-001 shape): a failure here logs a WARNING and returns
+        rather than blocking ``connect()``. The dual-read deserializer
+        (:func:`_coerce_neo4j_datetime`) still reads whatever form is stored, so
+        a deferred backfill degrades index performance, not correctness of a
+        single-node read - but the WHERE-filter drop above means recall of
+        un-backfilled future-dated rows stays broken until this completes.
+        """
+        if self._driver is None:
+            return
+
+        # Fast path: skip entirely once the sentinel marks completion. One
+        # indexed node lookup, no property scan.
+        try:
+            async with self._session() as session:
+                result = await session.run(
+                    "MATCH (m:_KhoraGraphMigration {id: $id}) RETURN m.completed AS completed LIMIT 1",
+                    id=self._VALID_DT_BACKFILL_SENTINEL,
+                )
+                record = await result.single()
+                if record is not None and record["completed"]:
+                    return
+        except Exception as e:  # noqa: BLE001 - never block connect() on the gate check
+            logger.warning("valid_until native-datetime backfill gate check failed: {err}", err=e)
+            return
+
+        # ``()-[r]-()`` MATCH + SET does not need a relationship-type literal
+        # (only CREATE / index creation do), so one statement covers all edge
+        # types. ``:Entity`` and ``:EntityVersion`` both carry the pair.
+        statements = [
+            (
+                "Entity.valid_from",
+                "MATCH (e:Entity) WHERE e.valid_from IS NOT NULL "
+                "AND valueType(e.valid_from) STARTS WITH 'STRING' "
+                "CALL { WITH e SET e.valid_from = datetime(e.valid_from) } IN TRANSACTIONS OF 1000 ROWS",
+            ),
+            (
+                "Entity.valid_until",
+                "MATCH (e:Entity) WHERE e.valid_until IS NOT NULL "
+                "AND valueType(e.valid_until) STARTS WITH 'STRING' "
+                "CALL { WITH e SET e.valid_until = datetime(e.valid_until) } IN TRANSACTIONS OF 1000 ROWS",
+            ),
+            (
+                "EntityVersion.valid_from",
+                "MATCH (ev:EntityVersion) WHERE ev.valid_from IS NOT NULL "
+                "AND valueType(ev.valid_from) STARTS WITH 'STRING' "
+                "CALL { WITH ev SET ev.valid_from = datetime(ev.valid_from) } IN TRANSACTIONS OF 1000 ROWS",
+            ),
+            (
+                "EntityVersion.valid_until",
+                "MATCH (ev:EntityVersion) WHERE ev.valid_until IS NOT NULL "
+                "AND valueType(ev.valid_until) STARTS WITH 'STRING' "
+                "CALL { WITH ev SET ev.valid_until = datetime(ev.valid_until) } IN TRANSACTIONS OF 1000 ROWS",
+            ),
+            (
+                "Relationship.valid_from",
+                "MATCH ()-[r]->() WHERE r.valid_from IS NOT NULL "
+                "AND valueType(r.valid_from) STARTS WITH 'STRING' "
+                "CALL { WITH r SET r.valid_from = datetime(r.valid_from) } IN TRANSACTIONS OF 1000 ROWS",
+            ),
+            (
+                "Relationship.valid_until",
+                "MATCH ()-[r]->() WHERE r.valid_until IS NOT NULL "
+                "AND valueType(r.valid_until) STARTS WITH 'STRING' "
+                "CALL { WITH r SET r.valid_until = datetime(r.valid_until) } IN TRANSACTIONS OF 1000 ROWS",
+            ),
+        ]
+
+        total_converted = 0
+        try:
+            # CALL {...} IN TRANSACTIONS must run as an implicit (autocommit)
+            # transaction, so use ``session.run`` directly - NOT execute_write
+            # (which opens an explicit tx that IN TRANSACTIONS cannot nest in).
+            async with self._session() as session:
+                for label, stmt in statements:
+                    try:
+                        result = await session.run(stmt)
+                        summary = await result.consume()
+                        n = summary.counters.properties_set
+                        total_converted += n
+                        if n:
+                            logger.info("Backfilled {n} native datetimes for {label} (#1472)", n=n, label=label)
+                    except Exception as e:  # noqa: BLE001 - per-statement isolation
+                        logger.warning(
+                            "valid_from/valid_until native-datetime backfill skipped for {label}: {err}",
+                            label=label,
+                            err=e,
+                        )
+                        # A partial conversion must NOT mark the sentinel done -
+                        # a later connect must retry the remaining STRING rows.
+                        return
+                # All statements converged: mark the migration complete so
+                # subsequent connects skip straight past the scan.
+                await session.run(
+                    "MERGE (m:_KhoraGraphMigration {id: $id}) SET m.completed = true, m.completed_at = datetime()",
+                    id=self._VALID_DT_BACKFILL_SENTINEL,
+                )
+        except Exception as e:  # noqa: BLE001 - never block connect() on backfill
+            logger.warning("valid_from/valid_until native-datetime backfill failed: {err}", err=e)
+            return
+
+        if total_converted:
+            logger.info("Native-datetime backfill converted {n} temporal properties total (#1472)", n=total_converted)
 
     def _get_driver(self) -> AsyncDriver:
         """Get the Neo4j driver."""
@@ -1648,13 +1824,13 @@ class Neo4jBackend(GraphBackendBase):
         """
 
         query = "MATCH (e:Entity {namespace_id: $namespace_id})"
-        # ``valid_until`` is stored as an ISO-8601 string (see soft-retire /
-        # upsert), so compare lexicographically against an ISO ``$now`` bind -
-        # matching the existing valid_from/valid_until traversal filters - rather
-        # than the Neo4j ``datetime()`` temporal (a string-vs-temporal mismatch).
+        # ``valid_until`` is a native ZONED DATETIME (#1472), so compare it
+        # against a native ``$now`` bind - the neo4j driver serializes the
+        # Python ``datetime`` to a ZONED DATETIME, making ``e.valid_until > $now``
+        # a cast-free indexed range on ``entity_ns_valid_until``.
         params: dict[str, Any] = {
             "namespace_id": str(namespace_id),
-            "now": datetime.now(UTC).isoformat(),
+            "now": datetime.now(UTC),
         }
 
         conditions = ["(e.valid_until IS NULL OR e.valid_until > $now)"]
@@ -2111,7 +2287,7 @@ CREATE (current)-[:SUPERSEDES {
     superseded_at: r.retired_at,
     reason: 'document_replaced'
 }]->(old)
-SET current.valid_until = r.retired_at,
+SET current.valid_until = datetime(r.retired_at),
     current.version_valid_to = r.retired_at,
     current.updated_at = r.retired_at
 RETURN current.id AS id
@@ -2631,8 +2807,8 @@ RETURN count(r) AS updated
             source_document_ids=parse_uuid_list(node.get("source_document_ids")),
             source_chunk_ids=parse_uuid_list(node.get("source_chunk_ids")),
             mention_count=node.get("mention_count", 1),
-            valid_from=datetime.fromisoformat(node["valid_from"]) if node.get("valid_from") else None,
-            valid_until=datetime.fromisoformat(node["valid_until"]) if node.get("valid_until") else None,
+            valid_from=_coerce_neo4j_datetime(node.get("valid_from")),
+            valid_until=_coerce_neo4j_datetime(node.get("valid_until")),
             confidence=node.get("confidence", 1.0),
             metadata=meta,
             created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
@@ -2866,7 +3042,7 @@ RETURN count(r) AS updated
                 MATCH ()-[rel {id: r.relationship_id, namespace_id: $namespace_id}]-()
                 WHERE size(rel.source_document_ids) = 1
                   AND r.old_doc_id IN rel.source_document_ids
-                SET rel.valid_until = r.retired_at,
+                SET rel.valid_until = datetime(r.retired_at),
                     rel.updated_at = r.retired_at
                 RETURN count(DISTINCT rel) AS retired
                 """,
@@ -2929,11 +3105,15 @@ RETURN count(r) AS updated
         ids = [str(r) for r in relationship_ids]
         ts = invalidated_at.isoformat()
 
+        # valid_until is stored as a native ZONED DATETIME (#1472), so coerce the
+        # ISO-string param with datetime() at the write site. updated_at stays an
+        # ISO string (unchanged type). The write-time cast is cheap (one per
+        # matched row) - unlike a read-filter cast it is not over a scan.
         _CYPHER = """\
 UNWIND $relationship_ids AS rid
 MATCH ()-[rel {id: rid, namespace_id: $namespace_id}]-()
 WHERE rel.valid_until IS NULL
-SET rel.valid_until = $invalidated_at,
+SET rel.valid_until = datetime($invalidated_at),
     rel.updated_at = $invalidated_at
 RETURN count(DISTINCT rel) AS invalidated
 """
@@ -3006,7 +3186,7 @@ CREATE (current)-[:SUPERSEDES {
     superseded_at: $retired_at,
     reason: $reason
 }]->(old)
-SET current.valid_until = $retired_at,
+SET current.valid_until = datetime($retired_at),
     current.version_valid_to = $retired_at,
     current.updated_at = $retired_at
 RETURN current.id AS id
@@ -3181,10 +3361,10 @@ RETURN count(newRel) AS renamed
         Idempotent: only entities that are still retired (a non-null
         ``valid_until`` / ``version_valid_to``) transition, so a replay reports
         zero. Only the :EntityVersion snapshot the dream forward mirror created
-        is deleted - matched by ``version_valid_to == current.valid_until`` (the
-        forward mirror stamps both with the same retire timestamp), so a prior
-        version chain (e.g. a document-replace snapshot) on a re-lived node is
-        left intact.
+        is deleted - matched by ``version_valid_to == current.version_valid_to``
+        (the forward mirror stamps both with the same retire timestamp), so a
+        prior version chain (e.g. a document-replace snapshot) on a re-lived node
+        is left intact.
         """
         if not entity_ids:
             return 0
@@ -3195,12 +3375,19 @@ RETURN count(newRel) AS renamed
         # unnecessary (and would double-delete it). The snapshot match is keyed
         # on version_valid_to == the node's retire stamp so only THIS op's
         # snapshot is removed, never a pre-existing version chain.
+        #
+        # The forward mirror (#1272) stamps ``version_valid_to`` on BOTH the
+        # snapshot and the live node to the same retire timestamp. We match on
+        # ``version_valid_to`` (not ``valid_until``) so the equality stays within
+        # a single property type: ``valid_until`` is now a native ZONED DATETIME
+        # (#1472) while ``version_valid_to`` remains an ISO string, and a
+        # string-vs-datetime equality in Neo4j yields NULL (never matches).
         _CYPHER = """\
 UNWIND $entity_ids AS eid
 MATCH (current:Entity {id: eid, namespace_id: $namespace_id})
 WHERE current.valid_until IS NOT NULL OR current.version_valid_to IS NOT NULL
 OPTIONAL MATCH (current)-[:SUPERSEDES]->(old:EntityVersion)
-    WHERE old.version_valid_to = current.valid_until
+    WHERE old.version_valid_to = current.version_valid_to
 WITH current, collect(old) AS olds
 SET current.valid_until = NULL,
     current.version_valid_to = NULL
@@ -3556,8 +3743,8 @@ RETURN DISTINCT com ORDER BY com.id
             properties=_deserialize_dict(rel.get("properties")),
             source_document_ids=parse_uuid_list(rel.get("source_document_ids")),
             source_chunk_ids=parse_uuid_list(rel.get("source_chunk_ids")),
-            valid_from=datetime.fromisoformat(rel["valid_from"]) if rel.get("valid_from") else None,
-            valid_until=datetime.fromisoformat(rel["valid_until"]) if rel.get("valid_until") else None,
+            valid_from=_coerce_neo4j_datetime(rel.get("valid_from")),
+            valid_until=_coerce_neo4j_datetime(rel.get("valid_until")),
             confidence=rel.get("confidence", 1.0),
             weight=rel.get("weight", 1.0),
             metadata=_deserialize_dict(rel.get("metadata")),
@@ -3598,8 +3785,9 @@ RETURN DISTINCT com ORDER BY com.id
         # matching get_relationship() / get_entity_relationships() (IDOR
         # family): edges whose endpoints are non-Entity or live in another
         # namespace never surface here (#1237).
-        # ``valid_until`` is an ISO-8601 string, so compare lexicographically
-        # against an ISO ``$now`` bind (same pattern as the traversal filters).
+        # ``valid_until`` is a native ZONED DATETIME (#1472), compared against a
+        # native ``$now`` bind for a cast-free indexed range (same pattern as the
+        # traversal filters).
         query = f"""
         MATCH (source:Entity {{namespace_id: $namespace_id}})-[r{rel_filter}]->(target:Entity {{namespace_id: $namespace_id}})
         WHERE r.namespace_id = $namespace_id
@@ -3614,7 +3802,7 @@ RETURN DISTINCT com ORDER BY com.id
             "namespace_id": str(namespace_id),
             "offset": offset,
             "limit": limit,
-            "now": datetime.now(UTC).isoformat(),
+            "now": datetime.now(UTC),
         }
         if endpoint_clause:
             params["between_entity_ids"] = [str(e) for e in between_entity_ids]
@@ -4031,11 +4219,13 @@ RETURN DISTINCT com ORDER BY com.id
 
         rel_conditions: list[str] = []
         if valid_after is not None:
+            # Native ZONED DATETIME binds (#1472): valid_from / valid_until are
+            # stored native, so compare against native bounds (no datetime() cast).
             rel_conditions.append("(rel.valid_from IS NULL OR rel.valid_from >= $valid_after)")
-            params["valid_after"] = valid_after.isoformat()
+            params["valid_after"] = valid_after
         if valid_before is not None:
             rel_conditions.append("(rel.valid_until IS NULL OR rel.valid_until <= $valid_before)")
-            params["valid_before"] = valid_before.isoformat()
+            params["valid_before"] = valid_before
 
         temporal_filter = ""
         if rel_conditions:

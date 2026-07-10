@@ -136,7 +136,10 @@ class TestBoundedExpansionParity:
         other_ns = uuid4()
 
         ids: dict[str, UUID] = {name: uuid4() for name in "ABCDEFGHXOP"}
-        past = (datetime.now(UTC) - timedelta(days=365)).isoformat()
+        # Seed valid_until as a native datetime (the neo4j driver stores it as a
+        # native ZONED DATETIME), matching how the backend writes post-#1472 so
+        # the temporal filter exercises the cast-free indexed comparison.
+        past = datetime.now(UTC) - timedelta(days=365)
 
         setup = """
         UNWIND $entities AS ent

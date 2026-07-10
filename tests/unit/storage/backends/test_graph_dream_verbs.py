@@ -195,9 +195,13 @@ class TestNeo4jSoftInvalidateRelationships:
         # Soft-delete stamps valid_until (the column recall honors), not a delete.
         assert "valid_until" in cypher
         assert "DELETE" not in cypher.upper()
+        # valid_until is stored native (#1472): the ISO-string param is coerced
+        # with datetime() at the write site so the recall filter is index-friendly.
+        assert "rel.valid_until = datetime($invalidated_at)" in cypher
         # Idempotent: only stamps edges not already invalidated.
         assert "valid_until IS NULL" in cypher
-        # Namespace-scoped + matched by id.
+        # Namespace-scoped + matched by id. The param stays an ISO string; the
+        # Cypher datetime() cast produces the native stored value.
         assert kwargs["namespace_id"] == str(ns)
         assert kwargs["invalidated_at"] == ts.isoformat()
         # ids threaded as a batch parameter (not interpolated).
@@ -235,6 +239,10 @@ class TestNeo4jSoftRetireEntities:
         # Soft-delete stamps the bi-temporal columns the issue names.
         assert "valid_until" in cypher
         assert "version_valid_to" in cypher
+        # valid_until is stored native (#1472); version_valid_to stays an ISO
+        # string (its equality match with the snapshot must not cross types).
+        assert "current.valid_until = datetime($retired_at)" in cypher
+        assert "current.version_valid_to = $retired_at" in cypher
         # Never a hard delete.
         assert "DELETE" not in cypher.upper()
         # Idempotent replay guard: only retire still-live entities.
@@ -533,10 +541,12 @@ class TestNeo4jRestoreVerbs:
         # Idempotent-by-count: only still-retired nodes transition.
         assert "current.valid_until IS NOT NULL OR current.version_valid_to IS NOT NULL" in cypher
         # The :EntityVersion snapshot + [:SUPERSEDES] edge are removed, scoped to
-        # THIS op's snapshot (version_valid_to == the node's retire stamp).
+        # THIS op's snapshot. Matched on version_valid_to (both ISO strings) - not
+        # valid_until, which is now a native ZONED DATETIME (#1472) and would make
+        # the equality a NULL-yielding cross-type comparison.
         assert "DETACH DELETE o" in cypher
         assert "EntityVersion" in cypher
-        assert "old.version_valid_to = current.valid_until" in cypher
+        assert "old.version_valid_to = current.version_valid_to" in cypher
         assert kwargs["entity_ids"] == [str(eid)]
         assert kwargs["namespace_id"] == str(ns)
 

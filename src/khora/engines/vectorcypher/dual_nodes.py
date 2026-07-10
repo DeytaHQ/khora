@@ -105,20 +105,16 @@ def _build_neighborhood_query(depth: int, prefer_current: bool) -> str:
         "MATCH (e:Entity {id: eid, namespace_id: $namespace_id})",
     ]
     if prefer_current:
-        # Hoist datetime() so it is evaluated once per source row. valid_until
-        # is persisted as an ISO STRING (``.isoformat()`` at the neo4j backend
-        # boundary), so coerce with datetime() before comparing against the
-        # ZONED DATETIME ``_now`` - a bare string > datetime comparison yields
-        # NULL, which would silently drop every future-dated edge.
+        # Bind the server clock once per source row as a native ZONED DATETIME.
+        # valid_until is now persisted as a native ZONED DATETIME (#1472), so the
+        # per-hop comparison is a cast-free ``valid_until > _now`` - engaging the
+        # entity_ns_valid_until index range instead of the former non-sargable
+        # ``datetime(valid_until) > _now`` per-row string cast.
         lines.append("WITH e, datetime() AS _now")
     lines.append(f"WITH e{now_carry}, [e] AS _visited, [e] AS _frontier, [] AS _found")
     for i in range(1, depth + 1):
-        rel_filter = (
-            f"\n  AND (_r{i}.valid_until IS NULL OR datetime(_r{i}.valid_until) > _now)" if prefer_current else ""
-        )
-        node_filter = (
-            "\n         AND (x.valid_until IS NULL OR datetime(x.valid_until) > _now)" if prefer_current else ""
-        )
+        rel_filter = f"\n  AND (_r{i}.valid_until IS NULL OR _r{i}.valid_until > _now)" if prefer_current else ""
+        node_filter = "\n         AND (x.valid_until IS NULL OR x.valid_until > _now)" if prefer_current else ""
         lines.append(
             # An empty frontier must not kill the row (UNWIND [] discards it),
             # so substitute [null]; OPTIONAL MATCH on a null start node then
@@ -634,11 +630,10 @@ class DualNodeManager:
                 params["channel"] = temporal_filter.channel
 
         # For temporal queries, prefer entities whose validity hasn't expired.
-        # valid_until is stored as an ISO string, so coerce with datetime()
-        # before comparing against the ZONED DATETIME — a bare string > datetime
-        # comparison yields NULL and would drop every current entity.
+        # valid_until is now a native ZONED DATETIME (#1472), so compare it
+        # directly against the server clock - a cast-free indexed range.
         if prefer_current:
-            temporal_conditions.append("(e.valid_until IS NULL OR datetime(e.valid_until) > datetime())")
+            temporal_conditions.append("(e.valid_until IS NULL OR e.valid_until > datetime())")
 
         # Push the caller filter's system-key slice down to Cypher. The MATCH
         # below binds the chunk as ``c`` (the compiler's default node variable),
