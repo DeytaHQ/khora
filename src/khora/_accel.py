@@ -32,49 +32,119 @@ _FORCE_BACKEND = os.environ.get("KHORA_ACCEL_BACKEND")
 # Tier 0: Rust native acceleration (fastest)
 # ---------------------------------------------------------------------------
 
-try:
-    from khora_accel import (
-        RustBM25Index,
-    )
-    from khora_accel import batch_cosine_similarity as _rust_batch_cosine
-    from khora_accel import batch_dot_product as _rust_batch_dot_product
-    from khora_accel import batch_levenshtein as _rust_batch_levenshtein
-    from khora_accel import batch_recency_scores as _rust_batch_recency_scores
-    from khora_accel import batch_score_stats as _rust_batch_score_stats
-    from khora_accel import batch_sequence_match as _rust_batch_sequence_match
-    from khora_accel import batch_temporal_filter as _rust_batch_temporal_filter
-    from khora_accel import block_and_score_pairs as _rust_block_and_score_pairs
-    from khora_accel import build_chunk_edges as _rust_build_chunk_edges
-    from khora_accel import configure_thread_pool as _rust_configure_thread_pool
-    from khora_accel import cosine_similarity as _rust_cosine
-    from khora_accel import deduplicate_chunks as _rust_deduplicate_chunks
-    from khora_accel import detect_communities as _rust_detect_communities
-    from khora_accel import detect_temporal_category as _rust_detect_temporal_category
-    from khora_accel import detect_temporal_category_with_confidence as _rust_detect_temporal_category_with_confidence
-    from khora_accel import extract_keywords as _rust_extract_keywords
-    from khora_accel import extract_keywords_batch as _rust_extract_keywords_batch
-    from khora_accel import levenshtein_similarity as _rust_levenshtein
-    from khora_accel import mmr_diversity_select as _rust_mmr_diversity_select
-    from khora_accel import normalize_embeddings_batch as _rust_normalize_embeddings_batch
-    from khora_accel import normalize_entity_name as _rust_normalize_entity_name
-    from khora_accel import normalize_entity_names_batch as _rust_normalize_entity_names_batch
-    from khora_accel import normalize_scores as _rust_normalize_scores
-    from khora_accel import pagerank as _rust_pagerank
-    from khora_accel import pairwise_cosine_above_threshold as _rust_pairwise_cosine
-    from khora_accel import reciprocal_rank_fusion as _rust_rrf
-    from khora_accel import resolve_entities_batch as _rust_resolve_entities_batch
-    from khora_accel import resolve_entities_enhanced as _rust_resolve_entities_enhanced
-    from khora_accel import score_entropy as _rust_score_entropy
-    from khora_accel import sequence_match_ratio as _rust_sequence_match
-    from khora_accel import weighted_rrf as _rust_weighted_rrf
-    from khora_accel import weighted_rrf_normalized as _rust_weighted_rrf_normalized
-    from khora_accel import weighted_rrf_normalized_with_diagnostics as _rust_weighted_rrf_normalized_with_diagnostics
-    from khora_accel import weighted_rrf_normalized_with_provenance as _rust_weighted_rrf_normalized_with_provenance
+# Single source of truth for the Rust symbols khora depends on, mapping the
+# local binding name used by the kernels below to the attribute name exported
+# by the khora-accel wheel. The CI guard in
+# tests/unit/test_accel_symbol_drift.py reuses this table to assert a built
+# wheel exports every symbol, so it can't drift from what the kernels call.
+_RUST_SYMBOLS: dict[str, str] = {
+    "RustBM25Index": "RustBM25Index",
+    "_rust_batch_cosine": "batch_cosine_similarity",
+    "_rust_batch_dot_product": "batch_dot_product",
+    "_rust_batch_levenshtein": "batch_levenshtein",
+    "_rust_batch_recency_scores": "batch_recency_scores",
+    "_rust_batch_score_stats": "batch_score_stats",
+    "_rust_batch_sequence_match": "batch_sequence_match",
+    "_rust_batch_temporal_filter": "batch_temporal_filter",
+    "_rust_block_and_score_pairs": "block_and_score_pairs",
+    "_rust_build_chunk_edges": "build_chunk_edges",
+    "_rust_configure_thread_pool": "configure_thread_pool",
+    "_rust_cosine": "cosine_similarity",
+    "_rust_deduplicate_chunks": "deduplicate_chunks",
+    "_rust_detect_communities": "detect_communities",
+    "_rust_detect_temporal_category": "detect_temporal_category",
+    "_rust_detect_temporal_category_with_confidence": "detect_temporal_category_with_confidence",
+    "_rust_extract_keywords": "extract_keywords",
+    "_rust_extract_keywords_batch": "extract_keywords_batch",
+    "_rust_levenshtein": "levenshtein_similarity",
+    "_rust_mmr_diversity_select": "mmr_diversity_select",
+    "_rust_normalize_embeddings_batch": "normalize_embeddings_batch",
+    "_rust_normalize_entity_name": "normalize_entity_name",
+    "_rust_normalize_entity_names_batch": "normalize_entity_names_batch",
+    "_rust_normalize_scores": "normalize_scores",
+    "_rust_pagerank": "pagerank",
+    "_rust_pairwise_cosine": "pairwise_cosine_above_threshold",
+    "_rust_rrf": "reciprocal_rank_fusion",
+    "_rust_resolve_entities_batch": "resolve_entities_batch",
+    "_rust_resolve_entities_enhanced": "resolve_entities_enhanced",
+    "_rust_score_entropy": "score_entropy",
+    "_rust_sequence_match": "sequence_match_ratio",
+    "_rust_weighted_rrf": "weighted_rrf",
+    "_rust_weighted_rrf_normalized": "weighted_rrf_normalized",
+    "_rust_weighted_rrf_normalized_with_diagnostics": "weighted_rrf_normalized_with_diagnostics",
+    "_rust_weighted_rrf_normalized_with_provenance": "weighted_rrf_normalized_with_provenance",
+}
 
-    _HAS_RUST = True
-except ImportError:  # pragma: no cover
-    _HAS_RUST = False
-    RustBM25Index = None  # type: ignore[assignment]
+# Import the wheel once, then bind each symbol individually via getattr. A stale
+# or partial wheel that is missing one newly-added symbol degrades ONLY the
+# kernels that need that symbol (they fall back to numpy / pure-Python) instead
+# of disabling every Rust kernel. ``_HAS_RUST`` reflects "the wheel imported at
+# all"; each kernel additionally gates on its own ``_rust_*`` binding being
+# non-None. Bindings are explicit assignments (not a ``globals()`` loop) so
+# static analysis can see them; ``_RUST_SYMBOLS`` above stays the single source
+# of truth that the CI drift guard checks against.
+_khora_accel: object | None
+try:
+    import khora_accel as _imported_khora_accel
+
+    _khora_accel = _imported_khora_accel
+except ImportError:
+    _khora_accel = None
+
+_HAS_RUST = _khora_accel is not None
+
+RustBM25Index = getattr(_khora_accel, "RustBM25Index", None)
+_rust_batch_cosine = getattr(_khora_accel, "batch_cosine_similarity", None)
+_rust_batch_dot_product = getattr(_khora_accel, "batch_dot_product", None)
+_rust_batch_levenshtein = getattr(_khora_accel, "batch_levenshtein", None)
+_rust_batch_recency_scores = getattr(_khora_accel, "batch_recency_scores", None)
+_rust_batch_score_stats = getattr(_khora_accel, "batch_score_stats", None)
+_rust_batch_sequence_match = getattr(_khora_accel, "batch_sequence_match", None)
+_rust_batch_temporal_filter = getattr(_khora_accel, "batch_temporal_filter", None)
+_rust_block_and_score_pairs = getattr(_khora_accel, "block_and_score_pairs", None)
+_rust_build_chunk_edges = getattr(_khora_accel, "build_chunk_edges", None)
+_rust_configure_thread_pool = getattr(_khora_accel, "configure_thread_pool", None)
+_rust_cosine = getattr(_khora_accel, "cosine_similarity", None)
+_rust_deduplicate_chunks = getattr(_khora_accel, "deduplicate_chunks", None)
+_rust_detect_communities = getattr(_khora_accel, "detect_communities", None)
+_rust_detect_temporal_category = getattr(_khora_accel, "detect_temporal_category", None)
+_rust_detect_temporal_category_with_confidence = getattr(_khora_accel, "detect_temporal_category_with_confidence", None)
+_rust_extract_keywords = getattr(_khora_accel, "extract_keywords", None)
+_rust_extract_keywords_batch = getattr(_khora_accel, "extract_keywords_batch", None)
+_rust_levenshtein = getattr(_khora_accel, "levenshtein_similarity", None)
+_rust_mmr_diversity_select = getattr(_khora_accel, "mmr_diversity_select", None)
+_rust_normalize_embeddings_batch = getattr(_khora_accel, "normalize_embeddings_batch", None)
+_rust_normalize_entity_name = getattr(_khora_accel, "normalize_entity_name", None)
+_rust_normalize_entity_names_batch = getattr(_khora_accel, "normalize_entity_names_batch", None)
+_rust_normalize_scores = getattr(_khora_accel, "normalize_scores", None)
+_rust_pagerank = getattr(_khora_accel, "pagerank", None)
+_rust_pairwise_cosine = getattr(_khora_accel, "pairwise_cosine_above_threshold", None)
+_rust_rrf = getattr(_khora_accel, "reciprocal_rank_fusion", None)
+_rust_resolve_entities_batch = getattr(_khora_accel, "resolve_entities_batch", None)
+_rust_resolve_entities_enhanced = getattr(_khora_accel, "resolve_entities_enhanced", None)
+_rust_score_entropy = getattr(_khora_accel, "score_entropy", None)
+_rust_sequence_match = getattr(_khora_accel, "sequence_match_ratio", None)
+_rust_weighted_rrf = getattr(_khora_accel, "weighted_rrf", None)
+_rust_weighted_rrf_normalized = getattr(_khora_accel, "weighted_rrf_normalized", None)
+_rust_weighted_rrf_normalized_with_diagnostics = getattr(_khora_accel, "weighted_rrf_normalized_with_diagnostics", None)
+_rust_weighted_rrf_normalized_with_provenance = getattr(_khora_accel, "weighted_rrf_normalized_with_provenance", None)
+
+# When the wheel is present but partially importable (stale/partial build), warn
+# and name the missing symbols so the operator knows their wheel is stale. A
+# wholly-absent wheel is the normal no-accel install and only logs INFO below.
+# Suppressed when the operator has explicitly forced Rust off (numpy/python):
+# they opted out, so the stale-wheel notice would just be misleading noise.
+if _HAS_RUST and _FORCE_BACKEND not in ("numpy", "python"):
+    _missing_rust_symbols = sorted(attr for attr in _RUST_SYMBOLS.values() if getattr(_khora_accel, attr, None) is None)
+    if _missing_rust_symbols:
+        logger.warning(
+            "khora-accel wheel is present but missing {} expected symbol(s): {}. "
+            "The affected kernels will use the numpy/pure-Python fallback. This "
+            "usually means the installed wheel is stale - rebuild/reinstall "
+            "khora-accel to restore full acceleration.",
+            len(_missing_rust_symbols),
+            ", ".join(_missing_rust_symbols),
+        )
 
 # ---------------------------------------------------------------------------
 # Tier 1: NumPy / RapidFuzz (existing)
@@ -103,10 +173,12 @@ if _FORCE_BACKEND == "python":
     _HAS_RUST = False
     _HAS_NUMPY = False
     _HAS_RAPIDFUZZ = False
-    RustBM25Index = None  # type: ignore[assignment]
+    for _name in _RUST_SYMBOLS:
+        globals()[_name] = None
 elif _FORCE_BACKEND == "numpy":
     _HAS_RUST = False
-    RustBM25Index = None  # type: ignore[assignment]
+    for _name in _RUST_SYMBOLS:
+        globals()[_name] = None
 # "rust" or unset: use auto-detected fastest path
 
 # ---------------------------------------------------------------------------
@@ -131,7 +203,7 @@ def cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
 
     Uses Rust > numpy > pure Python, depending on availability.
     """
-    if _HAS_RUST:
+    if _HAS_RUST and _rust_cosine is not None:
         return _rust_cosine(vec1, vec2)
 
     if len(vec1) != len(vec2):
@@ -173,7 +245,7 @@ def batch_cosine_similarity(
     if len(candidates) == 0:
         return []
 
-    if _HAS_RUST and _HAS_NUMPY:
+    if _HAS_RUST and _rust_batch_cosine is not None and _HAS_NUMPY:
         q = np.asarray(query, dtype=np.float32)
         mat = np.asarray(candidates, dtype=np.float32)
         return _rust_batch_cosine(q, mat, threshold)
@@ -218,7 +290,7 @@ def pairwise_cosine_above_threshold(
     Returns (i, j, similarity) triples where i < j and similarity >= threshold.
     Uses Rust (rayon parallel) > numpy > pure Python.
     """
-    if _HAS_RUST and _HAS_NUMPY:
+    if _HAS_RUST and _rust_pairwise_cosine is not None and _HAS_NUMPY:
         mat = np.asarray(embeddings, dtype=np.float32)
         return _rust_pairwise_cosine(mat, threshold)
 
@@ -321,7 +393,7 @@ def block_and_score_pairs(
 
     Uses Rust (rayon parallel) > numpy > pure Python.
     """
-    if _HAS_RUST and _HAS_NUMPY:
+    if _HAS_RUST and _rust_block_and_score_pairs is not None and _HAS_NUMPY:
         mat = np.asarray(embeddings, dtype=np.float32)
         if mat.ndim != 2:
             raise ValueError(f"embeddings must be 2-D, got ndim={mat.ndim}")
@@ -392,7 +464,7 @@ def levenshtein_similarity(s1: str, s2: str) -> float:
 
     Uses Rust > rapidfuzz > pure Python.
     """
-    if _HAS_RUST:
+    if _HAS_RUST and _rust_levenshtein is not None:
         return _rust_levenshtein(s1, s2)
 
     a, b = s1.lower(), s2.lower()
@@ -434,7 +506,7 @@ def sequence_match_ratio(s1: str, s2: str) -> float:
     prefix-overlapping name variants lower and left them unmerged. The difflib
     last resort still diverges slightly (no Jaro-Winkler in the stdlib).
     """
-    if _HAS_RUST:
+    if _HAS_RUST and _rust_sequence_match is not None:
         return _rust_sequence_match(s1, s2)
 
     if _HAS_RAPIDFUZZ:
@@ -460,7 +532,7 @@ def batch_levenshtein(
     Returns (index, similarity) pairs above threshold, sorted descending.
     Uses Rust parallelism when available, otherwise falls back to serial loop.
     """
-    if _HAS_RUST:
+    if _HAS_RUST and _rust_batch_levenshtein is not None:
         return _rust_batch_levenshtein(query, candidates, threshold)
 
     results = []
@@ -482,7 +554,7 @@ def batch_sequence_match(
     Returns (index, similarity) pairs above threshold, sorted descending.
     Uses Rust parallelism when available, otherwise falls back to serial loop.
     """
-    if _HAS_RUST:
+    if _HAS_RUST and _rust_batch_sequence_match is not None:
         return _rust_batch_sequence_match(query, candidates, threshold)
 
     results = []
@@ -527,7 +599,7 @@ def pagerank(
     Returns:
         List of length n with PageRank scores indexed by node ID.
     """
-    if _HAS_RUST:
+    if _HAS_RUST and _rust_pagerank is not None:
         # Only forward the personalization arg when set so an older
         # khora-accel wheel that still has the 5-arg signature keeps
         # working until it's rebuilt. New wheels accept either path.
@@ -596,7 +668,7 @@ def build_chunk_edges(
     Returns:
         Flat edge list of (src, dst, weight) triples (bidirectional).
     """
-    if _HAS_RUST:
+    if _HAS_RUST and _rust_build_chunk_edges is not None:
         return _rust_build_chunk_edges(n_chunks, keyword_chunk_ids, idf_scores)
 
     # Pure-Python fallback
@@ -718,7 +790,7 @@ def extract_keywords(content: str) -> list[str]:
     Tokenises with ``\\b[a-zA-Z]{3,}\\b``, removes stopwords, deduplicates.
     Uses Rust when available, otherwise pure Python.
     """
-    if _HAS_RUST:
+    if _HAS_RUST and _rust_extract_keywords is not None:
         return _rust_extract_keywords(content)
 
     lower = content.lower()
@@ -737,7 +809,7 @@ def extract_keywords_batch(contents: list[str]) -> list[list[str]]:
 
     Uses Rust (rayon parallel) when available, otherwise serial Python.
     """
-    if _HAS_RUST:
+    if _HAS_RUST and _rust_extract_keywords_batch is not None:
         return _rust_extract_keywords_batch(contents)
 
     return [extract_keywords(c) for c in contents]
@@ -760,7 +832,7 @@ def reciprocal_rank_fusion(
     Note: The higher-level ``engines.vectorcypher.fusion`` module wraps this
     with rich FusedResult metadata tracking. Use this for raw score computation.
     """
-    if _HAS_RUST:
+    if _HAS_RUST and _rust_rrf is not None:
         return _rust_rrf(ranked_lists, k)
 
     scores: dict[str, float] = {}
@@ -783,7 +855,7 @@ def weighted_rrf(
     ``weight / (k + rank)`` where rank is 1-indexed.
     Returns ``(id, score)`` pairs sorted descending.
     """
-    if _HAS_RUST:
+    if _HAS_RUST and _rust_weighted_rrf is not None:
         return _rust_weighted_rrf(ranked_lists, k)
 
     scores: dict[str, float] = {}
@@ -800,7 +872,7 @@ def normalize_scores(scores: list[float]) -> list[float]:
 
     If all scores are identical, returns a list of ``1.0``.
     """
-    if _HAS_RUST:
+    if _HAS_RUST and _rust_normalize_scores is not None:
         return _rust_normalize_scores(scores)
 
     if not scores:
@@ -822,7 +894,7 @@ def weighted_rrf_normalized(
     graph_weight: float = 0.4,
 ) -> list[tuple[str, float]]:
     """Weighted RRF with score normalization. Rust > Python fallback."""
-    if _HAS_RUST:
+    if _HAS_RUST and _rust_weighted_rrf_normalized is not None:
         return _rust_weighted_rrf_normalized(vector_results, graph_results, k, vector_weight, graph_weight)
 
     # Python fallback - same logic as Rust
@@ -861,7 +933,7 @@ def weighted_rrf_normalized_with_provenance(
     *source_bitmap* is a ``u8`` flag: 1 = vector only, 2 = graph only,
     3 = both.  Rust > Python fallback.
     """
-    if _HAS_RUST:
+    if _HAS_RUST and _rust_weighted_rrf_normalized_with_provenance is not None:
         return _rust_weighted_rrf_normalized_with_provenance(
             vector_results, graph_results, k, vector_weight, graph_weight
         )
@@ -906,7 +978,7 @@ def weighted_rrf_normalized_with_diagnostics(
     graph_rrf_contrib)`` tuples sorted descending by score.
     Rust > Python fallback.
     """
-    if _HAS_RUST:
+    if _HAS_RUST and _rust_weighted_rrf_normalized_with_diagnostics is not None:
         return _rust_weighted_rrf_normalized_with_diagnostics(
             vector_results, graph_results, k, vector_weight, graph_weight
         )
@@ -970,7 +1042,7 @@ def batch_score_stats(
 
     Rust > Python fallback. Empty input returns all zeros.
     """
-    if _HAS_RUST:
+    if _HAS_RUST and _rust_batch_score_stats is not None:
         return _rust_batch_score_stats(scores)
 
     if not scores:
@@ -997,7 +1069,7 @@ def score_entropy(scores: list[float]) -> float:
     ``-sum(p * ln(p))``. Higher entropy = more uniform = less confident.
     Rust > Python fallback. Returns 0.0 for empty or all-zero inputs.
     """
-    if _HAS_RUST:
+    if _HAS_RUST and _rust_score_entropy is not None:
         return _rust_score_entropy(scores)
 
     if not scores:
@@ -1024,7 +1096,7 @@ _HONORIFICS = ("mr.", "mrs.", "ms.", "dr.", "prof.", "sir ", "lord ", "lady ")
 
 def normalize_entity_name(name: str) -> str:
     """Normalize entity name for dedup. Rust > Python."""
-    if _HAS_RUST:
+    if _HAS_RUST and _rust_normalize_entity_name is not None:
         return _rust_normalize_entity_name(name)
     result = name.lower()
     for h in _HONORIFICS:
@@ -1038,7 +1110,7 @@ def normalize_entity_name(name: str) -> str:
 
 def normalize_entity_names_batch(names: list[str]) -> list[str]:
     """Batch normalize entity names. Rust > Python."""
-    if _HAS_RUST:
+    if _HAS_RUST and _rust_normalize_entity_names_batch is not None:
         return _rust_normalize_entity_names_batch(names)
     return [normalize_entity_name(n) for n in names]
 
@@ -1064,7 +1136,7 @@ def resolve_entities_batch(
     Returns a list parallel to *new_names*. Each element is either
     ``(existing_index, score, match_type)`` or ``None``.
     """
-    if _HAS_RUST:
+    if _HAS_RUST and _rust_resolve_entities_batch is not None:
         return _rust_resolve_entities_batch(new_names, existing_names, existing_aliases, threshold)
 
     # Pure-Python fallback
@@ -1155,7 +1227,7 @@ def resolve_entities_enhanced(
     """
     type_thresholds = type_thresholds or {}
 
-    if _HAS_RUST:
+    if _HAS_RUST and _rust_resolve_entities_enhanced is not None:
         keys = list(type_thresholds.keys())
         vals = [type_thresholds[k] for k in keys]
         return _rust_resolve_entities_enhanced(
@@ -1260,7 +1332,7 @@ def batch_temporal_filter(
     Returns:
         Boolean mask — True if the timestamp matches the filter.
     """
-    if _HAS_RUST:
+    if _HAS_RUST and _rust_batch_temporal_filter is not None:
         return _rust_batch_temporal_filter(timestamps_secs, operator, start_secs, end_secs)
 
     # Pure-Python fallback
@@ -1299,7 +1371,7 @@ def batch_recency_scores(
     Returns:
         Recency score per timestamp.
     """
-    if _HAS_RUST:
+    if _HAS_RUST and _rust_batch_recency_scores is not None:
         return _rust_batch_recency_scores(timestamps_secs, now_secs, decay_days, recency_weight)
 
     # Pure-Python fallback
@@ -1549,7 +1621,7 @@ def detect_temporal_category(query: str) -> int:
     Uses Rust Aho-Corasick when available, otherwise Python word-boundary
     regex matching (parity with the Rust kernel).
     """
-    if _HAS_RUST:
+    if _HAS_RUST and _rust_detect_temporal_category is not None:
         return _rust_detect_temporal_category(query)
 
     # Python fallback: word-boundary regex matching (keywords match only as
@@ -1579,7 +1651,7 @@ def detect_temporal_category_with_confidence(
     Uses Rust Aho-Corasick when available, otherwise Python word-boundary
     regex matching (parity with the Rust kernel).
     """
-    if _HAS_RUST:
+    if _HAS_RUST and _rust_detect_temporal_category_with_confidence is not None:
         return _rust_detect_temporal_category_with_confidence(query)
 
     # Python fallback: word-boundary regex matching (parity with the Rust
@@ -1634,7 +1706,7 @@ def normalize_embeddings_batch(
     Returns:
         List of L2-normalized vectors.
     """
-    if _HAS_RUST:
+    if _HAS_RUST and _rust_normalize_embeddings_batch is not None:
         return _rust_normalize_embeddings_batch(vectors)
 
     if _HAS_NUMPY:
@@ -1675,7 +1747,7 @@ def batch_dot_product(
     if len(candidates) == 0:
         return []
 
-    if _HAS_RUST and _HAS_NUMPY:
+    if _HAS_RUST and _rust_batch_dot_product is not None and _HAS_NUMPY:
         q = np.asarray(query, dtype=np.float32)
         mat = np.asarray(candidates, dtype=np.float32)
         return _rust_batch_dot_product(q, mat, threshold)
@@ -1724,7 +1796,7 @@ def detect_communities(
     Returns:
         Community ID per node (0-indexed, -1 for isolated nodes).
     """
-    if _HAS_RUST:
+    if _HAS_RUST and _rust_detect_communities is not None:
         return _rust_detect_communities(n, edges, resolution, max_iter)
 
     # Pure-Python fallback (same Louvain algorithm)
@@ -1831,7 +1903,7 @@ def mmr_diversity_select(
         return []
     k = min(k, n)
 
-    if _HAS_RUST and _HAS_NUMPY:
+    if _HAS_RUST and _rust_mmr_diversity_select is not None and _HAS_NUMPY:
         mat = np.asarray(embeddings, dtype=np.float32)
         return _rust_mmr_diversity_select(mat, scores, lambda_param, k)
 
@@ -1929,7 +2001,7 @@ def configure_thread_pool(num_threads: int = 0, *, mode: str = "query") -> None:
         num_threads: Number of threads for the rayon pool.  0 = auto.
         mode: Workload mode — ``"query"`` or ``"ingest"``.
     """
-    if _HAS_RUST:
+    if _HAS_RUST and _rust_configure_thread_pool is not None:
         _rust_configure_thread_pool(num_threads, mode)
     else:
         logger.debug("configure_thread_pool: Rust accel unavailable, skipping")
@@ -2012,6 +2084,6 @@ def deduplicate_chunks(
         threshold: Jaccard similarity threshold (0.0–1.0). Default 0.85.
         num_perm: Number of MinHash permutations. Default 64.
     """
-    if _HAS_RUST:
+    if _HAS_RUST and _rust_deduplicate_chunks is not None:
         return _rust_deduplicate_chunks(chunks, threshold, num_perm)
     return _py_deduplicate_chunks(chunks, threshold, num_perm)
