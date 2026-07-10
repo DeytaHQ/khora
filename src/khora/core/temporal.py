@@ -117,6 +117,7 @@ def temporal_chunk_to_chunk(tc: TemporalChunk) -> Chunk:
     applies the event-time-then-producer-time fallback downstream.
     """
     md = tc.metadata or {}
+    ci = tc.chunker_info or {}
     sid_raw = md.get("session_id")
     session_id: UUID | None
     if isinstance(sid_raw, UUID):
@@ -134,12 +135,12 @@ def temporal_chunk_to_chunk(tc: TemporalChunk) -> Chunk:
         namespace_id=tc.namespace_id,
         document_id=tc.document_id,
         content=tc.content,
-        chunk_index=int(md.get("chunk_index", 0) or 0),
-        start_char=int(md.get("start_char", 0) or 0),
-        end_char=int(md.get("end_char", 0) or 0),
-        token_count=int(md.get("token_count", 0) or 0),
+        chunk_index=int(ci.get("chunk_index", 0) or 0),
+        start_char=int(ci.get("start_char", 0) or 0),
+        end_char=int(ci.get("end_char", 0) or 0),
+        token_count=int(ci.get("token_count", 0) or 0),
         metadata=md,
-        chunker_info=tc.chunker_info or {},
+        chunker_info=ci,
         embedding=tc.embedding,
         embedding_model=str(md.get("embedding_model", "") or ""),
         created_at=tc.created_at or datetime.now(UTC),

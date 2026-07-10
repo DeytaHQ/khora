@@ -5,9 +5,11 @@ The contract under test:
 * A chunker emits ``ChunkResult.metadata = {"chunker": "<strategy>", ...}``
   (see ``khora.extraction.chunkers.base.ChunkResult`` docstring — every
   chunker MUST stamp ``metadata["chunker"]`` with its strategy name).
-* The VectorCypher engine must copy that dict, verbatim, onto the
-  ``TemporalChunk.chunker_info`` field before handing the chunk to the
-  temporal store.
+* The VectorCypher engine must copy that dict onto the
+  ``TemporalChunk.chunker_info`` field, alongside the chunker bookkeeping
+  keys (``chunk_index`` / ``start_char`` / ``end_char`` / ``token_count``,
+  stamped last), before handing the chunk to the temporal store. The
+  bookkeeping keys never land in ``TemporalChunk.metadata``.
 
 These tests pin that wire at the engine boundary. They mock the storage,
 temporal store, dual-node, and embedder layers — no DB, no Neo4j, no
@@ -171,17 +173,77 @@ class TestChunkerInfoPropagation:
 
         temporal_chunk = captured[0][0]
         assert isinstance(temporal_chunk, TemporalChunk)
-        # The contract: chunker_info is a (defensively copied) duplicate of
-        # ChunkResult.metadata.
-        assert temporal_chunk.chunker_info == marker, (
-            f"chunker_info mismatch: expected {marker}, got {temporal_chunk.chunker_info}"
-        )
+        # The contract: chunker_info carries the chunker's metadata plus the
+        # bookkeeping keys stamped last. None of the bookkeeping keys leak
+        # into TemporalChunk.metadata.
+        ci = temporal_chunk.chunker_info
+        assert ci["chunker"] == "fixed"
+        assert ci["size"] == 100
+        assert ci["chunk_index"] == 0
+        assert ci["start_char"] == 0
+        assert ci["end_char"] == 11
+        assert ci["token_count"] == 0
+        assert not any(k in temporal_chunk.metadata for k in ("chunk_index", "start_char", "end_char", "token_count"))
         # Defensive copy: mutating the original chunker metadata must not
         # leak into the persisted TemporalChunk.
         marker["after_persist"] = "leaked"
         assert "after_persist" not in temporal_chunk.chunker_info, (
             "chunker_info must be a copy of the chunker's metadata, not a shared reference"
         )
+
+    @pytest.mark.asyncio
+    async def test_bookkeeping_overrides_colliding_chunker_metadata(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Chunker metadata that collides with the four bookkeeping names loses:
+        the engine's stamped values win in chunker_info (stamped last), and none
+        of the four keys leak into TemporalChunk.metadata."""
+        engine = _make_connected_engine()
+
+        # Chunker emits conflicting values for all four bookkeeping keys.
+        collision = {"chunk_index": 99, "start_char": 99, "end_char": 99, "token_count": 99}
+        stub_chunker = _StubChunker(
+            [_StubChunkResult(content="hello world", start_char=0, end_char=11, token_count=7, metadata=collision)]
+        )
+        monkeypatch.setattr(
+            "khora.extraction.chunkers.create_chunker",
+            lambda *args, **kwargs: stub_chunker,
+        )
+
+        captured: list[list[TemporalChunk]] = []
+
+        async def _capture_create_chunks(chunks: list[TemporalChunk]) -> list[TemporalChunk]:
+            captured.append(list(chunks))
+            for c in chunks:
+                if c.id is None:
+                    c.id = uuid4()
+            return list(chunks)
+
+        engine._temporal_store.create_chunks_batch = AsyncMock(side_effect=_capture_create_chunks)
+        engine._dual_nodes.create_chunk_nodes_batch = AsyncMock(return_value=None)
+        engine._embedder.embed_batch = AsyncMock(return_value=[[0.0] * 4])
+        engine._embedder.model_name = "mock-embed"
+        engine._storage.update_document = AsyncMock(return_value=None)
+
+        from datetime import UTC, datetime
+
+        await engine._process_document(
+            _make_document(content="hello world"),
+            skill_name="default",
+            expertise=None,
+            extraction_model=None,
+            occurred_at=datetime.now(UTC),
+            entity_types=[],
+            relationship_types=[],
+        )
+
+        temporal_chunk = captured[0][0]
+        ci = temporal_chunk.chunker_info
+        # Stamped bookkeeping wins over the chunker's colliding values.
+        assert ci["chunk_index"] == 0
+        assert ci["start_char"] == 0
+        assert ci["end_char"] == 11
+        assert ci["token_count"] == 7
+        # None of the four bookkeeping keys leak into metadata.
+        assert not any(k in temporal_chunk.metadata for k in ("chunk_index", "start_char", "end_char", "token_count"))
 
     @pytest.mark.asyncio
     async def test_multiple_chunks_each_carry_their_own_chunker_info(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -231,13 +293,19 @@ class TestChunkerInfoPropagation:
         assert len(all_chunks) == 3, f"expected 3 chunks, got {len(all_chunks)}"
 
         for i, tc in enumerate(all_chunks):
-            assert tc.chunker_info == {"chunker": "fixed", "i": i}, (
-                f"chunk #{i} has unexpected chunker_info: {tc.chunker_info}"
-            )
+            ci = tc.chunker_info
+            assert ci["chunker"] == "fixed", f"chunk #{i}: {ci}"
+            assert ci["i"] == i, f"chunk #{i}: {ci}"
+            # Bookkeeping stamped alongside the chunker's own metadata.
+            assert ci["chunk_index"] == i, f"chunk #{i}: {ci}"
+            assert ci["start_char"] == i, f"chunk #{i}: {ci}"
+            assert ci["end_char"] == i + 7, f"chunk #{i}: {ci}"
+            assert ci["token_count"] == 0, f"chunk #{i}: {ci}"
 
     @pytest.mark.asyncio
-    async def test_empty_chunker_metadata_yields_empty_dict(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A chunker with empty ``metadata={}`` → ``chunker_info == {}`` (not None)."""
+    async def test_empty_chunker_metadata_yields_only_bookkeeping(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A chunker with empty ``metadata={}`` → ``chunker_info`` carries only
+        the four bookkeeping keys (no chunker-emitted keys), and is a dict not None."""
         engine = _make_connected_engine()
 
         stub_chunker = _StubChunker([_StubChunkResult(content="bare content", start_char=0, end_char=12, metadata={})])
@@ -276,6 +344,12 @@ class TestChunkerInfoPropagation:
         all_chunks = [c for batch in captured for c in batch]
         assert len(all_chunks) == 1
         tc = all_chunks[0]
-        # Must be a dict (default_factory), never None.
-        assert tc.chunker_info == {}
+        # Empty chunker metadata → only the four bookkeeping keys land; still a
+        # dict (default_factory), never None.
+        assert tc.chunker_info == {
+            "chunk_index": 0,
+            "start_char": 0,
+            "end_char": 12,
+            "token_count": 0,
+        }
         assert isinstance(tc.chunker_info, dict)

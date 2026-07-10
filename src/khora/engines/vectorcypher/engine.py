@@ -1302,15 +1302,16 @@ class VectorCypherEngine:
                             channel=doc_metadata.get("channel") or doc_metadata.get("thread_id"),
                             tags=_ensure_tags(doc_metadata.get("tags", [])),
                             confidence=1.0,
-                            metadata={
-                                **doc_metadata,
+                            metadata=dict(doc_metadata),
+                            chunker_info={
+                                **dict(raw_chunk.metadata),
                                 "chunk_index": chunk_index_offset + i,
                                 "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
                                 "end_char": raw_chunk.end_char
                                 if hasattr(raw_chunk, "end_char")
                                 else len(raw_chunk.content),
+                                "token_count": raw_chunk.token_count if hasattr(raw_chunk, "token_count") else 0,
                             },
-                            chunker_info=dict(raw_chunk.metadata),
                             **document_denorm_fields(document),
                         )
                         temporal_chunks.append(temporal_chunk)
@@ -1950,7 +1951,8 @@ class VectorCypherEngine:
                         chunk_index=i,
                         start_char=getattr(raw_chunk, "start_char", 0),
                         end_char=getattr(raw_chunk, "end_char", len(raw_chunk.content)),
-                        metadata={**new_doc_metadata, "chunk_index": i},
+                        token_count=getattr(raw_chunk, "token_count", 0),
+                        metadata=dict(new_doc_metadata),
                         chunker_info=dict(raw_chunk.metadata),
                         embedding=embedding,
                         embedding_model=embedder.model_name,
@@ -2060,13 +2062,14 @@ class VectorCypherEngine:
                     channel=doc_metadata.get("channel") or doc_metadata.get("thread_id"),
                     tags=_ensure_tags(doc_metadata.get("tags", [])),
                     confidence=1.0,
-                    metadata={
-                        **doc_metadata,
+                    metadata=dict(doc_metadata),
+                    chunker_info={
+                        **dict(c.chunker_info or {}),
                         "chunk_index": i,
                         "start_char": c.start_char,
                         "end_char": c.end_char or len(c.content),
+                        "token_count": c.token_count,
                     },
-                    chunker_info=dict(c.chunker_info or {}),
                     **document_denorm_fields(new_document),
                 )
             )
@@ -3475,15 +3478,16 @@ class VectorCypherEngine:
                         channel=doc_metadata.get("channel") or doc_metadata.get("thread_id"),
                         tags=_ensure_tags(doc_metadata.get("tags", [])),
                         confidence=1.0,
-                        metadata={
-                            **doc_metadata,
+                        metadata=dict(doc_metadata),
+                        chunker_info={
+                            **dict(raw_chunk.metadata),
                             "chunk_index": ci,
                             "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
                             "end_char": raw_chunk.end_char
                             if hasattr(raw_chunk, "end_char")
                             else len(raw_chunk.content),
+                            "token_count": raw_chunk.token_count if hasattr(raw_chunk, "token_count") else 0,
                         },
-                        chunker_info=dict(raw_chunk.metadata),
                         **document_denorm_fields(doc),
                     )
                     all_temporal_chunks.append(tc)

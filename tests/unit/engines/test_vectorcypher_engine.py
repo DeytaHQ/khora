@@ -2986,7 +2986,7 @@ class TestProcessDocumentWindowing:
 
     @pytest.mark.asyncio
     async def test_chunk_index_continuity_across_windows(self, engine: VectorCypherEngine) -> None:
-        """chunk_index in metadata must be continuous across windows."""
+        """chunk_index in chunker_info must be continuous across windows."""
         engine._vc_config = VectorCypherConfig(max_chunks_in_flight=2)
 
         raw_chunks = [self._make_raw_chunk(f"chunk {i}") for i in range(5)]
@@ -3023,7 +3023,7 @@ class TestProcessDocumentWindowing:
         assert engine._embedder.embed_batch.call_count == 3
 
         # Verify chunk_index is 0, 1, 2, 3, 4 across all windows
-        indices = [tc.metadata["chunk_index"] for tc in all_temporal_chunks]
+        indices = [tc.chunker_info["chunk_index"] for tc in all_temporal_chunks]
         assert indices == [0, 1, 2, 3, 4]
 
     @pytest.mark.asyncio
