@@ -56,6 +56,7 @@ from khora.engines.chronicle.compression import (
 from khora.engines.chronicle.events import ChronicleEvent, EventExtractor
 from khora.exceptions import ConfigurationError, EngineCapabilityError
 from khora.extraction.embedders import LiteLLMEmbedder
+from khora.filter.provenance import _DOC_KEYS
 from khora.khora import BatchResult, RecallResult, RememberResult, Stats
 from khora.query import SearchMode
 from khora.query.router import QueryComplexity, QueryComplexityRouter, RouterConfig
@@ -455,24 +456,6 @@ def _intersect_upper(window: datetime | None, filter_bound: datetime | None) -> 
     return min(window, fb)
 
 
-# System keys the recall-filter post-filter reads off a chunk record. All seven
-# denormalized document keys live on the per-document ``DocumentProjection`` the
-# recall path hydrates for filtered queries (``get_document_projections_batch``);
-# ``DocumentSource`` carries only a subset (title / source / source_type), kept as
-# a tertiary fallback so the projection-less paths don't regress. When a doc-key
-# filter is present these resolve via the projection; on the short-circuited path
-# (no doc-key leaf) the projection isn't fetched and the keys stay absent.
-_DOC_PROJECTION_KEYS: tuple[str, ...] = (
-    "source_type",
-    "source_name",
-    "source_url",
-    "external_id",
-    "content_type",
-    "source",
-    "title",
-)
-
-
 def _chunk_to_record(chunk: Chunk, doc: DocumentProjection | None = None) -> dict[str, Any]:
     """Map a :class:`Chunk` to the record dict the recall-filter post-filter reads.
 
@@ -517,7 +500,7 @@ def _chunk_to_record(chunk: Chunk, doc: DocumentProjection | None = None) -> dic
     # found nowhere stays absent → compile_python's §4 missing-semantics →
     # positive predicate empty.
     source_doc = chunk.source_document
-    for key in _DOC_PROJECTION_KEYS:
+    for key in _DOC_KEYS:
         value = getattr(chunk, key, None)
         if value is None and doc is not None:
             value = getattr(doc, key, None)
@@ -2198,7 +2181,7 @@ class ChronicleEngine:
             from khora.filter.execute import filter_leaf_keys
 
             projections: dict[UUID, DocumentProjection] = {}
-            needs_doc_keys = filter_ast is not None and bool(filter_leaf_keys(filter_ast) & set(_DOC_PROJECTION_KEYS))
+            needs_doc_keys = filter_ast is not None and bool(filter_leaf_keys(filter_ast) & _DOC_KEYS)
             if needs_doc_keys and chunks_with_scores:
                 doc_ids = list({chunk.document_id for chunk, _ in chunks_with_scores})
                 try:

@@ -48,6 +48,7 @@ from khora.config.schema import QuerySettings
 from khora.core.models import Chunk
 from khora.core.models.document import DocumentSource
 from khora.core.models.entity import Entity
+from khora.core.models.recall import DocumentProjection
 from khora.engines.chronicle.engine import ChronicleEngine
 from khora.filter import parse_to_ast
 from khora.filter.ast import FilterNode
@@ -74,7 +75,15 @@ def _chunk(
     source: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> Chunk:
-    """A seed chunk carrying the filterable fields a recall filter can address."""
+    """A seed chunk carrying the filterable fields a recall filter can address.
+
+    ``source`` is carried BOTH on the chunk's ``source_document`` projection (where
+    the implementation-blind oracle reads the denormalized ``source`` key back off
+    the seed :class:`Chunk`) AND, via :func:`_projections_for`, on the parent-document
+    :class:`DocumentProjection` the #1494 recall-path hydration reads. The two must
+    agree so the oracle's merged (chunk + projection) record view matches the record
+    the engine's ∃-over-provenance pass evaluated.
+    """
     return Chunk(
         id=uuid4(),
         namespace_id=ns_id,
@@ -84,6 +93,25 @@ def _chunk(
         metadata=metadata or {},
         source_document=(DocumentSource(id=uuid4(), source=source) if source is not None else None),
     )
+
+
+def _projections_for(chunks: dict[UUID, Chunk]) -> dict[UUID, DocumentProjection]:
+    """Build ``{document_id: DocumentProjection}`` mirroring each chunk's ``source``.
+
+    The #1494 recall-path hydration reads the denormalized document keys off the
+    parent-document :class:`DocumentProjection` (fetched via
+    ``get_document_projections_batch``), NOT off the chunk. This materializes a
+    projection carrying the same ``source`` the seed chunk's ``source_document``
+    holds, so a ``source``-keyed recall narrows exactly as the oracle expects. A
+    chunk with no ``source_document`` gets a bare projection (all doc keys ``None``).
+    """
+    projections: dict[UUID, DocumentProjection] = {}
+    for chunk in chunks.values():
+        src = chunk.source_document.source if chunk.source_document is not None else None
+        projections[chunk.document_id] = DocumentProjection(
+            id=chunk.document_id, created_at=chunk.created_at, source=src or None
+        )
+    return projections
 
 
 async def _recall_surfaces(
@@ -128,6 +156,9 @@ async def _recall_surfaces(
     retriever._storage.search_similar_entities = AsyncMock(return_value=sim)
     retriever._storage.get_entities_batch = AsyncMock(return_value=ents)
     retriever._storage.get_chunks_batch = AsyncMock(return_value=dict(chunk_registry))
+    # #1494: a doc-key (``source``) recall hydrates the parent-document projection
+    # where the denormalized key lives; wire it to mirror each seed chunk's source.
+    retriever._storage.get_document_projections_batch = AsyncMock(return_value=_projections_for(chunk_registry))
     retriever._dual_nodes.get_relationships_between = AsyncMock(return_value=[])
     engine = _build_engine(retriever)
 
@@ -380,3 +411,52 @@ class TestRecallConformanceOracleIsFalsifiable:
         good_chunk = _chunk(ns_id, year=2027)
         prov = _chunk(ns_id, year=2027)
         assert_recall_conformance(filter_ast, returned_chunks=[good_chunk], entity_provenance=[[prov]])
+
+
+# ---------------------------------------------------------------------------
+# #1494: the oracle's ∃ leg evaluates a DOC-KEY leaf against the merged
+# (chunk + document) record view — and REJECTS a field-incomplete record.
+#
+# The #1494 bug was exactly a field-incomplete provenance record: the ∃ pass
+# evaluated a doc-key leaf against a bare chunk that structurally lacked the
+# denormalized document keys, so the key read as absent and the pass over-dropped.
+# These cases guard the oracle's doc-key dimension in both polarities: a
+# field-COMPLETE provenance record (the doc key present) passes a doc-key filter,
+# and a field-INCOMPLETE one (the doc key omitted) is CAUGHT by the oracle — so a
+# regression to the old absent-key record cannot slip past the conformance check.
+# ---------------------------------------------------------------------------
+
+
+class TestOracleDocKeyMergedRecord:
+    """The oracle evaluates a doc-key leaf over the merged record and rejects incompleteness."""
+
+    def test_oracle_accepts_entity_whose_provenance_carries_the_doc_key(self) -> None:
+        """A ``source``-keyed filter accepts an entity whose provenance record carries the key.
+
+        The field-COMPLETE positive: the provenance chunk's ``source_document``
+        carries ``source="linear"``, so the merged record the oracle's ``"Chunk"``
+        predicate reads resolves the ``source`` leaf and the ∃ pass holds — the
+        oracle must NOT raise.
+        """
+        ns_id = uuid4()
+        filter_ast = _ast({"source": "linear", "occurred_at": {"$gte": "2027-01-01T00:00:00Z"}})
+        complete = _chunk(ns_id, year=2027, source="linear")
+        assert_recall_conformance(filter_ast, returned_chunks=[], entity_provenance=[[complete]])
+
+    def test_oracle_rejects_entity_whose_provenance_omits_the_doc_key(self) -> None:
+        """A field-INCOMPLETE provenance record (doc key omitted) MUST be caught.
+
+        The falsifiability guard against regressing to #1494: the provenance chunk
+        clears the date but carries NO ``source`` (no ``source_document``), so under a
+        ``source="linear"`` filter the doc key reads as absent → the predicate fails →
+        the ∃ pass is False → the oracle RAISES. If the oracle silently accepted this
+        (as the pre-fix path effectively did by never enforcing the doc-key leaf on
+        the entity surface), the bug would go undetected — so this test asserts the
+        oracle genuinely fails on the incomplete record.
+        """
+        ns_id = uuid4()
+        filter_ast = _ast({"source": "linear", "occurred_at": {"$gte": "2027-01-01T00:00:00Z"}})
+        # Date clears, but the ``source`` doc key is ABSENT (source=None -> no projection).
+        incomplete = _chunk(ns_id, year=2027, source=None)
+        with pytest.raises(AssertionError, match="no provenance chunk passing"):
+            assert_recall_conformance(filter_ast, returned_chunks=[], entity_provenance=[[incomplete]])
