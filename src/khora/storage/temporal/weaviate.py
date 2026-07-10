@@ -279,6 +279,7 @@ class WeaviateTemporalStore(TemporalVectorStore):
                     Property(name="tags", data_type=DataType.TEXT_ARRAY),
                     Property(name="confidence", data_type=DataType.NUMBER),
                     Property(name="metadata_json", data_type=DataType.TEXT),  # JSON string
+                    Property(name="chunker_info_json", data_type=DataType.TEXT),  # JSON string
                     *_denorm_properties(),
                 ],
                 multi_tenancy_config=Configure.multi_tenancy(enabled=True),
@@ -292,6 +293,8 @@ class WeaviateTemporalStore(TemporalVectorStore):
             for prop in _denorm_properties():
                 if prop.name not in existing:
                     await collection.config.add_property(prop)
+            if "chunker_info_json" not in existing:
+                await collection.config.add_property(Property(name="chunker_info_json", data_type=DataType.TEXT))
 
         self._connected = True
         logger.info(
@@ -675,6 +678,13 @@ class WeaviateTemporalStore(TemporalVectorStore):
             except (json.JSONDecodeError, TypeError):
                 pass
 
+        chunker_info: dict[str, Any] = {}
+        if props.get("chunker_info_json"):
+            try:
+                chunker_info = json.loads(props["chunker_info_json"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+
         return TemporalChunk(
             id=UUID(str(obj.uuid)),
             namespace_id=namespace_id,
@@ -689,6 +699,7 @@ class WeaviateTemporalStore(TemporalVectorStore):
             tags=props.get("tags") or [],
             confidence=props.get("confidence", 1.0),
             metadata=metadata,
+            chunker_info=chunker_info,
             source_type=props.get("source_type"),
             source_name=props.get("source_name"),
             source_url=props.get("source_url"),
@@ -895,6 +906,7 @@ def _chunk_to_properties(chunk: TemporalChunk) -> dict[str, Any]:
         "tags": chunk.tags or [],
         "confidence": chunk.confidence,
         "metadata_json": json.dumps(chunk.metadata or {}),
+        "chunker_info_json": json.dumps(chunk.chunker_info or {}),
         "source_type": chunk.source_type,
         "source_name": chunk.source_name,
         "source_url": chunk.source_url,

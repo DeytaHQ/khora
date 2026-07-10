@@ -533,6 +533,7 @@ _INCLUDE_ATTRS = [
     "tags",
     "confidence",
     "metadata_json",
+    "chunker_info_json",
 ]
 
 
@@ -554,6 +555,7 @@ def _chunk_to_row(chunk: TemporalChunk) -> dict[str, Any]:
         "tags": list(chunk.tags or []),
         "confidence": float(chunk.confidence) if chunk.confidence is not None else 1.0,
         "metadata_json": json.dumps(chunk.metadata or {}),
+        "chunker_info_json": json.dumps(chunk.chunker_info or {}),
     }
 
 
@@ -571,6 +573,14 @@ def _row_to_chunk(row: Any, namespace_id: UUID) -> TemporalChunk:
     if metadata_json:
         try:
             metadata = json.loads(metadata_json)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    chunker_info: dict[str, Any] = {}
+    chunker_info_json = _row_get(row, "chunker_info_json")
+    if chunker_info_json:
+        try:
+            chunker_info = json.loads(chunker_info_json)
         except (json.JSONDecodeError, TypeError):
             pass
 
@@ -592,6 +602,7 @@ def _row_to_chunk(row: Any, namespace_id: UUID) -> TemporalChunk:
         tags=list(_row_get(row, "tags") or []),
         confidence=float(_row_get(row, "confidence", 1.0) or 1.0),
         metadata=metadata,
+        chunker_info=chunker_info,
     )
 
 

@@ -27,6 +27,7 @@ from khora.filter import (
 )
 from khora.storage.temporal import TemporalChunk, TemporalFilter
 from khora.storage.temporal.turbopuffer import (
+    _INCLUDE_ATTRS,
     TurbopufferBackendConfig,
     TurbopufferTemporalStore,
     _build_turbopuffer_filter,
@@ -173,6 +174,63 @@ class TestChunkRowRoundtrip:
         assert chunk.confidence == 1.0  # default fallback
         assert chunk.tags == []
         assert chunk.metadata == {}
+
+    def test_chunker_info_survives_row_round_trip(self) -> None:
+        """chunker_info must round-trip through _chunk_to_row -> _row_to_chunk."""
+        ns_id = uuid4()
+        chunk = TemporalChunk(
+            id=uuid4(),
+            namespace_id=ns_id,
+            document_id=uuid4(),
+            content="body",
+            embedding=[0.1] * 4,
+            chunker_info={"chunker": "semantic"},
+        )
+        row = _chunk_to_row(chunk)
+        assert row["chunker_info_json"] == '{"chunker": "semantic"}'
+
+        restored = _row_to_chunk(row, ns_id)
+        assert restored.chunker_info == {"chunker": "semantic"}
+
+    def test_chunk_to_row_empty_chunker_info_defaults_to_object(self) -> None:
+        """A chunk with no chunker_info serializes to an empty JSON object."""
+        chunk = TemporalChunk(
+            id=uuid4(),
+            namespace_id=uuid4(),
+            document_id=uuid4(),
+            content="body",
+            embedding=[0.1] * 4,
+        )
+        row = _chunk_to_row(chunk)
+        assert row["chunker_info_json"] == "{}"
+        assert _row_to_chunk(row, chunk.namespace_id).chunker_info == {}
+
+    def test_row_missing_chunker_info_hydrates_to_empty_dict(self) -> None:
+        """A row lacking chunker_info_json (older schema) hydrates to {}."""
+        ns_id = uuid4()
+        row = {
+            "id": str(uuid4()),
+            "document_id": str(uuid4()),
+            "content": "body",
+            "vector": [0.2] * 4,
+        }
+        assert _row_to_chunk(row, ns_id).chunker_info == {}
+
+    def test_row_malformed_chunker_info_json_degrades_to_empty_dict(self) -> None:
+        """Invalid chunker_info_json degrades to {} rather than raising."""
+        ns_id = uuid4()
+        row = {
+            "id": str(uuid4()),
+            "document_id": str(uuid4()),
+            "content": "body",
+            "vector": [0.2] * 4,
+            "chunker_info_json": "{not valid json",
+        }
+        assert _row_to_chunk(row, ns_id).chunker_info == {}
+
+    def test_include_attrs_requests_chunker_info(self) -> None:
+        """Read paths must fetch chunker_info_json or it hydrates to {} forever."""
+        assert "chunker_info_json" in _INCLUDE_ATTRS
 
 
 @pytest.mark.unit
@@ -499,6 +557,37 @@ class TestCRUD:
         # The ns_handle.query default returns rows=[] - so get_chunk -> None.
         chunk = await store.get_chunk(uuid4(), uuid4())
         assert chunk is None
+
+    @pytest.mark.asyncio
+    async def test_create_then_get_chunk_preserves_chunker_info(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """chunker_info survives the full store write -> read path."""
+        _tp, client = _install_fake_turbopuffer(monkeypatch)
+        store = _build_store("k")
+        await store.connect()
+
+        ns_id = uuid4()
+        chunk = TemporalChunk(
+            id=uuid4(),
+            namespace_id=ns_id,
+            document_id=uuid4(),
+            content="x",
+            embedding=[0.1] * 4,
+            chunker_info={"chunker": "semantic"},
+        )
+        await store.create_chunk(chunk)
+
+        # The written row carries the serialized chunker_info.
+        written = client.namespaces.write.call_args.kwargs["upsert_rows"][0]
+        assert written["chunker_info_json"] == '{"chunker": "semantic"}'
+
+        # Reading that row back hydrates chunker_info via get_chunk's query path.
+        ns_handle = MagicMock()
+        ns_handle.query = AsyncMock(return_value=SimpleNamespace(rows=[written]))
+        client.namespace = MagicMock(return_value=ns_handle)
+
+        fetched = await store.get_chunk(chunk.id, ns_id)
+        assert fetched is not None
+        assert fetched.chunker_info == {"chunker": "semantic"}
 
 
 @pytest.mark.unit

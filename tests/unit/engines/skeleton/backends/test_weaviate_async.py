@@ -178,7 +178,7 @@ def _reconcile_noop_collection() -> MagicMock:
     no-op — what every connect-path test that doesn't exercise reconcile expects.
     """
     collection = MagicMock(name="CollectionAsync")
-    full = [*_BASE_PROPERTY_NAMES, *_DENORM_TEXT_KEYS, "source_timestamp"]
+    full = [*_BASE_PROPERTY_NAMES, *_DENORM_TEXT_KEYS, "source_timestamp", "chunker_info_json"]
     collection.config.get = AsyncMock(return_value=SimpleNamespace(properties=[SimpleNamespace(name=n) for n in full]))
     collection.config.add_property = AsyncMock()
     return collection
@@ -917,6 +917,7 @@ class TestDenormFieldsReconciliation:
         client.collections.exists = AsyncMock(return_value=True)
 
         # The OLD property set (no denorm props): only the pre-denorm columns.
+        # chunker_info_json is present so this test stays scoped to denorm reconcile.
         old_props = [
             SimpleNamespace(name=name)
             for name in (
@@ -931,6 +932,7 @@ class TestDenormFieldsReconciliation:
                 "tags",
                 "confidence",
                 "metadata_json",
+                "chunker_info_json",
             )
         ]
         collection = MagicMock(name="CollectionAsync")
@@ -973,6 +975,7 @@ class TestDenormFieldsReconciliation:
             "tags",
             "confidence",
             "metadata_json",
+            "chunker_info_json",
             *(p.name for p in _denorm_properties()),
         ]
         full_props = [SimpleNamespace(name=name) for name in existing_names]
@@ -985,6 +988,31 @@ class TestDenormFieldsReconciliation:
         await store.connect()
 
         collection.config.add_property.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_connect_adds_missing_chunker_info_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A pre-existing collection whose schema predates chunker_info_json gets the
+        # TEXT property added on connect (add-on-connect, not a collection recreate).
+        _weaviate, client = _install_fake_weaviate(monkeypatch)
+        client.collections.exists = AsyncMock(return_value=True)
+
+        # Full reconciled schema EXCEPT chunker_info_json.
+        existing_names = [
+            *_BASE_PROPERTY_NAMES,
+            *(p.name for p in _denorm_properties()),
+        ]
+        props = [SimpleNamespace(name=name) for name in existing_names]
+        collection = MagicMock(name="CollectionAsync")
+        collection.config.get = AsyncMock(return_value=SimpleNamespace(properties=props))
+        collection.config.add_property = AsyncMock()
+        client.collections.get = MagicMock(return_value=collection)
+
+        store = _build_store("http://localhost:8090")
+        await store.connect()
+
+        added = [call.args[0] for call in collection.config.add_property.await_args_list]
+        assert [p.name for p in added] == ["chunker_info_json"]
+        assert added[0].data_type == "TEXT"
 
 
 # ---------------------------------------------------------------------------
