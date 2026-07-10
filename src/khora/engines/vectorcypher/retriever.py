@@ -860,25 +860,31 @@ class VectorCypherRetriever:
         # existing score order so nothing is dropped.
         return [fused_results[i] for i in selected] + [r for i, r in enumerate(fused_results) if i not in selected_set]
 
-    def _diversity_decisive(self, ranking_scores: list[float]) -> bool:
+    def _diversity_skip_reason(self, ranking_scores: list[float]) -> str | None:
         """Adaptive diversity gate (#1463, #1018 "Experiment A").
 
-        Returns ``True`` when MMR should be SKIPPED because a decisive winner
-        exists: the top ranking score leads the runner-up by more than the
-        configured ``diversity_min_gap``, or there are too few candidates for
-        diversity to matter. Re-ranking a decisive result set for diversity only
-        risks demoting the clear winner, so we keep pure score order instead.
+        Returns the SKIP reason (a bounded label) when MMR should be skipped, or
+        ``None`` when MMR should run. Re-ranking a decisive result set for
+        diversity only risks demoting the clear winner, so we keep pure score
+        order in those cases:
+
+        - ``"too_few_candidates"``: fewer than 3 candidates — diversity is moot.
+        - ``"decisive_winner"``: the top ranking score leads the runner-up by
+          more than the configured ``diversity_min_gap``.
 
         ``ranking_scores`` are the post-boost/rerank scores normalized to [0, 1]
-        over the candidate set. A ``diversity_min_gap`` of 0.0 disables the gate.
+        over the candidate set. A ``diversity_min_gap`` of 0.0 disables the gate
+        (always returns ``None``).
         """
         gap = self._config.diversity_min_gap
         if gap <= 0.0:
-            return False
+            return None
         if len(ranking_scores) < 3:
-            return True
+            return "too_few_candidates"
         top_two = sorted(ranking_scores, reverse=True)[:2]
-        return (top_two[0] - top_two[1]) > gap
+        if (top_two[0] - top_two[1]) > gap:
+            return "decisive_winner"
+        return None
 
     def _effective_min_similarity(self, min_similarity: float) -> float:
         """Resolve the chunk-channel cosine floor (#1406).
@@ -2456,8 +2462,9 @@ class VectorCypherRetriever:
         # ``[:limit]`` slices below pick them up.
         if self._config.enable_diversity and len(fused_results) > limit:
             normalized_scores = _min_max_normalize(mmr_ranking_scores)
-            if self._diversity_decisive(normalized_scores):
-                _MMR_SKIPPED_COUNTER.add(1, attributes={"reason": "decisive_winner"})
+            skip_reason = self._diversity_skip_reason(normalized_scores)
+            if skip_reason is not None:
+                _MMR_SKIPPED_COUNTER.add(1, attributes={"reason": skip_reason})
             else:
                 with trace_span("khora.vectorcypher.mmr_diversity", candidate_count=len(fused_results), k=limit):
                     fused_results = self._mmr_select_fused(
@@ -2969,8 +2976,13 @@ class VectorCypherRetriever:
 
             # Append any remainder that wasn't reranked (already sorted by original score)
             reranked.extend(remainder)
-            logger.debug(f"Cross-encoder reranking applied: {top_n} candidates scored, returning top {limit}")
-            return reranked[:limit]
+            # #1463: return the FULL candidate pool (reranked top-N + remainder),
+            # not ``[:limit]``. Truncating here starved the downstream MMR gate
+            # (its ``len(fused_results) > limit`` guard was never true after
+            # reranking), so MMR never diversified the post-rerank scores. The
+            # final ``[:limit]`` slice in ``retrieve()`` still bounds the result.
+            logger.debug(f"Cross-encoder reranking applied: {top_n} candidates scored, pool size {len(reranked)}")
+            return reranked
         except Exception as e:
             logger.warning(f"Cross-encoder reranking failed, keeping original order: {e}")
             return fused_results
@@ -3162,8 +3174,10 @@ class VectorCypherRetriever:
                 reranked.append(fused)
 
             reranked.extend(remainder)
+            # #1463: return the full pool (see cross-encoder note above) so the
+            # downstream MMR gate still sees a broad candidate set to diversify.
             logger.debug(f"LLM reranking applied: {top_n} candidates scored for temporal query")
-            return reranked[:limit]
+            return reranked
         except Exception as e:
             logger.warning(f"LLM reranking failed, keeping current order: {e}")
             return fused_results

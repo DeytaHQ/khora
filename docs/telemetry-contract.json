@@ -1272,7 +1272,7 @@
       "owner": "vectorcypher",
       "description": "Number of times MMR diversity selection was skipped by the adaptive gate (issue #1463) because a decisive winner exists (top vs 2nd normalized ranking-score gap above diversity_min_gap, or too few candidates).",
       "labels": [
-        {"name": "reason", "values": ["decisive_winner"]}
+        {"name": "reason", "values": ["decisive_winner", "too_few_candidates"]}
       ],
       "_comment": "Issue #1463. NO namespace_id label - cardinality rule."
     },

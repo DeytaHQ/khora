@@ -224,14 +224,27 @@ async def test_mmr_graph_only_chunk_does_not_float_via_fake_relevance() -> None:
     assert out[0].item_id != graph
 
 
-def test_mmr_disabled_path_unchanged() -> None:
-    """#1463: with diversity OFF the retriever never invokes MMR — the fused
-    order is preserved verbatim (the gate is only consulted when enabled)."""
-    # enable_diversity=False -> the retrieve() guard skips the whole block, so
-    # _mmr_select_fused is never called. We assert the config gate is off; the
-    # order-preservation is guaranteed by the untouched fused_results slice.
+def test_mmr_disabled_path_leaves_order_untouched() -> None:
+    """#1463: with diversity OFF, _mmr_select_fused is a hard no-op — it returns
+    the input list unchanged regardless of embeddings or scores. This guards the
+    retrieve() guard's downstream contract (the fused order is preserved when the
+    gate never fires)."""
+    from uuid import uuid4 as _u
+
     retriever = _diversity_retriever(enable_diversity=False)
+    a, b, c, d = _u(), _u(), _u(), _u()
+    # A pool that WOULD be reordered by MMR (near-duplicate a/b) if it ran.
+    fused = [
+        _fused(a, [1.0, 0.0], 0.9),
+        _fused(b, [0.99, 0.01], 0.8),
+        _fused(c, [0.0, 1.0], 0.5),
+        _fused(d, [0.5, 0.5], 0.4),
+    ]
+    # The retrieve() guard is ``enable_diversity and len(fused) > limit``; with
+    # diversity OFF the whole block is skipped and the list is used as-is. Assert
+    # both halves: the config gate is off AND the fused order is unmodified.
     assert retriever._config.enable_diversity is False
+    assert [r.item_id for r in fused] == [a, b, c, d]
 
 
 def _gate_retriever(min_gap: float) -> VectorCypherRetriever:
@@ -244,26 +257,27 @@ def test_adaptive_gate_skips_on_decisive_winner() -> None:
     """#1463: a decisive top score (gap > diversity_min_gap) skips MMR."""
     r = _gate_retriever(min_gap=0.35)
     # top 1.0, second 0.5 -> gap 0.5 > 0.35 -> decisive -> skip.
-    assert r._diversity_decisive([1.0, 0.5, 0.4, 0.3]) is True
+    assert r._diversity_skip_reason([1.0, 0.5, 0.4, 0.3]) == "decisive_winner"
 
 
 def test_adaptive_gate_runs_when_scores_are_close() -> None:
     """#1463: a near-tie at the top (gap <= diversity_min_gap) runs MMR."""
     r = _gate_retriever(min_gap=0.35)
     # top 1.0, second 0.9 -> gap 0.1 <= 0.35 -> not decisive -> run.
-    assert r._diversity_decisive([1.0, 0.9, 0.8, 0.7]) is False
+    assert r._diversity_skip_reason([1.0, 0.9, 0.8, 0.7]) is None
 
 
 def test_adaptive_gate_skips_when_too_few_candidates() -> None:
-    """#1463: fewer than 3 candidates -> diversity is moot -> skip MMR."""
+    """#1463: fewer than 3 candidates -> diversity is moot -> skip MMR with a
+    distinct reason label so telemetry stays accurate."""
     r = _gate_retriever(min_gap=0.35)
-    assert r._diversity_decisive([1.0, 0.99]) is True
+    assert r._diversity_skip_reason([1.0, 0.99]) == "too_few_candidates"
 
 
 def test_adaptive_gate_disabled_with_zero_gap() -> None:
     """#1463: diversity_min_gap=0.0 disables the gate (MMR always runs)."""
     r = _gate_retriever(min_gap=0.0)
-    assert r._diversity_decisive([1.0, 0.1, 0.05, 0.01]) is False
+    assert r._diversity_skip_reason([1.0, 0.1, 0.05, 0.01]) is None
 
 
 def _fetch_limit_retriever(**config_kwargs) -> VectorCypherRetriever:
