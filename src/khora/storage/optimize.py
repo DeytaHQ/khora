@@ -12,6 +12,7 @@ safe to run multiple times.
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 from loguru import logger
 
@@ -554,6 +555,253 @@ async def reindex_hnsw_concurrently(engine) -> dict:
             logger.warning(msg)
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Per-namespace partial HNSW indexes (policy-gated, operator-driven)
+# ---------------------------------------------------------------------------
+#
+# A partial HNSW index ``... WHERE namespace_id = <ns>`` lets a
+# namespace-scoped vector query use a dedicated index instead of
+# post-filtering the shared index. Measured 50x faster with better recall on
+# a tight-filter recall at 500k rows (#1470). The cost is catalog pressure:
+# N promoted namespaces = N extra indexes on one table (planner overhead,
+# autovacuum load, catalog bloat). Because of that trade-off this is a
+# POLICY-GATED mechanism, NEVER automatic per-namespace — the promotion
+# functions no-op unless an operator opts in via config, and even then only
+# promote namespaces that cross a row threshold, capped by a hard ceiling.
+#
+# m / ef_construction match the tuned float32 indexes so a promoted namespace
+# gets the same graph quality as the shared index.
+_PARTIAL_HNSW_M = 24
+_PARTIAL_HNSW_EF_CONSTRUCTION = 128
+
+#: Tables that carry a per-namespace HNSW index. Each has an ``embedding
+#: vector`` column and a ``namespace_id uuid`` column.
+_PARTIAL_HNSW_TABLES = ("chunks", "entities")
+
+
+def _partial_hnsw_index_name(table: str, namespace_id: UUID) -> str:
+    """Deterministic, identifier-safe index name for a namespace partial index.
+
+    Uses the UUID hex (no hyphens) so the name is a valid unquoted Postgres
+    identifier and round-trips: the same namespace always maps to the same
+    index name, which makes CREATE / DROP idempotent.
+    """
+    return f"ix_{table}_embedding_hnsw_ns_{namespace_id.hex}"
+
+
+async def list_partial_hnsw_indexes(engine, *, table: str | None = None) -> list[str]:
+    """List existing per-namespace partial HNSW index names.
+
+    Args:
+        engine: An ``sqlalchemy.ext.asyncio.AsyncEngine`` instance.
+        table: If given, restrict to one table (``chunks`` / ``entities``).
+
+    Returns:
+        Sorted list of matching index names.
+    """
+    from sqlalchemy import text
+
+    tables = (table,) if table else _PARTIAL_HNSW_TABLES
+    found: list[str] = []
+    async with engine.connect() as conn:
+        await conn.execution_options(isolation_level="AUTOCOMMIT")
+        for tbl in tables:
+            # ``ix_<table>_embedding_hnsw_ns_<32 hex chars>`` — the trailing
+            # ``\_ns\_`` LIKE anchor avoids matching the shared
+            # ``ix_chunks_embedding_hnsw`` index.
+            rows = await conn.execute(
+                text("SELECT indexname FROM pg_indexes WHERE tablename = :tbl AND indexname LIKE :pat ESCAPE '\\'"),
+                {"tbl": tbl, "pat": f"ix\\_{tbl}\\_embedding\\_hnsw\\_ns\\_%"},
+            )
+            found.extend(r[0] for r in rows)
+    return sorted(found)
+
+
+async def _namespace_row_count(engine, namespace_id: UUID) -> int:
+    """Chunk count for a namespace — the promotion-eligibility metric."""
+    from sqlalchemy import text
+
+    async with engine.connect() as conn:
+        await conn.execution_options(isolation_level="AUTOCOMMIT")
+        row = await conn.execute(
+            text("SELECT count(*) FROM chunks WHERE namespace_id = :ns"),
+            {"ns": namespace_id},
+        )
+        return int(row.scalar() or 0)
+
+
+async def promote_namespace_hnsw(
+    engine,
+    namespace_id: UUID,
+    *,
+    m: int = _PARTIAL_HNSW_M,
+    ef_construction: int = _PARTIAL_HNSW_EF_CONSTRUCTION,
+) -> dict:
+    """Create per-namespace partial HNSW indexes for ``namespace_id``.
+
+    This is the raw MECHANISM — it always builds the indexes, bypassing the
+    promotion policy. Prefer ``maybe_promote_namespace`` for operator/task
+    use, which enforces the enabled flag, row threshold, and index ceiling.
+
+    Builds one partial index per table in ``_PARTIAL_HNSW_TABLES`` with a
+    ``WHERE namespace_id = <ns>`` predicate, using
+    ``CREATE INDEX CONCURRENTLY IF NOT EXISTS`` so it never blocks writes and
+    is idempotent. Postgres-only.
+
+    The namespace UUID is bound via a parameter for the row-count read and
+    formatted into the DDL as a literal for the partial predicate — DDL cannot
+    take bind parameters, but a ``UUID`` renders to a fixed 36-char hex form
+    with no injection surface.
+
+    Args:
+        engine: An ``sqlalchemy.ext.asyncio.AsyncEngine`` instance.
+        namespace_id: The namespace (row-level and stable IDs are the same on
+            these tables) to promote.
+        m: HNSW M parameter for the partial indexes.
+        ef_construction: HNSW ef_construction for the partial indexes.
+
+    Returns:
+        Dict with ``indexes_created`` count, ``indexes`` (names built), and
+        ``errors``.
+    """
+    from sqlalchemy import text
+
+    result: dict[str, Any] = {"indexes_created": 0, "indexes": [], "errors": []}
+    ns_literal = str(namespace_id)
+
+    for table in _PARTIAL_HNSW_TABLES:
+        idx_name = _partial_hnsw_index_name(table, namespace_id)
+        ddl = (
+            f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {idx_name} "
+            f"ON {table} USING hnsw (embedding vector_cosine_ops) "
+            f"WITH (m = {int(m)}, ef_construction = {int(ef_construction)}) "
+            f"WHERE namespace_id = '{ns_literal}'::uuid"
+        )
+        try:
+            async with engine.connect() as conn:
+                await conn.execution_options(isolation_level="AUTOCOMMIT")
+                existing = await conn.execute(
+                    text("SELECT 1 FROM pg_indexes WHERE indexname = :name"),
+                    {"name": idx_name},
+                )
+                if existing.scalar() is not None:
+                    logger.debug(f"Partial HNSW index {idx_name} already exists, skipping CREATE")
+                    result["indexes"].append(idx_name)
+                    continue
+                logger.info(f"Creating partial HNSW index {idx_name} for namespace {ns_literal}")
+                await conn.execute(text(ddl))
+            result["indexes_created"] += 1
+            result["indexes"].append(idx_name)
+        except Exception as e:  # noqa: BLE001
+            msg = f"CREATE INDEX {idx_name}: {e}"
+            result["errors"].append(msg)
+            logger.warning(msg)
+
+    return result
+
+
+async def demote_namespace_hnsw(engine, namespace_id: UUID) -> dict:
+    """Drop the per-namespace partial HNSW indexes for ``namespace_id``.
+
+    Idempotent (``DROP INDEX CONCURRENTLY IF EXISTS``). Call this on namespace
+    deletion so a deleted tenant does not leave orphan indexes behind, and to
+    reclaim a slot under the ``hnsw_partial_max_indexes`` ceiling.
+
+    Args:
+        engine: An ``sqlalchemy.ext.asyncio.AsyncEngine`` instance.
+        namespace_id: The namespace whose partial indexes to drop.
+
+    Returns:
+        Dict with ``indexes_dropped`` count and ``errors``.
+    """
+    from sqlalchemy import text
+
+    result: dict[str, Any] = {"indexes_dropped": 0, "errors": []}
+
+    for table in _PARTIAL_HNSW_TABLES:
+        idx_name = _partial_hnsw_index_name(table, namespace_id)
+        try:
+            async with engine.connect() as conn:
+                await conn.execution_options(isolation_level="AUTOCOMMIT")
+                existing = await conn.execute(
+                    text("SELECT 1 FROM pg_indexes WHERE indexname = :name"),
+                    {"name": idx_name},
+                )
+                if existing.scalar() is None:
+                    continue
+                logger.info(f"Dropping partial HNSW index {idx_name}")
+                await conn.execute(text(f"DROP INDEX CONCURRENTLY IF EXISTS {idx_name}"))
+            result["indexes_dropped"] += 1
+        except Exception as e:  # noqa: BLE001
+            msg = f"DROP INDEX {idx_name}: {e}"
+            result["errors"].append(msg)
+            logger.warning(msg)
+
+    return result
+
+
+async def maybe_promote_namespace(
+    engine,
+    namespace_id: UUID,
+    *,
+    enabled: bool = False,
+    min_rows: int = 50000,
+    max_indexes: int = 64,
+) -> dict:
+    """Promote a namespace to partial HNSW indexes IF the policy allows it.
+
+    This is the POLICY gate around ``promote_namespace_hnsw``. It is
+    default-OFF and never runs automatically on the write path — an operator
+    or a maintenance task must call it with ``enabled=True`` (wire the
+    arguments from ``KhoraConfig.storage.hnsw_partial_*``). It promotes only
+    when all of the following hold:
+
+    * ``enabled`` is True (the master switch);
+    * the namespace has at least ``min_rows`` chunks (hot enough to justify a
+      dedicated index);
+    * fewer than ``max_indexes`` per-namespace partial indexes already exist
+      on the ``chunks`` table (the catalog-bloat ceiling).
+
+    A refused promotion is reported in the result (``promoted=False`` with a
+    ``reason``), never raised — callers treat this as advisory.
+
+    Args:
+        engine: An ``sqlalchemy.ext.asyncio.AsyncEngine`` instance.
+        namespace_id: The namespace to consider for promotion.
+        enabled: Master switch (``KHORA_STORAGE_HNSW_PARTIAL_ENABLED``).
+        min_rows: Row-count threshold (``KHORA_STORAGE_HNSW_PARTIAL_MIN_ROWS``).
+        max_indexes: Per-table ceiling
+            (``KHORA_STORAGE_HNSW_PARTIAL_MAX_INDEXES``).
+
+    Returns:
+        Dict with ``promoted`` (bool), ``reason`` (str), ``row_count`` (int),
+        and, when promoted, the ``promote_namespace_hnsw`` result under
+        ``created``.
+    """
+    if not enabled:
+        return {"promoted": False, "reason": "disabled", "row_count": 0}
+
+    # Already promoted? Idempotent short-circuit — do not count it against the
+    # ceiling twice or rebuild it.
+    existing = await list_partial_hnsw_indexes(engine, table="chunks")
+    if _partial_hnsw_index_name("chunks", namespace_id) in existing:
+        return {"promoted": False, "reason": "already_promoted", "row_count": 0}
+
+    row_count = await _namespace_row_count(engine, namespace_id)
+    if row_count < min_rows:
+        return {"promoted": False, "reason": "below_min_rows", "row_count": row_count}
+
+    if len(existing) >= max_indexes:
+        logger.warning(
+            f"Refusing to promote namespace {namespace_id}: partial HNSW index ceiling "
+            f"({max_indexes}) reached ({len(existing)} exist). Demote a colder namespace first."
+        )
+        return {"promoted": False, "reason": "ceiling_reached", "row_count": row_count}
+
+    created = await promote_namespace_hnsw(engine, namespace_id)
+    return {"promoted": True, "reason": "promoted", "row_count": row_count, "created": created}
 
 
 async def optimize_postgresql(

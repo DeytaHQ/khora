@@ -1198,6 +1198,36 @@ class StorageSettings(BaseSettings):
         "Falls back to full precision if pgvector < 0.7.0.",
     )
 
+    # Per-namespace partial HNSW indexes (operator-driven, default-OFF).
+    # A partial HNSW index `WHERE namespace_id = <ns>` lets a namespace-scoped
+    # vector query use a dedicated index instead of post-filtering the shared
+    # index, which measured 50x faster with better recall on a tight-filter
+    # recall at 500k rows (#1470). The trade-off is catalog cost: N promoted
+    # namespaces = N extra indexes on one table (planner overhead, autovacuum
+    # load, catalog bloat). This is a POLICY-GATED mechanism, never automatic:
+    # an operator (or maintenance task) calls
+    # ``khora.storage.optimize.maybe_promote_namespace`` which only acts when
+    # ``hnsw_partial_enabled`` is True, the namespace has crossed
+    # ``hnsw_partial_min_rows`` chunks, and fewer than
+    # ``hnsw_partial_max_indexes`` partial indexes already exist. Beyond ~10M
+    # rows, move to ``PARTITION BY LIST (namespace_id)`` instead (see
+    # docs/architecture/storage-backends.md).
+    hnsw_partial_enabled: bool = Field(
+        default=False,
+        description="Enable operator-driven promotion of hot namespaces to per-namespace partial HNSW indexes. "
+        "Default OFF: the promotion functions no-op unless this is True. Never auto-creates on writes.",
+    )
+    hnsw_partial_min_rows: int = Field(
+        default=50000,
+        description="Row-count threshold a namespace must cross (chunk count) before it is eligible for promotion "
+        "to a per-namespace partial HNSW index. High default keeps promotion for genuinely hot tenants only.",
+    )
+    hnsw_partial_max_indexes: int = Field(
+        default=64,
+        description="Ceiling on the number of per-namespace partial HNSW indexes per table. Caps catalog bloat / "
+        "planner overhead / autovacuum load. Promotion beyond this count is refused (recorded, not raised).",
+    )
+
     @model_validator(mode="before")
     @classmethod
     def _migrate_legacy_fields(cls, data: Any) -> Any:
