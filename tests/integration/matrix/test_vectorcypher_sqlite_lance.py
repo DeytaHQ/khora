@@ -943,12 +943,6 @@ async def test_vc_filter_report_partial_pushdown_json1_off(kb: Khora, namespace_
     assert report["post_filtered"] is True
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="entity-surface filter leak (#1457): the embedded graph fallback surfaces a non-empty "
-    "entity surface the chunk-only channels don't cover, so build_filter_report forces both leaves "
-    "into unenforced_keys; restored once the #1457 fix filters the entity surface",
-)
 async def test_vc_filter_report_graph_nothing_pushed_embedded(kb: Khora, namespace_id: UUID) -> None:
     """The embedded graph fallback pushes NOTHING — every leaf re-checked in memory.
 

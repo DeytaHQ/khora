@@ -2548,6 +2548,28 @@ class VectorCypherRetriever:
             relationships.append((rel, rel_score))
         relationships.sort(key=lambda x: x[1], reverse=True)
 
+        # GitHub #1457: ∃-over-provenance entity/relationship filtering. A
+        # caller filter narrows the chunk surface via the per-channel post-
+        # filters above, but the graph-derived entity/relationship surfaces are
+        # assembled from graph traversal the chunk filter never touched. Apply
+        # the SAME "Chunk" predicate to each item's provenance chunks: an item
+        # survives iff ≥1 of its provenance chunks passes. Only runs under a
+        # filter; unfiltered recalls take the zero-cost path (no extra fetch).
+        # ``provenance_filtered_surfaces`` tells the engine to mark the
+        # entities/relationships surfaces covered. It is True whenever the ∃ pass
+        # ran under a filter: every returned item is VERIFIED (the helper
+        # fail-closes by dropping items whose provenance couldn't be fetched), so
+        # the surface is legitimately enforced even on the degraded path.
+        provenance_filtered_surfaces = False
+        if filter_ast is not None and filter_ast.children and (entity_results or relationships):
+            entity_results, relationships, provenance_filtered_surfaces = await self._filter_surfaces_by_provenance(
+                entity_results,
+                relationships,
+                filter_ast=filter_ast,
+                namespace_id=namespace_id,
+                degradations=degradations,
+            )
+
         return VectorCypherResult(
             chunks=chunk_results,
             entities=entity_results,
@@ -2598,12 +2620,92 @@ class VectorCypherRetriever:
                 # the flag is off or when the path fell back to vector-only.
                 "ppr_path_used": ppr_path_used,
                 "ppr_entity_count": len(ppr_entity_scores),
+                # GitHub #1457: True whenever the ∃-over-provenance filter ran
+                # (filter present and there were entity/relationship surfaces to
+                # prune). The engine reads this to add {"entities","relationships"}
+                # to the honest report's covered surfaces. Stays True even on the
+                # fetch-failure degraded path: the helper fail-closes by DROPPING
+                # unverified items, so every returned survivor is VERIFIED and the
+                # surface is legitimately enforced (the failure is recorded
+                # separately as a Degradation on ``degradations``).
+                "provenance_filtered_surfaces": provenance_filtered_surfaces,
                 # Private carrier (popped by the engine before the public spread):
                 # the per-channel honest filter-pushdown plans the engine folds
                 # into ``engine_info["filter"]``. Never leaks into engine_info.
                 "_filter_channel_plans": filter_channel_plans,
             },
         )
+
+    async def _filter_surfaces_by_provenance(
+        self,
+        entity_results: list[tuple[Entity, float]],
+        relationships: list[tuple[Relationship, float]],
+        filter_ast: FilterNode,
+        namespace_id: UUID,
+        degradations: list[Degradation],
+    ) -> tuple[list[tuple[Entity, float]], list[tuple[Relationship, float]], bool]:
+        """Thin orchestrator: ∃-over-provenance prune of the graph-path surfaces.
+
+        GitHub #1457. The caller filter narrows chunks via the per-channel chunk
+        post-filters, but the graph-derived entities/relationships are assembled
+        from traversal the chunk filter never touched. The engine-agnostic
+        :func:`~khora.filter.provenance.filter_items_by_provenance` re-applies the
+        SAME ``"Chunk"`` predicate over each item's provenance chunks; this method
+        just unwraps/re-associates the ``(obj, score)`` tuples and applies the
+        relationship endpoint rule.
+
+        Keep rules:
+
+        - **Entity** survives iff ≥1 of its ``source_chunk_ids`` chunks passes
+          the predicate. An entity with no provenance (stub) is dropped.
+        - **Relationship** survives iff BOTH endpoints survived AND (it carries no
+          provenance OR ≥1 of its own provenance chunks passes). Provenance-less
+          legacy edges use the endpoint rule only.
+
+        A filter matching zero chunks empties both surfaces. Input order is
+        preserved. ``filtered`` is always ``True`` here: the ∃ pass ran under a
+        filter, so even on the degraded (fetch-failure) path the returned survivors
+        are VERIFIED — the helper fail-closes by dropping unverified items — so the
+        surface is legitimately enforced and the engine marks it covered.
+        """
+        from khora.filter.provenance import filter_items_by_provenance
+
+        # Entities: ∃ over each entity's own provenance.
+        kept_entity_objs = await filter_items_by_provenance(
+            [entity for entity, _ in entity_results],
+            filter_ast,
+            namespace_id=namespace_id,
+            storage=self._storage,
+            component="vectorcypher.entity_filter",
+            degradations=degradations,
+        )
+        kept_entity_ids = {entity.id for entity in kept_entity_objs}
+        kept_entities = [(entity, score) for entity, score in entity_results if entity.id in kept_entity_ids]
+
+        # Relationships: endpoint rule AND ∃-over-own-provenance. Legacy edges
+        # (no provenance) use the endpoint rule alone; the provenance-bearing
+        # ones run through the ∃ helper as their own surface.
+        prov_rels = [(rel, score) for rel, score in relationships if rel.source_chunk_ids]
+        rels_passing_existential = {
+            rel.id
+            for rel in await filter_items_by_provenance(
+                [rel for rel, _ in prov_rels],
+                filter_ast,
+                namespace_id=namespace_id,
+                storage=self._storage,
+                component="vectorcypher.relationship_filter",
+                degradations=degradations,
+            )
+        }
+        kept_relationships = [
+            (rel, score)
+            for rel, score in relationships
+            if rel.source_entity_id in kept_entity_ids
+            and rel.target_entity_id in kept_entity_ids
+            and (not rel.source_chunk_ids or rel.id in rels_passing_existential)
+        ]
+
+        return kept_entities, kept_relationships, True
 
     async def _vector_only_fallback(
         self,

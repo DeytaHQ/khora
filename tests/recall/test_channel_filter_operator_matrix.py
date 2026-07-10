@@ -203,6 +203,14 @@ _EXCLUDED_CHANNELS: dict[str, str] = {
     "_simple_retrieve": (
         "Simple/VECTOR/KEYWORD dispatcher — delegates to the pushdown vector / BM25 channels; not a post-filter seam."
     ),
+    "_filter_surfaces_by_provenance": (
+        "Entity/relationship SURFACE post-filter (#1457, ∃-over-provenance): runs on the "
+        "assembled entity/relationship surfaces AFTER chunk fusion, never on chunks feeding "
+        "RRF. It enforces the caller filter existentially over each item's provenance chunks "
+        "(via khora.filter.provenance.filter_items_by_provenance) — so it is not a chunk "
+        "post-filter seam and cannot smuggle a filter-violating chunk into fusion; it has no "
+        "chunk-channel matrix row."
+    ),
 }
 
 
@@ -323,7 +331,7 @@ def test_partition_total_and_disjoint() -> None:
     """The two seam-sets totally and disjointly partition the filter-aware methods.
 
     ``_POST_FILTER_CHANNELS`` ∪ ``_EXCLUDED_CHANNELS.keys()`` == the audit gate's
-    ``_FILTER_AWARE_METHODS`` (currently 2 + 9 = 11), and the two sets are disjoint.
+    ``_FILTER_AWARE_METHODS`` (currently 2 + 10 = 12), and the two sets are disjoint.
     A new filter-aware channel added to ``retriever.py`` (which ``test_param_set_is_current``
     in the audit gate forces into ``_FILTER_AWARE_METHODS``) lands in NEITHER set
     until it is classified, failing this — the new-channel backstop.

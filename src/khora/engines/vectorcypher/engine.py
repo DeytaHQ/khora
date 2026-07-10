@@ -2664,9 +2664,19 @@ class VectorCypherEngine:
         # chunk-side filter narrowed; a graph-path recall emits graph-derived
         # entities / relationships the chunk filter never touched, so those
         # surfaces stay uncovered and force the filter's leaves unenforced.
+        # #1457: the graph path now runs an ∃-over-provenance post-filter on the
+        # entity/relationship surfaces (retriever._filter_surfaces_by_provenance),
+        # so mark them covered whenever that pass ran under a filter — mirroring
+        # how the simple path covers them. The flag is True even on the degraded
+        # (provenance-fetch-failure) path: the helper fail-closes by DROPPING
+        # unverified items, so every returned entity/relationship is verified and
+        # the surface is legitimately enforced (the failure is recorded as a
+        # separate Degradation on engine_info). Stays uncovered only when the
+        # filter is absent.
         covered = {"chunks"} | (
             {"entities", "relationships"}
             if str(result.metadata.get("search_mode", "")).startswith("simple_")
+            or result.metadata.get("provenance_filtered_surfaces")
             else set()
         )
 
