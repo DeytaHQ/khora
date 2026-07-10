@@ -36,9 +36,11 @@ def test_symbol_table_matches_kernel_usage():
     ``_rust_foo`` binding but forgets to register it in the table, this test
     fails. Symmetrically, a table entry that no kernel uses is flagged too.
     """
-    source = importlib.util.find_spec("khora._accel").origin
-    assert source is not None
-    text = open(source).read()
+    # accel is already imported, so read its source straight off __file__
+    # (avoids depending on importlib.util being bound, which is import-order
+    # sensitive: importlib.util is a submodule, not always present on importlib).
+    assert accel.__file__ is not None
+    text = open(accel.__file__).read()
 
     # Strip the _RUST_SYMBOLS table definition itself so its keys don't count
     # as "usage". The table is the block from "_RUST_SYMBOLS: dict" to its "}".
@@ -198,6 +200,18 @@ def test_partial_wheel_logs_warning_naming_missing_symbol(reload_accel_with):
     joined = " ".join(messages)
     assert "block_and_score_pairs" in joined
     assert "stale" in joined.lower()
+
+
+def test_partial_wheel_no_warning_when_backend_forced_off(reload_accel_with, monkeypatch):
+    """Forcing the backend off suppresses the stale-wheel WARNING (opted out)."""
+    monkeypatch.setenv("KHORA_ACCEL_BACKEND", "numpy")
+    fake = _make_fake_khora_accel(missing={"block_and_score_pairs"})
+    mod, messages = reload_accel_with(fake)
+
+    # Rust is force-disabled, so no scary stale-wheel notice is emitted.
+    assert mod._HAS_RUST is False
+    stale = [m for m in messages if "stale" in m.lower()]
+    assert not stale, f"forced-off backend must not warn about a stale wheel: {stale}"
 
 
 def test_full_wheel_emits_no_stale_warning(reload_accel_with):

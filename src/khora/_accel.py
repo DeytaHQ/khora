@@ -132,7 +132,9 @@ _rust_weighted_rrf_normalized_with_provenance = getattr(_khora_accel, "weighted_
 # When the wheel is present but partially importable (stale/partial build), warn
 # and name the missing symbols so the operator knows their wheel is stale. A
 # wholly-absent wheel is the normal no-accel install and only logs INFO below.
-if _HAS_RUST:
+# Suppressed when the operator has explicitly forced Rust off (numpy/python):
+# they opted out, so the stale-wheel notice would just be misleading noise.
+if _HAS_RUST and _FORCE_BACKEND not in ("numpy", "python"):
     _missing_rust_symbols = sorted(attr for attr in _RUST_SYMBOLS.values() if getattr(_khora_accel, attr, None) is None)
     if _missing_rust_symbols:
         logger.warning(
