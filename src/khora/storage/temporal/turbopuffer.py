@@ -580,7 +580,9 @@ def _row_to_chunk(row: Any, namespace_id: UUID) -> TemporalChunk:
     chunker_info_json = _row_get(row, "chunker_info_json")
     if chunker_info_json:
         try:
-            chunker_info = json.loads(chunker_info_json)
+            decoded = json.loads(chunker_info_json)
+            if isinstance(decoded, dict):
+                chunker_info = decoded
         except (json.JSONDecodeError, TypeError):
             pass
 

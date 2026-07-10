@@ -681,7 +681,9 @@ class WeaviateTemporalStore(TemporalVectorStore):
         chunker_info: dict[str, Any] = {}
         if props.get("chunker_info_json"):
             try:
-                chunker_info = json.loads(props["chunker_info_json"])
+                decoded = json.loads(props["chunker_info_json"])
+                if isinstance(decoded, dict):
+                    chunker_info = decoded
             except (json.JSONDecodeError, TypeError):
                 pass
 

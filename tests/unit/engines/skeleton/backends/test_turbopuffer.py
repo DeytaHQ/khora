@@ -228,6 +228,19 @@ class TestChunkRowRoundtrip:
         }
         assert _row_to_chunk(row, ns_id).chunker_info == {}
 
+    @pytest.mark.parametrize("payload", ["null", "[1, 2]", '"a string"', "42", "true"])
+    def test_row_non_dict_chunker_info_json_degrades_to_empty_dict(self, payload: str) -> None:
+        """Valid-but-non-dict JSON (null/list/scalar) degrades to {} rather than leaking a non-dict."""
+        ns_id = uuid4()
+        row = {
+            "id": str(uuid4()),
+            "document_id": str(uuid4()),
+            "content": "body",
+            "vector": [0.2] * 4,
+            "chunker_info_json": payload,
+        }
+        assert _row_to_chunk(row, ns_id).chunker_info == {}
+
     def test_include_attrs_requests_chunker_info(self) -> None:
         """Read paths must fetch chunker_info_json or it hydrates to {} forever."""
         assert "chunker_info_json" in _INCLUDE_ATTRS
