@@ -907,6 +907,74 @@ class TestDenormFieldsRoundTrip:
 
 
 @pytest.mark.unit
+class TestChunkerInfoRoundTrip:
+    """``_object_to_chunk`` chunker_info parse branches (hermetic).
+
+    The store-level round-trip is only exercised by the live-gated Weaviate
+    integration test, so these pin the write→read parse branches — valid dict,
+    empty/absent, non-dict JSON, and malformed JSON — in the default suite.
+    """
+
+    def _chunk(self, ns_id: UUID, chunker_info: dict[str, Any] | None = None) -> TemporalChunk:
+        return TemporalChunk(
+            id=uuid4(),
+            namespace_id=ns_id,
+            document_id=uuid4(),
+            content="hello",
+            embedding=[0.1] * 1536,
+            chunker_info=chunker_info if chunker_info is not None else {},
+        )
+
+    def test_valid_dict_round_trips(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _install_fake_weaviate(monkeypatch)
+        store = _build_store("http://localhost:8090")
+
+        ns_id = uuid4()
+        chunk = self._chunk(ns_id, {"chunker": "semantic"})
+        props = _chunk_to_properties(chunk)
+        assert props["chunker_info_json"] == '{"chunker": "semantic"}'
+
+        back = store._object_to_chunk(_readback_object(props, chunk.id), ns_id)
+        assert back.chunker_info == {"chunker": "semantic"}
+
+    def test_empty_and_absent_hydrate_to_empty_dict(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _install_fake_weaviate(monkeypatch)
+        store = _build_store("http://localhost:8090")
+
+        ns_id = uuid4()
+        chunk = self._chunk(ns_id)
+        props = _chunk_to_properties(chunk)
+        # A chunk with no chunker_info serializes to the empty JSON object.
+        assert props["chunker_info_json"] == "{}"
+        assert store._object_to_chunk(_readback_object(props, chunk.id), ns_id).chunker_info == {}
+
+        # Drop the key entirely (an older object that never carried it).
+        props.pop("chunker_info_json", None)
+        assert store._object_to_chunk(_readback_object(props, chunk.id), ns_id).chunker_info == {}
+
+    @pytest.mark.parametrize("payload", ["null", "[1, 2]", '"a string"', "42", "true"])
+    def test_non_dict_json_degrades_to_empty_dict(self, monkeypatch: pytest.MonkeyPatch, payload: str) -> None:
+        _install_fake_weaviate(monkeypatch)
+        store = _build_store("http://localhost:8090")
+
+        ns_id = uuid4()
+        chunk = self._chunk(ns_id)
+        props = _chunk_to_properties(chunk)
+        props["chunker_info_json"] = payload
+        assert store._object_to_chunk(_readback_object(props, chunk.id), ns_id).chunker_info == {}
+
+    def test_malformed_json_degrades_to_empty_dict(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _install_fake_weaviate(monkeypatch)
+        store = _build_store("http://localhost:8090")
+
+        ns_id = uuid4()
+        chunk = self._chunk(ns_id)
+        props = _chunk_to_properties(chunk)
+        props["chunker_info_json"] = "{not valid json"
+        assert store._object_to_chunk(_readback_object(props, chunk.id), ns_id).chunker_info == {}
+
+
+@pytest.mark.unit
 class TestDenormFieldsReconciliation:
     @pytest.mark.asyncio
     async def test_connect_adds_missing_denorm_properties(self, monkeypatch: pytest.MonkeyPatch) -> None:
