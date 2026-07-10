@@ -119,17 +119,22 @@ def _make_config(url: str) -> Config:
 
 
 # A runtime-shaped ``khora_chunks`` table: the identity/temporal/content
-# columns the runtime always creates, the eight denormalized columns 041 added
+# columns the runtime always creates, the ``metadata`` / ``chunker_info`` JSONB
+# columns the runtime always carries, the eight denormalized columns 041 added
 # and the widen migration resized (present, NULL), plus ``content_tsv`` and the
 # BEFORE INSERT OR UPDATE trigger that recomputes it. Creating this before the
 # upgrade exercises 044's existing-deployment backfill path including the
-# trigger DISABLE/ENABLE.
+# trigger DISABLE/ENABLE. ``metadata`` / ``chunker_info`` must be present because
+# the replayed ``upgrade head`` runs migration 053 (later in the chain), whose
+# relocation reads/writes both columns — the real runtime table always has them.
 _RUNTIME_KHORA_CHUNKS_DDL = """
 CREATE TABLE khora_chunks (
     id UUID PRIMARY KEY,
     namespace_id UUID NOT NULL,
     document_id UUID NOT NULL,
     content TEXT NOT NULL,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    chunker_info JSONB NOT NULL DEFAULT '{}'::jsonb,
     occurred_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ,
     source_type VARCHAR(64),
