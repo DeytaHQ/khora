@@ -220,6 +220,8 @@ class TestChunkMetadataMerge:
         assert ci["chunk_index"] == 0
         assert ci["start_char"] == 3
         assert ci["end_char"] == 13
+        assert ci["token_count"] == 0
+        assert "token_count" not in md
 
     @pytest.mark.asyncio
     async def test_remember_batch_merges_doc_metadata(self) -> None:
@@ -276,6 +278,8 @@ class TestChunkMetadataMerge:
         assert ci["chunk_index"] == 0
         assert ci["start_char"] == 3
         assert ci["end_char"] == 13
+        assert ci["token_count"] == 0
+        assert "token_count" not in md
 
 
 # ---------------------------------------------------------------------------

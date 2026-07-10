@@ -192,6 +192,60 @@ class TestChunkerInfoPropagation:
         )
 
     @pytest.mark.asyncio
+    async def test_bookkeeping_overrides_colliding_chunker_metadata(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Chunker metadata that collides with the four bookkeeping names loses:
+        the engine's stamped values win in chunker_info (stamped last), and none
+        of the four keys leak into TemporalChunk.metadata."""
+        engine = _make_connected_engine()
+
+        # Chunker emits conflicting values for all four bookkeeping keys.
+        collision = {"chunk_index": 99, "start_char": 99, "end_char": 99, "token_count": 99}
+        stub_chunker = _StubChunker(
+            [_StubChunkResult(content="hello world", start_char=0, end_char=11, token_count=7, metadata=collision)]
+        )
+        monkeypatch.setattr(
+            "khora.extraction.chunkers.create_chunker",
+            lambda *args, **kwargs: stub_chunker,
+        )
+
+        captured: list[list[TemporalChunk]] = []
+
+        async def _capture_create_chunks(chunks: list[TemporalChunk]) -> list[TemporalChunk]:
+            captured.append(list(chunks))
+            for c in chunks:
+                if c.id is None:
+                    c.id = uuid4()
+            return list(chunks)
+
+        engine._temporal_store.create_chunks_batch = AsyncMock(side_effect=_capture_create_chunks)
+        engine._dual_nodes.create_chunk_nodes_batch = AsyncMock(return_value=None)
+        engine._embedder.embed_batch = AsyncMock(return_value=[[0.0] * 4])
+        engine._embedder.model_name = "mock-embed"
+        engine._storage.update_document = AsyncMock(return_value=None)
+
+        from datetime import UTC, datetime
+
+        await engine._process_document(
+            _make_document(content="hello world"),
+            skill_name="default",
+            expertise=None,
+            extraction_model=None,
+            occurred_at=datetime.now(UTC),
+            entity_types=[],
+            relationship_types=[],
+        )
+
+        temporal_chunk = captured[0][0]
+        ci = temporal_chunk.chunker_info
+        # Stamped bookkeeping wins over the chunker's colliding values.
+        assert ci["chunk_index"] == 0
+        assert ci["start_char"] == 0
+        assert ci["end_char"] == 11
+        assert ci["token_count"] == 7
+        # None of the four bookkeeping keys leak into metadata.
+        assert not any(k in temporal_chunk.metadata for k in ("chunk_index", "start_char", "end_char", "token_count"))
+
+    @pytest.mark.asyncio
     async def test_multiple_chunks_each_carry_their_own_chunker_info(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A multi-chunk document → each ``TemporalChunk`` carries its own dict."""
         engine = _make_connected_engine()

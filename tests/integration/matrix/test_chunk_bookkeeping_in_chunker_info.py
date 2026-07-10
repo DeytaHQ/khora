@@ -141,10 +141,7 @@ async def kb(tmp_path: Path, request: pytest.FixtureRequest) -> AsyncIterator[Kh
     try:
         yield instance
     finally:
-        try:
-            await instance.disconnect()
-        except Exception:
-            pass
+        await instance.disconnect()
 
 
 def _types_and_expertise(engine: str) -> tuple[list[str], list[str], ExpertiseConfig | None]:
@@ -179,6 +176,26 @@ def _khora_chunks_json(db_path: str) -> list[tuple[dict[str, Any], dict[str, Any
         md = json.loads(row["metadata"]) if row["metadata"] else {}
         ci = json.loads(row["chunker_info"]) if row["chunker_info"] else {}
         out.append((md, ci))
+    return out
+
+
+def _main_chunks_rows(db_path: str) -> list[tuple[dict[str, Any], int]]:
+    """Return ``(metadata, token_count)`` from every main ``chunks`` row.
+
+    The main ``chunks`` table carries ``token_count`` as a first-class column
+    and ``metadata`` as a JSON column (same sqlite file as ``khora_chunks``).
+    """
+    con = sqlite3.connect(db_path)
+    con.row_factory = sqlite3.Row
+    try:
+        rows = con.execute("SELECT metadata, token_count FROM chunks").fetchall()
+    finally:
+        con.close()
+
+    out: list[tuple[dict[str, Any], int]] = []
+    for row in rows:
+        md = json.loads(row["metadata"]) if row["metadata"] else {}
+        out.append((md, int(row["token_count"] or 0)))
     return out
 
 
@@ -292,3 +309,13 @@ async def test_bookkeeping_split_survives_replace_document(kb: Khora) -> None:
 
     db_path = str(kb._config.storage.sqlite_lance.db_path)  # type: ignore[attr-defined]
     _assert_bookkeeping_split(_khora_chunks_json(db_path))
+
+    # The replace path also feeds the main ``chunks`` table (via the
+    # coordinator). Those rows must keep the four bookkeeping keys out of the
+    # user metadata column, and persist a real (non-zero) token_count.
+    main_rows = _main_chunks_rows(db_path)
+    assert main_rows, "expected at least one main chunks row"
+    for md, token_count in main_rows:
+        leaked = [k for k in _BOOKKEEPING_KEYS if k in md]
+        assert not leaked, f"bookkeeping keys leaked into main chunks metadata: {leaked} in {md!r}"
+        assert token_count > 0, f"main chunks token_count must be non-zero, got {token_count}"
