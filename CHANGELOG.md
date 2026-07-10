@@ -6,10 +6,6 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ## [Unreleased]
 
-### Changed
-
-- **Filtered VectorCypher graph-path recalls now filter the entity/relationship surfaces by provenance** (#1457): a recall filter narrows not just chunks but also the graph-derived entities and relationships. An entity survives iff at least one of its provenance chunks satisfies the filter; a relationship survives iff both its endpoints survived AND (it carries no provenance OR at least one of its own provenance chunks satisfies the filter). A filter matching zero chunks now returns four empty lists (documents, chunks, entities, relationships). Cost is a paged `get_chunks_batch` (pages of 500) per FILTERED graph-path recall, bounded by the entity/relationship count × their provenance; unfiltered recalls are unchanged and add no extra fetch. The honest filter report (`engine_info["filter"]`) now reports these surfaces as covered, so a purely metadata filter no longer shows spurious `unenforced_keys`. On a provenance-fetch failure the filter fails closed — unverified items are dropped (never returned unverified) and one `Degradation` (`reason="provenance_fetch_failed"`) is recorded on `engine_info["degradations"]`. The reusable ∃-over-provenance primitive lives in `khora.filter.provenance.filter_items_by_provenance`.
-
 ## [0.22.2] - recall-quality correctness, HNSW index-backed search, durable reconcilers
 
 ### Added
