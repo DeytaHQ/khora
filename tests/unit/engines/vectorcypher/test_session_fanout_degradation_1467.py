@@ -17,6 +17,7 @@ dual-node manager - no embedded stack, no LLM.
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -181,3 +182,34 @@ async def test_session_fanout_all_channels_succeed_records_no_degradation() -> N
     degradations = result.metadata.get("degradations") or []
     fanout_degs = [d for d in degradations if d.get("component") == "vectorcypher.session_fanout"]
     assert fanout_degs == [], f"expected no session_fanout degradation, got: {fanout_degs!r}"
+
+
+async def test_session_fanout_cancellederror_is_reraised_not_degraded() -> None:
+    """A cancelled per-session task re-raises CancelledError, never degraded.
+
+    ``gather(return_exceptions=True)`` surfaces a cancelled child task's
+    ``CancelledError`` as a value; it is a ``BaseException`` (not ``Exception``),
+    so swallowing it would break structured-concurrency / shutdown semantics.
+    The merge loop must propagate it rather than record a Degradation.
+    """
+    ns_id = uuid4()
+    retriever = _make_session_fanout_retriever(ns_id)
+
+    async def fake_vector_search_chunks(*, temporal_filter=None, **kwargs):
+        channel = getattr(temporal_filter, "channel", None)
+        if channel == "session-a":
+            raise asyncio.CancelledError
+        chunk = _make_chunk(ns_id)
+        return [(chunk.id, 0.8, chunk)]
+
+    retriever._vector_search_chunks = AsyncMock(side_effect=fake_vector_search_chunks)
+
+    signal = TemporalSignal(
+        is_temporal=True,
+        category=TemporalCategory.RECENCY,
+        confidence=0.9,
+        source="test",
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await retriever.retrieve("what changed recently", ns_id, temporal_signal=signal)

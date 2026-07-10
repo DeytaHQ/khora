@@ -1751,7 +1751,14 @@ class VectorCypherRetriever:
                 # Merge and deduplicate by chunk_id, keeping the best score
                 merged: dict[UUID, tuple[UUID, float, Chunk]] = {}
                 for i, result in enumerate(all_session_results):
-                    if isinstance(result, Exception):
+                    # Never swallow cancellation: gather(return_exceptions=True)
+                    # surfaces a cancelled child task's CancelledError as a value
+                    # here, and CancelledError is a BaseException (not Exception),
+                    # so it must be re-raised to preserve structured-concurrency
+                    # / shutdown semantics rather than degraded.
+                    if isinstance(result, asyncio.CancelledError):
+                        raise result
+                    if isinstance(result, BaseException):
                         # ADR-001 (#1467): a per-session (or fallback) channel
                         # raised; its chunks are dropped from the merge. Record a
                         # Degradation + bump the counter so a recall that lost
@@ -1759,10 +1766,10 @@ class VectorCypherRetriever:
                         # healthy. Recall still degrades to the surviving channels
                         # + unscoped fallback below.
                         ch_label = fanout_channels[i] if i < len(fanout_channels) else "fallback"
-                        logger.warning(
-                            f"Session search failed for channel={ch_label}: {result}",
-                            exc_info=result,
-                        )
+                        # loguru: attach the captured (non-active) exception via
+                        # opt(exception=...); a bare exc_info=<instance> is a no-op
+                        # here because there is no live exception in sys.exc_info().
+                        logger.opt(exception=result).warning(f"Session search failed for channel={ch_label}: {result}")
                         _SESSION_FANOUT_DEGRADED_COUNTER.add(1, attributes={"reason": "channel_exception"})
                         degradations.append(
                             Degradation(
