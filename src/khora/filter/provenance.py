@@ -77,10 +77,12 @@ _PROVENANCE_FILTER_DEGRADED_COUNTER = metric_counter(
     description=(
         "GitHub #1457. Engine-agnostic ∃-over-provenance item-filter fallbacks "
         "(khora.filter.provenance.filter_items_by_provenance). Incremented when a "
-        "provenance-chunk fetch page raises; items with no filter-passing chunk in "
-        "the pages fetched so far are dropped (fail-closed) and the verified "
-        "survivors returned. Labels: component (the caller's per-surface value, "
-        "e.g. vectorcypher.entity_filter), reason (provenance_fetch_failed). "
+        "provenance-chunk fetch page raises (reason=provenance_fetch_failed) or a "
+        "doc-key hydration page raises (reason=document_fetch_failed, #1494); items "
+        "with no filter-passing chunk in the pages fetched so far are dropped "
+        "(fail-closed) and the verified survivors returned. Labels: component (the "
+        "caller's per-surface value, e.g. vectorcypher.entity_filter), reason "
+        "(provenance_fetch_failed | document_fetch_failed). "
         "NO namespace_id label - cardinality rule."
     ),
 )
@@ -144,7 +146,10 @@ async def filter_items_by_provenance[T: _HasProvenance](
     ``created_at`` / ``source_timestamp`` / ``metadata`` PLUS the hydrated doc
     keys. ``occurred_at`` stays the RAW chunk value on the no-adapter path — it is
     NOT coalesced, so the ∃ pass agrees exactly with VectorCypher's graph chunk
-    channel (which evaluates the same predicate over the raw chunk).
+    channel (which evaluates the same predicate over the raw chunk). The no-adapter
+    path therefore assumes the ``Chunk`` carries ``occurred_at`` natively; an engine
+    whose chunk channel coalesces ``occurred_at`` MUST pass a ``chunk_record_adapter``
+    so the ∃ record matches its chunk semantics.
 
     Doc-key hydration (#1494): the fetched provenance chunks do not carry the
     seven :data:`_DOC_KEYS` document keys. When the filter AST references any of
@@ -160,7 +165,13 @@ async def filter_items_by_provenance[T: _HasProvenance](
     Exactly one :class:`Degradation` (``reason="provenance_fetch_failed"`` for a
     chunk-page failure or ``"document_fetch_failed"`` for a projection-page
     failure, ``component`` as passed in) is appended, logged at WARNING with
-    ``exc_info=True``. Never re-raises.
+    ``exc_info=True``. Never re-raises. Note the deliberate asymmetry with
+    Chronicle's chunk channel, which degrades *open* on a hydration failure
+    (evaluates the post-filter with the doc keys absent): this ∃ pass degrades
+    *closed* (drops unverified items), because an existence claim over provenance
+    must be verified, not guessed. A transient projection-fetch failure can thus
+    return chunks while the entity/relationship surface narrows — surfaced via the
+    ``document_fetch_failed`` degradation.
     """
     if not items:
         return []
