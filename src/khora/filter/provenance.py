@@ -36,8 +36,8 @@ from khora.filter.execute import build_compile_context
 from khora.telemetry.metrics import metric_counter
 
 # Page size for the provenance-chunk fetch. Bounds the backend IN-list per round
-# trip (Chronicle can pass many items) and, with the early-exit below, caps the
-# cost at one page per 500 undecided provenance chunks.
+# trip (Chronicle can pass many items); total cost is bounded by the number of
+# unique provenance chunk ids across the items, fetched in pages of this size.
 _PAGE_SIZE = 500
 
 # Provenance-filter degradation counter (GitHub #1457, ADR-001). The metric name

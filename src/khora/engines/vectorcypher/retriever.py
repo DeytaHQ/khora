@@ -2620,11 +2620,14 @@ class VectorCypherRetriever:
                 # the flag is off or when the path fell back to vector-only.
                 "ppr_path_used": ppr_path_used,
                 "ppr_entity_count": len(ppr_entity_scores),
-                # GitHub #1457: True when the ∃-over-provenance filter actually
-                # narrowed the entity/relationship surfaces (filter present and
-                # the provenance fetch succeeded). The engine reads this to add
-                # {"entities","relationships"} to the honest report's covered
-                # surfaces. Stays False on the fetch-failure degraded path.
+                # GitHub #1457: True whenever the ∃-over-provenance filter ran
+                # (filter present and there were entity/relationship surfaces to
+                # prune). The engine reads this to add {"entities","relationships"}
+                # to the honest report's covered surfaces. Stays True even on the
+                # fetch-failure degraded path: the helper fail-closes by DROPPING
+                # unverified items, so every returned survivor is VERIFIED and the
+                # surface is legitimately enforced (the failure is recorded
+                # separately as a Degradation on ``degradations``).
                 "provenance_filtered_surfaces": provenance_filtered_surfaces,
                 # Private carrier (popped by the engine before the public spread):
                 # the per-channel honest filter-pushdown plans the engine folds
