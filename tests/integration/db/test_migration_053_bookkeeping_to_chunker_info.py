@@ -376,6 +376,10 @@ class TestMigration053OnSqlite:
         #    pinning the nesting order so a future regression in the merge
         #    precedence is caught.
         md, ci = asyncio.run(_read_row(sqlite_url, _ID_TIER1_PRECEDENCE))
+        # Strip side of the same row: metadata.chunk_index (1) equals the twin
+        # column and is stripped; metadata.start_char (10) differs from the
+        # column (333) and survives as a user key.
+        assert md == {"start_char": 10, "author": "bob"}
         assert ci["start_char"] == _PREC_COLUMN_START_CHAR, (
             f"precedence broken: expected column value {_PREC_COLUMN_START_CHAR}, got {ci['start_char']} "
             f"(base was {_PREC_BASE_START_CHAR}, twin was {_PREC_TWIN_START_CHAR})"
@@ -651,6 +655,9 @@ class TestMigration053OnPostgres:
         # 6. Three-way precedence: start_char in kc.chunker_info (111), twin
         #    chunker_info (222), and bookkeeping column (333) — column wins last.
         md, ci = asyncio.run(_read_row(pg_url, _ID_TIER1_PRECEDENCE))
+        # Strip side: chunk_index (== column) stripped; start_char (10 != 333)
+        # and author survive as user keys.
+        assert md == {"start_char": 10, "author": "bob"}
         assert ci["start_char"] == _PREC_COLUMN_START_CHAR, (
             f"precedence broken: expected column value {_PREC_COLUMN_START_CHAR}, got {ci['start_char']} "
             f"(base was {_PREC_BASE_START_CHAR}, twin was {_PREC_TWIN_START_CHAR})"
