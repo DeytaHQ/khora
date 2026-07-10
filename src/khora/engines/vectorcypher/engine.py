@@ -115,6 +115,22 @@ _VC_COMMUNITY_PROJECTION_DEGRADED_COUNTER = metric_counter(
 # shallowest (most specific) first.
 _VC_MAX_COMMUNITIES = 10
 
+
+def _consume_embed_task_exc(task: asyncio.Future) -> None:
+    """Swallow a t0 embed task's result/exception when nobody awaited it (#1469).
+
+    On the happy path the retriever awaits the task, so this callback reads an
+    already-retrieved result and is a no-op. It only matters when recall() raises
+    between launching the task and the retriever's await: reading ``.exception()``
+    here marks the exception retrieved so the event loop does not log a spurious
+    "Task exception was never retrieved" warning. Cancellation is expected on the
+    error path and ignored.
+    """
+    if task.cancelled():
+        return
+    task.exception()
+
+
 # Chunk graph-mirror degradation counter (ADR-001). The create path mirrors
 # pgvector-stored chunks into Neo4j Chunk nodes; a Neo4j write failure must not
 # abort the document ingest now that pgvector already holds the chunks. On
@@ -2408,6 +2424,19 @@ class VectorCypherEngine:
 
         retriever = self._get_retriever()
 
+        # #1469: the query embedding depends only on the query text, so launch
+        # it at t0 as a background task and hand the in-flight awaitable to the
+        # retriever, which awaits it at its embed step. This overlaps the embed
+        # (25-40ms, possibly an LLM/API round-trip) with temporal-detect +
+        # route + recency-floor synthesis instead of running them serially. The
+        # retriever performs exactly one embed per call (it awaits this task
+        # rather than embedding inline), so there is no double-embed.
+        query_embedding_task = asyncio.ensure_future(self._get_embedder().embed(query))
+        # If the code between here and the retriever's await raises (e.g. temporal
+        # detection), the retriever never awaits the task; consume its result in
+        # a done-callback so the loop never logs "exception was never retrieved".
+        query_embedding_task.add_done_callback(_consume_embed_task_exc)
+
         # Cascade temporal detection: Aho-Corasick dictionary -> (optional) semantic
         # Replaces the old regex + dateparser approach with categorized signals.
         # Always run temporal detection (dictionary-based, <10μs, deterministic);
@@ -2497,7 +2526,8 @@ class VectorCypherEngine:
         else:
             hybrid_alpha_override = None
 
-        # Use VectorCypher retriever
+        # Use VectorCypher retriever. Hand it the t0 embed task (#1469); it
+        # awaits the task at its embed step.
         result = await retriever.retrieve(
             query=query,
             namespace_id=namespace_id,
@@ -2510,6 +2540,7 @@ class VectorCypherEngine:
             hybrid_alpha_override=hybrid_alpha_override,
             recency_bias=recency_bias,
             filter_ast=filter_ast,
+            query_embedding_task=query_embedding_task,
         )
 
         # When a caller filter narrowed the candidate set below the requested k,

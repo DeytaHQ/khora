@@ -18,6 +18,7 @@ import asyncio
 import json
 import math
 import os
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
@@ -907,6 +908,7 @@ class VectorCypherRetriever:
         hybrid_alpha_override: float | None = None,
         recency_bias: float | None = None,
         filter_ast: FilterNode | None = None,
+        query_embedding_task: Awaitable[list[float]] | None = None,
     ) -> VectorCypherResult:
         """Retrieve relevant chunks using VectorCypher hybrid approach.
 
@@ -951,6 +953,15 @@ class VectorCypherRetriever:
                 where the pgvector backend compiles it to the SAME
                 ``khora_chunks`` WHERE predicate. ``None`` leaves every path
                 byte-identical to the no-filter behaviour.
+            query_embedding_task: Optional in-flight embedding awaitable
+                launched by the caller at t0 (#1469). The query embedding
+                depends only on the query text, so the engine kicks it off
+                before temporal-detect and hands the task here; this method
+                awaits it at the embed step instead of embedding inline,
+                overlapping the embed with temporal-detect + route +
+                recency-floor synthesis. ``None`` keeps the historic inline
+                ``self._embedder.embed(query)`` call (no double-embed either
+                way — exactly one embed happens per call).
 
         Returns:
             VectorCypherResult with chunks, entities, and metadata
@@ -1071,14 +1082,21 @@ class VectorCypherRetriever:
             logger.debug(f"Query routing: {routing.complexity.value} (use_graph={routing.use_graph})")
             span.set_attribute("routing_complexity", routing.complexity.value)
 
-            # Step 2: Embed the query
+            # Step 2: Embed the query. When the caller launched the embed at
+            # t0 (#1469), await that in-flight task here so the embed overlapped
+            # temporal-detect + route + recency-floor synthesis; otherwise embed
+            # inline. Exactly one embed happens per call either way.
             with trace_span("khora.vectorcypher.embed_query") as embed_span:
                 embed_span.set_attribute("model", self._embedder.model_name)
                 embed_span.set_attribute("dimension", self._embedder.dimension)
                 embed_span.set_attribute("text_length", len(query))
+                embed_span.set_attribute("overlapped", query_embedding_task is not None)
                 _stats = getattr(self._embedder, "cache_stats", None)
                 _pre_hits = _stats["hits"] if isinstance(_stats, dict) else None
-                query_embedding = await self._embedder.embed(query)
+                if query_embedding_task is not None:
+                    query_embedding = await query_embedding_task
+                else:
+                    query_embedding = await self._embedder.embed(query)
                 if _pre_hits is not None:
                     _post_hits = self._embedder.cache_stats["hits"]
                     embed_span.set_attribute("cache_hit", _post_hits > _pre_hits)
