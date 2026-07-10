@@ -154,6 +154,12 @@ def _engine_with_semantic(results: list[tuple[Chunk, float]]) -> ChronicleEngine
     storage.search_fulltext_chunks = AsyncMock(return_value=[])
     storage.search_similar_chunks = AsyncMock(return_value=results)
     storage.search_similar_entities = AsyncMock(return_value=[])
+    # Doc-key hydration seam (#1494): the ∃-over-provenance entity/relationship
+    # filter now batch-fetches DocumentProjections when a doc-key leaf is present.
+    # Default to an empty projection map so hydration succeeds (no fail-closed drop)
+    # and the doc keys resolve via the chunk.source_document tertiary fallback,
+    # matching pre-hydration behavior. Tests that need a real projection override it.
+    storage.get_document_projections_batch = AsyncMock(return_value={})
     engine._storage = storage
 
     embedder = MagicMock()

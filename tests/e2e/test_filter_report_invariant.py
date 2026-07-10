@@ -415,6 +415,127 @@ async def test_report_invariant_graph_entity_bearing_date_filter_vc_full(vectorc
     _assert_report(result, _LEAK_DATE_FILTER)
 
 
+# --------------------------------------------------------------------------- #
+# #1494: a compound ``source_name`` + date filter over a TWO-SOURCE entity corpus
+# narrows the graph-path entity surface to exactly the matching source's entities,
+# AND reports clean (``unenforced_keys == []``).
+#
+# This is the entity-surface counterpart of the doc-key leak: the seed carries two
+# ``source_name``-tagged corpora, each contributing its own entity set the date
+# filter never gates. Pre-#1494 the ∃-over-provenance pass evaluated the
+# ``source_name`` leaf against a bare provenance chunk that lacked the denormalized
+# document keys (``source_name`` isn't even on ``DocumentSource``), so it dropped
+# EVERY entity (both sources) and forced the leaves unenforced. Post-fix the
+# provenance pass hydrates each entity's parent-document projection, so the entity
+# surface narrows to the ``linear`` source's entities while the ``slack`` ones drop,
+# and the report is clean. The anti-vacuity gate fails loud unless BOTH sources'
+# entities actually surface first.
+# --------------------------------------------------------------------------- #
+
+# Two source-tagged corpora, each with its own marker + entity set. The markers are
+# distinct so ``plan_extraction`` stages each source's entities independently; both
+# share the ``_SRC_RECALL_MARKER`` substring so a single GRAPH recall surfaces BOTH
+# sources' entities (making the ``source_name`` narrowing non-vacuous).
+_SRC_RECALL_MARKER = "srcnarrow"
+_SRC_MARKER_LINEAR = "srcnarrow-linear"
+_SRC_MARKER_SLACK = "srcnarrow-slack"
+_SRC_ENTITIES_LINEAR = [("Meridian", "PERSON"), ("Beacon", "ORG")]
+_SRC_RELATIONSHIPS_LINEAR = [("Meridian", "Beacon", "WORKS_ON")]
+_SRC_ENTITIES_SLACK = [("Cascade", "PERSON"), ("Summit", "ORG")]
+_SRC_RELATIONSHIPS_SLACK = [("Cascade", "Summit", "WORKS_ON")]
+_SRC_SOURCE_NAME_LINEAR = "linear"
+_SRC_SOURCE_NAME_SLACK = "slack"
+# ``source_name`` for the matching source + a date bound the seed's event time clears
+# (so the date leaf never narrows and the ``source_name`` leaf is the only force).
+_SRC_COMPOUND_FILTER: dict = {
+    "source_name": _SRC_SOURCE_NAME_LINEAR,
+    "occurred_at": {"$gte": "2020-01-01T00:00:00Z"},
+}
+
+
+async def _seed_two_source_corpus(kb: Khora, namespace_id) -> None:
+    """Seed two ``source_name``-tagged entity corpora through the real ingest path.
+
+    The ``linear`` source contributes ``_SRC_ENTITIES_LINEAR`` and the ``slack``
+    source ``_SRC_ENTITIES_SLACK``; each document carries the shared
+    ``_SRC_RECALL_MARKER`` so one GRAPH recall surfaces both sources' entities.
+    """
+    plan_extraction(_SRC_MARKER_LINEAR, _SRC_ENTITIES_LINEAR, _SRC_RELATIONSHIPS_LINEAR)
+    plan_extraction(_SRC_MARKER_SLACK, _SRC_ENTITIES_SLACK, _SRC_RELATIONSHIPS_SLACK)
+    for marker, source_name, entities, relationships in (
+        (_SRC_MARKER_LINEAR, _SRC_SOURCE_NAME_LINEAR, _SRC_ENTITIES_LINEAR, _SRC_RELATIONSHIPS_LINEAR),
+        (_SRC_MARKER_SLACK, _SRC_SOURCE_NAME_SLACK, _SRC_ENTITIES_SLACK, _SRC_RELATIONSHIPS_SLACK),
+    ):
+        for content in _harness.entity_seed_docs(marker, count=3):
+            await kb.remember(
+                content=content,
+                namespace=namespace_id,
+                source_name=source_name,
+                source_timestamp=_LEAK_SOURCE_TIMESTAMP,
+                entity_types=[t for _, t in entities],
+                relationship_types=[rt for _, _, rt in relationships],
+            )
+
+
+@_harness.lane_skip("vc_full")
+@pytest.mark.skipif(
+    not _harness.lane_reachable("vc_full"),
+    reason="set NEO4J_INTEGRATION_TEST=1 and start PG+Neo4j (make dev) to exercise the live graph lane",
+)
+async def test_report_invariant_graph_source_name_narrows_entities_vc_full(vectorcypher_kb) -> None:
+    """A graph recall + compound ``source_name`` filter narrows entities and reports clean.
+
+    Seeds two ``source_name``-tagged corpora (``linear`` / ``slack``), each with its
+    own entity set. A compound ``{"source_name": "linear", "occurred_at": {"$gte":
+    2020}}`` filter must narrow the graph-path entity surface to exactly the
+    ``linear`` source's entities (the ``slack`` ones drop) AND report clean
+    (``unenforced_keys == []``). The #1494 fix's projection hydration is what lets the
+    ∃-over-provenance pass resolve ``source_name`` (a key absent from ``DocumentSource``)
+    on each entity's provenance. Gated on BOTH sources surfacing first so the narrowing
+    is not vacuous.
+    """
+    kb = vectorcypher_kb
+    namespace_id = (await kb.create_namespace()).namespace_id
+    await _seed_two_source_corpus(kb, namespace_id)
+
+    # Anti-vacuity gate: an UNFILTERED graph recall surfaces BOTH sources' entities,
+    # so the narrowing below is a real prune (not an already-empty-or-single set).
+    gate = await _harness.assert_graph_contributes(kb, namespace_id, _SRC_RECALL_MARKER)
+    if gate.engine_info.get("graph_chunk_count", 0) <= 0:
+        pytest.fail("graph channel spliced no chunks — the source-narrowing leak is not exercised (vacuous)")
+    # Ingest canonicalizes entity names to lowercase, so compare case-insensitively.
+    gate_names = {e.name.lower() for e in gate.entities}
+    linear_names = {n.lower() for n, _ in _SRC_ENTITIES_LINEAR}
+    slack_names = {n.lower() for n, _ in _SRC_ENTITIES_SLACK}
+    if not (linear_names <= gate_names and slack_names <= gate_names):
+        pytest.fail(
+            f"both sources' entities must surface UNFILTERED for the narrowing to be meaningful; "
+            f"got {sorted(gate_names)} (need {sorted(linear_names | slack_names)})"
+        )
+
+    result = await kb.recall(
+        _SRC_RECALL_MARKER,
+        namespace=namespace_id,
+        mode=SearchMode.GRAPH,
+        limit=_RECALL_LIMIT,
+        min_similarity=_RECALL_MIN_SIMILARITY,
+        filter=_SRC_COMPOUND_FILTER,
+    )
+
+    filtered_names = {e.name.lower() for e in result.entities}
+    if not filtered_names:
+        pytest.fail("filtered graph recall surfaced no entities — the surface-coverage rule is inert (vacuous)")
+    # Narrowed to exactly the linear source's entities; the slack ones dropped.
+    assert linear_names <= filtered_names, (
+        f"the matching-source (linear) entities were over-dropped — #1494 not fixed: got {sorted(filtered_names)}"
+    )
+    assert not (slack_names & filtered_names), (
+        f"a non-matching-source (slack) entity leaked past the source_name filter: got {sorted(filtered_names)}"
+    )
+    # The entity surface is covered by the ∃ pass, so the report is clean.
+    _assert_report(result, _SRC_COMPOUND_FILTER)
+
+
 @_harness.lane_skip("chronicle")
 @pytest.mark.skipif(
     not _harness.lane_reachable("chronicle"), reason="start Postgres (make dev) to exercise this live lane"

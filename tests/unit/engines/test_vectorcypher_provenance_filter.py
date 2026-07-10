@@ -52,8 +52,9 @@ from uuid import UUID, uuid4
 import pytest
 
 from khora.core.models import Chunk
-from khora.core.models.document import DocumentSource
 from khora.core.models.entity import Entity, Relationship
+from khora.core.models.recall import DocumentProjection
+from khora.filter.provenance import filter_items_by_provenance
 from khora.filter.report import FilterPushdownReport
 from khora.query import SearchMode
 from tests.unit.engines.test_vectorcypher_filter_report import (
@@ -71,22 +72,60 @@ pytestmark = pytest.mark.unit
 _DATE_FILTER: dict[str, Any] = {"occurred_at": {"$gte": "2027-01-01T00:00:00Z"}}
 
 
-def _prov_chunk(ns_id: Any, *, year: int, source: str | None = None) -> Chunk:
-    """A provenance chunk whose ``occurred_at`` sits in ``year`` (+ optional source).
+# Side-band map from a provenance chunk id to the denormalized document keys the
+# doc-key filter reads. Post-#1494 those keys are hydrated onto the record from the
+# parent document's ``DocumentProjection`` (NOT carried on the chunk), so we stash
+# them here at ``_prov_chunk`` time and materialize a projection in ``_projection_for``
+# — keeping the chunk's own ``metadata`` clean (a metadata filter must not see them).
+_CHUNK_DOC_KEYS: dict[UUID, dict[str, Any]] = {}
 
-    ``occurred_at`` decides whether the chunk clears the ``$gte 2027`` horizon;
-    ``source`` (threaded via a ``DocumentSource`` projection, where the ``"Chunk"``
-    predicate resolves the denormalized ``source`` key) decides a ``source``-keyed
-    filter.
+
+def _prov_chunk(ns_id: Any, *, year: int, **doc_keys: Any) -> Chunk:
+    """A provenance chunk whose ``occurred_at`` sits in ``year`` (+ optional doc keys).
+
+    ``occurred_at`` decides whether the chunk clears the ``$gte 2027`` horizon. Any
+    ``doc_keys`` (``source`` / ``source_name`` / ``source_url`` / ``external_id`` /
+    ``content_type`` / ``source_type`` / ``title``) are the denormalized document
+    keys a doc-key filter reads — post-#1494 they are hydrated onto the record from
+    the parent document's :class:`DocumentProjection`, NOT carried on the chunk. The
+    chunk still owns a stable ``document_id`` so :func:`_projection_for` can key the
+    projection back to it; :func:`_wire_projections` installs those projections on the
+    retriever's ``get_document_projections_batch`` seam.
     """
-    return Chunk(
+    chunk = Chunk(
         id=uuid4(),
         namespace_id=ns_id,
         document_id=uuid4(),
         content=f"provenance chunk ({year})",
         occurred_at=datetime(year, 6, 1, tzinfo=UTC),
-        source_document=(DocumentSource(id=uuid4(), source=source) if source is not None else None),
     )
+    if doc_keys:
+        _CHUNK_DOC_KEYS[chunk.id] = doc_keys
+    return chunk
+
+
+def _projection_for(chunk: Chunk) -> DocumentProjection:
+    """Build the parent-document :class:`DocumentProjection` for a provenance chunk.
+
+    Reads the doc keys stashed for the chunk by :func:`_prov_chunk` and materializes
+    them onto a projection keyed (by :func:`_wire_projections`) to the chunk's
+    ``document_id`` — the shape ``get_document_projections_batch`` returns and the
+    #1494 hydration folds onto the record the ``"Chunk"`` predicate evaluates.
+    """
+    return DocumentProjection(id=chunk.document_id, created_at=chunk.created_at, **_CHUNK_DOC_KEYS.get(chunk.id, {}))
+
+
+def _wire_projections(retriever: Any, chunks: list[Chunk]) -> None:
+    """Install the ``get_document_projections_batch`` seam for ``chunks`` (#1494).
+
+    A doc-key filter makes ``filter_items_by_provenance`` set ``needs_docs=True`` and
+    batch-fetch the parent-document projections. Without this seam the retriever's
+    bare ``get_document_projections_batch`` AsyncMock returns a non-dict, which the
+    helper treats as a fetch failure and fail-closes (dropping every entity). This
+    returns ``{document_id: DocumentProjection}`` for exactly the provided chunks.
+    """
+    projections = {c.document_id: _projection_for(c) for c in chunks}
+    retriever._storage.get_document_projections_batch = AsyncMock(return_value=projections)
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +235,9 @@ class TestPartialMatchNarrowsBySourceProvenance:
         retriever._storage.get_chunks_batch = AsyncMock(
             return_value={linear_chunk.id: linear_chunk, slack_chunk.id: slack_chunk}
         )
+        # #1494: the ``source`` leaf hydrates each chunk's parent-document projection,
+        # where the denormalized ``source`` key lives (NOT on the chunk).
+        _wire_projections(retriever, [linear_chunk, slack_chunk])
         # Two surviving-eligible entities reach the Neo4j relationship fetch; stub
         # it (this case is about the entity surface, not relationships).
         retriever._dual_nodes.get_relationships_between = AsyncMock(return_value=[])
@@ -215,6 +257,385 @@ class TestPartialMatchNarrowsBySourceProvenance:
         report = result.engine_info["filter"]
         FilterPushdownReport.model_validate(report)
         assert report["unenforced_keys"] == []
+
+
+# ---------------------------------------------------------------------------
+# #1494 REPRO: a compound doc-key + date filter on the GRAPH path keeps the
+# matching-doc entity and drops the non-matching one — instead of over-dropping
+# EVERY entity because the doc key read as absent on the bare chunk.
+#
+# Pre-fix, ``filter_items_by_provenance`` evaluated the compiled predicate against
+# a raw ``Chunk`` that structurally lacks the seven denormalized document keys, so
+# ANY doc-key leaf resolved to ``None`` on every chunk and the ∃ pass dropped the
+# whole entity/relationship surface. The fix hydrates the parent-document
+# ``DocumentProjection`` and folds the doc keys onto the record. These cases prove
+# both directions: the matching entity SURVIVES and the non-matching entity DROPS.
+# ---------------------------------------------------------------------------
+
+
+class TestDocKeyCompoundFilterReproIsFixed:
+    """A compound doc-key + date filter on the graph path narrows by provenance doc key."""
+
+    async def test_compound_source_plus_date_keeps_match_drops_nonmatch(self) -> None:
+        """``{"source": "linear", "occurred_at": {"$gte": 2020}}`` -> only the linear entity survives.
+
+        THE #1494 REPRO. Two docs (``source="linear"`` / ``source="slack"``), both
+        with 2027 provenance that clears the 2020 date bound, so ONLY the ``source``
+        leaf differentiates them. Pre-fix the doc key read as absent on the bare
+        chunk, so the ∃ pass dropped BOTH entities (over-drop). Post-fix the linear
+        entity SURVIVES (its hydrated projection carries ``source="linear"``) and the
+        slack entity DROPS — both directions asserted.
+        """
+        ns_id = uuid4()
+        retriever = _make_retriever(ns_id, enable_bm25=True)
+        linear_chunk = _prov_chunk(ns_id, year=2027, source="linear")
+        slack_chunk = _prov_chunk(ns_id, year=2027, source="slack")
+        linear_entity = Entity(
+            id=uuid4(),
+            namespace_id=ns_id,
+            name="LinearEvent",
+            entity_type="EVENT",
+            source_chunk_ids=[linear_chunk.id],
+        )
+        slack_entity = Entity(
+            id=uuid4(),
+            namespace_id=ns_id,
+            name="SlackEvent",
+            entity_type="EVENT",
+            source_chunk_ids=[slack_chunk.id],
+        )
+        retriever._storage.search_similar_entities = AsyncMock(
+            return_value=[(linear_entity.id, 0.9), (slack_entity.id, 0.8)]
+        )
+        retriever._storage.get_entities_batch = AsyncMock(
+            return_value={linear_entity.id: linear_entity, slack_entity.id: slack_entity}
+        )
+        retriever._storage.get_chunks_batch = AsyncMock(
+            return_value={linear_chunk.id: linear_chunk, slack_chunk.id: slack_chunk}
+        )
+        _wire_projections(retriever, [linear_chunk, slack_chunk])
+        retriever._dual_nodes.get_relationships_between = AsyncMock(return_value=[])
+        engine = _build_engine(retriever)
+
+        result = await engine.recall(
+            "alpha bravo charlie",
+            ns_id,
+            limit=10,
+            mode=SearchMode.GRAPH,
+            filter_ast=_ast({"source": "linear", "occurred_at": {"$gte": "2020-01-01T00:00:00Z"}}),
+        )
+
+        names = [e.name for e in result.entities]
+        # Survivor present (the doc key matched via the hydrated projection)...
+        assert "LinearEvent" in names, "the matching-source entity was over-dropped — #1494 not fixed"
+        # ...and the non-match absent (the ∃ pass still has teeth on the doc key).
+        assert "SlackEvent" not in names, "the non-matching-source entity leaked — the doc-key ∃ pass is inert"
+        assert names == ["LinearEvent"]
+
+    async def test_projection_only_key_source_name_keeps_match_drops_nonmatch(self) -> None:
+        """A ``source_name`` leaf narrows by provenance — the key ``DocumentSource`` never carried.
+
+        The Architect's harder repro: ``source_name`` (like ``source_url`` /
+        ``external_id`` / ``content_type``) is NOT a field on ``DocumentSource``, so
+        pre-fix it could resolve NOWHERE (not even off ``chunk.source_document``) and
+        the ∃ pass over-dropped every entity even harder than a bare ``source`` leaf.
+        Post-fix the ``DocumentProjection`` carries all seven keys, so the entity
+        whose projection has ``source_name="gitlab"`` is KEPT and the ``source_name=
+        "jira"`` one is dropped.
+        """
+        ns_id = uuid4()
+        retriever = _make_retriever(ns_id, enable_bm25=True)
+        gitlab_chunk = _prov_chunk(ns_id, year=2027, source_name="gitlab")
+        jira_chunk = _prov_chunk(ns_id, year=2027, source_name="jira")
+        gitlab_entity = Entity(
+            id=uuid4(),
+            namespace_id=ns_id,
+            name="GitlabEvent",
+            entity_type="EVENT",
+            source_chunk_ids=[gitlab_chunk.id],
+        )
+        jira_entity = Entity(
+            id=uuid4(),
+            namespace_id=ns_id,
+            name="JiraEvent",
+            entity_type="EVENT",
+            source_chunk_ids=[jira_chunk.id],
+        )
+        retriever._storage.search_similar_entities = AsyncMock(
+            return_value=[(gitlab_entity.id, 0.9), (jira_entity.id, 0.8)]
+        )
+        retriever._storage.get_entities_batch = AsyncMock(
+            return_value={gitlab_entity.id: gitlab_entity, jira_entity.id: jira_entity}
+        )
+        retriever._storage.get_chunks_batch = AsyncMock(
+            return_value={gitlab_chunk.id: gitlab_chunk, jira_chunk.id: jira_chunk}
+        )
+        _wire_projections(retriever, [gitlab_chunk, jira_chunk])
+        retriever._dual_nodes.get_relationships_between = AsyncMock(return_value=[])
+        engine = _build_engine(retriever)
+
+        result = await engine.recall(
+            "alpha bravo charlie",
+            ns_id,
+            limit=10,
+            mode=SearchMode.GRAPH,
+            filter_ast=_ast({"source_name": "gitlab", "occurred_at": {"$gte": "2020-01-01T00:00:00Z"}}),
+        )
+
+        names = [e.name for e in result.entities]
+        assert names == ["GitlabEvent"], (
+            f"a source_name leaf (absent from DocumentSource) did not narrow by projection: got {names}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# #1494 (b): a doc-key-ONLY filter (no temporal leaf) still hydrates projections
+# and the ∃ result is correct — the ``needs_docs`` gate is keyed on ANY doc-key
+# leaf, not on a temporal leaf being present.
+# ---------------------------------------------------------------------------
+
+
+class TestDocKeyOnlyFilterHydratesProjections:
+    """A filter with only a doc-key leaf (no date) fetches projections and narrows correctly."""
+
+    async def test_source_only_filter_keeps_match_drops_nonmatch(self) -> None:
+        """``{"source": "linear"}`` (no temporal leaf) -> projections fetched, only linear survives.
+
+        ``needs_docs`` is ``bool(filter_leaf_keys(ast) & _DOC_KEYS)`` — a doc-key leaf
+        alone trips it, no temporal leaf required. The projection fetch runs and the
+        ∃ pass narrows to exactly the linear-provenance entity. Guards that the
+        hydration gate is not accidentally conditioned on a companion date key.
+        """
+        ns_id = uuid4()
+        linear_chunk = _prov_chunk(ns_id, year=2027, source="linear")
+        slack_chunk = _prov_chunk(ns_id, year=2027, source="slack")
+        linear_entity = Entity(
+            id=uuid4(),
+            namespace_id=ns_id,
+            name="LinearEvent",
+            entity_type="EVENT",
+            source_chunk_ids=[linear_chunk.id],
+        )
+        slack_entity = Entity(
+            id=uuid4(),
+            namespace_id=ns_id,
+            name="SlackEvent",
+            entity_type="EVENT",
+            source_chunk_ids=[slack_chunk.id],
+        )
+        storage = AsyncMock()
+        storage.get_chunks_batch = AsyncMock(return_value={linear_chunk.id: linear_chunk, slack_chunk.id: slack_chunk})
+        storage.get_document_projections_batch = AsyncMock(
+            return_value={
+                linear_chunk.document_id: _projection_for(linear_chunk),
+                slack_chunk.document_id: _projection_for(slack_chunk),
+            }
+        )
+        degradations: list[Any] = []
+
+        kept = await filter_items_by_provenance(
+            [linear_entity, slack_entity],
+            _ast({"source": "linear"}),
+            namespace_id=ns_id,
+            storage=storage,
+            component="vectorcypher.entity_filter",
+            degradations=degradations,
+        )
+
+        # The projection fetch ran (needs_docs tripped on the source leaf alone)...
+        storage.get_document_projections_batch.assert_awaited()
+        # ...and the ∃ pass narrowed to exactly the matching-source entity.
+        assert [e.name for e in kept] == ["LinearEvent"]
+        assert degradations == []
+
+
+# ---------------------------------------------------------------------------
+# #1494 (c): a filter with NO doc-key leaf never touches the projection fetcher
+# (needs_docs=False) and produces the SAME survivors the raw-chunk path did
+# pre-fix — the byte-identical zero-fetch guarantee.
+# ---------------------------------------------------------------------------
+
+
+class TestNoDocKeyLeafSkipsProjectionFetch:
+    """A doc-key-free filter never fetches projections and keeps the pre-fix survivors."""
+
+    async def test_occurred_at_only_filter_never_fetches_projections(self) -> None:
+        """An ``occurred_at``-only filter fetches ZERO projections and keeps the passing entity.
+
+        ``needs_docs`` is ``False`` (no doc-key leaf), so ``_record_for`` returns the
+        RAW chunk and ``get_document_projections_batch`` is NEVER called — the
+        byte-identical pre-#1494 path. The passing (2027) entity is kept and the
+        failing (2026) one is dropped exactly as the raw-chunk path always did.
+        """
+        ns_id = uuid4()
+        pass_chunk = _prov_chunk(ns_id, year=2027)
+        fail_chunk = _prov_chunk(ns_id, year=2026)
+        pass_entity = Entity(
+            id=uuid4(),
+            namespace_id=ns_id,
+            name="Kept",
+            entity_type="EVENT",
+            source_chunk_ids=[pass_chunk.id],
+        )
+        fail_entity = Entity(
+            id=uuid4(),
+            namespace_id=ns_id,
+            name="Dropped",
+            entity_type="EVENT",
+            source_chunk_ids=[fail_chunk.id],
+        )
+        storage = AsyncMock()
+        storage.get_chunks_batch = AsyncMock(return_value={pass_chunk.id: pass_chunk, fail_chunk.id: fail_chunk})
+        # A spy that would raise if the doc-key-free path ever fetched projections.
+        storage.get_document_projections_batch = AsyncMock(
+            side_effect=AssertionError("projections fetched for a doc-key-free filter (needs_docs must be False)")
+        )
+        degradations: list[Any] = []
+
+        kept = await filter_items_by_provenance(
+            [pass_entity, fail_entity],
+            _ast(_DATE_FILTER),
+            namespace_id=ns_id,
+            storage=storage,
+            component="vectorcypher.entity_filter",
+            degradations=degradations,
+        )
+
+        # Zero-fetch guarantee: the projection fetcher was never called.
+        storage.get_document_projections_batch.assert_not_awaited()
+        # Same survivors the raw-chunk path produced pre-fix.
+        assert [e.name for e in kept] == ["Kept"]
+        assert degradations == []
+
+
+# ---------------------------------------------------------------------------
+# #1494 (d): a ``get_document_projections_batch`` raise fail-closes — the
+# unverified items DROP and exactly ONE ``document_fetch_failed`` Degradation is
+# recorded (ADR-001), distinct from the ``provenance_fetch_failed`` chunk-fetch leg.
+# ---------------------------------------------------------------------------
+
+
+class TestDocProjectionFetchFailureIsFailClosed:
+    """A projection-fetch raise drops unverified items + records one document_fetch_failed Degradation."""
+
+    async def test_projection_fetch_raise_drops_and_records_one_degradation(self) -> None:
+        """``get_document_projections_batch`` raising -> items dropped + one ``document_fetch_failed``.
+
+        The chunk fetch SUCCEEDS but the doc-key hydration raises, so the ∃ pass
+        cannot resolve the ``source`` leaf and every still-undecided item is dropped
+        (fail-closed). Exactly ONE :class:`Degradation` with
+        ``reason == "document_fetch_failed"`` is appended — the distinct
+        projection-fetch failure reason, not the chunk-fetch ``provenance_fetch_failed``.
+        """
+        ns_id = uuid4()
+        chunk = _prov_chunk(ns_id, year=2027, source="linear")
+        entity = Entity(
+            id=uuid4(),
+            namespace_id=ns_id,
+            name="Unverifiable",
+            entity_type="EVENT",
+            source_chunk_ids=[chunk.id],
+        )
+        storage = AsyncMock()
+        storage.get_chunks_batch = AsyncMock(return_value={chunk.id: chunk})
+        storage.get_document_projections_batch = AsyncMock(side_effect=RuntimeError("projection store down"))
+        degradations: list[Any] = []
+
+        kept = await filter_items_by_provenance(
+            [entity],
+            _ast({"source": "linear", "occurred_at": {"$gte": "2020-01-01T00:00:00Z"}}),
+            namespace_id=ns_id,
+            storage=storage,
+            component="vectorcypher.entity_filter",
+            degradations=degradations,
+        )
+
+        # Fail-closed: the unverified entity is dropped.
+        assert kept == [], "an unverified entity leaked when the projection fetch raised"
+        # Exactly one Degradation, and its reason is the projection-fetch reason.
+        assert len(degradations) == 1, f"expected exactly one Degradation, got {len(degradations)}"
+        assert degradations[0]["reason"] == "document_fetch_failed"
+        assert degradations[0]["component"] == "vectorcypher.entity_filter"
+
+
+# ---------------------------------------------------------------------------
+# #1494 (e): the chronicle adapter seam threads the hydrated projection.
+#
+# ``_chunk_to_record(chunk, doc)`` is now 2-arg — the #1494 hydration passes the
+# per-document ``DocumentProjection`` as ``doc``, and a ``source_name`` leaf must
+# resolve FROM that projection (the key ``DocumentSource`` never carried). This
+# proves the 1-arg -> 2-arg seam actually delivers the doc to the adapter.
+# ---------------------------------------------------------------------------
+
+
+class TestChronicleAdapterReceivesHydratedProjection:
+    """chronicle's ``_chunk_to_record`` resolves a doc key from the hydrated projection."""
+
+    async def test_source_name_resolves_from_projection_via_adapter(self) -> None:
+        """A ``source_name`` leaf resolves off the hydrated projection through the adapter.
+
+        Drives ``filter_items_by_provenance`` with chronicle's REAL
+        ``_chunk_to_record`` adapter and a chunk carrying NO ``source_name`` (it lives
+        on the document). ``get_document_projections_batch`` returns a projection with
+        ``source_name="slack"``; the 2-arg adapter threads that projection so the
+        ``source_name`` predicate matches and the entity SURVIVES — proving the seam
+        delivers the doc. A negative control (projection ``source_name="email"``)
+        drops the entity, so the resolution has teeth.
+        """
+        from khora.engines.chronicle.engine import _chunk_to_record
+
+        ns_id = uuid4()
+        chunk = Chunk(
+            id=uuid4(),
+            namespace_id=ns_id,
+            document_id=uuid4(),
+            content="chronicle provenance chunk",
+            occurred_at=None,
+            source_timestamp=datetime(2027, 6, 1, tzinfo=UTC),
+        )
+        item = _ProvItem([chunk.id])
+
+        storage = AsyncMock()
+        storage.get_chunks_batch = AsyncMock(return_value={chunk.id: chunk})
+        # The projection carries source_name (the key the chunk lacks).
+        storage.get_document_projections_batch = AsyncMock(
+            return_value={
+                chunk.document_id: DocumentProjection(
+                    id=chunk.document_id, created_at=chunk.created_at, source_name="slack"
+                )
+            }
+        )
+
+        # Matching projection -> the adapter resolves source_name from the doc -> kept.
+        kept = await filter_items_by_provenance(
+            [item],
+            _ast({"source_name": "slack"}),
+            namespace_id=ns_id,
+            storage=storage,
+            component="chronicle.entity_filter",
+            degradations=[],
+            chunk_record_adapter=_chunk_to_record,
+        )
+        assert kept == [item], "the adapter did not receive the hydrated projection (source_name unresolved)"
+
+        # Negative control: a non-matching projection value drops the entity.
+        storage.get_document_projections_batch = AsyncMock(
+            return_value={
+                chunk.document_id: DocumentProjection(
+                    id=chunk.document_id, created_at=chunk.created_at, source_name="email"
+                )
+            }
+        )
+        dropped = await filter_items_by_provenance(
+            [item],
+            _ast({"source_name": "slack"}),
+            namespace_id=ns_id,
+            storage=storage,
+            component="chronicle.entity_filter",
+            degradations=[],
+            chunk_record_adapter=_chunk_to_record,
+        )
+        assert dropped == [], "a non-matching projection source_name should drop the entity"
 
 
 # ---------------------------------------------------------------------------
