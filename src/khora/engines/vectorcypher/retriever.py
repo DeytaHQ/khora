@@ -15,6 +15,7 @@ Performance optimizations:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import math
 import os
@@ -1852,148 +1853,174 @@ class VectorCypherRetriever:
         # Step 4: Cypher expand to find related entities
         # For temporal queries (STATE_QUERY/RECENCY/CHANGE), prefer currently-valid
         # entities by filtering out those whose valid_until has passed.
+        #
+        # Issue #1468 — bind ONE Neo4j session across this recall's sequential
+        # graph reads (expand -> optional version filter / history -> chunk
+        # fetch). Without the bind each read opens and tears down its own pooled
+        # connection; with it they share one, collapsing 2-3 per-recall pool
+        # acquisitions into one. This region is strictly sequential (every await
+        # below completes before the next starts), which a single Neo4j
+        # AsyncSession requires — the concurrent relationship fetch runs OUTSIDE
+        # this block. Queries and result shapes are byte-identical to the
+        # unbound path, so recall parity is total (the only change is connection
+        # reuse). On graph-less stacks (_dual_nodes is None) there is no session
+        # to bind, so this is a no-op nullcontext and the SurrealDB/embedded
+        # fetch fallbacks are untouched.
         graph_fallback = False
         graph_error_msg: str | None = None
-        try:
-            expanded_entities, entity_info_map = await self._cypher_expand(
-                entry_entity_ids=[e[0] for e in entry_entities],
-                namespace_id=namespace_id,
-                depth=depth,
-                prefer_current=_tp.prefer_current,
-                degradations=degradations,
-            )
-        except _NEO4J_TRANSIENT_ERRORS as exc:
-            logger.warning(
-                f"Neo4j unavailable during cypher_expand for namespace={namespace_id}, "
-                f"falling back to vector-only results: {type(exc).__name__}: {exc}"
-            )
-            expanded_entities = {}
-            entity_info_map = {}
-            graph_fallback = True
-            graph_error_msg = type(exc).__name__
+        # Only a real ``DualNodeManager`` binds a session; a mocked / duck-typed
+        # ``_dual_nodes`` (unit tests) or a graph-less stack has nothing to bind,
+        # so fall back to a no-op nullcontext. The fold is a connection-reuse
+        # optimization — never a behavior change — so skipping it is transparent.
+        _graph_session_ctx = (
+            self._dual_nodes.bind_session()
+            if isinstance(self._dual_nodes, DualNodeManager)
+            else contextlib.nullcontext()
+        )
+        async with _graph_session_ctx:
+            try:
+                expanded_entities, entity_info_map = await self._cypher_expand(
+                    entry_entity_ids=[e[0] for e in entry_entities],
+                    namespace_id=namespace_id,
+                    depth=depth,
+                    prefer_current=_tp.prefer_current,
+                    degradations=degradations,
+                )
+            except _NEO4J_TRANSIENT_ERRORS as exc:
+                logger.warning(
+                    f"Neo4j unavailable during cypher_expand for namespace={namespace_id}, "
+                    f"falling back to vector-only results: {type(exc).__name__}: {exc}"
+                )
+                expanded_entities = {}
+                entity_info_map = {}
+                graph_fallback = True
+                graph_error_msg = type(exc).__name__
 
-        # Step 4b: Bi-temporal version filtering
-        # For EXPLICIT temporal queries with a parsed date, narrow entities to
-        # those whose version was valid at the target date.
-        version_history: list[dict[str, Any]] | None = None
-        all_entity_ids = list({e[0] for e in entry_entities} | expanded_entities.keys())
+            # Step 4b: Bi-temporal version filtering
+            # For EXPLICIT temporal queries with a parsed date, narrow entities to
+            # those whose version was valid at the target date.
+            version_history: list[dict[str, Any]] | None = None
+            all_entity_ids = list({e[0] for e in entry_entities} | expanded_entities.keys())
 
-        if temporal_signal and temporal_signal.is_temporal:
-            if temporal_signal.category == TemporalCategory.EXPLICIT and temporal_signal.temporal_filter is not None:
-                # Derive a target date from the temporal filter
-                tf = temporal_signal.temporal_filter
-                target_date = getattr(tf, "occurred_before", None) or getattr(tf, "occurred_after", None)
-                if target_date is not None:
-                    with trace_span("khora.vectorcypher.version_filter", target_date=target_date.isoformat()):
+            if temporal_signal and temporal_signal.is_temporal:
+                if (
+                    temporal_signal.category == TemporalCategory.EXPLICIT
+                    and temporal_signal.temporal_filter is not None
+                ):
+                    # Derive a target date from the temporal filter
+                    tf = temporal_signal.temporal_filter
+                    target_date = getattr(tf, "occurred_before", None) or getattr(tf, "occurred_after", None)
+                    if target_date is not None:
+                        with trace_span("khora.vectorcypher.version_filter", target_date=target_date.isoformat()):
+                            try:
+                                # On graph-less backends (sqlite_lance / surrealdb)
+                                # this is a no-op that returns entities unfiltered and
+                                # records a structured degradation — the embedded schema
+                                # lacks the version_valid_from/to columns. Occurred-bounds
+                                # chunk filtering is still honored via ``temporal_filter``.
+                                all_entity_ids = await self._version_filter_entities(
+                                    entity_ids=all_entity_ids,
+                                    namespace_id=namespace_id,
+                                    target_date=target_date,
+                                    degradations=degradations,
+                                )
+                            except _NEO4J_TRANSIENT_ERRORS as exc:
+                                logger.warning(
+                                    f"Version filter failed for namespace={namespace_id}, "
+                                    f"skipping: {type(exc).__name__}: {exc}"
+                                )
+
+                elif temporal_signal.category == TemporalCategory.CHANGE:
+                    # For CHANGE queries, fetch version history via SUPERSEDES edges
+                    with trace_span("khora.vectorcypher.version_history", entity_count=len(all_entity_ids)):
                         try:
-                            # On graph-less backends (sqlite_lance / surrealdb)
-                            # this is a no-op that returns entities unfiltered and
-                            # records a structured degradation — the embedded schema
-                            # lacks the version_valid_from/to columns. Occurred-bounds
-                            # chunk filtering is still honored via ``temporal_filter``.
-                            all_entity_ids = await self._version_filter_entities(
+                            version_history = await self._fetch_version_history(
                                 entity_ids=all_entity_ids,
                                 namespace_id=namespace_id,
-                                target_date=target_date,
-                                degradations=degradations,
                             )
                         except _NEO4J_TRANSIENT_ERRORS as exc:
                             logger.warning(
-                                f"Version filter failed for namespace={namespace_id}, "
+                                f"Version history fetch failed for namespace={namespace_id}, "
                                 f"skipping: {type(exc).__name__}: {exc}"
                             )
+                            version_history = None
 
-            elif temporal_signal.category == TemporalCategory.CHANGE:
-                # For CHANGE queries, fetch version history via SUPERSEDES edges
-                with trace_span("khora.vectorcypher.version_history", entity_count=len(all_entity_ids)):
-                    try:
-                        version_history = await self._fetch_version_history(
-                            entity_ids=all_entity_ids,
-                            namespace_id=namespace_id,
-                        )
-                    except _NEO4J_TRANSIENT_ERRORS as exc:
-                        logger.warning(
-                            f"Version history fetch failed for namespace={namespace_id}, "
-                            f"skipping: {type(exc).__name__}: {exc}"
-                        )
-                        version_history = None
+            # Step 5: Fetch chunks from all entities
+            # Skip when graph is unavailable — _fetch_chunks_from_entities uses
+            # Neo4j via DualNodeManager and would fail with the same error.
+            #
+            # Issue #542 — when the PPR retrieval flag is on AND a storage
+            # coordinator is wired, replace the BFS-driven chunk fetch with
+            # query-time Personalized PageRank.  Falls back to vector-only
+            # (graph_chunks=[]) when entities or seed overlap are empty.
+            # The vector channel is preserved either way and fusion still
+            # runs — so a degenerate PPR result never silently kills recall.
+            ppr_path_used = False
+            ppr_entity_scores: dict[UUID, float] = {}
+            # Sink for the graph channel's pushdown plan. The Neo4j BFS fetch appends
+            # the consumed keys of the compile it actually spliced into the executed
+            # ``WHERE`` (threaded through ``_fetch_chunks_from_entities`` →
+            # ``get_chunks_by_entities``), so the report derives from the executing
+            # compile. The PPR path and the storage-fallback (SurrealDB / embedded)
+            # paths push nothing and leave it empty, so every leaf falls to
+            # ``post_filtered_keys`` for them.
+            graph_pushed_keys_sink: list[frozenset[str]] = []
+            if graph_fallback:
+                graph_chunks: list[tuple[UUID, float, Chunk]] = []
+            elif self._config.enable_ppr_retrieval and self._storage is not None:
+                from khora.engines.vectorcypher.ppr_retrieval import ppr_retrieve_chunks
 
-        # Step 5: Fetch chunks from all entities
-        # Skip when graph is unavailable — _fetch_chunks_from_entities uses
-        # Neo4j via DualNodeManager and would fail with the same error.
-        #
-        # Issue #542 — when the PPR retrieval flag is on AND a storage
-        # coordinator is wired, replace the BFS-driven chunk fetch with
-        # query-time Personalized PageRank.  Falls back to vector-only
-        # (graph_chunks=[]) when entities or seed overlap are empty.
-        # The vector channel is preserved either way and fusion still
-        # runs — so a degenerate PPR result never silently kills recall.
-        ppr_path_used = False
-        ppr_entity_scores: dict[UUID, float] = {}
-        # Sink for the graph channel's pushdown plan. The Neo4j BFS fetch appends
-        # the consumed keys of the compile it actually spliced into the executed
-        # ``WHERE`` (threaded through ``_fetch_chunks_from_entities`` →
-        # ``get_chunks_by_entities``), so the report derives from the executing
-        # compile. The PPR path and the storage-fallback (SurrealDB / embedded)
-        # paths push nothing and leave it empty, so every leaf falls to
-        # ``post_filtered_keys`` for them.
-        graph_pushed_keys_sink: list[frozenset[str]] = []
-        if graph_fallback:
-            graph_chunks: list[tuple[UUID, float, Chunk]] = []
-        elif self._config.enable_ppr_retrieval and self._storage is not None:
-            from khora.engines.vectorcypher.ppr_retrieval import ppr_retrieve_chunks
+                # Build a chunk_id -> cosine-similarity map from the vector channel so
+                # PPR can blend graph mass with query relevance (HippoRAG-2 style,
+                # mass * (1 + sim)) instead of ordering chunks query-agnostically by
+                # pure PR mass. The vector task is awaited here and again at Step 6;
+                # asyncio caches the result, so this peek is effectively free.
+                chunk_similarity: dict[UUID, float] = {}
+                try:
+                    if _session_aware_chunks is not None:
+                        _vc_for_sim = _session_aware_chunks
+                    elif vector_chunks_task is not None:
+                        _vc_for_sim = await vector_chunks_task
+                    else:
+                        _vc_for_sim = []
+                    chunk_similarity = {cid: score for cid, score, _ in _vc_for_sim}
+                except Exception:  # noqa: S110 - sim is optional; PPR still runs without it
+                    chunk_similarity = {}
 
-            # Build a chunk_id -> cosine-similarity map from the vector channel so
-            # PPR can blend graph mass with query relevance (HippoRAG-2 style,
-            # mass * (1 + sim)) instead of ordering chunks query-agnostically by
-            # pure PR mass. The vector task is awaited here and again at Step 6;
-            # asyncio caches the result, so this peek is effectively free.
-            chunk_similarity: dict[UUID, float] = {}
-            try:
-                if _session_aware_chunks is not None:
-                    _vc_for_sim = _session_aware_chunks
-                elif vector_chunks_task is not None:
-                    _vc_for_sim = await vector_chunks_task
-                else:
-                    _vc_for_sim = []
-                chunk_similarity = {cid: score for cid, score, _ in _vc_for_sim}
-            except Exception:  # noqa: S110 - sim is optional; PPR still runs without it
-                chunk_similarity = {}
-
-            ppr_chunks, ppr_entity_scores = await ppr_retrieve_chunks(
-                storage=self._storage,
-                namespace_id=namespace_id,
-                entry_entities=entry_entities,
-                damping=self._config.ppr_damping,
-                max_iter=self._config.ppr_max_iter,
-                tol=self._config.ppr_tol,
-                top_entities=self._config.ppr_top_entities,
-                chunk_similarity=chunk_similarity,
-                limit=graph_fetch_limit,
-                neighborhood_per_seed_limit=self._config.ppr_neighborhood_per_seed_limit,
-                max_neighborhood_entities=self._config.ppr_max_neighborhood_entities,
-                # ADR-001 (#1373): surface a Degradation on the engine_info list
-                # when the graph channel silently returns nothing.
-                out_degradations=degradations,
-            )
-            graph_chunks = ppr_chunks
-            ppr_path_used = bool(ppr_chunks)
-            logger.debug(
-                "PPR retrieval path: {} chunks scored over {} entities",
-                len(graph_chunks),
-                len(ppr_entity_scores),
-            )
-        else:
-            graph_chunks = await self._fetch_chunks_from_entities(
-                entity_ids=all_entity_ids,
-                namespace_id=namespace_id,
-                temporal_filter=temporal_filter,
-                limit=graph_fetch_limit,  # Fetch more for fusion (widened on residual metadata)
-                temporal_sort=_tp.temporal_sort,
-                prefer_current=_tp.prefer_current,
-                filter_ast=filter_ast,
-                graph_pushed_keys_out=graph_pushed_keys_sink,
-            )
+                ppr_chunks, ppr_entity_scores = await ppr_retrieve_chunks(
+                    storage=self._storage,
+                    namespace_id=namespace_id,
+                    entry_entities=entry_entities,
+                    damping=self._config.ppr_damping,
+                    max_iter=self._config.ppr_max_iter,
+                    tol=self._config.ppr_tol,
+                    top_entities=self._config.ppr_top_entities,
+                    chunk_similarity=chunk_similarity,
+                    limit=graph_fetch_limit,
+                    neighborhood_per_seed_limit=self._config.ppr_neighborhood_per_seed_limit,
+                    max_neighborhood_entities=self._config.ppr_max_neighborhood_entities,
+                    # ADR-001 (#1373): surface a Degradation on the engine_info list
+                    # when the graph channel silently returns nothing.
+                    out_degradations=degradations,
+                )
+                graph_chunks = ppr_chunks
+                ppr_path_used = bool(ppr_chunks)
+                logger.debug(
+                    "PPR retrieval path: {} chunks scored over {} entities",
+                    len(graph_chunks),
+                    len(ppr_entity_scores),
+                )
+            else:
+                graph_chunks = await self._fetch_chunks_from_entities(
+                    entity_ids=all_entity_ids,
+                    namespace_id=namespace_id,
+                    temporal_filter=temporal_filter,
+                    limit=graph_fetch_limit,  # Fetch more for fusion (widened on residual metadata)
+                    temporal_sort=_tp.temporal_sort,
+                    prefer_current=_tp.prefer_current,
+                    filter_ast=filter_ast,
+                    graph_pushed_keys_out=graph_pushed_keys_sink,
+                )
 
         # Step 6: Wait for parallel vector chunk search to complete
         # This was started at the beginning and may already be done.
