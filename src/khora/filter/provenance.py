@@ -23,7 +23,7 @@ degraded path.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
@@ -84,6 +84,7 @@ async def filter_items_by_provenance[T: _HasProvenance](
     storage: _ChunkStore,
     component: str,
     degradations: list[Degradation],
+    chunk_record_adapter: Callable[[Any], Any] | None = None,
 ) -> list[T]:
     """Keep the items whose provenance satisfies ``filter_ast`` (∃ rule).
 
@@ -96,6 +97,16 @@ async def filter_items_by_provenance[T: _HasProvenance](
     unbounded union would blow the backend variable limit once a caller feeds it
     many items). Each page's filter-passing chunk ids accumulate into a shared
     ``surviving`` set; an item is kept iff any of its ids landed in that set.
+
+    ``chunk_record_adapter`` maps each fetched provenance chunk to the record the
+    predicate is evaluated against, so the entity/relationship surface enforces
+    the filter with the SAME field semantics its chunk channel uses. Chronicle
+    passes its ``_chunk_to_record`` (which resolves ``occurred_at`` as
+    ``COALESCE(occurred_at, source_timestamp)``, matching its chunk post-filter);
+    without it a raw chunk carrying its event time only in ``source_timestamp``
+    would false-drop the entity even though the chunk channel kept the chunk.
+    When ``None`` the raw chunk is used directly (VectorCypher, whose chunks
+    carry ``occurred_at`` natively — the adapter would be identity there anyway).
 
     Fail-closed (ADR-001): on a fetch-page exception the accumulated set is taken
     as final — items with a hit in the pages fetched SO FAR survive, the rest are
@@ -141,6 +152,10 @@ async def filter_items_by_provenance[T: _HasProvenance](
             )
             break
 
-        surviving.update(cid for cid, ch in chunks_map.items() if predicate(ch))
+        surviving.update(
+            cid
+            for cid, ch in chunks_map.items()
+            if predicate(chunk_record_adapter(ch) if chunk_record_adapter is not None else ch)
+        )
 
     return [item for item in items if any(cid in surviving for cid in item.source_chunk_ids)]

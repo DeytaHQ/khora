@@ -2296,6 +2296,39 @@ class ChronicleEngine:
             for (chunk, _), score in zip(chunks_with_scores, normalized_chunk_scores, strict=False)
         ]
 
+        # GitHub #1458: ∃-over-provenance entity filtering. The entity channel
+        # (search_similar_entities) is assembled from vector similarity the chunk
+        # post-filter never touched, so a caller filter that narrows chunks would
+        # otherwise leak entities it never constrained. Re-apply the SAME "Chunk"
+        # predicate to each entity's provenance chunks via the engine-agnostic
+        # helper: an entity survives iff ≥1 of its source_chunk_ids passes. Only
+        # runs under a filter; unfiltered recalls take the zero-cost path (no
+        # extra fetch). ``provenance_pass_ran`` marks the entity surface covered
+        # for the honest report — True whenever the pass executed, including the
+        # fetch-failure degraded path (the helper fail-closes by DROPPING
+        # unverified entities, so every survivor is verified).
+        provenance_pass_ran = False
+        if filter_ast is not None and bool(filter_ast.children) and entity_hits:
+            from khora.filter.provenance import filter_items_by_provenance
+
+            provenance_pass_ran = True
+            score_by_id = {entity.id: score for entity, score in entity_hits}
+            kept_entities = await filter_items_by_provenance(
+                [entity for entity, _ in entity_hits],
+                filter_ast,
+                namespace_id=namespace_id,
+                storage=storage,
+                component="chronicle.entity_filter",
+                degradations=degradations,
+                # Enforce the filter against each provenance chunk with the SAME
+                # field semantics the chunk channel uses (COALESCE(occurred_at,
+                # source_timestamp) etc.), so an entity is not false-dropped on an
+                # occurred_at predicate its provenance chunk satisfies only through
+                # source_timestamp — the chunk post-filter above keeps that chunk.
+                chunk_record_adapter=_chunk_to_record,
+            )
+            entity_hits = [(entity, score_by_id[entity.id]) for entity in kept_entities]
+
         recall_entities = [
             RecallEntity(
                 id=entity.id,
@@ -2386,17 +2419,24 @@ class ChronicleEngine:
                     defensive_recheck=(filter_ast is not None and bool(filter_ast.children)),
                 )
             },
-            # Chronicle covers only the "chunks" surface: the entity channel
-            # (search_similar_entities) receives no filter_ast (#1458), so a HYBRID
-            # recall that surfaces entities emits an UNCOVERED entity surface and the
-            # builder honestly forces the filter's leaves into unenforced_keys. The
-            # #1458 fix filters the entity surface and adds it to covered_surfaces.
+            # Chronicle covers the "chunks" surface unconditionally; the entity
+            # surface is covered iff the ∃-over-provenance pass ran (#1458). When a
+            # filter is present the pass re-applies the chunk predicate to each
+            # entity's provenance, so the entity/relationship surfaces are enforced
+            # and added to covered_surfaces — otherwise a HYBRID recall surfacing
+            # entities the filter never constrained would honestly force the filter's
+            # leaves into unenforced_keys.
             surface_sizes={
                 "chunks": len(recall_chunks),
                 "entities": len(recall_entities),
                 "relationships": 0,
             },
-            covered_surfaces={"chunks"},
+            # Chronicle's relationships surface is ALWAYS empty (size 0), so
+            # including "relationships" in covered_surfaces is harmless either way —
+            # build_filter_report only forces a filter's leaves into unenforced_keys
+            # for an uncovered surface with size > 0. Listed for parity with the
+            # VectorCypher pass, which covers both surfaces together.
+            covered_surfaces={"chunks"} | ({"entities", "relationships"} if provenance_pass_ran else set()),
         )
 
         return RecallResult(

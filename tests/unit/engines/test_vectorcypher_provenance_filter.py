@@ -533,3 +533,112 @@ class TestMultiPageFailClosedKeepsDecidedItems:
         assert [(d.get("component"), d.get("reason")) for d in degradations] == [
             ("vectorcypher.entity_filter", "provenance_fetch_failed")
         ]
+
+
+# ---------------------------------------------------------------------------
+# chunk_record_adapter: the entity surface enforces the filter with the SAME
+# field semantics its chunk channel uses. Chronicle's chunks carry their event
+# time only in ``source_timestamp`` (raw ``occurred_at`` is NULL), so its
+# ``_chunk_to_record`` COALESCE adapter is what lets an ``occurred_at`` predicate
+# the chunk channel satisfied keep the provenance entity (GitHub #1458).
+# ---------------------------------------------------------------------------
+
+
+class TestChunkRecordAdapterCoalescesOccurredAt:
+    """The real chronicle ``_chunk_to_record`` adapter aligns entity + chunk enforcement.
+
+    Drives ``filter_items_by_provenance`` with chronicle's ACTUAL
+    ``_chunk_to_record`` (not a stand-in) so the entity surface enforces
+    ``occurred_at`` with the SAME ``COALESCE(occurred_at, source_timestamp)``
+    semantics chronicle's chunk post-filter uses. Both directions have teeth:
+    a source_timestamp-only chunk that CLEARS the horizon keeps its entity; a
+    chunk whose event time (via either field) FAILS the horizon drops it.
+    """
+
+    async def test_source_timestamp_only_chunk_needs_adapter_to_survive(self) -> None:
+        """A source_timestamp-only chunk drops under the raw predicate, survives via the adapter.
+
+        This is the chronicle shape: ``chunk.occurred_at`` is NULL and the real
+        event time lives in ``source_timestamp``. Without an adapter the raw chunk's
+        ``occurred_at`` resolves to ``None`` -> the ``$gte`` predicate fails ->
+        the entity false-drops even though the chunk channel (which reads via
+        ``_chunk_to_record``) kept the chunk. The real ``_chunk_to_record`` adapter
+        closes that gap.
+        """
+        from khora.engines.chronicle.engine import _chunk_to_record
+        from khora.filter.provenance import filter_items_by_provenance
+
+        ns_id = uuid4()
+        # A chunk carrying its event time ONLY in source_timestamp (occurred_at NULL).
+        chunk = Chunk(
+            id=uuid4(),
+            namespace_id=ns_id,
+            document_id=uuid4(),
+            content="source_timestamp-only provenance chunk",
+            occurred_at=None,
+            source_timestamp=datetime(2027, 6, 1, tzinfo=UTC),
+        )
+        item = _ProvItem([chunk.id])
+
+        storage = AsyncMock()
+        storage.get_chunks_batch = AsyncMock(return_value={chunk.id: chunk})
+
+        # Without an adapter: raw occurred_at is None -> the entity is dropped.
+        dropped = await filter_items_by_provenance(
+            [item],
+            _ast(_DATE_FILTER),
+            namespace_id=ns_id,
+            storage=storage,
+            component="chronicle.entity_filter",
+            degradations=[],
+        )
+        assert dropped == [], "raw occurred_at=None should fail the $gte predicate without a COALESCE adapter"
+
+        # With chronicle's real _chunk_to_record adapter: the entity survives, because
+        # the record's occurred_at is COALESCE(None, source_timestamp) = 2027 >= 2027.
+        kept = await filter_items_by_provenance(
+            [item],
+            _ast(_DATE_FILTER),
+            namespace_id=ns_id,
+            storage=storage,
+            component="chronicle.entity_filter",
+            degradations=[],
+            chunk_record_adapter=_chunk_to_record,
+        )
+        assert kept == [item], "the COALESCE adapter should let the source_timestamp event time satisfy the filter"
+
+    async def test_chunk_failing_both_fields_is_dropped_even_with_adapter(self) -> None:
+        """A chunk whose event time fails the horizon (via either field) drops WITH the adapter.
+
+        The adapter is not a blanket "keep everything": it only changes WHICH field
+        supplies the event time, not whether the predicate is enforced. A chunk whose
+        source_timestamp (COALESCE'd into occurred_at) is 2026 does NOT clear the 2027
+        horizon, so its entity is correctly dropped — the enforcement still has teeth.
+        """
+        from khora.engines.chronicle.engine import _chunk_to_record
+        from khora.filter.provenance import filter_items_by_provenance
+
+        ns_id = uuid4()
+        stale = Chunk(
+            id=uuid4(),
+            namespace_id=ns_id,
+            document_id=uuid4(),
+            content="pre-horizon provenance chunk",
+            occurred_at=None,
+            source_timestamp=datetime(2026, 6, 1, tzinfo=UTC),
+        )
+        item = _ProvItem([stale.id])
+
+        storage = AsyncMock()
+        storage.get_chunks_batch = AsyncMock(return_value={stale.id: stale})
+
+        kept = await filter_items_by_provenance(
+            [item],
+            _ast(_DATE_FILTER),
+            namespace_id=ns_id,
+            storage=storage,
+            component="chronicle.entity_filter",
+            degradations=[],
+            chunk_record_adapter=_chunk_to_record,
+        )
+        assert kept == [], "a 2026 event time must not clear the 2027 horizon even through the COALESCE adapter"
