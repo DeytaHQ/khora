@@ -1185,12 +1185,13 @@ async def process_document(
                                 channel=doc_metadata.get("channel"),
                                 tags=doc_metadata.get("tags", []),
                                 confidence=1.0,
-                                metadata={
+                                metadata=dict(chunk.metadata or {}),
+                                chunker_info={
+                                    **(chunk.chunker_info or {}),
                                     "chunk_index": chunk.chunk_index,
                                     "start_char": chunk.start_char,
                                     "end_char": chunk.end_char,
                                     "token_count": chunk.token_count,
-                                    **(chunk.metadata or {}),
                                 },
                                 **document_denorm_fields(document),
                             )

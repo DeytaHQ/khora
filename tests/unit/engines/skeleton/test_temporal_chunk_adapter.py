@@ -121,13 +121,49 @@ def test_session_id_absent_when_missing_or_malformed() -> None:
     assert temporal_chunk_to_chunk(_make_tc(metadata={"session_id": ""})).session_id is None
 
 
-def test_carries_position_metadata() -> None:
-    md = {"chunk_index": 3, "start_char": 100, "end_char": 200, "token_count": 25}
-    c = temporal_chunk_to_chunk(_make_tc(metadata=md))
+def test_carries_position_bookkeeping_from_chunker_info() -> None:
+    """The four bookkeeping fields are read from ``chunker_info``.
+
+    Chunk position bookkeeping (chunk_index / start_char / end_char /
+    token_count) lives in ``chunker_info`` — ``metadata`` is reserved for
+    user/document metadata only. The adapter must populate the public
+    ``Chunk`` position fields from ``chunker_info``.
+    """
+    ci = {
+        "chunker": "fixed",
+        "chunk_index": 3,
+        "start_char": 100,
+        "end_char": 200,
+        "token_count": 25,
+    }
+    c = temporal_chunk_to_chunk(_make_tc(chunker_info=ci))
     assert c.chunk_index == 3
     assert c.start_char == 100
     assert c.end_char == 200
     assert c.token_count == 25
+
+
+def test_position_bookkeeping_not_read_from_metadata_no_fallback() -> None:
+    """Legacy-shaped chunk (bookkeeping in ``metadata``, empty
+    ``chunker_info``) yields ZEROS — there is NO metadata fallback.
+
+    Pins the no-fallback decision explicitly: bookkeeping now flows through
+    ``chunker_info`` exclusively. A ``TemporalChunk`` that carries the four
+    keys in ``metadata`` (the pre-refactor shape) with an empty
+    ``chunker_info`` must NOT have those values surfaced on the public
+    ``Chunk`` — every position field falls back to 0. The ``metadata`` dict
+    itself still passes through untouched.
+    """
+    legacy_md = {"chunk_index": 3, "start_char": 100, "end_char": 200, "token_count": 25}
+    c = temporal_chunk_to_chunk(_make_tc(metadata=legacy_md, chunker_info={}))
+
+    assert c.chunk_index == 0
+    assert c.start_char == 0
+    assert c.end_char == 0
+    assert c.token_count == 0
+    # metadata is passed through verbatim — the values are present there,
+    # they are simply not read for the position fields anymore.
+    assert c.metadata == legacy_md
 
 
 def test_identity_fields_pass_through() -> None:

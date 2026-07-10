@@ -435,11 +435,13 @@ class SkeletonConstructionEngine:
                 channel=doc_metadata.get("channel"),
                 tags=doc_metadata.get("tags", []),
                 confidence=1.0,
-                metadata={
-                    **doc_metadata,
+                metadata=dict(doc_metadata),
+                chunker_info={
+                    **dict(raw_chunk.metadata),
                     "chunk_index": i,
                     "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
                     "end_char": raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content),
+                    "token_count": raw_chunk.token_count if hasattr(raw_chunk, "token_count") else 0,
                 },
                 **document_denorm_fields(document),
             )
@@ -1043,11 +1045,13 @@ class SkeletonConstructionEngine:
                     channel=doc_custom.get("channel"),
                     tags=doc_custom.get("tags", []),
                     confidence=1.0,
-                    metadata={
-                        **doc_custom,
+                    metadata=dict(doc_custom),
+                    chunker_info={
+                        **dict(raw_chunk.metadata),
                         "chunk_index": chunk_idx,
                         "start_char": (raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0),
                         "end_char": (raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content)),
+                        "token_count": (raw_chunk.token_count if hasattr(raw_chunk, "token_count") else 0),
                     },
                     **document_denorm_fields(doc),
                 )

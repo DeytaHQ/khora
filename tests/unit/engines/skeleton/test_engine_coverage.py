@@ -136,7 +136,7 @@ class TestProcessDocument:
         document.metadata.custom = {"source_system": "slack", "author": "alice"}
         document.mark_completed = MagicMock()
 
-        raw = SimpleNamespace(content="chunk text", start_char=0, end_char=10)
+        raw = SimpleNamespace(content="chunk text", start_char=0, end_char=10, metadata={"chunker": "fixed"})
         mock_chunker = MagicMock()
         mock_chunker.chunk.return_value = [raw]
 
@@ -167,9 +167,12 @@ class TestProcessDocument:
 
 @pytest.mark.unit
 class TestChunkMetadataMerge:
-    """Document metadata is spread onto every chunk's ``metadata`` so
-    ``metadata.<path>`` filters can read it back, while the bookkeeping keys
-    (``chunk_index`` / ``start_char`` / ``end_char``) always win on collision."""
+    """Document metadata is copied onto every chunk's ``metadata`` verbatim so
+    ``metadata.<path>`` filters can read it back. Chunker bookkeeping
+    (``chunk_index`` / ``start_char`` / ``end_char`` / ``token_count``) is NOT
+    written into ``metadata`` — it lives in ``chunker_info``. A user key that
+    happens to collide with a bookkeeping name (e.g. ``chunk_index``) is treated
+    as user data and preserved in ``metadata`` untouched."""
 
     @pytest.mark.asyncio
     async def test_process_document_merges_doc_metadata(self) -> None:
@@ -184,7 +187,7 @@ class TestChunkMetadataMerge:
         document.metadata = {"tag": "release", "source_name": "linear", "chunk_index": 999}
         document.mark_completed = MagicMock()
 
-        raw = SimpleNamespace(content="chunk text", start_char=3, end_char=13)
+        raw = SimpleNamespace(content="chunk text", start_char=3, end_char=13, metadata={"chunker": "fixed"})
         mock_chunker = MagicMock()
         mock_chunker.chunk.return_value = [raw]
 
@@ -204,14 +207,19 @@ class TestChunkMetadataMerge:
         sent_chunks = eng._temporal_store.create_chunks_batch.call_args[0][0]
         assert len(sent_chunks) == 1
         md = sent_chunks[0].metadata
-        # Document keys propagated.
+        ci = sent_chunks[0].chunker_info
+        # Document keys propagated as user metadata.
         assert md["tag"] == "release"
         assert md["source_name"] == "linear"
-        # Bookkeeping keys present and authoritative — the doc's colliding
-        # chunk_index=999 must NOT survive.
-        assert md["chunk_index"] == 0
-        assert md["start_char"] == 3
-        assert md["end_char"] == 13
+        # The user's colliding chunk_index=999 is user data — preserved in
+        # metadata untouched; bookkeeping is NOT written into metadata.
+        assert md["chunk_index"] == 999
+        assert "start_char" not in md
+        assert "end_char" not in md
+        # Chunker bookkeeping lives in chunker_info.
+        assert ci["chunk_index"] == 0
+        assert ci["start_char"] == 3
+        assert ci["end_char"] == 13
 
     @pytest.mark.asyncio
     async def test_remember_batch_merges_doc_metadata(self) -> None:
@@ -231,7 +239,7 @@ class TestChunkMetadataMerge:
         eng._storage.create_document = AsyncMock(side_effect=lambda d: _make_doc(d.content))
         eng._storage.update_document = AsyncMock()
 
-        raw = SimpleNamespace(content="chunk text", start_char=3, end_char=13)
+        raw = SimpleNamespace(content="chunk text", start_char=3, end_char=13, metadata={"chunker": "fixed"})
         mock_chunker = MagicMock()
         mock_chunker.chunk.return_value = [raw]
         eng._embedder.embed_batch = AsyncMock(return_value=[[0.1, 0.2]])
@@ -257,12 +265,17 @@ class TestChunkMetadataMerge:
         sent_chunks = eng._temporal_store.create_chunks_batch.call_args[0][0]
         assert len(sent_chunks) == 1
         md = sent_chunks[0].metadata
+        ci = sent_chunks[0].chunker_info
         assert md["tag"] == "release"
         assert md["source_name"] == "linear"
-        # Real chunk_index wins over the colliding doc-metadata value.
-        assert md["chunk_index"] == 0
-        assert md["start_char"] == 3
-        assert md["end_char"] == 13
+        # The user's colliding chunk_index=999 stays in metadata (user data);
+        # real bookkeeping lives in chunker_info, not metadata.
+        assert md["chunk_index"] == 999
+        assert "start_char" not in md
+        assert "end_char" not in md
+        assert ci["chunk_index"] == 0
+        assert ci["start_char"] == 3
+        assert ci["end_char"] == 13
 
 
 # ---------------------------------------------------------------------------
@@ -352,7 +365,7 @@ class TestRememberBatch:
         eng._storage.create_document = AsyncMock(side_effect=lambda d: _make_doc(d.content))
         eng._storage.update_document = AsyncMock()
 
-        raw = SimpleNamespace(content="chunk text", start_char=0, end_char=10)
+        raw = SimpleNamespace(content="chunk text", start_char=0, end_char=10, metadata={"chunker": "fixed"})
         mock_chunker = MagicMock()
         mock_chunker.chunk.return_value = [raw]
         eng._embedder.embed_batch = AsyncMock(return_value=[[0.1, 0.2], [0.1, 0.2], [0.1, 0.2]])

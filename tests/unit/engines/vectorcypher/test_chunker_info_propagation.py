@@ -5,9 +5,11 @@ The contract under test:
 * A chunker emits ``ChunkResult.metadata = {"chunker": "<strategy>", ...}``
   (see ``khora.extraction.chunkers.base.ChunkResult`` docstring — every
   chunker MUST stamp ``metadata["chunker"]`` with its strategy name).
-* The VectorCypher engine must copy that dict, verbatim, onto the
-  ``TemporalChunk.chunker_info`` field before handing the chunk to the
-  temporal store.
+* The VectorCypher engine must copy that dict onto the
+  ``TemporalChunk.chunker_info`` field, alongside the chunker bookkeeping
+  keys (``chunk_index`` / ``start_char`` / ``end_char`` / ``token_count``,
+  stamped last), before handing the chunk to the temporal store. The
+  bookkeeping keys never land in ``TemporalChunk.metadata``.
 
 These tests pin that wire at the engine boundary. They mock the storage,
 temporal store, dual-node, and embedder layers — no DB, no Neo4j, no
@@ -171,11 +173,17 @@ class TestChunkerInfoPropagation:
 
         temporal_chunk = captured[0][0]
         assert isinstance(temporal_chunk, TemporalChunk)
-        # The contract: chunker_info is a (defensively copied) duplicate of
-        # ChunkResult.metadata.
-        assert temporal_chunk.chunker_info == marker, (
-            f"chunker_info mismatch: expected {marker}, got {temporal_chunk.chunker_info}"
-        )
+        # The contract: chunker_info carries the chunker's metadata plus the
+        # bookkeeping keys stamped last. None of the bookkeeping keys leak
+        # into TemporalChunk.metadata.
+        ci = temporal_chunk.chunker_info
+        assert ci["chunker"] == "fixed"
+        assert ci["size"] == 100
+        assert ci["chunk_index"] == 0
+        assert ci["start_char"] == 0
+        assert ci["end_char"] == 11
+        assert ci["token_count"] == 0
+        assert not any(k in temporal_chunk.metadata for k in ("chunk_index", "start_char", "end_char", "token_count"))
         # Defensive copy: mutating the original chunker metadata must not
         # leak into the persisted TemporalChunk.
         marker["after_persist"] = "leaked"
@@ -231,13 +239,19 @@ class TestChunkerInfoPropagation:
         assert len(all_chunks) == 3, f"expected 3 chunks, got {len(all_chunks)}"
 
         for i, tc in enumerate(all_chunks):
-            assert tc.chunker_info == {"chunker": "fixed", "i": i}, (
-                f"chunk #{i} has unexpected chunker_info: {tc.chunker_info}"
-            )
+            ci = tc.chunker_info
+            assert ci["chunker"] == "fixed", f"chunk #{i}: {ci}"
+            assert ci["i"] == i, f"chunk #{i}: {ci}"
+            # Bookkeeping stamped alongside the chunker's own metadata.
+            assert ci["chunk_index"] == i, f"chunk #{i}: {ci}"
+            assert ci["start_char"] == i, f"chunk #{i}: {ci}"
+            assert ci["end_char"] == i + 7, f"chunk #{i}: {ci}"
+            assert ci["token_count"] == 0, f"chunk #{i}: {ci}"
 
     @pytest.mark.asyncio
-    async def test_empty_chunker_metadata_yields_empty_dict(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A chunker with empty ``metadata={}`` → ``chunker_info == {}`` (not None)."""
+    async def test_empty_chunker_metadata_yields_only_bookkeeping(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A chunker with empty ``metadata={}`` → ``chunker_info`` carries only
+        the four bookkeeping keys (no chunker-emitted keys), and is a dict not None."""
         engine = _make_connected_engine()
 
         stub_chunker = _StubChunker([_StubChunkResult(content="bare content", start_char=0, end_char=12, metadata={})])
@@ -276,6 +290,12 @@ class TestChunkerInfoPropagation:
         all_chunks = [c for batch in captured for c in batch]
         assert len(all_chunks) == 1
         tc = all_chunks[0]
-        # Must be a dict (default_factory), never None.
-        assert tc.chunker_info == {}
+        # Empty chunker metadata → only the four bookkeeping keys land; still a
+        # dict (default_factory), never None.
+        assert tc.chunker_info == {
+            "chunk_index": 0,
+            "start_char": 0,
+            "end_char": 12,
+            "token_count": 0,
+        }
         assert isinstance(tc.chunker_info, dict)
