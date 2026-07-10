@@ -1857,6 +1857,17 @@ class QuerySettings(BaseSettings):
     diversity_lambda: float = Field(
         default=0.5, ge=0.0, le=1.0, description="Diversity vs relevance tradeoff (0=pure diversity, 1=pure relevance)"
     )
+    # #1463 — adaptive diversity gate. When the top candidate's normalized
+    # ranking score leads the runner-up by more than this gap, MMR is skipped:
+    # the winner is decisive and re-ranking for diversity only risks demoting it.
+    # 0.0 disables the gate (MMR always runs when enabled). Conservative default
+    # so most queries are unaffected — only near-tie-free result sets skip MMR.
+    diversity_min_gap: float = Field(
+        default=0.35,
+        ge=0.0,
+        le=1.0,
+        description="Skip MMR when the top vs 2nd normalized ranking-score gap exceeds this (0=never skip)",
+    )
 
     # Stage 1 recall budget distribution (must sum to ~1.0)
     stage1_vector_ratio: float = Field(

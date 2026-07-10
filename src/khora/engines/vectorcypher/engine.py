@@ -906,6 +906,7 @@ class VectorCypherEngine:
             stage1_recall_limit=self._config.query.stage1_recall_limit,
             enable_diversity=self._config.query.enable_diversity,
             diversity_lambda=self._config.query.diversity_lambda,
+            diversity_min_gap=self._config.query.diversity_min_gap,
         )
 
     async def disconnect(self) -> None:
