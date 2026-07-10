@@ -3431,19 +3431,54 @@ class VectorCypherEngine:
         # row, so BatchResult.entities must reflect unique persisted cardinality).
         _seen_entity_keys: set[tuple[str, str]] = set()
 
-        for window_states in windows:
-            # ── Stage 2: Batch-embed ALL chunk texts ────────────────────────
+        # #1471: overlap window K+1's chunk embedding (stage 2) with window K's
+        # storage + extraction (stages 3-6). embed_batch is the dominant
+        # producer-side cost and depends only on ``state.embed_texts`` (already
+        # computed in stage 1), so the next window's embeddings can be computed
+        # while the current window still runs the LLM extraction + entity
+        # writes. Only the embedding I/O overlaps; every mutation of the shared
+        # per-batch accumulators (results, _seen_entity_keys, per_document,
+        # diagnostics) stays strictly serial in window order. Deferred (higher
+        # risk, lower value): overlapping the tiny store_chunks leg and the
+        # extract/entity-store consumer side, which would require a queue-based
+        # rewrite of the 470-line loop and concurrent access to those
+        # accumulators.
+        def _collect_embed_texts(win: list[_DocState]) -> tuple[list[str], list[tuple[int, int]]]:
+            texts: list[str] = []
+            offsets: list[tuple[int, int]] = []  # (state_index, start_offset) into texts
+            for si, state in enumerate(win):
+                offsets.append((si, len(texts)))
+                texts.extend(state.embed_texts)
+            return texts, offsets
+
+        async def _embed_window(win: list[_DocState]) -> tuple[list[list[float]], list[tuple[int, int]]]:
+            texts, offsets = _collect_embed_texts(win)
+            logger.debug(f"Batch embedding {len(texts)} texts across {len(win)} documents")
+            return await embedder.embed_batch(texts), offsets
+
+        def _prefetch(win: list[_DocState]) -> asyncio.Task:
+            task = asyncio.ensure_future(_embed_window(win))
+            # If a later window's stages raise before we await this prefetch, the
+            # task is orphaned; retrieve its exception in a done-callback so
+            # asyncio does not log "Task exception was never retrieved". The real
+            # error still propagates from the failing window's own stages.
+            task.add_done_callback(lambda t: t.cancelled() or t.exception())
+            return task
+
+        # Kick off the first window's embedding; each iteration prefetches the
+        # next window's embedding before doing its own storage + extraction.
+        _next_embed_task: asyncio.Task | None = _prefetch(windows[0])
+
+        for _wi, window_states in enumerate(windows):
+            # ── Stage 2: await this window's (prefetched) chunk embeddings ──
             _t0 = _time.perf_counter()
 
-            # Collect all texts with provenance tracking
-            all_embed_texts: list[str] = []
-            text_offsets: list[tuple[int, int]] = []  # (state_index, start_offset) into all_embed_texts
-            for si, state in enumerate(window_states):
-                text_offsets.append((si, len(all_embed_texts)))
-                all_embed_texts.extend(state.embed_texts)
+            assert _next_embed_task is not None
+            all_embeddings, text_offsets = await _next_embed_task
 
-            logger.debug(f"Batch embedding {len(all_embed_texts)} texts across {len(window_states)} documents")
-            all_embeddings = await embedder.embed_batch(all_embed_texts)
+            # Prefetch the next window's embeddings so its embed_batch I/O runs
+            # concurrently with this window's stages 3-6.
+            _next_embed_task = _prefetch(windows[_wi + 1]) if _wi + 1 < len(windows) else None
 
             _stage2_ms += (_time.perf_counter() - _t0) * 1000
 
@@ -3518,6 +3553,18 @@ class VectorCypherEngine:
                         await persist_keyword_chunk_edges(
                             storage, namespace_id, doc_chunks, out_diagnostics=extraction_diagnostics
                         )
+
+            # #1471: release chunk embeddings once stage-3 writes are done. The
+            # chunk vectors (O(window) × embedding_dim floats) are durable in
+            # pgvector + mirrored to the graph by now, and nothing in stages
+            # 4-6 reads them (extraction works off chunk text; stage 5 embeds
+            # ENTITY text into a separate object). Dropping the big
+            # ``all_embeddings`` list and the per-chunk ``embedding`` references
+            # here keeps peak resident memory bounded by a single window instead
+            # of holding the vectors through extraction + entity storage.
+            del all_embeddings
+            for tc in all_temporal_chunks:
+                tc.embedding = None
 
             _stage3_ms += (_time.perf_counter() - _t0) * 1000
 
