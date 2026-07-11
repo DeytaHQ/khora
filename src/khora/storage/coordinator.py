@@ -240,13 +240,23 @@ class StorageCoordinator:
     _is_unified_backend: bool = field(default=False, init=False)
     _hook_dispatcher: Any = field(default=None, init=False)
 
+    def should_dispatch_hooks(self) -> bool:
+        """True when a dispatch would reach at least one subscriber.
+
+        Mirrors the exact guard in :meth:`dispatch_hook`. Callers that build a
+        batch of ``MemoryEvent`` objects can check this once and skip the whole
+        construction+dispatch loop when it returns False - a no-subscriber
+        dispatch is already a no-op, so this only avoids the wasted work.
+        """
+        return self._hook_dispatcher is not None and self._hook_dispatcher.subscription_count > 0
+
     async def dispatch_hook(self, event: Any) -> None:
         """Dispatch an event to hook subscribers if a dispatcher is attached.
 
         Called by the ingestion pipeline after extraction/storage operations.
         No-op if no dispatcher is set (i.e., no hooks subscribed).
         """
-        if self._hook_dispatcher is not None and self._hook_dispatcher.subscription_count > 0:
+        if self.should_dispatch_hooks():
             await self._hook_dispatcher.dispatch(event)
 
     # Security: tuple of public attr names that proxy through __setattr__.
