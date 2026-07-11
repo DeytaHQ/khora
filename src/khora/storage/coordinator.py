@@ -1308,7 +1308,7 @@ class StorageCoordinator:
         """
         if not self._relational:
             raise RuntimeError("Relational backend not configured")
-        return await self._relational.get_documents_by_checksums(  # type: ignore[unresolved-attribute]
+        return await self._relational.get_documents_by_checksums(
             namespace_id, checksums, pending_stale_before=pending_stale_before
         )
 

@@ -202,16 +202,21 @@ def test_partial_wheel_logs_warning_naming_missing_symbol(reload_accel_with):
     assert "stale" in joined.lower()
 
 
-def test_partial_wheel_no_warning_when_backend_forced_off(reload_accel_with, monkeypatch):
-    """Forcing the backend off suppresses the stale-wheel WARNING (opted out)."""
-    monkeypatch.setenv("KHORA_ACCEL_BACKEND", "numpy")
+@pytest.mark.parametrize("backend", ["numpy", "python"])
+def test_partial_wheel_no_warning_when_backend_forced_off(reload_accel_with, monkeypatch, backend):
+    """Forcing the backend off suppresses the stale-wheel WARNING (opted out).
+
+    Both force-off values (``numpy`` and ``python``) are separate override
+    branches in _accel.py, so both are covered.
+    """
+    monkeypatch.setenv("KHORA_ACCEL_BACKEND", backend)
     fake = _make_fake_khora_accel(missing={"block_and_score_pairs"})
     mod, messages = reload_accel_with(fake)
 
     # Rust is force-disabled, so no scary stale-wheel notice is emitted.
     assert mod._HAS_RUST is False
     stale = [m for m in messages if "stale" in m.lower()]
-    assert not stale, f"forced-off backend must not warn about a stale wheel: {stale}"
+    assert not stale, f"forced-off backend ({backend}) must not warn about a stale wheel: {stale}"
 
 
 def test_full_wheel_emits_no_stale_warning(reload_accel_with):

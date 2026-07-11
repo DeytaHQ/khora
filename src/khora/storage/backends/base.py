@@ -235,6 +235,20 @@ class RelationalBackendProtocol(Protocol):
         ...
 
     @abstractmethod
+    async def get_documents_by_checksums(
+        self, namespace_id: UUID, checksums: list[str], *, pending_stale_before: datetime | None = None
+    ) -> dict[str, Document]:
+        """Fetch documents by content checksums in a single query (batch dedup).
+
+        Same status semantics as ``get_document_by_checksum``: FAILED is always
+        excluded, and when ``pending_stale_before`` is given, PENDING documents
+        older than that cutoff are also excluded so a crash-abandoned half-ingest
+        (#1464) re-ingests. Returns a dict mapping checksum to Document for the
+        documents that exist and pass the filter.
+        """
+        ...
+
+    @abstractmethod
     async def get_document_by_external_id(
         self,
         external_id: str | None,
