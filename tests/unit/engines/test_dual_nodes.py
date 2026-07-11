@@ -1311,15 +1311,24 @@ class TestBoundedNeighborhoodExpansionQuery:
         assert "_found[0..$limit]" in query
 
     def test_prefer_current_filters_every_hop(self) -> None:
-        """valid_until is checked per traversed relationship and per reported node."""
+        """valid_until is checked per traversed relationship and per reported node.
+
+        valid_until is now a native ZONED DATETIME (#1472), so the comparison is
+        cast-free (``valid_until > _now``) - engaging the entity_ns_valid_until
+        index range instead of the former non-sargable ``datetime(valid_until)``
+        per-row string cast.
+        """
         depth = 3
         query = _build_neighborhood_query(depth, prefer_current=True)
         assert "datetime() AS _now" in query
+        # No per-row cast of the stored property (would defeat the index).
+        assert "datetime(_r" not in query
+        assert "datetime(x.valid_until)" not in query
         # One relationship-validity check per hop...
         for i in range(1, depth + 1):
-            assert f"_r{i}.valid_until IS NULL OR datetime(_r{i}.valid_until) > _now" in query
+            assert f"_r{i}.valid_until IS NULL OR _r{i}.valid_until > _now" in query
         # ...and one reported-node validity check per hop.
-        assert query.count("x.valid_until IS NULL OR datetime(x.valid_until) > _now") == depth
+        assert query.count("x.valid_until IS NULL OR x.valid_until > _now") == depth
 
     def test_prefer_current_false_has_no_temporal_filter(self) -> None:
         query = _build_neighborhood_query(3, prefer_current=False)

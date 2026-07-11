@@ -77,6 +77,7 @@ class TestKeepaliveDefaultOff:
         assert backend._pool_keepalive_enabled is False
 
         backend._create_indexes = AsyncMock()
+        backend._backfill_native_valid_datetimes = AsyncMock()  # #1472: isolate keepalive from connect() side effects
         backend._register_pool_metrics = MagicMock()
 
         await backend.connect()
@@ -115,6 +116,7 @@ class TestKeepaliveStarts:
         assert backend._pool_keepalive_interval_ms == 50
 
         backend._create_indexes = AsyncMock()
+        backend._backfill_native_valid_datetimes = AsyncMock()  # #1472: isolate keepalive from connect() side effects
         backend._register_pool_metrics = MagicMock()
 
         await backend.connect()
@@ -179,6 +181,7 @@ class TestKeepaliveIdempotentStart:
         driver = _make_keepalive_driver()
         backend = Neo4jBackend.from_driver(driver, pool_keepalive_enabled=True, pool_keepalive_interval_ms=50)
         backend._create_indexes = AsyncMock()
+        backend._backfill_native_valid_datetimes = AsyncMock()  # #1472: isolate keepalive from connect() side effects
         backend._register_pool_metrics = MagicMock()
 
         await backend.connect()
@@ -559,6 +562,7 @@ class TestKeepaliveShutdownRace:
         driver = _make_keepalive_driver(idle=4)
         backend = Neo4jBackend.from_driver(driver, pool_keepalive_enabled=True, pool_keepalive_interval_ms=20)
         backend._create_indexes = AsyncMock()
+        backend._backfill_native_valid_datetimes = AsyncMock()  # #1472: isolate keepalive from connect() side effects
         backend._register_pool_metrics = MagicMock()
 
         await backend.connect()

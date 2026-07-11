@@ -5,8 +5,14 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import uuid4
 
+import pytest
+
 from khora.core.models import Entity, Relationship
-from khora.storage.backends.neo4j import _entity_to_cypher_params, _relationship_to_cypher_params
+from khora.storage.backends.neo4j import (
+    _coerce_neo4j_datetime,
+    _entity_to_cypher_params,
+    _relationship_to_cypher_params,
+)
 
 
 class TestEntityToCypherParams:
@@ -59,7 +65,11 @@ class TestEntityToCypherParams:
         assert params["entity_type"] == "CUSTOM_TYPE"
 
     def test_temporal_fields(self) -> None:
-        """valid_from and valid_until are serialized as ISO strings."""
+        """valid_from and valid_until pass through as native datetime objects (#1472).
+
+        The neo4j driver serializes a Python ``datetime`` to a native ZONED
+        DATETIME property, so the temporal filter is a cast-free indexed range.
+        """
         vf = datetime(2024, 1, 1, tzinfo=UTC)
         vu = datetime(2024, 12, 31, tzinfo=UTC)
         entity = Entity(
@@ -70,8 +80,10 @@ class TestEntityToCypherParams:
             valid_until=vu,
         )
         params = _entity_to_cypher_params(entity)
-        assert params["valid_from"] == vf.isoformat()
-        assert params["valid_until"] == vu.isoformat()
+        assert params["valid_from"] == vf
+        assert params["valid_until"] == vu
+        assert isinstance(params["valid_from"], datetime)
+        assert isinstance(params["valid_until"], datetime)
 
     def test_attributes_serialized(self) -> None:
         """Attributes dict is JSON-serialized."""
@@ -148,3 +160,32 @@ class TestRelationshipToCypherParams:
         params = _relationship_to_cypher_params(rel)
         assert isinstance(params["properties"], str)
         assert "key" in params["properties"]
+
+
+class TestCoerceNeo4jDatetime:
+    """Dual-read coercion for native ZONED DATETIME + legacy ISO strings (#1472)."""
+
+    def test_none_passthrough(self) -> None:
+        assert _coerce_neo4j_datetime(None) is None
+
+    def test_legacy_iso_string(self) -> None:
+        """Old graphs (and not-yet-backfilled nodes) still carry ISO strings."""
+        out = _coerce_neo4j_datetime("2024-12-31T00:00:00+00:00")
+        assert out == datetime(2024, 12, 31, tzinfo=UTC)
+
+    def test_python_datetime_passthrough(self) -> None:
+        dt = datetime(2024, 1, 1, tzinfo=UTC)
+        assert _coerce_neo4j_datetime(dt) is dt
+
+    def test_native_neo4j_datetime(self) -> None:
+        """A neo4j ``DateTime`` (the new native write form) coerces via to_native()."""
+        from neo4j.time import DateTime
+
+        native = DateTime(2024, 6, 1, 0, 0, 0, tzinfo=UTC)
+        out = _coerce_neo4j_datetime(native)
+        assert isinstance(out, datetime)
+        assert out == datetime(2024, 6, 1, tzinfo=UTC)
+
+    def test_unexpected_type_raises(self) -> None:
+        with pytest.raises(TypeError):
+            _coerce_neo4j_datetime(12345)

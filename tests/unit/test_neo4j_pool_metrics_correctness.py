@@ -886,6 +886,7 @@ class TestConnectStartsSampler:
 
         # Isolate the sampler: stub out the other connect() side effects.
         backend._create_indexes = AsyncMock()
+        backend._backfill_native_valid_datetimes = AsyncMock()  # #1472: isolate connect() side effects
         backend._register_pool_metrics = MagicMock()
         observed = _wire_sampled_recorders(backend)
 
@@ -908,6 +909,7 @@ class TestConnectStartsSampler:
         backend = Neo4jBackend.from_driver(driver)  # default: pool_sampler_enabled=False
 
         backend._create_indexes = AsyncMock()
+        backend._backfill_native_valid_datetimes = AsyncMock()  # #1472: isolate connect() side effects
         backend._register_pool_metrics = MagicMock()
         observed = _wire_sampled_recorders(backend)
 
