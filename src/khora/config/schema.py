@@ -2134,8 +2134,14 @@ class QuerySettings(BaseSettings):
     # can never be served after a mutation. Default ON, bounded + TTL'd; set
     # KHORA_QUERY_ENABLE_RESULT_CACHE=false to disable.
     enable_result_cache: bool = Field(
-        default=True,
-        description="Enable the epoch-invalidated recall result cache (#1469).",
+        default=False,
+        description=(
+            "Enable the epoch-invalidated recall result cache (#1469). Default OFF: "
+            "caching makes an identical repeat recall skip channel execution and "
+            "telemetry, so it is opt-in until its latency benefit is measured. Enable "
+            "via KHORA_QUERY_ENABLE_RESULT_CACHE=true for repeat-query workloads "
+            "(agent loops, evals)."
+        ),
     )
     result_cache_max_size: int = Field(
         default=1000,

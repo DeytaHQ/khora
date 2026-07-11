@@ -189,6 +189,10 @@ def _routing() -> RoutingDecision:
 
 def _engine(**query_overrides) -> tuple[VectorCypherEngine, MagicMock]:
     cfg = KhoraConfig()
+    # The result cache defaults OFF (#1469); this suite exercises the cache, so
+    # opt in by default. Individual tests still override (e.g. the disabled-path
+    # case passes enable_result_cache=False), and that override wins below.
+    cfg.query.enable_result_cache = True
     for k, v in query_overrides.items():
         setattr(cfg.query, k, v)
 
