@@ -14,9 +14,11 @@ This structure enables efficient retrieval by:
 
 from __future__ import annotations
 
+import contextlib
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -47,6 +49,16 @@ _NEO4J_TIMEOUT_CODES = (
     "Neo.ClientError.Transaction.TransactionTimedOut",
     "Neo.ClientError.Transaction.TransactionTimedOutClientConfiguration",
 )
+
+# Per-recall shared Neo4j session (issue #1468). Set by
+# ``DualNodeManager.bind_session()`` for the duration of a recall's sequential
+# graph reads; read by ``DualNodeManager._session()`` so those reads reuse one
+# pooled connection instead of acquiring one each. Module-level (not an
+# instance attribute) so it is isolated per async task-tree — a single manager
+# instance serves concurrent recalls, and a plain attribute would cross-leak
+# their sessions. ``None`` means "no active bind" → open a fresh session as
+# before.
+_BOUND_SESSION: ContextVar[AsyncSession | None] = ContextVar("khora_dualnode_bound_session", default=None)
 
 
 def _build_neighborhood_query(depth: int, prefer_current: bool) -> str:
@@ -228,13 +240,78 @@ class DualNodeManager:
         All Neo4j access from this class must go through this helper so that
         ``Neo4jBackend._session`` pool metrics (timeout counter, acquire
         duration) observe traversals driven by ``DualNodeManager``.
+
+        When a recall has an active :meth:`bind_session` (issue #1468) the
+        bound session is reused instead of opening a new one, so a recall's
+        sequential graph reads share one pooled connection. The bind owns the
+        session's lifecycle, so this contextmanager must NOT close it here — it
+        just yields the already-open session.
         """
-        if self._pool_backend is not None:
+        bound = _BOUND_SESSION.get()
+        if bound is not None:
+            yield bound
+        elif self._pool_backend is not None:
             async with self._pool_backend._session() as session:
                 yield session
         else:
             async with self._driver.session(database=self._database) as session:
                 yield session
+
+    @asynccontextmanager
+    async def bind_session(self) -> AsyncIterator[None]:
+        """Bind one Neo4j session for a recall's sequential graph reads (#1468).
+
+        Opens a single session (through ``pool_backend`` when set, so pool
+        metrics still observe it) and installs it in the ``_BOUND_SESSION``
+        ContextVar for the duration of the ``async with`` body. Every
+        :meth:`_session` call inside the body — from ``get_entity_neighborhoods``,
+        the retriever's ``_version_filter_entities`` / ``_fetch_version_history``,
+        and ``get_chunks_by_entities`` — reuses this session, collapsing what
+        were 2-3 separate pool acquisitions per recall into one.
+
+        SAFETY: a Neo4j ``AsyncSession`` is not safe for concurrent use, so the
+        caller MUST only wrap a region whose graph reads run strictly
+        sequentially (awaited one after another). The retriever's expand ->
+        (version filter) -> chunk-fetch chain is exactly such a region; the
+        concurrent relationship fetch runs outside it. Re-entrant binds are a
+        no-op reuse of the outer bind (nested ``async with`` on the same
+        manager keeps the outer session).
+        """
+        if _BOUND_SESSION.get() is not None:
+            # Already bound by an enclosing scope; reuse it (no new session,
+            # no token to reset — the outer bind owns lifecycle).
+            yield
+            return
+
+        if self._pool_backend is not None:
+            session_cm = self._pool_backend._session()
+        else:
+            session_cm = self._driver.session(database=self._database)
+
+        # The fold is a pure connection-reuse optimization. If the underlying
+        # session source is not a real async context manager (e.g. an AsyncMock
+        # driver/backend in unit tests, whose ``.session()`` returns a bare
+        # coroutine), skip binding and yield without a bound session — reads
+        # then fall back to per-call ``_session()`` exactly as before. This
+        # keeps the fold transparent to callers that mock at the manager
+        # boundary rather than the driver boundary.
+        if not (hasattr(session_cm, "__aenter__") and hasattr(session_cm, "__aexit__")):
+            # Best-effort close of a stray coroutine to quiet "never awaited"
+            # warnings when the source was an AsyncMock; a real CM is entered
+            # below instead.
+            close = getattr(session_cm, "close", None)
+            if callable(close):
+                with contextlib.suppress(Exception):
+                    close()
+            yield
+            return
+
+        async with session_cm as session:
+            token = _BOUND_SESSION.set(session)
+            try:
+                yield
+            finally:
+                _BOUND_SESSION.reset(token)
 
     async def ensure_indexes(self) -> None:
         """Create indexes for Chunk and TimeNode nodes."""
