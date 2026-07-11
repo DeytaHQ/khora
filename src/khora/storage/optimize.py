@@ -659,8 +659,15 @@ async def promote_namespace_hnsw(
         engine: An ``sqlalchemy.ext.asyncio.AsyncEngine`` instance.
         namespace_id: The namespace (row-level and stable IDs are the same on
             these tables) to promote.
-        m: HNSW M parameter for the partial indexes.
-        ef_construction: HNSW ef_construction for the partial indexes.
+        m: HNSW M parameter for the partial indexes. Defaults to ``24`` to match
+            the shared-index tuning (migration 007 / ``config.storage.hnsw_m``).
+            If a deployment has changed the shared-index ``m``, pass the same
+            value here so the per-namespace index is not built with a mismatched
+            graph degree.
+        ef_construction: HNSW ef_construction for the partial indexes. Defaults
+            to ``128`` to match the shared-index tuning (migration 007 /
+            ``config.storage.hnsw_ef_construction``); pass the deployment's
+            value if it differs.
 
     Returns:
         Dict with ``indexes_created`` count, ``indexes`` (names built), and
@@ -783,10 +790,21 @@ async def maybe_promote_namespace(
     if not enabled:
         return {"promoted": False, "reason": "disabled", "row_count": 0}
 
-    # Already promoted? Idempotent short-circuit — do not count it against the
-    # ceiling twice or rebuild it.
+    # Already promoted? Idempotent short-circuit — but only when EVERY target
+    # table carries the partial index. If a prior promotion succeeded on chunks
+    # yet failed on entities (errors are captured, not raised), the chunks-only
+    # check would wrongly report "already_promoted" and never retry entities,
+    # leaving the namespace permanently half-promoted. Requiring all tables
+    # means we fall through to promote_namespace_hnsw (idempotent per table),
+    # which re-attempts only the missing index.
     existing = await list_partial_hnsw_indexes(engine, table="chunks")
-    if _partial_hnsw_index_name("chunks", namespace_id) in existing:
+    fully_promoted = True
+    for tbl in _PARTIAL_HNSW_TABLES:
+        tbl_indexes = existing if tbl == "chunks" else await list_partial_hnsw_indexes(engine, table=tbl)
+        if _partial_hnsw_index_name(tbl, namespace_id) not in tbl_indexes:
+            fully_promoted = False
+            break
+    if fully_promoted:
         return {"promoted": False, "reason": "already_promoted", "row_count": 0}
 
     row_count = await _namespace_row_count(engine, namespace_id)
