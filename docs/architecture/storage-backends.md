@@ -175,6 +175,29 @@ Ordering by the raw `<=>` operator ascending matters: it is the only form pgvect
 
 Khora's migrations already use `CREATE INDEX CONCURRENTLY` for all HNSW indexes, so running migrations *after* a bulk restore naturally follows this pattern.
 
+### Per-namespace partial HNSW indexes (hot tenants)
+
+Every recall query ANDs a `namespace_id` filter, which pgvector applies *after* the HNSW index scan (`relaxed_order` iterative scan resumes the scan so a selective namespace does not starve the result set below `limit`). For a genuinely hot tenant living inside a large shared table this still costs: on a 500k-row table a tight-filter recall (rare namespace + narrow time window) scanned ~20k buffers in 145.8ms returning 8/10 rows, whereas a **partial** HNSW index `... WHERE namespace_id = <ns>` served the same query in 2.9ms returning 9/10 rows - roughly **50x** with better recall (#1470). A partial index also drops the build-time memory spill and shrinks the entity-upsert advisory-lock blast radius.
+
+**This is a policy-gated mechanism, never automatic.** A partial index per namespace means *N* extra indexes on one table; at many tenants that is catalog bloat, planner overhead, and autovacuum load - it trades a query problem for a catalog problem. So Khora ships the mechanism plus a promotion policy, **default-OFF**:
+
+| Knob | Env var | Default | Meaning |
+|------|---------|---------|---------|
+| `hnsw_partial_enabled` | `KHORA_STORAGE_HNSW_PARTIAL_ENABLED` | `false` | Master switch. When false, the promotion functions no-op. |
+| `hnsw_partial_min_rows` | `KHORA_STORAGE_HNSW_PARTIAL_MIN_ROWS` | `50000` | Chunk count a namespace must cross before it is eligible. |
+| `hnsw_partial_max_indexes` | `KHORA_STORAGE_HNSW_PARTIAL_MAX_INDEXES` | `64` | Ceiling on partial indexes per table (caps catalog cost). |
+
+The mechanism lives in `khora.storage.optimize`:
+
+- `promote_namespace_hnsw(engine, namespace_id)` - build the partial indexes on `chunks` and `entities` (`CREATE INDEX CONCURRENTLY IF NOT EXISTS`, idempotent). Raw mechanism; bypasses the policy.
+- `demote_namespace_hnsw(engine, namespace_id)` - drop them (`DROP INDEX CONCURRENTLY IF EXISTS`). **Call on namespace deletion** so a removed tenant leaves no orphan index and frees a ceiling slot.
+- `maybe_promote_namespace(engine, namespace_id, enabled=…, min_rows=…, max_indexes=…)` - the **policy gate**. Promotes only when `enabled`, the namespace is over `min_rows`, and fewer than `max_indexes` partial indexes exist; otherwise returns `{"promoted": False, "reason": …}` (never raises). Wire the arguments from `KhoraConfig.storage.hnsw_partial_*`.
+- `list_partial_hnsw_indexes(engine)` - discovery, for an audit / maintenance task.
+
+**Lifecycle owner.** Promotion is an explicit operator action or a scheduled maintenance task, not a write-path side effect. The intended shape is a periodic job that, for each namespace over the threshold, calls `maybe_promote_namespace`, and that calls `demote_namespace_hnsw` from the namespace-deletion path (`forget` / tenant offboarding). The ceiling is deliberately low (64) so an operator notices and either raises it consciously or moves to partitioning.
+
+**When to graduate to partitioning.** Per-namespace partial indexes are the right tool for *tens* of hot tenants on a table up to a few million rows. Beyond ~10M rows, or when you would otherwise promote hundreds of namespaces, switch the structural strategy to `PARTITION BY LIST (namespace_id)`: each partition gets its own (full, non-partial) HNSW index, the planner prunes to one partition per query, and the catalog cost is one index per partition instead of one partial index per hot tenant on a giant shared heap. That is a schema migration, not a runtime promotion, and is the documented successor at that scale.
+
 ### Embedding Configuration
 
 Default model: `text-embedding-3-small` (OpenAI, 1536 dimensions)
