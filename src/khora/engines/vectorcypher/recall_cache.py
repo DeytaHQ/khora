@@ -46,8 +46,12 @@ class RecallResultCache:
         # Insertion-ordered so the oldest entry is evicted first (LRU on write;
         # a hit also moves the entry to the end so it is not evicted early).
         self._store: OrderedDict[str, tuple[datetime, RecallResult]] = OrderedDict()
-        # Per-namespace write-epoch. A missing namespace is epoch 0.
-        self._epochs: dict[UUID, int] = {}
+        # Per-namespace write-epoch (LRU-capped so it can't grow unbounded under
+        # high namespace cardinality). A missing / evicted namespace is epoch 0;
+        # since namespace_id is part of the key digest, an evicted (reset) epoch
+        # can only cause an extra miss, never a stale hit.
+        self._epochs: OrderedDict[UUID, int] = OrderedDict()
+        self._epochs_cap = max(max_size, 1000)
         self._lock = threading.Lock()
         self._hits = 0
         self._misses = 0
@@ -66,6 +70,9 @@ class RecallResultCache:
         with self._lock:
             new_epoch = self._epochs.get(namespace_id, 0) + 1
             self._epochs[namespace_id] = new_epoch
+            self._epochs.move_to_end(namespace_id)
+            while len(self._epochs) > self._epochs_cap:
+                self._epochs.popitem(last=False)
             return new_epoch
 
     def bump_all_epochs(self) -> None:
@@ -92,7 +99,12 @@ class RecallResultCache:
         stored under (and later served for) the post-write epoch.
         """
         with self._lock:
-            return self._epochs.get(namespace_id, 0)
+            epoch = self._epochs.get(namespace_id, 0)
+            # Touch on read so an actively-queried namespace is not evicted from
+            # the LRU-capped epoch map while it still has live cache entries.
+            if namespace_id in self._epochs:
+                self._epochs.move_to_end(namespace_id)
+            return epoch
 
     @staticmethod
     def _digest(
@@ -108,11 +120,20 @@ class RecallResultCache:
         recency_bias: float | None,
         temporal_filter: ChunkTemporalFilter | None,
         filter_ast: FilterNode | None,
+        config_fingerprint: str,
     ) -> str:
         # ``repr`` of the frozen filter AST and the small temporal dataclass is a
         # deterministic, order-stable string; ``asdict`` normalizes the temporal
         # filter's nested fields. Everything else is a scalar. The epoch is part
         # of the key, so a bump makes prior entries unreachable.
+        # ``config_fingerprint`` folds in the retriever's effective config so a
+        # runtime config change (e.g. toggling enable_bm25_channel) is a distinct
+        # key - config drives the result set but is not otherwise in the inputs.
+        # ``canonical_hash`` (same helper khora.recall uses for the trace span)
+        # normalizes the filter AST so two semantically-identical filters built
+        # with different internal dict/set ordering share a cache entry.
+        from khora.filter import canonical_hash
+
         tf = asdict(temporal_filter) if temporal_filter is not None else None
         parts = (
             query.strip().lower(),
@@ -125,7 +146,8 @@ class RecallResultCache:
             None if hybrid_alpha is None else round(float(hybrid_alpha), 6),
             None if recency_bias is None else round(float(recency_bias), 6),
             repr(tf),
-            repr(filter_ast),
+            canonical_hash(filter_ast) if filter_ast is not None else None,
+            config_fingerprint,
         )
         return sha256(repr(parts).encode()).hexdigest()
 
@@ -143,6 +165,7 @@ class RecallResultCache:
         recency_bias: float | None,
         temporal_filter: ChunkTemporalFilter | None,
         filter_ast: FilterNode | None,
+        config_fingerprint: str,
     ) -> RecallResult | None:
         """Return the cached result for these exact inputs, or ``None`` on miss/expiry."""
         if not self.enabled:
@@ -160,6 +183,7 @@ class RecallResultCache:
                 recency_bias=recency_bias,
                 temporal_filter=temporal_filter,
                 filter_ast=filter_ast,
+                config_fingerprint=config_fingerprint,
             )
             entry = self._store.get(key)
             if entry is not None:
@@ -187,6 +211,7 @@ class RecallResultCache:
         recency_bias: float | None,
         temporal_filter: ChunkTemporalFilter | None,
         filter_ast: FilterNode | None,
+        config_fingerprint: str,
         result: RecallResult,
     ) -> None:
         """Store ``result`` under the digest of these inputs (LRU-evicting if full).
@@ -213,6 +238,7 @@ class RecallResultCache:
                 recency_bias=recency_bias,
                 temporal_filter=temporal_filter,
                 filter_ast=filter_ast,
+                config_fingerprint=config_fingerprint,
             )
             self._store[key] = (datetime.now(), result)
             self._store.move_to_end(key)

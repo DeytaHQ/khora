@@ -1148,7 +1148,11 @@ class VectorCypherRetriever:
                 embed_span.set_attribute("dimension", self._embedder.dimension)
                 embed_span.set_attribute("text_length", len(query))
                 embed_span.set_attribute("overlapped", query_embedding_task is not None)
-                _stats = getattr(self._embedder, "cache_stats", None)
+                # cache_hit is only meaningful on the inline path: when the embed
+                # was launched at t0 (#1469) it already started (and may have
+                # finished) before this span, so a "before" snapshot here would
+                # report a false delta. Skip it in the overlapped path.
+                _stats = None if query_embedding_task is not None else getattr(self._embedder, "cache_stats", None)
                 _pre_hits = _stats["hits"] if isinstance(_stats, dict) else None
                 if query_embedding_task is not None:
                     query_embedding = await query_embedding_task

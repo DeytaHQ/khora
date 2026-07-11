@@ -2464,11 +2464,17 @@ class VectorCypherEngine:
         if mode not in self.supported_modes:
             raise EngineCapabilityError("vectorcypher", mode, self.supported_modes)
 
+        retriever = self._get_retriever()
+
         # #1469: epoch-invalidated result cache. Check BEFORE any storage / embed
         # work so a repeated identical query short-circuits the whole pipeline.
         # The key covers every result-affecting input plus the namespace's
         # write-epoch, so a hit is safe and a post-write query can never hit a
         # stale entry (the epoch bump on the write made prior entries unreachable).
+        # ``config_fingerprint`` folds in the retriever's effective config
+        # (repr of the RetrieverConfig dataclass) so a runtime config change -
+        # e.g. a caller toggling enable_bm25_channel between two otherwise
+        # identical recalls - is a distinct key and does not serve a stale result.
         _cache_epoch = self._recall_cache.current_epoch(namespace_id)
         _cache_args = dict(
             query=query,
@@ -2482,12 +2488,11 @@ class VectorCypherEngine:
             recency_bias=recency_bias,
             temporal_filter=temporal_filter,
             filter_ast=filter_ast,
+            config_fingerprint=repr(getattr(retriever, "_config", None)),
         )
         cached = self._recall_cache.get(**_cache_args)
         if cached is not None:
             return cached
-
-        retriever = self._get_retriever()
 
         # #1469: the query embedding depends only on the query text, so launch
         # it at t0 as a background task and hand the in-flight awaitable to the

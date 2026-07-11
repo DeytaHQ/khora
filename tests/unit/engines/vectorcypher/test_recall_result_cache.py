@@ -51,6 +51,7 @@ def _key_args(ns, **overrides):
         recency_bias=None,
         temporal_filter=None,
         filter_ast=None,
+        config_fingerprint="cfg",
     )
     base.update(overrides)
     return base
@@ -81,6 +82,14 @@ class TestRecallResultCache:
         assert cache.get(**_key_args(ns, query="different")) is None
         # ...but the original key still hits.
         assert cache.get(**_key_args(ns, limit=10)) is not None
+
+    def test_miss_on_config_fingerprint_change(self) -> None:
+        """A runtime config change (different fingerprint) is a distinct key."""
+        ns = uuid4()
+        cache = RecallResultCache()
+        cache.set(result=_result(ns), **_key_args(ns, config_fingerprint="bm25=False"))
+        assert cache.get(**_key_args(ns, config_fingerprint="bm25=False")) is not None
+        assert cache.get(**_key_args(ns, config_fingerprint="bm25=True")) is None
 
     def test_epoch_bump_invalidates(self) -> None:
         ns = uuid4()
@@ -136,6 +145,22 @@ class TestRecallResultCache:
         cache.set(result=_result(ns_a), **_key_args(ns_a))
         cache.bump_epoch(ns_b)  # bumping B must not touch A
         assert cache.get(**_key_args(ns_a)) is not None
+
+    def test_epochs_map_is_bounded(self) -> None:
+        """The per-namespace epoch map is LRU-capped so it can't grow unbounded.
+
+        An evicted namespace resets to epoch 0; since namespace_id is in the key
+        digest, that can only cause an extra miss, never a stale hit.
+        """
+        cache = RecallResultCache(max_size=10)
+        cache._epochs_cap = 3  # shrink for the test
+        seen = [uuid4() for _ in range(5)]
+        for ns in seen:
+            cache.bump_epoch(ns)
+        # Only the last 3 namespaces retain a bumped epoch; the first 2 evicted.
+        assert cache.current_epoch(seen[0]) == 0
+        assert cache.current_epoch(seen[1]) == 0
+        assert cache.current_epoch(seen[-1]) == 1
 
     def test_bump_all_epochs(self) -> None:
         ns_a, ns_b = uuid4(), uuid4()
@@ -229,6 +254,23 @@ class TestRecallCacheEndToEnd:
         engine, retriever = _engine(enable_result_cache=False)
 
         await engine.recall("what happened", ns, limit=5)
+        await engine.recall("what happened", ns, limit=5)
+
+        assert retriever.retrieve.await_count == 2
+
+    async def test_runtime_config_change_invalidates(self) -> None:
+        """Toggling a retriever-config knob between two identical recalls misses
+        the cache (the config fingerprint changed) - mirrors the integration
+        filter-thread-through test that toggles enable_bm25_channel."""
+        from khora.engines.vectorcypher.retriever import RetrieverConfig
+
+        ns = uuid4()
+        engine, retriever = _engine()
+        retriever._config = RetrieverConfig(enable_bm25_channel=False)
+
+        await engine.recall("what happened", ns, limit=5)
+        # A caller flips a config knob at runtime, changing the result set.
+        retriever._config.enable_bm25_channel = True
         await engine.recall("what happened", ns, limit=5)
 
         assert retriever.retrieve.await_count == 2
