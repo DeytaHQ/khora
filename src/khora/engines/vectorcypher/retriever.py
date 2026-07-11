@@ -19,6 +19,7 @@ import contextlib
 import json
 import math
 import os
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
@@ -256,6 +257,21 @@ _SESSION_FANOUT_DEGRADED_COUNTER = metric_counter(
         "(channel_exception). NO namespace_id label - cardinality rule."
     ),
 )
+
+
+def _consume_task_exc(task: asyncio.Future) -> None:
+    """Swallow a speculative task's result/exception when nobody awaited it (#1469).
+
+    On the happy path the task is awaited and this callback reads an
+    already-retrieved result (no-op). It only matters when the code between the
+    speculative launch and the await raises (e.g. the base embed fails): reading
+    ``.exception()`` here marks it retrieved so the event loop does not log a
+    spurious "Task exception was never retrieved" warning. Cancellation is
+    expected on that path and ignored.
+    """
+    if task.cancelled():
+        return
+    task.exception()
 
 
 def _decode_chunker_info(value: Any) -> dict[str, Any]:
@@ -763,34 +779,59 @@ class VectorCypherRetriever:
         is_complex = routing.complexity != QueryComplexity.SIMPLE
         return is_temporal or is_complex
 
-    async def _maybe_expand_hyde(
+    def _maybe_launch_hyde(
         self,
         query: str,
-        query_embedding: list[float],
         *,
         routing: RoutingDecision,
         temporal_signal: TemporalSignal | None,
         out_degradations: list[Degradation] | None = None,
-    ) -> list[float]:
-        """Apply HyDE query-embedding expansion when configured (#1018).
+    ) -> asyncio.Task[list[list[float]] | None] | None:
+        """Speculatively launch HyDE hypothetical generation + embedding (#1469).
 
-        Returns the expanded embedding when HyDE fires, otherwise the original.
-        The expander degrades to the original embedding on any failure, so this
-        never aborts a recall. When ``out_degradations`` is supplied and the
-        expander falls back, a :class:`Degradation` is appended (ADR-001,
-        issue #1324).
+        HyDE's LLM call + hypothetical embed depend only on the query text, not
+        on the base query embedding, so we kick them off as a task right after
+        routing and overlap the (expensive) LLM round-trip with the base-embed
+        await and the rest of the front-matter. The base embedding is folded in
+        later via :meth:`_fold_hyde`. Gated by the SAME ``_should_hyde``
+        predicate as before - HyDE fires for exactly the same queries, so recall
+        quality is unchanged; only the latency is hidden.
+
+        Returns the in-flight task, or ``None`` when HyDE should not fire.
         """
         if not self._should_hyde(routing, temporal_signal):
-            return query_embedding
+            return None
         if self._hyde_expander is None:
             self._hyde_expander = HyDEExpander(
                 self._embedder,
                 num_hypotheticals=self._config.hyde_num_hypotheticals,
             )
+        hyde_task = asyncio.ensure_future(
+            self._hyde_expander.generate_hypothetical_embeddings(query, out_diagnostics=out_degradations)
+        )
+        # Guard against orphaning if the base-embed await between launch and fold
+        # raises before _fold_hyde awaits this task.
+        hyde_task.add_done_callback(_consume_task_exc)
+        return hyde_task
+
+    async def _fold_hyde(
+        self,
+        query_embedding: list[float],
+        hyde_task: asyncio.Task[list[list[float]] | None] | None,
+    ) -> list[float]:
+        """Await a speculative HyDE task and average it into the base embedding.
+
+        Returns the base embedding unchanged when HyDE did not fire or the
+        expander degraded (task returned ``None``); the degradation is already
+        recorded on the shared ``out_degradations`` list by the expander.
+        """
+        if hyde_task is None:
+            return query_embedding
         with trace_span("khora.vectorcypher.hyde"):
-            return await self._hyde_expander.expand_query_embedding(
-                query, query_embedding, out_diagnostics=out_degradations
-            )
+            hyde_embeddings = await hyde_task
+        if not hyde_embeddings:
+            return query_embedding
+        return HyDEExpander.combine_with_query_embedding(query_embedding, hyde_embeddings)
 
     def _vector_fetch_limit(self, limit: int) -> int:
         """Broad-recall vector fetch budget for this call (#1018).
@@ -914,6 +955,7 @@ class VectorCypherRetriever:
         hybrid_alpha_override: float | None = None,
         recency_bias: float | None = None,
         filter_ast: FilterNode | None = None,
+        query_embedding_task: Awaitable[list[float]] | None = None,
     ) -> VectorCypherResult:
         """Retrieve relevant chunks using VectorCypher hybrid approach.
 
@@ -958,6 +1000,15 @@ class VectorCypherRetriever:
                 where the pgvector backend compiles it to the SAME
                 ``khora_chunks`` WHERE predicate. ``None`` leaves every path
                 byte-identical to the no-filter behaviour.
+            query_embedding_task: Optional in-flight embedding awaitable
+                launched by the caller at t0 (#1469). The query embedding
+                depends only on the query text, so the engine kicks it off
+                before temporal-detect and hands the task here; this method
+                awaits it at the embed step instead of embedding inline,
+                overlapping the embed with temporal-detect + route +
+                recency-floor synthesis. ``None`` keeps the historic inline
+                ``self._embedder.embed(query)`` call (no double-embed either
+                way — exactly one embed happens per call).
 
         Returns:
             VectorCypherResult with chunks, entities, and metadata
@@ -1078,33 +1129,51 @@ class VectorCypherRetriever:
             logger.debug(f"Query routing: {routing.complexity.value} (use_graph={routing.use_graph})")
             span.set_attribute("routing_complexity", routing.complexity.value)
 
-            # Step 2: Embed the query
-            with trace_span("khora.vectorcypher.embed_query") as embed_span:
-                embed_span.set_attribute("model", self._embedder.model_name)
-                embed_span.set_attribute("dimension", self._embedder.dimension)
-                embed_span.set_attribute("text_length", len(query))
-                _stats = getattr(self._embedder, "cache_stats", None)
-                _pre_hits = _stats["hits"] if isinstance(_stats, dict) else None
-                query_embedding = await self._embedder.embed(query)
-                if _pre_hits is not None:
-                    _post_hits = self._embedder.cache_stats["hits"]
-                    embed_span.set_attribute("cache_hit", _post_hits > _pre_hits)
-
-            # Step 2b: HyDE query-embedding expansion (#1018). Honors
-            # ``query.enable_hyde`` on the default recall() path (previously only
-            # the bypassed QueryEngine applied it). "auto" expands for complex /
-            # temporal queries; the expander degrades to the original embedding
-            # on any LLM/embed failure.
-            # ADR-001 (#1324): collect HyDE degradations here and merge them
-            # into the sub-path result's ``metadata["degradations"]`` below.
+            # Step 1b: Speculatively launch HyDE (#1469). Its LLM call + embed
+            # depend only on the query text (not the base embedding), and only
+            # the vector channel consumes the expanded embedding. Kicking it off
+            # here overlaps the (expensive) LLM round-trip with the base-embed
+            # await below instead of running strictly after it. Gated by the same
+            # _should_hyde predicate - HyDE still fires for the same queries, so
+            # recall quality is unchanged. ADR-001 (#1324): degradations collected
+            # here and merged into the sub-path result's metadata below.
             _hyde_degradations: list[Degradation] = []
-            query_embedding = await self._maybe_expand_hyde(
+            hyde_task = self._maybe_launch_hyde(
                 query,
-                query_embedding,
                 routing=routing,
                 temporal_signal=temporal_signal,
                 out_degradations=_hyde_degradations,
             )
+            span.set_attribute("hyde_launched", hyde_task is not None)
+
+            # Step 2: Embed the query. When the caller launched the embed at
+            # t0 (#1469), await that in-flight task here so the embed overlapped
+            # temporal-detect + route + recency-floor synthesis; otherwise embed
+            # inline. Exactly one embed happens per call either way.
+            with trace_span("khora.vectorcypher.embed_query") as embed_span:
+                embed_span.set_attribute("model", self._embedder.model_name)
+                embed_span.set_attribute("dimension", self._embedder.dimension)
+                embed_span.set_attribute("text_length", len(query))
+                embed_span.set_attribute("overlapped", query_embedding_task is not None)
+                # cache_hit is only meaningful on the inline path: when the embed
+                # was launched at t0 (#1469) it already started (and may have
+                # finished) before this span, so a "before" snapshot here would
+                # report a false delta. Skip it in the overlapped path.
+                _stats = None if query_embedding_task is not None else getattr(self._embedder, "cache_stats", None)
+                _pre_hits = _stats["hits"] if isinstance(_stats, dict) else None
+                if query_embedding_task is not None:
+                    query_embedding = await query_embedding_task
+                else:
+                    query_embedding = await self._embedder.embed(query)
+                if _pre_hits is not None:
+                    _post_hits = self._embedder.cache_stats["hits"]
+                    embed_span.set_attribute("cache_hit", _post_hits > _pre_hits)
+
+            # Step 2b: fold the speculative HyDE embedding into the base
+            # embedding (#1469). Awaits the task launched in Step 1b and averages
+            # in the hypothetical-document embeddings; degrades to the base
+            # embedding when HyDE did not fire or the expander fell back.
+            query_embedding = await self._fold_hyde(query_embedding, hyde_task)
 
             # #833 mode dispatch: VECTOR / KEYWORD short-circuit to the
             # simple path (no graph traversal). GRAPH forces the vectorcypher

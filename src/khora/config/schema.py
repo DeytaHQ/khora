@@ -2156,6 +2156,34 @@ class QuerySettings(BaseSettings):
         description="Top-two score gap at which the confidence gap-component saturates to 1.0.",
     )
 
+    # Recall result cache (#1469). An epoch-invalidated in-process cache at the
+    # VectorCypherEngine.recall boundary. The key covers every result-affecting
+    # input (namespace, query, mode, limit, min_similarity, temporal/recency
+    # params, filter hash) plus a per-namespace write-epoch that is bumped on any
+    # write (remember / remember_batch / forget / dream-apply) so a stale entry
+    # can never be served after a mutation. Default ON, bounded + TTL'd; set
+    # KHORA_QUERY_ENABLE_RESULT_CACHE=false to disable.
+    enable_result_cache: bool = Field(
+        default=False,
+        description=(
+            "Enable the epoch-invalidated recall result cache (#1469). Default OFF: "
+            "caching makes an identical repeat recall skip channel execution and "
+            "telemetry, so it is opt-in until its latency benefit is measured. Enable "
+            "via KHORA_QUERY_ENABLE_RESULT_CACHE=true for repeat-query workloads "
+            "(agent loops, evals)."
+        ),
+    )
+    result_cache_max_size: int = Field(
+        default=1000,
+        ge=0,
+        description="Max cached recall results before LRU eviction (0 disables the cache).",
+    )
+    result_cache_ttl_seconds: int = Field(
+        default=300,
+        ge=0,
+        description="Time-to-live for each cached recall result, in seconds.",
+    )
+
 
 class KhoraConfig(BaseSettings):
     """Main application configuration."""
