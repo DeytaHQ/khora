@@ -167,9 +167,13 @@ async def _explain_scoped_query(engine, namespace_id) -> str:
     background-noise volume.
     """
     async with engine.connect() as conn:
-        # Mirror khora's shipped query-time settings (pgvector.py search_similar).
-        # SET LOCAL keeps them scoped to this transaction.
-        async with conn.begin():
+        # Do NOT wrap in `async with conn.begin()`: rolling back inside that
+        # block closes the transaction the context manager still owns. Instead
+        # let the connection autobegin on the first execute, then roll back
+        # explicitly so the in-tx DROPs are undone and the shared indexes
+        # survive. Mirror khora's shipped query-time settings (pgvector.py
+        # search_similar); SET LOCAL scopes them to this transaction.
+        try:
             await conn.execute(sa.text("DROP INDEX ix_chunks_embedding_hnsw"))
             await conn.execute(sa.text("DROP INDEX IF EXISTS ix_chunks_embedding_halfvec_hnsw"))
             await conn.execute(sa.text("SET LOCAL hnsw.ef_search = 100"))
@@ -183,7 +187,7 @@ async def _explain_scoped_query(engine, namespace_id) -> str:
                 {"ns": namespace_id, "qv": _QUERY_VEC},
             )
             plan = "\n".join(r[0] for r in rows)
-            # Roll back the in-tx DROPs so the shared indexes survive the test.
+        finally:
             await conn.rollback()
     return plan
 
