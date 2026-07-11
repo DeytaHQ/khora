@@ -20,6 +20,7 @@ import pytest
 
 from khora.config.schema import KhoraConfig
 from khora.engines.vectorcypher.engine import VectorCypherConfig, VectorCypherEngine
+from khora.engines.vectorcypher.recall_cache import RecallResultCache
 from khora.engines.vectorcypher.retriever import VectorCypherResult
 from khora.query.router import QueryComplexity, RoutingDecision
 
@@ -46,6 +47,9 @@ def _make_engine(embedder: MagicMock, retriever: MagicMock) -> VectorCypherEngin
     engine._dual_nodes = None
     engine._router = None
     engine._connected = True
+    # Real cache instance; the overlap tests use unique namespaces so cache
+    # state never interferes with the embed-task assertions.
+    engine._recall_cache = RecallResultCache()
     # No entities -> _project_communities short-circuits without touching storage.
     return engine
 

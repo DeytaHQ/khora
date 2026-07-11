@@ -2530,7 +2530,7 @@ class Khora:
         """
         from khora.dream.api import dream as _dream
 
-        return await _dream(
+        result = await _dream(
             self,
             namespace,
             mode=mode,
@@ -2541,6 +2541,15 @@ class Khora:
             on_progress=on_progress,
             resume_from=resume_from,
         )
+        # #1469: an apply-mode dream mutates the namespace via the coordinator
+        # (not the engine's remember/forget), so explicitly invalidate the
+        # engine's recall result cache for that namespace. dry-run writes nothing.
+        if mode == "apply":
+            engine = self._engine
+            invalidate = getattr(engine, "invalidate_recall_cache", None)
+            if invalidate is not None:
+                invalidate(await self._resolve_namespace(namespace))
+        return result
 
     async def dream_status(self, run_id: UUID) -> dict[str, object]:
         """Return live or post-mortem status for a dream run."""
@@ -2577,7 +2586,15 @@ class Khora:
         """
         from khora.dream.api import dream_undo as _dream_undo
 
-        return await _dream_undo(self, op_id, base_dir=base_dir)
+        result = await _dream_undo(self, op_id, base_dir=base_dir)
+        # #1469: undo mutates via the coordinator and the affected namespace is
+        # not surfaced here, so invalidate every namespace's recall cache. Undo
+        # is rare, so a broad clear is acceptable and maximally safe.
+        engine = self._engine
+        invalidate_all = getattr(engine, "invalidate_all_recall_cache", None)
+        if invalidate_all is not None:
+            invalidate_all()
+        return result
 
     # =========================================================================
     # Entity Operations

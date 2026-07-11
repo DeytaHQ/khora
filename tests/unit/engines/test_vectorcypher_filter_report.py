@@ -339,6 +339,13 @@ def _build_engine(retriever: VectorCypherRetriever) -> VectorCypherEngine:
     engine._config.query.abstention_confidence_target_gap = 0.1
     engine._vc_config = VectorCypherConfig()
     engine._retriever = retriever
+    # #1469: recall() launches a t0 embed task only when an embedder exists, and
+    # reads the result cache. A stubbed retriever handles embedding itself, so
+    # keep the embedder absent and disable the cache (max_size=0).
+    engine._embedder = None
+    from khora.engines.vectorcypher.recall_cache import RecallResultCache
+
+    engine._recall_cache = RecallResultCache(max_size=0)
     engine._connected = True
     return engine
 

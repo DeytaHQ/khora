@@ -66,6 +66,7 @@ from khora.telemetry.metrics import metric_counter, metric_histogram
 
 from .dual_nodes import DualNodeManager, EntityChunkLink
 from .keyword_edges import persist_keyword_chunk_edges, persist_keyword_chunk_edges_from_keywords
+from .recall_cache import RecallResultCache
 from .retriever import RetrieverConfig, VectorCypherRetriever
 from .router import QueryComplexityRouter, RouterConfig
 from .temporal_detection import TemporalCategory, TemporalDetector, TemporalSignal
@@ -114,6 +115,20 @@ _VC_COMMUNITY_PROJECTION_DEGRADED_COUNTER = metric_counter(
 # span more communities than a caller wants to render, so we cap and keep the
 # shallowest (most specific) first.
 _VC_MAX_COMMUNITIES = 10
+
+
+def _coerce_bool(value: Any, *, default: bool) -> bool:
+    """Return ``value`` if it is a real bool, else ``default`` (#1469).
+
+    Guards the recall-cache config reads against a MagicMock config in tests,
+    which yields a truthy MagicMock for any attribute.
+    """
+    return value if isinstance(value, bool) else default
+
+
+def _coerce_int(value: Any, *, default: int) -> int:
+    """Return ``value`` if it is a real non-bool int, else ``default`` (#1469)."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else default
 
 
 def _consume_embed_task_exc(task: asyncio.Future) -> None:
@@ -677,6 +692,22 @@ class VectorCypherEngine:
         self._router: QueryComplexityRouter | None = None
         self._connected = False
 
+        # Epoch-invalidated recall result cache (#1469). Default ON, bounded +
+        # TTL'd, keyed on every result-affecting input plus a per-namespace
+        # write-epoch bumped on any write. Disable via
+        # KHORA_QUERY_ENABLE_RESULT_CACHE=false. A cache size of 0 also disables it.
+        # Coerce config reads to concrete int/bool so a MagicMock config in tests
+        # (which returns a truthy MagicMock for any attribute) cannot feed a
+        # MagicMock into timedelta/comparison - fall back to the defaults instead.
+        _q = getattr(config, "query", None)
+        _cache_enabled = _coerce_bool(getattr(_q, "enable_result_cache", True), default=True)
+        _cache_size = _coerce_int(getattr(_q, "result_cache_max_size", 1000), default=1000)
+        _cache_ttl = _coerce_int(getattr(_q, "result_cache_ttl_seconds", 300), default=300)
+        self._recall_cache = RecallResultCache(
+            max_size=(_cache_size if _cache_enabled else 0),
+            ttl_seconds=_cache_ttl,
+        )
+
     @staticmethod
     def _neo4j_driver_kwargs(neo4j_cfg: Any) -> dict[str, Any]:
         """Extract Neo4j driver kwargs from config.
@@ -962,6 +993,8 @@ class VectorCypherEngine:
         self._dual_nodes = None
         self._router = None
         self._connected = False
+        # #1469: drop cached recall results on disconnect (epochs retained).
+        self._recall_cache.clear()
 
         logger.info("VectorCypher engine disconnected")
 
@@ -1196,6 +1229,10 @@ class VectorCypherEngine:
             chunk_size=chunk_size,
             out_diagnostics=extraction_diagnostics,
         )
+
+        # #1469: a new document was written to the namespace; invalidate its
+        # cached recall results.
+        self._recall_cache.bump_epoch(namespace_id)
 
         result_metadata = _build_remember_metadata(extraction_diagnostics)
         return RememberResult(
@@ -2167,6 +2204,9 @@ class VectorCypherEngine:
                 graph_mirror_err.original_exception_type,
                 graph_mirror_err.pending_persisted,
             )
+            # #1469: the PG-side replace committed (graph mirror degraded), which
+            # is a write to the namespace - invalidate its cached recall results.
+            self._recall_cache.bump_epoch(namespace_id)
             return RememberResult(
                 document_id=new_document.id,
                 namespace_id=namespace_id,
@@ -2300,6 +2340,8 @@ class VectorCypherEngine:
         ]
         if mirror_degradations:
             replace_metadata["degradations"] = mirror_degradations
+        # #1469: the replace committed - invalidate cached recall results.
+        self._recall_cache.bump_epoch(namespace_id)
         return RememberResult(
             document_id=replace_result.document_id,
             namespace_id=namespace_id,
@@ -2422,6 +2464,29 @@ class VectorCypherEngine:
         if mode not in self.supported_modes:
             raise EngineCapabilityError("vectorcypher", mode, self.supported_modes)
 
+        # #1469: epoch-invalidated result cache. Check BEFORE any storage / embed
+        # work so a repeated identical query short-circuits the whole pipeline.
+        # The key covers every result-affecting input plus the namespace's
+        # write-epoch, so a hit is safe and a post-write query can never hit a
+        # stale entry (the epoch bump on the write made prior entries unreachable).
+        _cache_epoch = self._recall_cache.current_epoch(namespace_id)
+        _cache_args = dict(
+            query=query,
+            namespace_id=namespace_id,
+            epoch=_cache_epoch,
+            mode=mode.name.lower(),
+            limit=limit,
+            min_similarity=min_similarity,
+            graph_depth=graph_depth,
+            hybrid_alpha=hybrid_alpha,
+            recency_bias=recency_bias,
+            temporal_filter=temporal_filter,
+            filter_ast=filter_ast,
+        )
+        cached = self._recall_cache.get(**_cache_args)
+        if cached is not None:
+            return cached
+
         retriever = self._get_retriever()
 
         # #1469: the query embedding depends only on the query text, so launch
@@ -2430,12 +2495,18 @@ class VectorCypherEngine:
         # (25-40ms, possibly an LLM/API round-trip) with temporal-detect +
         # route + recency-floor synthesis instead of running them serially. The
         # retriever performs exactly one embed per call (it awaits this task
-        # rather than embedding inline), so there is no double-embed.
-        query_embedding_task = asyncio.ensure_future(self._get_embedder().embed(query))
-        # If the code between here and the retriever's await raises (e.g. temporal
-        # detection), the retriever never awaits the task; consume its result in
-        # a done-callback so the loop never logs "exception was never retrieved".
-        query_embedding_task.add_done_callback(_consume_embed_task_exc)
+        # rather than embedding inline), so there is no double-embed. When no
+        # embedder is available (embedder not connected, or a fully-stubbed
+        # retriever in tests), stay on the retriever's inline-embed path -
+        # passing None keeps that leg byte-identical to the pre-#1469 behavior.
+        query_embedding_task: asyncio.Future[list[float]] | None = None
+        if self._embedder is not None:
+            query_embedding_task = asyncio.ensure_future(self._embedder.embed(query))
+            # If the code between here and the retriever's await raises (e.g.
+            # temporal detection), the retriever never awaits the task; consume
+            # its result in a done-callback so the loop never logs "exception
+            # was never retrieved".
+            query_embedding_task.add_done_callback(_consume_embed_task_exc)
 
         # Cascade temporal detection: Aho-Corasick dictionary -> (optional) semantic
         # Replaces the old regex + dateparser approach with categorized signals.
@@ -2752,7 +2823,7 @@ class VectorCypherEngine:
         if temporal_degradations:
             result.metadata.setdefault("degradations", []).extend(temporal_degradations)
 
-        return RecallResult(
+        recall_result = RecallResult(
             query=query,
             namespace_id=namespace_id,
             documents=documents,
@@ -2798,6 +2869,13 @@ class VectorCypherEngine:
                 **result.metadata,
             },
         )
+
+        # #1469: cache the freshly computed result under the epoch captured at
+        # recall start. If a concurrent write bumped the namespace epoch since
+        # then, set() sees the captured epoch is stale and refuses to store, so a
+        # pre-write result is never served after the write. No-op when disabled.
+        self._recall_cache.set(result=recall_result, **_cache_args)
+        return recall_result
 
     async def _project_communities(
         self,
@@ -2849,6 +2927,24 @@ class VectorCypherEngine:
         ordered = sorted(deduped.values(), key=lambda c: (c.summary_depth, str(c.id)))
         return ordered[:_VC_MAX_COMMUNITIES]
 
+    def invalidate_recall_cache(self, namespace_id: UUID) -> None:
+        """Invalidate cached recall results for a namespace (#1469).
+
+        For write paths that don't flow through this engine's own
+        remember/forget methods - dream-apply mutates via the coordinator - so
+        the Khora facade calls this after that operation to keep the
+        epoch-invalidated cache from serving stale results.
+        """
+        self._recall_cache.bump_epoch(namespace_id)
+
+    def invalidate_all_recall_cache(self) -> None:
+        """Invalidate cached recall results across every namespace (#1469).
+
+        For rare, broad mutations (dream-undo) where the affected namespace is
+        not readily available at the call site.
+        """
+        self._recall_cache.bump_all_epochs()
+
     async def forget(self, document_id: UUID, namespace_id: UUID | None) -> bool:
         """Remove a memory from the engine."""
         storage = self._get_storage()
@@ -2875,6 +2971,9 @@ class VectorCypherEngine:
 
         # Delete from pgvector
         await temporal_store.delete_chunks_by_document(document_id, namespace_id)
+
+        # #1469: any write to the namespace invalidates its cached recall results.
+        self._recall_cache.bump_epoch(namespace_id)
 
         # Delete from relational storage
         return await storage.delete_document(document_id, namespace_id=namespace_id)
@@ -3003,7 +3102,7 @@ class VectorCypherEngine:
             await prepare_for_bulk_load(storage)
 
         try:
-            return await self._remember_batch_impl(
+            batch_result = await self._remember_batch_impl(
                 documents,
                 namespace_id,
                 skill_name=skill_name,
@@ -3023,6 +3122,12 @@ class VectorCypherEngine:
                 source_url=source_url,
                 source_timestamp=source_timestamp,
             )
+            # #1469: a batch write invalidates the namespace's cached recall
+            # results. Bump on any processed document (skip a pure all-duplicate
+            # batch, which wrote nothing).
+            if batch_result.processed > 0:
+                self._recall_cache.bump_epoch(namespace_id)
+            return batch_result
         finally:
             if bulk_mode:
                 from khora.storage.optimize import ensure_hnsw_indexes

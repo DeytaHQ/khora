@@ -46,6 +46,9 @@ def _skeleton_engine_with_mocks():
     engine._storage = storage
     engine._embedder = MagicMock()
     engine._temporal_store = MagicMock()
+    from khora.engines.vectorcypher.recall_cache import RecallResultCache
+
+    engine._recall_cache = RecallResultCache(max_size=0)  # #1469: writes bump the epoch
     engine._connected = True
     return engine
 
@@ -72,6 +75,9 @@ def _vectorcypher_engine_with_mocks():
     engine._retriever = None
     engine._dual_nodes = None
     engine._router = None
+    from khora.engines.vectorcypher.recall_cache import RecallResultCache
+
+    engine._recall_cache = RecallResultCache(max_size=0)  # #1469: writes bump the epoch
     engine._connected = True
     return engine
 
