@@ -69,6 +69,7 @@ from .keyword_edges import persist_keyword_chunk_edges, persist_keyword_chunk_ed
 from .recall_cache import RecallResultCache
 from .retriever import RetrieverConfig, VectorCypherRetriever
 from .router import QueryComplexityRouter, RouterConfig
+from .shadow_scoring import build_candidate_order, compute_shadow_report
 from .temporal_detection import TemporalCategory, TemporalDetector, TemporalSignal
 
 if TYPE_CHECKING:
@@ -2628,6 +2629,40 @@ class VectorCypherEngine:
 
         # Validate and filter retrieval results
         validated_chunks = self._validate_recall_results(result.chunks, query)
+
+        # Shadow-scoring A/B harness (#1479). Observe-only: compute a candidate
+        # order over the SAME validated (incumbent-ordered) scored candidates
+        # and record the divergence. Never reorders the returned result. The
+        # whole block is skipped when the flag is OFF (the default), so it is
+        # genuinely zero-cost then. Failures degrade to no shadow key + a
+        # Degradation (ADR-001) - shadow observability must never abort recall.
+        if self._config.query.shadow_scoring:
+            _strategy = self._config.query.shadow_scoring_strategy
+            try:
+                candidate_order = build_candidate_order(validated_chunks, strategy=_strategy)
+                # Rides the ``**result.metadata`` spread into engine_info as
+                # ``engine_info["shadow_scoring"]`` (free-form key, not
+                # telemetry-contract-gated). Observe-only; the returned chunk
+                # order is unchanged.
+                result.metadata["shadow_scoring"] = compute_shadow_report(
+                    validated_chunks,
+                    candidate_order,
+                    strategy=_strategy,
+                    limit=limit,
+                )
+            except Exception as exc:  # noqa: BLE001 - degrade, never abort recall (ADR-001)
+                logger.warning(
+                    "VectorCypher shadow scoring failed; recall continues without a shadow report",
+                    exc_info=True,
+                )
+                result.metadata.setdefault("degradations", []).append(
+                    Degradation(
+                        component="vectorcypher.shadow_scoring",
+                        reason="compute_failed",
+                        detail=_strategy,
+                        exception=repr(exc),
+                    )
+                )
 
         # Compute retrieval confidence signals for abstention calibration.
         # NOTE: chunks are returned in RANK order (fusion + boosts + rerank),

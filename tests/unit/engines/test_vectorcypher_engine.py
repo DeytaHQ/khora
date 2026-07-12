@@ -139,6 +139,10 @@ class TestVectorCypherEngineInit:
         config.query.abstention_mode = "cosine_floor"
         config.query.abstention_confidence_target_cosine = 0.5
         config.query.abstention_confidence_target_gap = 0.1
+        # Shadow-scoring A/B harness (#1479) is default-OFF; pin it so the
+        # recall path skips the observe-only block (a bare MagicMock would be
+        # truthy and try to run it with a Mock strategy).
+        config.query.shadow_scoring = False
         config.llm.model = "gpt-4o-mini"
         config.llm.embedding_model = "text-embedding-3-small"
         config.llm.embedding_dimension = 1536
@@ -206,6 +210,10 @@ class TestVectorCypherEngineGetters:
         config.query.abstention_mode = "cosine_floor"
         config.query.abstention_confidence_target_cosine = 0.5
         config.query.abstention_confidence_target_gap = 0.1
+        # Shadow-scoring A/B harness (#1479) is default-OFF; pin it so the
+        # recall path skips the observe-only block (a bare MagicMock would be
+        # truthy and try to run it with a Mock strategy).
+        config.query.shadow_scoring = False
         return VectorCypherEngine(config)
 
     def test_get_storage_raises_when_not_connected(self, engine: VectorCypherEngine) -> None:
@@ -261,6 +269,10 @@ class TestVectorCypherEngineDisconnect:
         config.query.abstention_mode = "cosine_floor"
         config.query.abstention_confidence_target_cosine = 0.5
         config.query.abstention_confidence_target_gap = 0.1
+        # Shadow-scoring A/B harness (#1479) is default-OFF; pin it so the
+        # recall path skips the observe-only block (a bare MagicMock would be
+        # truthy and try to run it with a Mock strategy).
+        config.query.shadow_scoring = False
 
         engine = VectorCypherEngine(config)
         # Should not raise
@@ -291,6 +303,10 @@ class TestVectorCypherEngineDisconnect:
         config.query.abstention_mode = "cosine_floor"
         config.query.abstention_confidence_target_cosine = 0.5
         config.query.abstention_confidence_target_gap = 0.1
+        # Shadow-scoring A/B harness (#1479) is default-OFF; pin it so the
+        # recall path skips the observe-only block (a bare MagicMock would be
+        # truthy and try to run it with a Mock strategy).
+        config.query.shadow_scoring = False
 
         engine = VectorCypherEngine(config)
 
@@ -345,6 +361,10 @@ class TestVectorCypherEngineRemember:
         config.query.abstention_mode = "cosine_floor"
         config.query.abstention_confidence_target_cosine = 0.5
         config.query.abstention_confidence_target_gap = 0.1
+        # Shadow-scoring A/B harness (#1479) is default-OFF; pin it so the
+        # recall path skips the observe-only block (a bare MagicMock would be
+        # truthy and try to run it with a Mock strategy).
+        config.query.shadow_scoring = False
         config.llm.model = "gpt-4o-mini"
         config.pipeline.extract_entities = True
 
@@ -1483,6 +1503,10 @@ class TestVectorCypherEngineBatchDedupScope:
         config.query.abstention_mode = "cosine_floor"
         config.query.abstention_confidence_target_cosine = 0.5
         config.query.abstention_confidence_target_gap = 0.1
+        # Shadow-scoring A/B harness (#1479) is default-OFF; pin it so the
+        # recall path skips the observe-only block (a bare MagicMock would be
+        # truthy and try to run it with a Mock strategy).
+        config.query.shadow_scoring = False
         config.llm.model = "gpt-4o-mini"
         config.pipeline.extract_entities = True
 
@@ -1893,6 +1917,10 @@ class TestVectorCypherEngineRecall:
         config.query.abstention_mode = "cosine_floor"
         config.query.abstention_confidence_target_cosine = 0.5
         config.query.abstention_confidence_target_gap = 0.1
+        # Shadow-scoring A/B harness (#1479) is default-OFF; pin it so the
+        # recall path skips the observe-only block (a bare MagicMock would be
+        # truthy and try to run it with a Mock strategy).
+        config.query.shadow_scoring = False
 
         engine = VectorCypherEngine(config)
         engine._connected = True
@@ -2078,6 +2106,10 @@ class TestVectorCypherEngineForget:
         config.query.abstention_mode = "cosine_floor"
         config.query.abstention_confidence_target_cosine = 0.5
         config.query.abstention_confidence_target_gap = 0.1
+        # Shadow-scoring A/B harness (#1479) is default-OFF; pin it so the
+        # recall path skips the observe-only block (a bare MagicMock would be
+        # truthy and try to run it with a Mock strategy).
+        config.query.shadow_scoring = False
 
         engine = VectorCypherEngine(config)
         engine._connected = True
@@ -2412,6 +2444,10 @@ class TestVectorCypherEngineHealthCheck:
         config.query.abstention_mode = "cosine_floor"
         config.query.abstention_confidence_target_cosine = 0.5
         config.query.abstention_confidence_target_gap = 0.1
+        # Shadow-scoring A/B harness (#1479) is default-OFF; pin it so the
+        # recall path skips the observe-only block (a bare MagicMock would be
+        # truthy and try to run it with a Mock strategy).
+        config.query.shadow_scoring = False
 
         engine = VectorCypherEngine(config)
         result = await engine.health_check()
@@ -2442,6 +2478,10 @@ class TestVectorCypherEngineHealthCheck:
         config.query.abstention_mode = "cosine_floor"
         config.query.abstention_confidence_target_cosine = 0.5
         config.query.abstention_confidence_target_gap = 0.1
+        # Shadow-scoring A/B harness (#1479) is default-OFF; pin it so the
+        # recall path skips the observe-only block (a bare MagicMock would be
+        # truthy and try to run it with a Mock strategy).
+        config.query.shadow_scoring = False
 
         engine = VectorCypherEngine(config)
         engine._connected = True
@@ -2491,6 +2531,10 @@ class TestVectorCypherEngineHealthCheck:
         config.query.abstention_mode = "cosine_floor"
         config.query.abstention_confidence_target_cosine = 0.5
         config.query.abstention_confidence_target_gap = 0.1
+        # Shadow-scoring A/B harness (#1479) is default-OFF; pin it so the
+        # recall path skips the observe-only block (a bare MagicMock would be
+        # truthy and try to run it with a Mock strategy).
+        config.query.shadow_scoring = False
 
         engine = VectorCypherEngine(config)
         engine._connected = True
@@ -2541,6 +2585,10 @@ class TestVectorCypherEngineValidateRecallResults:
         config.query.abstention_mode = "cosine_floor"
         config.query.abstention_confidence_target_cosine = 0.5
         config.query.abstention_confidence_target_gap = 0.1
+        # Shadow-scoring A/B harness (#1479) is default-OFF; pin it so the
+        # recall path skips the observe-only block (a bare MagicMock would be
+        # truthy and try to run it with a Mock strategy).
+        config.query.shadow_scoring = False
         return VectorCypherEngine(config)
 
     def test_filters_empty_content(self, engine: VectorCypherEngine) -> None:
@@ -2637,6 +2685,10 @@ class TestVectorCypherEngineConnectAcquisitionTimeout:
         config.query.abstention_mode = "cosine_floor"
         config.query.abstention_confidence_target_cosine = 0.5
         config.query.abstention_confidence_target_gap = 0.1
+        # Shadow-scoring A/B harness (#1479) is default-OFF; pin it so the
+        # recall path skips the observe-only block (a bare MagicMock would be
+        # truthy and try to run it with a Mock strategy).
+        config.query.shadow_scoring = False
         config.storage.backend = "postgres"
         config.llm.model = "gpt-4o-mini"
         config.llm.embedding_model = "text-embedding-3-small"
@@ -2757,6 +2809,10 @@ class TestVectorCypherEngineParseDatetime:
         config.query.abstention_mode = "cosine_floor"
         config.query.abstention_confidence_target_cosine = 0.5
         config.query.abstention_confidence_target_gap = 0.1
+        # Shadow-scoring A/B harness (#1479) is default-OFF; pin it so the
+        # recall path skips the observe-only block (a bare MagicMock would be
+        # truthy and try to run it with a Mock strategy).
+        config.query.shadow_scoring = False
         return VectorCypherEngine(config)
 
     def test_parse_datetime_object(self, engine: VectorCypherEngine) -> None:
@@ -2848,6 +2904,10 @@ class TestProcessDocumentWindowing:
         config.query.abstention_mode = "cosine_floor"
         config.query.abstention_confidence_target_cosine = 0.5
         config.query.abstention_confidence_target_gap = 0.1
+        # Shadow-scoring A/B harness (#1479) is default-OFF; pin it so the
+        # recall path skips the observe-only block (a bare MagicMock would be
+        # truthy and try to run it with a Mock strategy).
+        config.query.shadow_scoring = False
         config.pipeline.extract_entities = False
         config.pipeline.chunking_strategy = "recursive"
         config.pipeline.chunk_size = 512
@@ -3205,6 +3265,10 @@ class TestVectorCypherEngineApiTemporalFilter:
         config.query.abstention_mode = "cosine_floor"
         config.query.abstention_confidence_target_cosine = 0.5
         config.query.abstention_confidence_target_gap = 0.1
+        # Shadow-scoring A/B harness (#1479) is default-OFF; pin it so the
+        # recall path skips the observe-only block (a bare MagicMock would be
+        # truthy and try to run it with a Mock strategy).
+        config.query.shadow_scoring = False
 
         engine = VectorCypherEngine(config)
         engine._connected = True

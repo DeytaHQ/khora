@@ -1899,6 +1899,24 @@ class QuerySettings(BaseSettings):
         description="Skip MMR when the top vs 2nd normalized ranking-score gap exceeds this (0=never skip)",
     )
 
+    # Shadow-scoring A/B harness (#1479). When True, the VectorCypher engine
+    # computes a CANDIDATE ranking alongside the live INCUMBENT ranking on each
+    # recall and records the divergence under
+    # ``RecallResult.engine_info["shadow_scoring"]``. The RETURNED results are
+    # always the incumbent's - shadow is observe-only and never reorders the
+    # result. Default OFF: genuinely zero-cost when disabled (the engine skips
+    # the whole block). ``shadow_scoring_strategy`` names the candidate order:
+    # "score_sort" (re-order by descending RecallChunk.score - the #1433/#1463
+    # divergence class) or "identity" (no-op self-check).
+    shadow_scoring: bool = Field(
+        default=False,
+        description="Enable observe-only shadow-scoring A/B on recall (records divergence in engine_info)",
+    )
+    shadow_scoring_strategy: Literal["score_sort", "identity"] = Field(
+        default="score_sort",
+        description="Candidate ordering for the shadow-scoring harness (score_sort | identity)",
+    )
+
     # Stage 1 recall budget distribution (must sum to ~1.0)
     stage1_vector_ratio: float = Field(
         default=0.5,
