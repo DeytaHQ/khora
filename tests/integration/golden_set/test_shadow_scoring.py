@@ -15,7 +15,6 @@ golden-set module (no network, no LLM).
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -28,13 +27,11 @@ except ImportError:
     _HAS_EMBEDDED = False
 
 from tests.integration.golden_set.test_golden_set_recall import (
-    _build_vocabulary,
     _config,
+    _ingest_corpus,
     _load_corpus,
-    _make_vocab_embedding,
-    _patch_vocab_embedder,
+    _patch_deterministic_llm,
 )
-from tests.test_helpers.filter_spy import stub_llm
 
 pytestmark = [
     pytest.mark.integration,
@@ -46,18 +43,6 @@ pytestmark = [
 # so the incumbent order and the score-sort candidate order can genuinely
 # diverge - the whole point of the harness.
 _QUERY = "How do the payments platform project and the search feature roadmap relate for Alice and Bob?"
-
-
-async def _seed_kb(kb, corpus) -> Any:
-    ns = await kb.create_namespace()
-    for doc in corpus["documents"]:
-        await kb.remember(
-            doc["content"],
-            namespace=ns.namespace_id,
-            entity_types=["PERSON", "PLACE", "ELEMENT", "PROJECT", "CONCEPT"],
-            relationship_types=["RELATED_TO", "DISCOVERED", "OWNS", "MENTIONS"],
-        )
-    return ns.namespace_id
 
 
 async def test_shadow_off_then_on_same_ingest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -74,18 +59,14 @@ async def test_shadow_off_then_on_same_ingest(tmp_path: Path, monkeypatch: pytes
     from khora import Khora, SearchMode
 
     corpus = _load_corpus()
-    vocab = _build_vocabulary(corpus)
-    vocab_embedding, dim = _make_vocab_embedding(vocab)
-
-    stub_llm(monkeypatch, dim=dim)
-    _patch_vocab_embedder(monkeypatch, vocab_embedding)
+    dim = _patch_deterministic_llm(monkeypatch, corpus)
 
     config = _config(tmp_path, dim)
     config.query.shadow_scoring = False
 
     tmp_path.mkdir(parents=True, exist_ok=True)
     async with Khora(config, run_migrations=True) as kb:
-        ns_id = await _seed_kb(kb, corpus)
+        ns_id, _ = await _ingest_corpus(kb, corpus)
 
         # Flag OFF (default): no shadow key, capture the baseline order.
         off = await kb.recall(_QUERY, namespace=ns_id, limit=10, mode=SearchMode.HYBRID)
@@ -132,11 +113,7 @@ async def test_shadow_identity_strategy_is_a_noop_candidate(tmp_path: Path, monk
     from khora import Khora, SearchMode
 
     corpus = _load_corpus()
-    vocab = _build_vocabulary(corpus)
-    vocab_embedding, dim = _make_vocab_embedding(vocab)
-
-    stub_llm(monkeypatch, dim=dim)
-    _patch_vocab_embedder(monkeypatch, vocab_embedding)
+    dim = _patch_deterministic_llm(monkeypatch, corpus)
 
     config = _config(tmp_path, dim)
     config.query.shadow_scoring = True
@@ -144,15 +121,8 @@ async def test_shadow_identity_strategy_is_a_noop_candidate(tmp_path: Path, monk
 
     tmp_path.mkdir(parents=True, exist_ok=True)
     async with Khora(config, run_migrations=True) as kb:
-        ns = await kb.create_namespace()
-        for doc in corpus["documents"]:
-            await kb.remember(
-                doc["content"],
-                namespace=ns.namespace_id,
-                entity_types=["PERSON", "PLACE", "ELEMENT", "PROJECT", "CONCEPT"],
-                relationship_types=["RELATED_TO", "DISCOVERED", "OWNS", "MENTIONS"],
-            )
-        result = await kb.recall(_QUERY, namespace=ns.namespace_id, limit=10, mode=SearchMode.HYBRID)
+        ns_id, _ = await _ingest_corpus(kb, corpus)
+        result = await kb.recall(_QUERY, namespace=ns_id, limit=10, mode=SearchMode.HYBRID)
 
     report = result.engine_info["shadow_scoring"]
     assert report["strategy"] == "identity"

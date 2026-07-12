@@ -2489,7 +2489,17 @@ class VectorCypherEngine:
             recency_bias=recency_bias,
             temporal_filter=temporal_filter,
             filter_ast=filter_ast,
-            config_fingerprint=repr(getattr(retriever, "_config", None)),
+            # Fold the shadow-scoring toggle + strategy into the fingerprint so a
+            # cached entry is never served for the wrong shadow setting (#1479):
+            # the observe-only report under engine_info['shadow_scoring'] depends
+            # on both, but they live on KhoraConfig.query (not the retriever
+            # config the base fingerprint captures). Keeps them out of the cache
+            # key's explicit signature - no recall_cache.py churn.
+            config_fingerprint=(
+                f"{repr(getattr(retriever, '_config', None))}"
+                f"|shadow={self._config.query.shadow_scoring}"
+                f":{self._config.query.shadow_scoring_strategy}"
+            ),
         )
         cached = self._recall_cache.get(**_cache_args)
         if cached is not None:

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -176,6 +177,48 @@ def _rank_of_doc(chunks: list[Any], doc_id: UUID) -> int | None:
     return None
 
 
+_ENTITY_TYPES = ["PERSON", "PLACE", "ELEMENT", "PROJECT", "CONCEPT"]
+_RELATIONSHIP_TYPES = ["RELATED_TO", "DISCOVERED", "OWNS", "MENTIONS"]
+
+
+def _patch_deterministic_llm(monkeypatch: pytest.MonkeyPatch, corpus: dict[str, Any]) -> int:
+    """Stub extractor + swap in the vocab embedder. Returns the embedding dim.
+
+    stub_llm first (patches the SHA embedder + extractor + resets registry),
+    then override the embedder with the semantic vocab embedding.
+    """
+    vocab = _build_vocabulary(corpus)
+    vocab_embedding, dim = _make_vocab_embedding(vocab)
+    stub_llm(monkeypatch, dim=dim)
+    _patch_vocab_embedder(monkeypatch, vocab_embedding)
+    return dim
+
+
+async def _ingest_corpus(kb, corpus: dict[str, Any]) -> tuple[UUID, dict[str, UUID]]:
+    """Ingest every corpus document into a fresh namespace.
+
+    Threads each doc's optional ``occurred_at`` through ``remember`` as
+    ``source_timestamp`` so the temporal archetype exercises recency-aware
+    ranking (``RecallChunk.occurred_at`` derives from ``source_timestamp``),
+    not just lexical matching. Returns (namespace_id, doc_id -> stored UUID).
+    Shared by both the rank test and the determinism test so their seeding
+    stays in lockstep.
+    """
+    ns = await kb.create_namespace()
+    id_map: dict[str, UUID] = {}
+    for doc in corpus["documents"]:
+        kwargs: dict[str, Any] = {
+            "namespace": ns.namespace_id,
+            "entity_types": _ENTITY_TYPES,
+            "relationship_types": _RELATIONSHIP_TYPES,
+        }
+        if doc.get("occurred_at"):
+            kwargs["source_timestamp"] = datetime.fromisoformat(doc["occurred_at"])
+        remembered = await kb.remember(doc["content"], **kwargs)
+        id_map[doc["doc_id"]] = remembered.document_id
+    return ns.namespace_id, id_map
+
+
 async def _seed_and_recall(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Ingest the golden corpus, run every golden query, return (results, id_map).
 
@@ -185,35 +228,16 @@ async def _seed_and_recall(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from khora import Khora, SearchMode
 
     corpus = _load_corpus()
-    vocab = _build_vocabulary(corpus)
-    vocab_embedding, dim = _make_vocab_embedding(vocab)
-
-    # stub_llm first (patches SHA embedder + extractor + resets registry),
-    # then override the embedder with the semantic vocab embedding.
-    stub_llm(monkeypatch, dim=dim)
-    _patch_vocab_embedder(monkeypatch, vocab_embedding)
-
-    entity_types = ["PERSON", "PLACE", "ELEMENT", "PROJECT", "CONCEPT"]
-    relationship_types = ["RELATED_TO", "DISCOVERED", "OWNS", "MENTIONS"]
+    dim = _patch_deterministic_llm(monkeypatch, corpus)
 
     tmp_path.mkdir(parents=True, exist_ok=True)
     results: dict[str, Any] = {}
-    id_map: dict[str, UUID] = {}
     async with Khora(_config(tmp_path, dim), run_migrations=True) as kb:
-        ns = await kb.create_namespace()
-        for doc in corpus["documents"]:
-            remembered = await kb.remember(
-                doc["content"],
-                namespace=ns.namespace_id,
-                entity_types=entity_types,
-                relationship_types=relationship_types,
-            )
-            id_map[doc["doc_id"]] = remembered.document_id
-
+        ns_id, id_map = await _ingest_corpus(kb, corpus)
         for q in corpus["queries"]:
             results[q["query_id"]] = await kb.recall(
                 q["query"],
-                namespace=ns.namespace_id,
+                namespace=ns_id,
                 limit=10,
                 mode=SearchMode.HYBRID,
             )
@@ -270,26 +294,16 @@ async def test_golden_set_recall_is_deterministic(tmp_path: Path, monkeypatch: p
     from khora import Khora, SearchMode
 
     corpus = _load_corpus()
-    vocab = _build_vocabulary(corpus)
-    vocab_embedding, dim = _make_vocab_embedding(vocab)
-    stub_llm(monkeypatch, dim=dim)
-    _patch_vocab_embedder(monkeypatch, vocab_embedding)
+    dim = _patch_deterministic_llm(monkeypatch, corpus)
 
     query = next(q for q in corpus["queries"] if q["query_id"] == "multi_entity_alice_bob")["query"]
 
     tmp_path.mkdir(parents=True, exist_ok=True)
     async with Khora(_config(tmp_path, dim), run_migrations=True) as kb:
-        ns = await kb.create_namespace()
-        for doc in corpus["documents"]:
-            await kb.remember(
-                doc["content"],
-                namespace=ns.namespace_id,
-                entity_types=["PERSON", "PLACE", "ELEMENT", "PROJECT", "CONCEPT"],
-                relationship_types=["RELATED_TO", "DISCOVERED", "OWNS", "MENTIONS"],
-            )
+        ns_id, _ = await _ingest_corpus(kb, corpus)
         orders = []
         for _ in range(3):
-            res = await kb.recall(query, namespace=ns.namespace_id, limit=10, mode=SearchMode.HYBRID)
+            res = await kb.recall(query, namespace=ns_id, limit=10, mode=SearchMode.HYBRID)
             orders.append([str(c.id) for c in res.chunks])
 
     assert orders[0] == orders[1] == orders[2], (
