@@ -106,15 +106,22 @@ def _fingerprint_result(result: Any, id_map: dict[str, UUID]) -> dict[str, Any]:
     back to the stable corpus doc_id where possible and index chunks by rank.
     The fingerprint captures: ordered chunk (doc_id, rounded score), ordered
     entity (name, rounded score), ordered relationship (type, rounded score),
-    and the stable engine_info slice.
+    ordered document stub (doc_id, source_type), and the stable engine_info slice.
+
+    Coverage note: this corpus recalls vector-only on ``sqlite_lance``
+    (``SearchMode.HYBRID`` with no graph backend), so ``entities`` /
+    ``relationships`` are empty here and ``project_entities`` /
+    ``project_relationships`` are covered by the unit suite
+    (``tests/unit/core/test_recall_projection.py``), not this end-to-end net. The
+    chunk-derived ``documents`` stub projection IS exercised here.
     """
     doc_to_corpus = {v: k for k, v in id_map.items()}
 
     # Canonicalize chunk order by (score, doc): the returned order at a tied RRF
     # rank is non-deterministic across ingests in the baseline (see module
     # docstring), so we compare the multiset. A dropped / added chunk or a
-    # changed score still trips it. Entities / relationships are sorted the same
-    # way for the same reason.
+    # changed score still trips it. Entities / relationships / documents are
+    # sorted the same way for the same reason.
     chunks = sorted(
         (
             {
@@ -133,6 +140,21 @@ def _fingerprint_result(result: Any, id_map: dict[str, UUID]) -> dict[str, Any]:
         ({"type": r.relationship_type, "score": _round(r.score)} for r in result.relationships),
         key=lambda d: (d["score"], d["type"]),
     )
+    # Document-stub projection (the third extracted #1480 function). Fingerprint
+    # the stable fields only: the corpus doc id + source_type. ``created_at`` is
+    # excluded because entity/rel-referenced stubs stamp ``datetime.now(UTC)``
+    # (volatile); the chunk-derived docs carry a stable created_at but mixing the
+    # two would flake. Sorted by (doc, source_type) so the multiset is compared.
+    documents = sorted(
+        (
+            {
+                "doc": doc_to_corpus.get(d.id, str(d.id)),
+                "source_type": d.source_type,
+            }
+            for d in result.documents
+        ),
+        key=lambda d: (d["doc"], d["source_type"]),
+    )
 
     engine_info = {}
     for key in _STABLE_ENGINE_INFO_KEYS:
@@ -143,15 +165,23 @@ def _fingerprint_result(result: Any, id_map: dict[str, UUID]) -> dict[str, Any]:
         "chunks": chunks,
         "entities": entities,
         "relationships": relationships,
+        "documents": documents,
         "engine_info": engine_info,
     }
 
 
 async def _compute_fingerprint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    from tests.test_helpers.diagnostics import assert_no_silent_degradation
+
     corpus, results, id_map = await _seed_and_recall(tmp_path, monkeypatch)
     fingerprint: dict[str, Any] = {}
     for spec in corpus["queries"]:
         qid = spec["query_id"]
+        # ADR-001: the fingerprint deliberately excludes ``degradations`` (it is
+        # order-volatile), so guard here that the golden baseline reflects HEALTHY
+        # scoring - a silently-degraded channel in the fixture would otherwise be
+        # snapshotted as "golden" without anyone noticing.
+        assert_no_silent_degradation(results[qid])
         fingerprint[qid] = _fingerprint_result(results[qid], id_map)
     return fingerprint
 

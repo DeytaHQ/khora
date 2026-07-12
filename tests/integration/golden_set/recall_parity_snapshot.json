@@ -42,6 +42,48 @@
         "score": 0.738867
       }
     ],
+    "documents": [
+      {
+        "doc": "distractor_carol",
+        "source_type": "library"
+      },
+      {
+        "doc": "distractor_melbourne",
+        "source_type": "library"
+      },
+      {
+        "doc": "distractor_sydney",
+        "source_type": "library"
+      },
+      {
+        "doc": "factoid_capital",
+        "source_type": "library"
+      },
+      {
+        "doc": "factoid_speed",
+        "source_type": "library"
+      },
+      {
+        "doc": "hop_radium_therapy",
+        "source_type": "library"
+      },
+      {
+        "doc": "multi_alice_project",
+        "source_type": "library"
+      },
+      {
+        "doc": "multi_bob_project",
+        "source_type": "library"
+      },
+      {
+        "doc": "temporal_q1_launch",
+        "source_type": "library"
+      },
+      {
+        "doc": "temporal_q4_review",
+        "source_type": "library"
+      }
+    ],
     "engine_info": {
       "abstention_signals": {
         "chunks_below_min": false,
@@ -118,6 +160,48 @@
       {
         "doc": "factoid_speed",
         "score": 0.700649
+      }
+    ],
+    "documents": [
+      {
+        "doc": "distractor_astronomy",
+        "source_type": "library"
+      },
+      {
+        "doc": "distractor_carol",
+        "source_type": "library"
+      },
+      {
+        "doc": "distractor_sydney",
+        "source_type": "library"
+      },
+      {
+        "doc": "factoid_capital",
+        "source_type": "library"
+      },
+      {
+        "doc": "factoid_speed",
+        "source_type": "library"
+      },
+      {
+        "doc": "hop_nobel_prize",
+        "source_type": "library"
+      },
+      {
+        "doc": "hop_radium_therapy",
+        "source_type": "library"
+      },
+      {
+        "doc": "temporal_q1_launch",
+        "source_type": "library"
+      },
+      {
+        "doc": "temporal_q2_incident",
+        "source_type": "library"
+      },
+      {
+        "doc": "temporal_q4_review",
+        "source_type": "library"
       }
     ],
     "engine_info": {
@@ -198,6 +282,48 @@
         "score": 0.770675
       }
     ],
+    "documents": [
+      {
+        "doc": "distractor_carol",
+        "source_type": "library"
+      },
+      {
+        "doc": "distractor_gardening",
+        "source_type": "library"
+      },
+      {
+        "doc": "distractor_melbourne",
+        "source_type": "library"
+      },
+      {
+        "doc": "distractor_sydney",
+        "source_type": "library"
+      },
+      {
+        "doc": "multi_alice_bob_meeting",
+        "source_type": "library"
+      },
+      {
+        "doc": "multi_alice_project",
+        "source_type": "library"
+      },
+      {
+        "doc": "multi_bob_project",
+        "source_type": "library"
+      },
+      {
+        "doc": "temporal_q1_launch",
+        "source_type": "library"
+      },
+      {
+        "doc": "temporal_q2_incident",
+        "source_type": "library"
+      },
+      {
+        "doc": "temporal_q4_review",
+        "source_type": "library"
+      }
+    ],
     "engine_info": {
       "abstention_signals": {
         "chunks_below_min": false,
@@ -276,6 +402,48 @@
         "score": 0.55
       }
     ],
+    "documents": [
+      {
+        "doc": "distractor_astronomy",
+        "source_type": "library"
+      },
+      {
+        "doc": "distractor_carol",
+        "source_type": "library"
+      },
+      {
+        "doc": "distractor_sydney",
+        "source_type": "library"
+      },
+      {
+        "doc": "hop_marie_curie",
+        "source_type": "library"
+      },
+      {
+        "doc": "hop_radium_therapy",
+        "source_type": "library"
+      },
+      {
+        "doc": "multi_alice_project",
+        "source_type": "library"
+      },
+      {
+        "doc": "multi_bob_project",
+        "source_type": "library"
+      },
+      {
+        "doc": "temporal_q1_launch",
+        "source_type": "library"
+      },
+      {
+        "doc": "temporal_q2_incident",
+        "source_type": "library"
+      },
+      {
+        "doc": "temporal_q4_review",
+        "source_type": "library"
+      }
+    ],
     "engine_info": {
       "abstention_signals": {
         "chunks_below_min": false,
@@ -352,6 +520,48 @@
       {
         "doc": "temporal_q2_incident",
         "score": 0.643721
+      }
+    ],
+    "documents": [
+      {
+        "doc": "distractor_carol",
+        "source_type": "library"
+      },
+      {
+        "doc": "distractor_sydney",
+        "source_type": "library"
+      },
+      {
+        "doc": "factoid_capital",
+        "source_type": "library"
+      },
+      {
+        "doc": "hop_radium_therapy",
+        "source_type": "library"
+      },
+      {
+        "doc": "multi_alice_bob_meeting",
+        "source_type": "library"
+      },
+      {
+        "doc": "multi_alice_project",
+        "source_type": "library"
+      },
+      {
+        "doc": "multi_bob_project",
+        "source_type": "library"
+      },
+      {
+        "doc": "temporal_q1_launch",
+        "source_type": "library"
+      },
+      {
+        "doc": "temporal_q2_incident",
+        "source_type": "library"
+      },
+      {
+        "doc": "temporal_q4_review",
+        "source_type": "library"
       }
     ],
     "engine_info": {
