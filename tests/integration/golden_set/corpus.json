@@ -1,0 +1,117 @@
+{
+  "_readme": "Golden-set retrieval regression corpus (#1479). See README.md in this directory for how to add a case. Each 'documents' entry is a short, lexically-distinct passage; each 'queries' entry pins the gold document(s) that MUST appear at or above a rank on the RETURNED order. Embeddings are computed deterministically (token-vocabulary bag-of-words, LLM-free, network-free) by tests/integration/golden_set/test_golden_set_recall.py::vocab_embedding, so lexical overlap between a query and its gold document drives cosine similarity. Keep documents single-chunk (a few sentences) so document_id maps 1:1 to a chunk.",
+  "documents": [
+    {
+      "doc_id": "factoid_capital",
+      "content": "The capital city of Australia is Canberra. Canberra was purpose built as the seat of the federal parliament and government, chosen as a compromise between the rival cities Sydney and Melbourne."
+    },
+    {
+      "doc_id": "factoid_speed",
+      "content": "The speed of light in a vacuum is approximately 299792 kilometres per second. This constant is denoted c and is the universal speed limit of the physical universe."
+    },
+    {
+      "doc_id": "factoid_boiling",
+      "content": "Water boils at one hundred degrees celsius at standard atmospheric sea level pressure. At higher altitude the lower atmospheric pressure makes water boil at a lower temperature."
+    },
+    {
+      "doc_id": "distractor_sydney",
+      "content": "Sydney is the largest and most populous city in Australia, famous for its harbour, the opera house and the bridge. Sydney is not the capital city despite being the biggest metropolis."
+    },
+    {
+      "doc_id": "distractor_melbourne",
+      "content": "Melbourne is a large coastal city in Australia known for its coffee culture, laneways and sport. Melbourne competed with Sydney to be the capital and lost the compromise decision."
+    },
+    {
+      "doc_id": "hop_marie_curie",
+      "content": "Marie Curie was a physicist and chemist who conducted pioneering research on radioactivity. Working in Paris, Marie Curie discovered the elements radium and polonium with her husband."
+    },
+    {
+      "doc_id": "hop_radium_therapy",
+      "content": "Radium was later used in cancer radiotherapy. The radioactive element radium emits radiation that damages tumour cells, an application that grew directly out of the discovery of radium."
+    },
+    {
+      "doc_id": "hop_nobel_prize",
+      "content": "The Nobel Prize in physics and the Nobel Prize in chemistry are prestigious awards. Marie Curie won a Nobel Prize in two different scientific fields, physics and chemistry, a unique achievement."
+    },
+    {
+      "doc_id": "temporal_q1_launch",
+      "content": "In the first quarter, the January product launch of the analytics dashboard drove early revenue. The Q1 launch happened in winter and set the baseline for the fiscal year projections.",
+      "occurred_at": "2026-01-15T09:00:00Z"
+    },
+    {
+      "doc_id": "temporal_q2_incident",
+      "content": "A spring outage in the second quarter degraded the analytics dashboard for several hours. The Q2 incident in April was mitigated by scaling the service and adding capacity headroom.",
+      "occurred_at": "2026-04-10T14:00:00Z"
+    },
+    {
+      "doc_id": "temporal_q4_review",
+      "content": "The end of year review in the fourth quarter summarised annual analytics dashboard growth. The Q4 retrospective in December set targets for the next fiscal year and closed the winter cycle.",
+      "occurred_at": "2026-12-05T16:00:00Z"
+    },
+    {
+      "doc_id": "multi_alice_project",
+      "content": "Alice is the lead engineer who owns the payments platform project. Alice reviews every merge request touching the payments service and mentors the two junior engineers on the platform team."
+    },
+    {
+      "doc_id": "multi_bob_project",
+      "content": "Bob is the product manager who owns the search feature roadmap. Bob writes the specifications for the search ranking work and coordinates the release schedule with the platform team."
+    },
+    {
+      "doc_id": "multi_alice_bob_meeting",
+      "content": "Alice and Bob met to align the payments platform project with the search feature roadmap. Alice and Bob agreed that the payments service and the search ranking work share the same database."
+    },
+    {
+      "doc_id": "distractor_carol",
+      "content": "Carol is a designer who works on the marketing website and the onboarding flow. Carol collaborates with the growth team and is not involved in the payments platform or the search feature."
+    },
+    {
+      "doc_id": "distractor_cooking",
+      "content": "A good tomato sauce starts with garlic and onion softened in olive oil. Simmer the crushed tomatoes with basil for thirty minutes and season with salt and pepper to taste."
+    },
+    {
+      "doc_id": "distractor_gardening",
+      "content": "Tomato plants need full sun, well drained soil and regular watering. Prune the side shoots, stake the vines for support and harvest the fruit once it is fully ripe and red."
+    },
+    {
+      "doc_id": "distractor_astronomy",
+      "content": "A light year is the distance light travels in one year, roughly nine trillion kilometres. Astronomers use the light year to measure the vast distances between stars and galaxies."
+    }
+  ],
+  "queries": [
+    {
+      "query_id": "factoid_single_needle",
+      "archetype": "single-needle factoid",
+      "query": "Which purpose built city is the seat of the federal parliament and capital of Australia?",
+      "gold_doc_ids": ["factoid_capital"],
+      "max_rank": 1
+    },
+    {
+      "query_id": "factoid_speed_of_light",
+      "archetype": "single-needle factoid",
+      "query": "What is the speed of light in a vacuum in kilometres per second?",
+      "gold_doc_ids": ["factoid_speed"],
+      "max_rank": 2
+    },
+    {
+      "query_id": "multihop_radium",
+      "archetype": "multi-hop / relational",
+      "query": "Who discovered the radioactive element radium used in cancer radiotherapy?",
+      "gold_doc_ids": ["hop_marie_curie", "hop_radium_therapy"],
+      "max_rank": 3
+    },
+    {
+      "query_id": "temporal_recent_incident",
+      "archetype": "temporal / recency",
+      "query": "the spring outage incident that degraded the analytics dashboard",
+      "gold_doc_ids": ["temporal_q2_incident"],
+      "max_rank": 2
+    },
+    {
+      "query_id": "multi_entity_alice_bob",
+      "archetype": "multi-entity",
+      "query": "How do the payments platform project and the search feature roadmap relate for Alice and Bob?",
+      "gold_doc_ids": ["multi_alice_bob_meeting"],
+      "max_rank": 3
+    }
+  ]
+}
