@@ -41,13 +41,12 @@ from khora.core.models import (
 )
 from khora.core.models.recall import (
     CommunityNode,
-    DocumentProjection,
     RecallChunk,
     RecallEntity,
-    RecallRelationship,
 )
 from khora.core.ranking import select_core_chunk_ids
 from khora.core.recall_abstention import compute_abstention_signals, compute_confidence
+from khora.core.recall_projection import project_document_stubs, project_entities, project_relationships
 from khora.core.temporal import (
     ChunkTemporalFilter,
     TemporalChunk,
@@ -2708,67 +2707,14 @@ class VectorCypherEngine:
             for chunk, score in validated_chunks
         ]
 
-        recall_entities = [
-            RecallEntity(
-                id=entity.id,
-                name=entity.name,
-                entity_type=entity.entity_type,
-                description=entity.description or "",
-                score=score,
-                attributes=dict(entity.attributes or {}),
-                mention_count=entity.mention_count or 0,
-                source_document_ids=list(entity.source_document_ids) or list((entity.source_documents or {}).keys()),
-                source_chunk_ids=list(entity.source_chunk_ids),
-            )
-            for entity, score in result.entities
-        ]
-
-        recall_relationships = [
-            RecallRelationship(
-                id=rel.id,
-                source_entity_id=rel.source_entity_id,
-                target_entity_id=rel.target_entity_id,
-                relationship_type=rel.relationship_type,
-                description=rel.description or "",
-                score=score,
-                valid_from=rel.valid_from,
-                valid_until=rel.valid_until,
-                source_document_ids=list(rel.source_document_ids),
-            )
-            for rel, score in result.relationships
-        ]
-
-        # Document stubs — fuller projections land with the recall-method rewrite.
-        seen_doc_ids: set[UUID] = set()
-        documents: list[DocumentProjection] = []
-        for chunk, _ in validated_chunks:
-            if chunk.document_id in seen_doc_ids:
-                continue
-            seen_doc_ids.add(chunk.document_id)
-            src = chunk.source_document
-            documents.append(
-                DocumentProjection(
-                    id=chunk.document_id,
-                    created_at=chunk.created_at,
-                    source_type=(src.source_type if src and src.source_type else "library"),
-                    title=(src.title if src and src.title else None),
-                    source=(src.source if src and src.source else None),
-                    source_timestamp=(src.source_timestamp if src else None),
-                    metadata=dict(chunk.metadata or {}),
-                )
-            )
-        for re_ in recall_entities:
-            for did in re_.source_document_ids:
-                if did in seen_doc_ids:
-                    continue
-                seen_doc_ids.add(did)
-                documents.append(DocumentProjection(id=did, created_at=datetime.now(UTC), source_type="library"))
-        for rr in recall_relationships:
-            for did in rr.source_document_ids:
-                if did in seen_doc_ids:
-                    continue
-                seen_doc_ids.add(did)
-                documents.append(DocumentProjection(id=did, created_at=datetime.now(UTC), source_type="library"))
+        # Entity / relationship / doc-stub projection is shared with Chronicle
+        # via the #1480 seam. VectorCypher entities may carry the source_documents
+        # map but not the flat id list, so it opts into the fallback. The chunk
+        # projection above stays engine-local (VC surfaces the absolute display
+        # score, #1433; Chronicle min-max normalizes).
+        recall_entities = project_entities(result.entities, source_document_ids_fallback=True)
+        recall_relationships = project_relationships(result.relationships)
+        documents = project_document_stubs(validated_chunks, recall_entities, recall_relationships)
 
         # Canonical engine_info keys for the recall response.
         #

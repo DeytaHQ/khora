@@ -1,0 +1,392 @@
+{
+  "factoid_single_needle": {
+    "chunks": [
+      {
+        "doc": "hop_radium_therapy",
+        "score": 0.290191
+      },
+      {
+        "doc": "multi_alice_project",
+        "score": 0.367884
+      },
+      {
+        "doc": "distractor_melbourne",
+        "score": 0.387783
+      },
+      {
+        "doc": "temporal_q4_review",
+        "score": 0.402147
+      },
+      {
+        "doc": "multi_bob_project",
+        "score": 0.404651
+      },
+      {
+        "doc": "distractor_carol",
+        "score": 0.421733
+      },
+      {
+        "doc": "temporal_q1_launch",
+        "score": 0.430155
+      },
+      {
+        "doc": "factoid_speed",
+        "score": 0.4842
+      },
+      {
+        "doc": "distractor_sydney",
+        "score": 0.537613
+      },
+      {
+        "doc": "factoid_capital",
+        "score": 0.738867
+      }
+    ],
+    "engine_info": {
+      "abstention_signals": {
+        "chunks_below_min": false,
+        "chunks_empty": false,
+        "combined_score": 0.3,
+        "entities_empty": true,
+        "should_abstain": false,
+        "top_score_low": false
+      },
+      "bm25_chunk_count": 0,
+      "channels_used": [
+        "vector"
+      ],
+      "confidence": 1.0,
+      "engine": "vectorcypher",
+      "graph_chunk_count": 0,
+      "graph_depth": 0,
+      "is_temporal": false,
+      "max_raw_vector_score": 0.738867,
+      "mode": "hybrid",
+      "raw_chunk_count": 10,
+      "retrieval_mean_score": 0.4465,
+      "retrieval_score_variance": 0.013386,
+      "retrieval_top_score_gap": 0.2013,
+      "routing": "simple",
+      "rrf_k": 60,
+      "temporal_category": "none",
+      "temporal_confidence": 1.0,
+      "use_graph": false,
+      "validated_chunk_count": 10,
+      "vector_chunk_count": 10
+    },
+    "entities": [],
+    "relationships": []
+  },
+  "factoid_speed_of_light": {
+    "chunks": [
+      {
+        "doc": "hop_radium_therapy",
+        "score": 0.244949
+      },
+      {
+        "doc": "factoid_capital",
+        "score": 0.289241
+      },
+      {
+        "doc": "distractor_sydney",
+        "score": 0.302532
+      },
+      {
+        "doc": "hop_nobel_prize",
+        "score": 0.336146
+      },
+      {
+        "doc": "distractor_carol",
+        "score": 0.339032
+      },
+      {
+        "doc": "temporal_q4_review",
+        "score": 0.348155
+      },
+      {
+        "doc": "temporal_q1_launch",
+        "score": 0.355024
+      },
+      {
+        "doc": "temporal_q2_incident",
+        "score": 0.39375
+      },
+      {
+        "doc": "distractor_astronomy",
+        "score": 0.414284
+      },
+      {
+        "doc": "factoid_speed",
+        "score": 0.700649
+      }
+    ],
+    "engine_info": {
+      "abstention_signals": {
+        "chunks_below_min": false,
+        "chunks_empty": false,
+        "combined_score": 0.3,
+        "entities_empty": true,
+        "should_abstain": false,
+        "top_score_low": false
+      },
+      "bm25_chunk_count": 0,
+      "channels_used": [
+        "vector"
+      ],
+      "confidence": 1.0,
+      "engine": "vectorcypher",
+      "graph_chunk_count": 0,
+      "graph_depth": 0,
+      "is_temporal": false,
+      "max_raw_vector_score": 0.700649,
+      "mode": "hybrid",
+      "raw_chunk_count": 10,
+      "retrieval_mean_score": 0.3724,
+      "retrieval_score_variance": 0.014132,
+      "retrieval_top_score_gap": 0.2864,
+      "routing": "simple",
+      "rrf_k": 60,
+      "temporal_category": "none",
+      "temporal_confidence": 1.0,
+      "use_graph": false,
+      "validated_chunk_count": 10,
+      "vector_chunk_count": 10
+    },
+    "entities": [],
+    "relationships": []
+  },
+  "multi_entity_alice_bob": {
+    "chunks": [
+      {
+        "doc": "distractor_melbourne",
+        "score": 0.340168
+      },
+      {
+        "doc": "temporal_q2_incident",
+        "score": 0.375097
+      },
+      {
+        "doc": "temporal_q4_review",
+        "score": 0.391965
+      },
+      {
+        "doc": "temporal_q1_launch",
+        "score": 0.419263
+      },
+      {
+        "doc": "distractor_sydney",
+        "score": 0.436667
+      },
+      {
+        "doc": "distractor_gardening",
+        "score": 0.443296
+      },
+      {
+        "doc": "distractor_carol",
+        "score": 0.528498
+      },
+      {
+        "doc": "multi_alice_project",
+        "score": 0.567734
+      },
+      {
+        "doc": "multi_bob_project",
+        "score": 0.61978
+      },
+      {
+        "doc": "multi_alice_bob_meeting",
+        "score": 0.770675
+      }
+    ],
+    "engine_info": {
+      "abstention_signals": {
+        "chunks_below_min": false,
+        "chunks_empty": false,
+        "combined_score": 0.3,
+        "entities_empty": true,
+        "should_abstain": false,
+        "top_score_low": false
+      },
+      "bm25_chunk_count": 0,
+      "channels_used": [
+        "vector"
+      ],
+      "confidence": 1.0,
+      "engine": "vectorcypher",
+      "graph_chunk_count": 0,
+      "graph_depth": 2,
+      "is_temporal": false,
+      "max_raw_vector_score": 0.770675,
+      "mode": "hybrid",
+      "raw_chunk_count": 10,
+      "retrieval_mean_score": 0.4893,
+      "retrieval_score_variance": 0.015843,
+      "retrieval_top_score_gap": 0.1509,
+      "routing": "complex",
+      "rrf_k": 60,
+      "temporal_category": "none",
+      "temporal_confidence": 1.0,
+      "use_graph": true,
+      "validated_chunk_count": 10,
+      "vector_chunk_count": 10
+    },
+    "entities": [],
+    "relationships": []
+  },
+  "multihop_radium": {
+    "chunks": [
+      {
+        "doc": "distractor_astronomy",
+        "score": 0.184506
+      },
+      {
+        "doc": "distractor_sydney",
+        "score": 0.247016
+      },
+      {
+        "doc": "multi_alice_project",
+        "score": 0.253546
+      },
+      {
+        "doc": "hop_marie_curie",
+        "score": 0.275241
+      },
+      {
+        "doc": "multi_bob_project",
+        "score": 0.278887
+      },
+      {
+        "doc": "temporal_q2_incident",
+        "score": 0.289346
+      },
+      {
+        "doc": "distractor_carol",
+        "score": 0.290659
+      },
+      {
+        "doc": "temporal_q4_review",
+        "score": 0.298481
+      },
+      {
+        "doc": "temporal_q1_launch",
+        "score": 0.316228
+      },
+      {
+        "doc": "hop_radium_therapy",
+        "score": 0.55
+      }
+    ],
+    "engine_info": {
+      "abstention_signals": {
+        "chunks_below_min": false,
+        "chunks_empty": false,
+        "combined_score": 0.3,
+        "entities_empty": true,
+        "should_abstain": false,
+        "top_score_low": false
+      },
+      "bm25_chunk_count": 0,
+      "channels_used": [
+        "vector"
+      ],
+      "confidence": 1.0,
+      "engine": "vectorcypher",
+      "graph_chunk_count": 0,
+      "graph_depth": 0,
+      "is_temporal": false,
+      "max_raw_vector_score": 0.55,
+      "mode": "hybrid",
+      "raw_chunk_count": 10,
+      "retrieval_mean_score": 0.2984,
+      "retrieval_score_variance": 0.00823,
+      "retrieval_top_score_gap": 0.2338,
+      "routing": "simple",
+      "rrf_k": 60,
+      "temporal_category": "none",
+      "temporal_confidence": 1.0,
+      "use_graph": false,
+      "validated_chunk_count": 10,
+      "vector_chunk_count": 10
+    },
+    "entities": [],
+    "relationships": []
+  },
+  "temporal_recent_incident": {
+    "chunks": [
+      {
+        "doc": "hop_radium_therapy",
+        "score": 0.286039
+      },
+      {
+        "doc": "factoid_capital",
+        "score": 0.33776
+      },
+      {
+        "doc": "distractor_sydney",
+        "score": 0.392534
+      },
+      {
+        "doc": "distractor_carol",
+        "score": 0.395904
+      },
+      {
+        "doc": "multi_alice_project",
+        "score": 0.402912
+      },
+      {
+        "doc": "multi_alice_bob_meeting",
+        "score": 0.408248
+      },
+      {
+        "doc": "multi_bob_project",
+        "score": 0.455842
+      },
+      {
+        "doc": "temporal_q4_review",
+        "score": 0.487869
+      },
+      {
+        "doc": "temporal_q1_launch",
+        "score": 0.527645
+      },
+      {
+        "doc": "temporal_q2_incident",
+        "score": 0.643721
+      }
+    ],
+    "engine_info": {
+      "abstention_signals": {
+        "chunks_below_min": false,
+        "chunks_empty": false,
+        "combined_score": 0.3,
+        "entities_empty": true,
+        "should_abstain": false,
+        "top_score_low": false
+      },
+      "bm25_chunk_count": 0,
+      "channels_used": [
+        "vector"
+      ],
+      "confidence": 1.0,
+      "engine": "vectorcypher",
+      "graph_chunk_count": 0,
+      "graph_depth": 0,
+      "is_temporal": false,
+      "max_raw_vector_score": 0.643721,
+      "mode": "hybrid",
+      "raw_chunk_count": 10,
+      "retrieval_mean_score": 0.4338,
+      "retrieval_score_variance": 0.009209,
+      "retrieval_top_score_gap": 0.1161,
+      "routing": "simple",
+      "rrf_k": 60,
+      "temporal_category": "none",
+      "temporal_confidence": 1.0,
+      "use_graph": false,
+      "validated_chunk_count": 10,
+      "vector_chunk_count": 10
+    },
+    "entities": [],
+    "relationships": []
+  }
+}
