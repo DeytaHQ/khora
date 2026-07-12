@@ -2496,7 +2496,7 @@ class VectorCypherEngine:
             # config the base fingerprint captures). Keeps them out of the cache
             # key's explicit signature - no recall_cache.py churn.
             config_fingerprint=(
-                f"{repr(getattr(retriever, '_config', None))}"
+                f"{getattr(retriever, '_config', None)!r}"
                 f"|shadow={self._config.query.shadow_scoring}"
                 f":{self._config.query.shadow_scoring_strategy}"
             ),
