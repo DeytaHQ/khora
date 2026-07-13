@@ -985,6 +985,7 @@ class VectorCypherRetriever:
         recency_bias: float | None = None,
         filter_ast: FilterNode | None = None,
         query_embedding_task: Awaitable[list[float]] | None = None,
+        write_epoch: int | None = None,
     ) -> VectorCypherResult:
         """Retrieve relevant chunks using VectorCypher hybrid approach.
 
@@ -1038,6 +1039,11 @@ class VectorCypherRetriever:
                 recency-floor synthesis. ``None`` keeps the historic inline
                 ``self._embedder.embed(query)`` call (no double-embed either
                 way — exactly one embed happens per call).
+            write_epoch: Namespace write-epoch (#1469 recall-cache epoch),
+                threaded from the engine. The opt-in PPR path keys its
+                query-independent base-graph-slice cache on it (#1476), so
+                repeated queries on a slowly-changing namespace skip the entity /
+                relationship DB fetch. ``None`` disables that cache.
 
         Returns:
             VectorCypherResult with chunks, entities, and metadata
@@ -1289,6 +1295,7 @@ class VectorCypherRetriever:
                         hybrid_alpha_override=hybrid_alpha_override,
                         recency_bias=recency_bias,
                         filter_ast=filter_ast,
+                        write_epoch=write_epoch,
                     )
                 except _NEO4J_TRANSIENT_ERRORS as e:
                     logger.warning(f"Graph search failed, falling back to vector-only: {e}")
@@ -1621,6 +1628,7 @@ class VectorCypherRetriever:
         hybrid_alpha_override: float | None = None,
         recency_bias: float | None = None,
         filter_ast: FilterNode | None = None,
+        write_epoch: int | None = None,
     ) -> VectorCypherResult:
         """Internal VectorCypher retrieval with graph traversal.
 
@@ -2159,6 +2167,10 @@ class VectorCypherRetriever:
                     max_neighborhood_entities=self._config.ppr_max_neighborhood_entities,
                     early_stop_patience=self._config.ppr_early_stop_patience,
                     early_stop_margin=self._config.ppr_early_stop_margin,
+                    # #1476: key the base-graph-slice cache on the namespace
+                    # write-epoch so repeated queries skip the entity /
+                    # relationship DB fetch until the next write.
+                    graph_cache_epoch=write_epoch,
                     # ADR-001 (#1373): surface a Degradation on the engine_info list
                     # when the graph channel silently returns nothing.
                     out_degradations=degradations,

@@ -19,6 +19,8 @@ References:
 from __future__ import annotations
 
 import asyncio
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -40,6 +42,46 @@ if TYPE_CHECKING:
 # memory at query time.
 _MAX_ENTITIES_FOR_PPR = 5000
 _MAX_RELATIONSHIPS_FOR_PPR = 50_000
+
+
+# Bounded LRU cache of the query-INDEPENDENT base graph slice
+# (``list_entities`` / ``list_relationships``), keyed on
+# ``(namespace_id, write_epoch)`` (#1476). Repeated queries on a slowly-changing
+# namespace reuse the slice and skip the two DB round-trips, while the walk (seed
+# personalization + PPR) still runs per query. The write-epoch is the #1469
+# recall-cache epoch, bumped on ANY namespace write, so a post-write query
+# captures a fresh epoch and misses — a stale slice is never served (it shares
+# the #1469 epoch-eviction semantics: an epoch reset only after >1000 namespaces
+# evict the epoch map, by which point the tiny slice LRU has long dropped the
+# entry). Small by design: each entry may hold up to _MAX_ENTITIES_FOR_PPR
+# entities + _MAX_RELATIONSHIPS_FOR_PPR relationships, so the cap trades memory
+# for hit rate. Entries are read-only downstream (augmentation builds fresh
+# lists), so sharing one across concurrent recalls is safe.
+_GRAPH_SLICE_CACHE_MAX = 8
+_graph_slice_cache: OrderedDict[tuple[UUID, int], tuple[list[Entity], list[Relationship]]] = OrderedDict()
+_graph_slice_lock = threading.Lock()
+
+
+def _graph_slice_cache_get(key: tuple[UUID, int]) -> tuple[list[Entity], list[Relationship]] | None:
+    with _graph_slice_lock:
+        hit = _graph_slice_cache.get(key)
+        if hit is not None:
+            _graph_slice_cache.move_to_end(key)
+        return hit
+
+
+def _graph_slice_cache_put(key: tuple[UUID, int], value: tuple[list[Entity], list[Relationship]]) -> None:
+    with _graph_slice_lock:
+        _graph_slice_cache[key] = value
+        _graph_slice_cache.move_to_end(key)
+        while len(_graph_slice_cache) > _GRAPH_SLICE_CACHE_MAX:
+            _graph_slice_cache.popitem(last=False)
+
+
+def _clear_graph_slice_cache() -> None:
+    """Drop every cached base slice (test hook)."""
+    with _graph_slice_lock:
+        _graph_slice_cache.clear()
 
 
 @dataclass(frozen=True, slots=True)
@@ -324,6 +366,7 @@ async def ppr_retrieve_chunks(
     max_neighborhood_entities: int = 2000,
     early_stop_patience: int = 3,
     early_stop_margin: int = 10,
+    graph_cache_epoch: int | None = None,
     out_degradations: list[Degradation] | None = None,
 ) -> tuple[list[tuple[UUID, float, Chunk]], dict[UUID, float]]:
     """Run query-time PPR over the namespace graph and score chunks.
@@ -365,6 +408,13 @@ async def ppr_retrieve_chunks(
             early-stop stability check, so a node just outside the retrieved set
             cannot climb in after the walk halts. Inert when ``early_stop_patience``
             is ``0``.
+        graph_cache_epoch: When provided, the query-independent base graph slice
+            (``list_entities`` / ``list_relationships``) is cached keyed on
+            ``(namespace_id, graph_cache_epoch)`` (#1476), so repeated queries on
+            a slowly-changing namespace skip the two DB round-trips. The epoch is
+            the #1469 recall-cache write-epoch (bumped on any namespace write), so
+            a stale slice is never served. ``None`` disables the cache (every
+            recall re-fetches — the pre-#1476 behaviour).
         out_degradations: When provided, a structured :class:`Degradation`
             (ADR-001) is appended whenever the graph channel returns nothing on
             a genuine degenerate condition (no seed overlap / still-empty graph
@@ -379,12 +429,24 @@ async def ppr_retrieve_chunks(
             span.set_attribute("fallback_reason", "no_entry_entities")
             return [], {}
 
-        entities = await storage.list_entities(namespace_id, limit=_MAX_ENTITIES_FOR_PPR)
-        if not entities:
-            span.set_attribute("fallback_reason", "empty_entity_graph")
-            return [], {}
+        # #1476: reuse the cached query-independent base slice when the namespace
+        # write-epoch is unchanged, skipping both DB round-trips. The empty-graph
+        # short-circuit only runs on a miss (the cache never holds an empty slice).
+        cache_key = (namespace_id, graph_cache_epoch) if graph_cache_epoch is not None else None
+        cached_slice = _graph_slice_cache_get(cache_key) if cache_key is not None else None
+        if cached_slice is not None:
+            entities, relationships = cached_slice
+            span.set_attribute("graph_cache_hit", True)
+        else:
+            entities = await storage.list_entities(namespace_id, limit=_MAX_ENTITIES_FOR_PPR)
+            if not entities:
+                span.set_attribute("fallback_reason", "empty_entity_graph")
+                return [], {}
 
-        relationships = await storage.list_relationships(namespace_id, limit=_MAX_RELATIONSHIPS_FOR_PPR)
+            relationships = await storage.list_relationships(namespace_id, limit=_MAX_RELATIONSHIPS_FOR_PPR)
+            if cache_key is not None:
+                _graph_slice_cache_put(cache_key, (entities, relationships))
+            span.set_attribute("graph_cache_hit", False)
 
         # #1373: the global slice is ordered query-independently (entities BY
         # name, relationships by created_at DESC) and capped. Below the caps the

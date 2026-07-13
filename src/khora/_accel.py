@@ -676,7 +676,12 @@ def pagerank(
             contrib = 0.0
             for src, weight in incoming[node]:
                 if out_degree[src] > 0:
-                    contrib += scores[src] * weight / out_degree[src]
+                    # `weight / out_degree[src]` is grouped first (not
+                    # `scores[src] * weight / out_degree[src]`) so the arithmetic
+                    # matches the Rust CSR kernel's precomputed normalized weight
+                    # exactly — float ops are non-associative, and this keeps the
+                    # two backends bit-identical (#1476).
+                    contrib += scores[src] * (weight / out_degree[src])
             new_score = (1.0 - damping) * p[node] + damping * contrib
             diff += abs(new_score - scores[node])
             new_scores[node] = new_score

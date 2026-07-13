@@ -575,3 +575,108 @@ class TestSeedAnchoredAugmentation:
         assert e_alice.id in scores
         assert len(degradations) == 1
         assert degradations[0]["reason"] == "chunk_hydration_empty"
+
+
+# ---------------------------------------------------------------------------
+# #1476 — base-graph-slice cache keyed on the namespace write-epoch
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestPPRGraphSliceCache:
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        ppr_retrieval._clear_graph_slice_cache()
+        yield
+        ppr_retrieval._clear_graph_slice_cache()
+
+    def _fixture(self):
+        chunk = _make_chunk("Alice met Bob")
+        e_alice = _make_entity("Alice", [chunk.id])
+        e_bob = _make_entity("Bob", [chunk.id])
+        rels = [_make_relationship(e_alice.id, e_bob.id)]
+        return e_alice, e_bob, rels, {chunk.id: chunk}
+
+    async def _run(self, storage, ns, seed_id, epoch):
+        return await ppr_retrieve_chunks(
+            storage=storage,
+            namespace_id=ns,
+            entry_entities=[(seed_id, 1.0)],
+            damping=0.85,
+            max_iter=50,
+            tol=1e-5,
+            top_entities=10,
+            limit=10,
+            graph_cache_epoch=epoch,
+        )
+
+    @pytest.mark.asyncio
+    async def test_same_epoch_hits_cache_skips_second_db_fetch(self) -> None:
+        ns = uuid4()
+        e_alice, e_bob, rels, chunks_map = self._fixture()
+        storage = _mock_storage(entities=[e_alice, e_bob], relationships=rels, chunks_map=chunks_map)
+
+        r1, s1 = await self._run(storage, ns, e_alice.id, epoch=1)
+        r2, s2 = await self._run(storage, ns, e_alice.id, epoch=1)
+
+        # Second call is a cache hit: the base slice is not re-fetched.
+        assert storage.list_entities.await_count == 1
+        assert storage.list_relationships.await_count == 1
+        # Identical results from cache.
+        assert [cid for cid, _, _ in r1] == [cid for cid, _, _ in r2]
+        assert s1.keys() == s2.keys()
+
+    @pytest.mark.asyncio
+    async def test_new_epoch_invalidates_and_refetches(self) -> None:
+        ns = uuid4()
+        e_alice, e_bob, rels, chunks_map = self._fixture()
+        storage = _mock_storage(entities=[e_alice, e_bob], relationships=rels, chunks_map=chunks_map)
+
+        await self._run(storage, ns, e_alice.id, epoch=1)
+        await self._run(storage, ns, e_alice.id, epoch=2)  # write bumped the epoch
+
+        # A new epoch is a distinct key → both calls re-fetch the slice.
+        assert storage.list_entities.await_count == 2
+        assert storage.list_relationships.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_none_epoch_disables_cache(self) -> None:
+        ns = uuid4()
+        e_alice, e_bob, rels, chunks_map = self._fixture()
+        storage = _mock_storage(entities=[e_alice, e_bob], relationships=rels, chunks_map=chunks_map)
+
+        await self._run(storage, ns, e_alice.id, epoch=None)
+        await self._run(storage, ns, e_alice.id, epoch=None)
+
+        # No epoch → caching off → every recall re-fetches (legacy behaviour).
+        assert storage.list_entities.await_count == 2
+        assert storage.list_relationships.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_empty_slice_is_not_cached(self) -> None:
+        ns = uuid4()
+        storage = _mock_storage(entities=[], relationships=[], chunks_map={})
+
+        # Empty entity graph → early fallback, nothing cached.
+        await self._run(storage, ns, uuid4(), epoch=1)
+        await self._run(storage, ns, uuid4(), epoch=1)
+
+        # Both calls hit the DB (an empty slice is never stored).
+        assert storage.list_entities.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_lru_evicts_oldest_epoch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(ppr_retrieval, "_GRAPH_SLICE_CACHE_MAX", 2)
+        ns = uuid4()
+        e_alice, e_bob, rels, chunks_map = self._fixture()
+        storage = _mock_storage(entities=[e_alice, e_bob], relationships=rels, chunks_map=chunks_map)
+
+        # Fill the cache past its cap: epochs 1, 2, 3 → epoch 1 is evicted.
+        await self._run(storage, ns, e_alice.id, epoch=1)
+        await self._run(storage, ns, e_alice.id, epoch=2)
+        await self._run(storage, ns, e_alice.id, epoch=3)
+        base = storage.list_entities.await_count  # 3 misses so far
+        # epoch 1 was evicted → re-fetch; epoch 3 is still cached → hit.
+        await self._run(storage, ns, e_alice.id, epoch=1)
+        await self._run(storage, ns, e_alice.id, epoch=3)
+        assert storage.list_entities.await_count == base + 1

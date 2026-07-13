@@ -2642,6 +2642,10 @@ class VectorCypherEngine:
             recency_bias=recency_bias,
             filter_ast=filter_ast,
             query_embedding_task=query_embedding_task,
+            # #1476: hand the namespace write-epoch (captured above for the
+            # result cache) to the retriever so the opt-in PPR path can cache its
+            # query-independent base graph slice keyed on it.
+            write_epoch=_cache_epoch,
         )
 
         # When a caller filter narrowed the candidate set below the requested k,

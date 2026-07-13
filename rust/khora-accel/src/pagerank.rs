@@ -149,27 +149,61 @@ pub fn pagerank_inner(
             _ => vec![uniform; n],
         };
 
-        // Build incoming adjacency list: for each dst, store (src, weight)
-        let mut incoming: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
-        // Accumulate out-degree (sum of outgoing weights) per node
+        // Build the incoming graph in CSR form (Issue #1476): for each `dst`,
+        // `row_ptr[dst]..row_ptr[dst + 1]` indexes its incoming edges in the flat
+        // `in_src` / `in_wnorm` arrays. Iterating CSR is sequential (cache
+        // friendly) versus the pointer-chasing `Vec<Vec<(usize, f64)>>` adjacency
+        // list it replaces. `in_wnorm` folds the `weight / out_degree[src]`
+        // normalization into the build, so the per-iteration inner loop is a
+        // single fused multiply-add per edge (one fewer division per edge per
+        // iteration). Edges are scattered in input order, so a node's incoming
+        // contributions are summed in the same order as the pure-Python fallback
+        // — the two paths stay bit-identical.
         let mut out_degree: Vec<f64> = vec![0.0; n];
-
+        let mut in_count: Vec<usize> = vec![0; n];
         for &(src, dst, weight) in edges {
             if src < n && dst < n {
-                incoming[dst].push((src, weight));
                 out_degree[src] += weight;
+                in_count[dst] += 1;
+            }
+        }
+        let mut row_ptr: Vec<usize> = vec![0; n + 1];
+        for node in 0..n {
+            row_ptr[node + 1] = row_ptr[node] + in_count[node];
+        }
+        let nnz = row_ptr[n];
+        let mut in_src: Vec<u32> = vec![0; nnz];
+        let mut in_wnorm: Vec<f64> = vec![0.0; nnz];
+        // `fill[dst]` tracks the next free slot for `dst` as edges are scattered.
+        let mut fill: Vec<usize> = row_ptr[..n].to_vec();
+        for &(src, dst, weight) in edges {
+            if src < n && dst < n {
+                let pos = fill[dst];
+                fill[dst] += 1;
+                in_src[pos] = src as u32;
+                // Guard out_degree == 0 exactly as the original loop's
+                // `if out_degree[src] > 0.0` did (a zero-weight source
+                // contributes nothing rather than dividing by zero).
+                in_wnorm[pos] = if out_degree[src] > 0.0 {
+                    weight / out_degree[src]
+                } else {
+                    0.0
+                };
             }
         }
 
-        // Initialize from the personalization distribution so the first
-        // iteration already biases toward the seed neighbourhood.
-        let mut scores: Vec<f64> = p.clone();
+        // Ping-pong score buffers, initialized from the personalization
+        // distribution so the first iteration is already seeded. `cur` holds the
+        // current scores; `next` is fully overwritten each iteration then swapped
+        // in — no per-iteration allocation.
+        let mut cur: Vec<f64> = p.clone();
+        let mut next: Vec<f64> = vec![0.0; n];
 
         // Top-k rank-stability early-stop state (Issue #1476). `rank_k` is
         // clamped to `n`; `prev_top` holds the previous iteration's top-k
         // ordering and `stable_count` the run of consecutive stable iterations.
-        // `top_buf` is reused across iterations to keep the per-iteration check
-        // allocation-free.
+        // `top_buf` / `key_buf` are reused across iterations to keep the
+        // per-iteration check allocation-free.
         let rank_k = rank_k.map(|k| k.min(n));
         let mut prev_top: Vec<usize> = Vec::new();
         let mut top_buf: Vec<usize> = Vec::new();
@@ -177,22 +211,21 @@ pub fn pagerank_inner(
         let mut stable_count: usize = 0;
 
         for _iter in 0..max_iter {
-            let mut new_scores: Vec<f64> = vec![0.0; n];
             let mut diff = 0.0f64;
 
             for node in 0..n {
+                let start = row_ptr[node];
+                let end = row_ptr[node + 1];
                 let mut contrib = 0.0f64;
-                for &(src, weight) in &incoming[node] {
-                    if out_degree[src] > 0.0 {
-                        contrib += scores[src] * weight / out_degree[src];
-                    }
+                for e in start..end {
+                    contrib += cur[in_src[e] as usize] * in_wnorm[e];
                 }
                 let new_score = (1.0 - damping) * p[node] + damping * contrib;
-                diff += (new_score - scores[node]).abs();
-                new_scores[node] = new_score;
+                diff += (new_score - cur[node]).abs();
+                next[node] = new_score;
             }
 
-            scores = new_scores;
+            std::mem::swap(&mut cur, &mut next);
             if diff < tol {
                 break;
             }
@@ -203,7 +236,7 @@ pub fn pagerank_inner(
             // pre-#1476 behaviour.
             if let Some(k) = rank_k {
                 if k > 0 && stable_iters > 0 {
-                    top_k_into(&scores, k, &mut key_buf, &mut top_buf);
+                    top_k_into(&cur, k, &mut key_buf, &mut top_buf);
                     if top_buf == prev_top {
                         stable_count += 1;
                         if stable_count >= stable_iters {
@@ -218,7 +251,7 @@ pub fn pagerank_inner(
             }
         }
 
-        scores
+        cur
     }
 }
 
