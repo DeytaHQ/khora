@@ -124,6 +124,55 @@ def build_personalization_vector(
     return vec
 
 
+def recognition_filter_seeds(
+    entry_entities: list[tuple[UUID, float]],
+    entities_by_id: dict[UUID, Entity],
+    chunk_similarity: dict[UUID, float],
+    *,
+    min_recognition: float,
+) -> list[tuple[UUID, float]]:
+    """HippoRAG-2 recognition-memory step: keep only query-relevant seeds (#1476).
+
+    Raw entity-cosine seeding personalizes PPR from every entity whose *name*
+    embeds close to the query, even when none of that entity's evidence supports
+    the query. HippoRAG-2 instead filters the seed set through a recognition step
+    so the walk starts only from entities the query actually recognizes.
+
+    This is a cheap approximation of that step that reuses signals already on
+    hand (no extra LLM / reranker call on the hot path): a seed is *recognized*
+    when at least one of its source chunks clears ``min_recognition`` cosine
+    similarity to the query (``chunk_similarity``, from the vector channel). Seeds
+    whose Entity is unknown to the graph, or when no ``chunk_similarity`` is
+    available, are kept (we cannot assess them, so we do not drop them). If the
+    filter would remove *every* seed the unfiltered set is returned unchanged, so
+    the personalization vector never collapses to zero (which would silently drop
+    the whole graph channel).
+
+    QUALITY EXPERIMENT — this changes retrieval results, so it is gated OFF by
+    default and must be A/B'd via the retrieval-only eval harness (grb#13) before
+    being enabled anywhere.
+    """
+    if not chunk_similarity:
+        return entry_entities
+    filtered: list[tuple[UUID, float]] = []
+    for eid, score in entry_entities:
+        ent = entities_by_id.get(eid)
+        if ent is None:
+            # Unknown to the graph slice — cannot assess recognition; keep it so
+            # augmentation / teleport still applies.
+            filtered.append((eid, score))
+            continue
+        best = max(
+            (chunk_similarity.get(cid, 0.0) for cid in ent.source_chunk_ids),
+            default=0.0,
+        )
+        if best >= min_recognition:
+            filtered.append((eid, score))
+    # Never zero the seed set: an over-aggressive threshold falls back to raw
+    # seeding rather than dropping the graph channel.
+    return filtered or entry_entities
+
+
 def build_ppr_graph(
     entities: list[Entity],
     relationships: list[tuple[UUID, UUID, float]],
@@ -367,6 +416,8 @@ async def ppr_retrieve_chunks(
     early_stop_patience: int = 3,
     early_stop_margin: int = 10,
     graph_cache_epoch: int | None = None,
+    recognition_filter: bool = False,
+    recognition_min_similarity: float = 0.3,
     out_degradations: list[Degradation] | None = None,
 ) -> tuple[list[tuple[UUID, float, Chunk]], dict[UUID, float]]:
     """Run query-time PPR over the namespace graph and score chunks.
@@ -415,6 +466,14 @@ async def ppr_retrieve_chunks(
             the #1469 recall-cache write-epoch (bumped on any namespace write), so
             a stale slice is never served. ``None`` disables the cache (every
             recall re-fetches — the pre-#1476 behaviour).
+        recognition_filter: HippoRAG-2 recognition-memory seeding (#1476). When
+            ``True``, the seed personalization is filtered to entities whose
+            evidence chunks are query-relevant (see :func:`recognition_filter_seeds`)
+            instead of seeding from raw entity cosine. QUALITY EXPERIMENT — gated
+            OFF by default; validate via the grb#13 retrieval-only eval harness
+            before enabling.
+        recognition_min_similarity: Minimum source-chunk cosine similarity for a
+            seed to count as recognized. Only used when ``recognition_filter``.
         out_degradations: When provided, a structured :class:`Degradation`
             (ADR-001) is appended whenever the graph channel returns nothing on
             a genuine degenerate condition (no seed overlap / still-empty graph
@@ -474,7 +533,23 @@ async def ppr_retrieve_chunks(
         ]
 
         graph = build_ppr_graph(entities, edge_triples)
-        personalization = build_personalization_vector(entry_entities, graph.entity_id_to_idx)
+
+        # #1476: optional HippoRAG-2 recognition-memory seeding. Filter the seed
+        # set to query-relevant entities BEFORE projecting the personalization
+        # vector, so the walk starts only from recognized seeds. Gated OFF by
+        # default (quality experiment; A/B via grb#13).
+        seed_entities = entry_entities
+        if recognition_filter:
+            entities_by_id = {e.id: e for e in graph.entities}
+            seed_entities = recognition_filter_seeds(
+                entry_entities,
+                entities_by_id,
+                chunk_similarity or {},
+                min_recognition=recognition_min_similarity,
+            )
+            span.set_attribute("recognition_filtered_seeds", len(seed_entities))
+
+        personalization = build_personalization_vector(seed_entities, graph.entity_id_to_idx)
 
         if sum(personalization) <= 0.0:
             # None of the query entities matched a graph node — fall back.
@@ -598,6 +673,7 @@ async def ppr_retrieve_chunks(
 __all__ = [
     "build_personalization_vector",
     "build_ppr_graph",
+    "recognition_filter_seeds",
     "score_chunks_via_ppr",
     "ppr_retrieve_chunks",
 ]

@@ -554,6 +554,11 @@ class RetrieverConfig:
     # patience=0 disables it (legacy global-L1 convergence).
     ppr_early_stop_patience: int = 3
     ppr_early_stop_margin: int = 10
+    # #1476: HippoRAG-2 recognition-memory seeding (quality experiment, OFF by
+    # default). Filters the PPR seed personalization to query-relevant entities.
+    # Validate via the grb#13 retrieval-only eval harness before enabling.
+    ppr_recognition_filter: bool = False
+    ppr_recognition_min_similarity: float = 0.3
 
     # Limits
     max_chunks: int = 50
@@ -2167,6 +2172,8 @@ class VectorCypherRetriever:
                     max_neighborhood_entities=self._config.ppr_max_neighborhood_entities,
                     early_stop_patience=self._config.ppr_early_stop_patience,
                     early_stop_margin=self._config.ppr_early_stop_margin,
+                    recognition_filter=self._config.ppr_recognition_filter,
+                    recognition_min_similarity=self._config.ppr_recognition_min_similarity,
                     # #1476: key the base-graph-slice cache on the namespace
                     # write-epoch so repeated queries skip the entity /
                     # relationship DB fetch until the next write.

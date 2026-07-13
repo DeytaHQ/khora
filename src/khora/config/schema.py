@@ -1883,6 +1883,26 @@ class QuerySettings(BaseSettings):
             "is 0."
         ),
     )
+    ppr_recognition_filter: bool = Field(
+        default=False,
+        description=(
+            "HippoRAG-2 recognition-memory seeding for the PPR path (khora#1476). "
+            "When True, the PPR seed personalization is filtered to entities whose "
+            "evidence chunks are query-relevant (vector-channel cosine) instead of "
+            "seeding from raw entity cosine. QUALITY EXPERIMENT — gated OFF by "
+            "default; validate via the grb#13 retrieval-only eval harness before "
+            "enabling."
+        ),
+    )
+    ppr_recognition_min_similarity: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum source-chunk cosine similarity for a PPR seed to count as "
+            "recognized (khora#1476). Only used when ppr_recognition_filter is True."
+        ),
+    )
 
     @field_validator("enable_hyde", mode="before")
     @classmethod

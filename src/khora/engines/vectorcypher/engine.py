@@ -955,6 +955,8 @@ class VectorCypherEngine:
             ppr_max_neighborhood_entities=self._config.query.ppr_max_neighborhood_entities,
             ppr_early_stop_patience=self._config.query.ppr_early_stop_patience,
             ppr_early_stop_margin=self._config.query.ppr_early_stop_margin,
+            ppr_recognition_filter=self._config.query.ppr_recognition_filter,
+            ppr_recognition_min_similarity=self._config.query.ppr_recognition_min_similarity,
             metadata_overfetch_multiplier=self._config.query.metadata_overfetch_multiplier,
             # Issue #1018 — QuerySettings tier on the default recall() path.
             # These were inert on VectorCypher because recall() dispatches
