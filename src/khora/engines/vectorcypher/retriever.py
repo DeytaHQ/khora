@@ -2154,7 +2154,14 @@ class VectorCypherRetriever:
                         _vc_for_sim = await vector_chunks_task
                     else:
                         _vc_for_sim = []
-                    chunk_similarity = {cid: score for cid, score, _ in _vc_for_sim}
+                    # Prefer the true per-chunk cosine (``raw_cosine_by_id``) over the
+                    # tuple score, which under ``hybrid_alpha < 1.0`` is a vector+BM25
+                    # blend. ``score_chunks_via_ppr`` and ``recognition_filter_seeds``
+                    # both document this map as "cosine similarity to query", and the
+                    # recognition threshold (#1476) is a cosine-scale gate — so the
+                    # raw cosine is what the contract measures. Falls back to the tuple
+                    # score for any chunk missing from the raw-cosine map.
+                    chunk_similarity = {cid: raw_cosine_by_id.get(cid, score) for cid, score, _ in _vc_for_sim}
                 except Exception:  # noqa: S110 - sim is optional; PPR still runs without it
                     chunk_similarity = {}
 

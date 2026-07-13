@@ -107,6 +107,10 @@ fn top_k_into(scores: &[f64], k: usize, key_buf: &mut Vec<(f64, u32)>, out: &mut
     out.extend(key_buf.iter().map(|&(_, i)| i as usize));
 }
 
+/// Owning convenience wrapper around [`top_k_into`]. The power iteration uses
+/// `top_k_into` with reused buffers; this allocation-per-call form is only used
+/// by the tests, hence `#[cfg(test)]`.
+#[cfg(test)]
 fn top_k_indices(scores: &[f64], k: usize) -> Vec<usize> {
     let mut key_buf = Vec::new();
     let mut out = Vec::new();
@@ -429,16 +433,20 @@ mod tests {
 
     #[test]
     fn test_early_stop_actually_halts_early() {
-        // Sanity: with early-stop the scores must differ from a single-iteration
-        // run (it does real work) but converge to the same top ranking well
-        // before max_iter. We assert the early result is not the trivial
-        // one-iteration result and matches the full top-k.
+        // The early-stop must do real iteration work (its scores differ from the
+        // trivial one-iteration result) yet converge to the same top-30 as the
+        // full run — i.e. it halts early without changing the ranking.
         let n = 400;
         let edges = build_test_graph(n);
         let seed: Vec<f64> = (0..n).map(|i| if i < 5 { 1.0 } else { 0.0 }).collect();
 
+        let one_iter = pagerank_inner(n, &edges, 0.85, 1, 1e-9, Some(seed.clone()), None, 3);
         let full = pagerank_inner(n, &edges, 0.85, 100, 1e-9, Some(seed.clone()), None, 3);
         let early = pagerank_inner(n, &edges, 0.85, 100, 1e-9, Some(seed), Some(40), 2);
+        assert_ne!(
+            one_iter, early,
+            "early-stop result should reflect real iteration work"
+        );
         assert_eq!(top_k_indices(&full, 30), top_k_indices(&early, 30));
     }
 

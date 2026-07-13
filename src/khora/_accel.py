@@ -661,6 +661,18 @@ def pagerank(
             incoming[dst].append((src, weight))
             out_degree[src] += weight
 
+    # Precompute the normalized incoming weight `weight / out_degree[src]` once
+    # (mirrors the Rust CSR kernel's `in_wnorm`), dropping the per-iteration
+    # division from O(edges * iters) to O(edges). `weight / out_degree[src]`
+    # yields the same float whether computed here or inline, so
+    # `scores[src] * wnorm` stays bit-identical to the Rust `cur[src] * in_wnorm`
+    # (float ops are non-associative — this grouping is load-bearing). A
+    # zero-out-degree source normalizes to 0.0, matching the kernel's guard
+    # (adding 0.0 is a no-op, so it is equivalent to skipping the edge) (#1476).
+    incoming_norm: list[list[tuple[int, float]]] = [
+        [(src, weight / out_degree[src] if out_degree[src] > 0 else 0.0) for src, weight in row] for row in incoming
+    ]
+
     scores = list(p)  # init from p so the first iteration is already seeded
 
     # Top-k rank-stability early-stop state (#1476). Mirrors pagerank.rs.
@@ -674,14 +686,8 @@ def pagerank(
 
         for node in range(n):
             contrib = 0.0
-            for src, weight in incoming[node]:
-                if out_degree[src] > 0:
-                    # `weight / out_degree[src]` is grouped first (not
-                    # `scores[src] * weight / out_degree[src]`) so the arithmetic
-                    # matches the Rust CSR kernel's precomputed normalized weight
-                    # exactly — float ops are non-associative, and this keeps the
-                    # two backends bit-identical (#1476).
-                    contrib += scores[src] * (weight / out_degree[src])
+            for src, wnorm in incoming_norm[node]:
+                contrib += scores[src] * wnorm
             new_score = (1.0 - damping) * p[node] + damping * contrib
             diff += abs(new_score - scores[node])
             new_scores[node] = new_score
