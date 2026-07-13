@@ -487,6 +487,8 @@ async def ppr_retrieve_chunks(
                             **(chunk.metadata if isinstance(chunk.metadata, dict) else {}),
                         },
                         created_at=getattr(chunk, "created_at", None),
+                        occurred_at=chunk.occurred_at,
+                        source_timestamp=chunk.source_timestamp,
                     ),
                 )
             )
