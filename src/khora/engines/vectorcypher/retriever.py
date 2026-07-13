@@ -46,6 +46,7 @@ from khora.filter.telemetry import record_graph_channel_empty
 from khora.query import SearchMode
 from khora.query.degree_stats import build_degree_stats
 from khora.query.hyde import HyDEExpander
+from khora.storage.backends.mixins import deserialize_dict
 from khora.telemetry import bounded_text_hash, trace_span
 from khora.telemetry.metrics import metric_counter
 
@@ -1521,15 +1522,17 @@ class VectorCypherRetriever:
                         namespace_id=namespace_id,
                         document_id=UUID(c_data["document_id"]),
                         content=c_data.get("content", ""),
-                        metadata={"occurred_at": c_data.get("occurred_at")},
+                        # The :Chunk node stores the serialized user metadata
+                        # blob; deserialize it with the same helper the
+                        # get_chunks_by_entities path uses (→ {} when absent).
+                        metadata=deserialize_dict(c_data.get("metadata")),
                         chunker_info=_decode_chunker_info(c_data.get("chunker_info")),
-                        # The graph store carries only the chunk event-time;
-                        # surface it as occurred_at so the recall projection
-                        # uses it. Neo4j stores it as an ISO-8601 string;
-                        # coerce to datetime. source_timestamp mirrors it as
-                        # the projection fallback carrier.
+                        # The graph store carries the chunk event-time
+                        # (occurred_at) and the producer time (source_timestamp)
+                        # as separate node properties. Neo4j stores them as
+                        # ISO-8601 strings; coerce both to datetime.
                         occurred_at=_coerce_occurred_at(c_data.get("occurred_at")),
-                        source_timestamp=_coerce_occurred_at(c_data.get("occurred_at")),
+                        source_timestamp=_coerce_occurred_at(c_data.get("source_timestamp")),
                     )
                     chunks.append((chunk, rank_score))
 
@@ -4166,7 +4169,9 @@ class VectorCypherRetriever:
                                     "embedding": chunk.embedding,
                                     "total_mentions": 1,
                                     "entity_ids": [],
-                                    "occurred_at": getattr(chunk, "source_timestamp", None),
+                                    "metadata": chunk.metadata,
+                                    "occurred_at": chunk.occurred_at,
+                                    "source_timestamp": chunk.source_timestamp,
                                     "chunker_info": getattr(chunk, "chunker_info", None) or {},
                                 }
                             )
@@ -4195,14 +4200,13 @@ class VectorCypherRetriever:
                         **(record.get("metadata") or {}),
                     },
                     chunker_info=_decode_chunker_info(record.get("chunker_info")),
-                    # The graph store carries only the chunk event-time;
-                    # surface it as occurred_at so the recall projection uses
-                    # it. record["occurred_at"] is an ISO-8601 string from
-                    # Neo4j or a datetime from the SurrealDB fallback above.
-                    # source_timestamp mirrors it as the projection fallback
-                    # carrier.
+                    # The graph store carries the chunk event-time (occurred_at)
+                    # and the producer time (source_timestamp) as separate
+                    # record fields. From Neo4j both are ISO-8601 strings; from
+                    # the SurrealDB fallback above both are datetimes. Coerce
+                    # each independently — do NOT mirror occurred_at.
                     occurred_at=_coerce_occurred_at(record.get("occurred_at")),
-                    source_timestamp=_coerce_occurred_at(record.get("occurred_at")),
+                    source_timestamp=_coerce_occurred_at(record.get("source_timestamp")),
                 )
                 results.append((chunk_id, score, chunk))
 
@@ -4438,6 +4442,7 @@ class VectorCypherRetriever:
                             },
                             chunker_info=getattr(chunk, "chunker_info", None) or {},
                             created_at=getattr(chunk, "created_at", None) or getattr(chunk, "occurred_at", None),
+                            occurred_at=getattr(chunk, "occurred_at", None),
                             # The temporal store carries the chunk event-time
                             # (occurred_at, surfaced into metadata above) and the
                             # producer time (source_timestamp); the projection

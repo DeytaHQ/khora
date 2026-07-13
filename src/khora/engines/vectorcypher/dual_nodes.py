@@ -753,6 +753,7 @@ class DualNodeManager:
                c.content AS content,
                c.document_id AS document_id,
                c.occurred_at AS occurred_at,
+               c.source_timestamp AS source_timestamp,
                c.metadata AS metadata,
                c.chunker_info AS chunker_info,
                collect(DISTINCT e.id) AS entity_ids,
