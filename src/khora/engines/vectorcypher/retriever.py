@@ -2964,20 +2964,21 @@ class VectorCypherRetriever:
         score_range = score_max - score_min
         candidates = []
         for r in candidates_to_rerank:
-            # Build content with optional temporal prefix for cross-encoder context
+            # Build content with optional temporal prefix for cross-encoder
+            # context. occurred_at is a first-class column, so the Date prefix is
+            # built independently of the metadata blob; session_id stays gated on
+            # the blob because it is a user-space key that only lives there.
             chunk_content = r.item.content if hasattr(r.item, "content") else str(r.item)
-            if hasattr(r.item, "metadata") and isinstance(r.item.metadata, dict):
-                raw = r.item.metadata
-                if raw:
-                    prefix_parts = []
-                    session_id = raw.get("session_id") or raw.get("conversation_id")
-                    if session_id:
-                        prefix_parts.append(f"Session: {session_id}")
-                    occurred_at = getattr(r.item, "occurred_at", None) or getattr(r.item, "source_timestamp", None)
-                    if occurred_at:
-                        prefix_parts.append(f"Date: {str(occurred_at)[:10]}")
-                    if prefix_parts:
-                        chunk_content = f"[{', '.join(prefix_parts)}] {chunk_content}"
+            prefix_parts = []
+            if hasattr(r.item, "metadata") and isinstance(r.item.metadata, dict) and r.item.metadata:
+                session_id = r.item.metadata.get("session_id") or r.item.metadata.get("conversation_id")
+                if session_id:
+                    prefix_parts.append(f"Session: {session_id}")
+            occurred_at = getattr(r.item, "occurred_at", None) or getattr(r.item, "source_timestamp", None)
+            if occurred_at:
+                prefix_parts.append(f"Date: {str(occurred_at)[:10]}")
+            if prefix_parts:
+                chunk_content = f"[{', '.join(prefix_parts)}] {chunk_content}"
             candidates.append(
                 RerankCandidate(
                     item=r,
@@ -3166,21 +3167,22 @@ class VectorCypherRetriever:
         candidates = []
         for r in candidates_to_rerank:
             # Build content with temporal prefix (date from the first-class
-            # column; session id still from the metadata blob) for LLM context
+            # column, independent of the metadata blob; session id stays gated on
+            # the blob where it lives) for LLM context.
             chunk_content = r.item.content if hasattr(r.item, "content") else str(r.item)
+            prefix_parts = []
             if hasattr(r.item, "metadata") and r.item.metadata:
                 meta = r.item.metadata
                 raw = meta.custom if hasattr(meta, "custom") else (meta if isinstance(meta, dict) else {})
                 if raw:
-                    prefix_parts = []
                     session_id = raw.get("session_id") or raw.get("conversation_id")
                     if session_id:
                         prefix_parts.append(f"Session: {session_id}")
-                    occurred_at = getattr(r.item, "occurred_at", None) or getattr(r.item, "source_timestamp", None)
-                    if occurred_at:
-                        prefix_parts.append(f"Date: {str(occurred_at)[:10]}")
-                    if prefix_parts:
-                        chunk_content = f"[{', '.join(prefix_parts)}] {chunk_content}"
+            occurred_at = getattr(r.item, "occurred_at", None) or getattr(r.item, "source_timestamp", None)
+            if occurred_at:
+                prefix_parts.append(f"Date: {str(occurred_at)[:10]}")
+            if prefix_parts:
+                chunk_content = f"[{', '.join(prefix_parts)}] {chunk_content}"
             candidates.append(
                 RerankCandidate(
                     item=r,

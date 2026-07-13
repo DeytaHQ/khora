@@ -531,6 +531,56 @@ class TestApplyReranking:
         # The stale blob date must NOT leak: prefix is sourced from the column.
         assert "1999" not in captured[0].content
 
+    @pytest.mark.asyncio
+    async def test_date_prefix_with_empty_metadata_blob(self) -> None:
+        """Date prefix is built from the column even when the blob is empty.
+
+        This is the empty-blob BM25/PPR population the reader flip targets: the
+        ``occurred_at`` column drives the ``Date:`` prefix independently of the
+        metadata blob, and ``Session:`` (a blob-only key) is absent. Guards the
+        follow-up stage that removes the transitional dead-write injections from
+        silently dropping the rerank date prefix.
+        """
+        chunk = Chunk(
+            id=uuid4(),
+            namespace_id=uuid4(),
+            document_id=uuid4(),
+            content="the meeting notes",
+            metadata={},
+            occurred_at=datetime(2026, 4, 1, 12, 34, 56, tzinfo=UTC),
+        )
+        fused = [FusedResult(item=chunk, item_id=chunk.id, rrf_score=0.5)]
+        retriever = _make_retriever()
+
+        from khora.query.reranking import RerankResult
+
+        captured: list[Any] = []
+
+        class CaptureReranker:
+            async def rerank(
+                self,
+                query: str,
+                candidates: Any,
+                *,
+                top_k: int = 10,
+                blend_weight: float = 0.7,
+            ) -> list[RerankResult]:
+                captured.extend(candidates)
+                return [
+                    RerankResult(
+                        item=candidates[0].item,
+                        original_score=0.5,
+                        rerank_score=0.7,
+                        final_score=0.7,
+                    )
+                ]
+
+        retriever._reranker = CaptureReranker()  # type: ignore[assignment]
+        await retriever._apply_reranking("q", fused, limit=5, namespace_id=uuid4())
+        assert captured
+        assert "Date: 2026-04-01" in captured[0].content
+        assert "Session:" not in captured[0].content
+
 
 # ---------------------------------------------------------------------------
 # _apply_llm_reranking — LLM path mirrors cross-encoder shape
@@ -648,6 +698,54 @@ class TestApplyLLMReranking:
         assert "Date: 2026-04-01" in captured[0].content
         # The stale blob date must NOT leak: prefix is sourced from the column.
         assert "1999" not in captured[0].content
+
+    @pytest.mark.asyncio
+    async def test_date_prefix_with_empty_metadata_blob(self) -> None:
+        """LLM path: Date prefix comes from the column with an empty blob.
+
+        Mirrors the cross-encoder empty-blob test: the ``occurred_at`` column
+        drives the ``Date:`` prefix independently of the metadata blob, and
+        ``Session:`` (a blob-only key) is absent.
+        """
+        chunk = Chunk(
+            id=uuid4(),
+            namespace_id=uuid4(),
+            document_id=uuid4(),
+            content="the meeting notes",
+            metadata={},
+            occurred_at=datetime(2026, 4, 1, 12, 34, 56, tzinfo=UTC),
+        )
+        fused = [FusedResult(item=chunk, item_id=chunk.id, rrf_score=0.5)]
+        retriever = _make_retriever()
+
+        from khora.query.reranking import RerankResult
+
+        captured: list[Any] = []
+
+        class CaptureReranker:
+            async def rerank(
+                self,
+                query: str,
+                candidates: Any,
+                *,
+                top_k: int = 10,
+                blend_weight: float = 0.7,
+            ) -> list[RerankResult]:
+                captured.extend(candidates)
+                return [
+                    RerankResult(
+                        item=candidates[0].item,
+                        original_score=0.5,
+                        rerank_score=0.7,
+                        final_score=0.7,
+                    )
+                ]
+
+        retriever._llm_reranker = CaptureReranker()  # type: ignore[assignment]
+        await retriever._apply_llm_reranking("q", fused, limit=5, namespace_id=uuid4())
+        assert captured
+        assert "Date: 2026-04-01" in captured[0].content
+        assert "Session:" not in captured[0].content
 
     @pytest.mark.asyncio
     async def test_lazy_init_llm_reranker(self) -> None:

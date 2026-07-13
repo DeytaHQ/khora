@@ -14,6 +14,14 @@ Before the reader flip a channel that surfaced chunks without stamping the
 embedded storage round-trip + the real channels + the real recency scorer to
 prove they now line up.
 
+The entity-PPR channel (``ppr_retrieval.ppr_retrieve_chunks``, #1492 §(b)) runs
+PageRank over the graph and is not exercisable on the embedded stack, so it is
+covered compositionally rather than driven here: stage-1 re-wrap tests pin that
+its re-wrapped chunks carry the first-class ``occurred_at`` / ``source_timestamp``
+fields, and this PR's reader/scorer tests pin that ``_calculate_recency_scores``
+reads that column - the two compose to the same recency visibility proven here
+for the keyword_ppr channel.
+
 Hermetic - deterministic fake embeddings, real SQLite + LanceDB in tmp_path.
 Mirrors ``test_keyword_ppr_channel.py``.
 """
