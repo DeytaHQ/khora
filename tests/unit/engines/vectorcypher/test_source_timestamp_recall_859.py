@@ -212,6 +212,66 @@ class TestFetchChunksFromEntitiesSourceTimestamp:
         _, _, returned_chunk = results[0]
         assert returned_chunk.source_timestamp is None
 
+    async def test_fallback_preserves_metadata_and_reads_occurred_at_not_mirror(
+        self,
+    ) -> None:
+        """SurrealDB/embedded fallback: the stored metadata blob must survive
+        and ``occurred_at`` must come from ``chunk.occurred_at`` - never be
+        mirrored from ``source_timestamp``.
+
+        Before this change the record builder dropped ``metadata`` entirely and
+        sourced ``occurred_at`` from ``chunk.source_timestamp``; a persisted
+        chunk with a NULL ``source_timestamp`` therefore lost both the user key
+        and its event-time. The pre-existing cases above only assert
+        ``source_timestamp`` pass-through, so they pass against the old code
+        too - this case pins the new behavior.
+        """
+        namespace_id = uuid4()
+        document_id = uuid4()
+        persisted = Chunk(
+            id=uuid4(),
+            namespace_id=namespace_id,
+            document_id=document_id,
+            content="persisted-meta",
+            metadata={"author": "gina"},
+            occurred_at=T_SOURCE,
+            source_timestamp=None,
+        )
+        entity = Entity(
+            id=uuid4(),
+            namespace_id=namespace_id,
+            name="Gina",
+            entity_type="PERSON",
+            source_chunk_ids=[persisted.id],
+        )
+
+        retriever = VectorCypherRetriever.__new__(VectorCypherRetriever)
+        retriever._config = RetrieverConfig()
+        retriever._dual_nodes = None
+        retriever._vector_store = MagicMock()
+        retriever._neo4j_driver = None
+        storage = MagicMock()
+        storage.get_entities_batch = AsyncMock(return_value={entity.id: entity})
+        storage.get_chunks_batch = AsyncMock(return_value={persisted.id: persisted})
+        retriever._storage = storage
+
+        results = await retriever._fetch_chunks_from_entities(
+            entity_ids=[entity.id],
+            namespace_id=namespace_id,
+            temporal_filter=None,
+            limit=10,
+        )
+
+        assert len(results) == 1
+        _, _, returned_chunk = results[0]
+        # Both were lost before this PR: the record builder dropped the blob and
+        # mirrored occurred_at from the (NULL) source_timestamp.
+        assert returned_chunk.metadata.get("author") == "gina"
+        assert returned_chunk.occurred_at == T_SOURCE
+        # source_timestamp was NULL and must stay NULL — proves the two fields
+        # are read from their own sources, never mirrored onto each other.
+        assert returned_chunk.source_timestamp is None
+
 
 # A producer time distinct from the chunk event-time — used to prove the two
 # fields are read from their own authoritative sources, never mirrored.
