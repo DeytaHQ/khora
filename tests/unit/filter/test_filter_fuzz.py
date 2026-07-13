@@ -910,3 +910,93 @@ def _field_not(operand: dict[str, Any]) -> dict[str, Any]:
     """
     ((key, expr),) = operand.items()
     return {key: {"$not": expr}}
+
+
+# --------------------------------------------------------------------------- #
+# Stored-blob column invariant: a clean metadata blob + a populated first-class
+# date column read consistently on the SQL-pushdown read path.
+# --------------------------------------------------------------------------- #
+#
+# The recall read paths carry the STORED metadata blob verbatim — nothing is
+# injected into ``metadata`` from the first-class ``occurred_at`` /
+# ``source_timestamp`` columns at read time. The fixed seed already models this:
+# records r07–r18 stamp a real ``occurred_at`` / ``source_timestamp`` column, yet
+# NONE of the 18 blobs carries an ``occurred_at`` KEY. So a ``metadata.occurred_at``
+# leaf reads the blob (where the key is absent) — never the column — on both the
+# oracle and the real sqlite_lance read path (the server-side prefilter that the
+# vector + BM25 recall channels share). These deterministic cases pin that
+# equivalence on the exact filters a downstream caller would use to select
+# "chunks with no event-time key in their blob" and to match a chunk by its whole
+# stored blob. They reuse the same oracle-vs-lance seam Property A drives, so a
+# future read path that reintroduced a blob injection (a column value leaking into
+# ``metadata``) would diverge here.
+
+
+def _column_populated_ids() -> frozenset[str]:
+    """Seed ids whose first-class ``occurred_at``/``source_timestamp`` column is set.
+
+    The invariant only bites when the column is populated (an unset column can't
+    leak into the blob), so the ``$exists: false`` match MUST still include these.
+    """
+    return frozenset(r.id for r in FIXED_SEED if r.occurred_at is not None or r.source_timestamp is not None)
+
+
+class TestStoredBlobColumnInvariant:
+    """A populated date COLUMN never leaks into the stored metadata BLOB on read.
+
+    ``metadata.occurred_at`` addresses the blob key, which is absent on every seed
+    record even though many carry a populated ``occurred_at``/``source_timestamp``
+    column. The oracle and the real sqlite_lance read path (the pushdown the vector
+    + BM25 channels share) must agree on that, so a column value silently injected
+    into the blob would surface as an oracle/lance divergence here.
+    """
+
+    def test_occurred_at_key_absent_matches_every_clean_blob(self) -> None:
+        """``metadata.occurred_at $exists false`` keeps ALL 18 rows on both sides.
+
+        No seed blob carries an ``occurred_at`` key, so the leaf is universally
+        true — INCLUDING the records whose ``occurred_at`` COLUMN is populated. If a
+        read path folded the column into the blob, those column-bearing rows would
+        drop, shrinking the lance survivor set below the oracle's.
+        """
+        ast = parse_to_ast(RecallFilter.model_validate({"metadata.occurred_at": {"$exists": False}}))
+        all_ids = frozenset(r.id for r in FIXED_SEED)
+        oracle = _oracle_survivors(ast)
+        lance = _lance_survivors(ast)
+        assert oracle == all_ids, oracle
+        assert lance == oracle
+        # Non-vacuous: the column-populated records are part of the match, so the
+        # case genuinely exercises "clean blob + populated column".
+        populated = _column_populated_ids()
+        assert populated, "seed carries no column-populated records — check FIXED_SEED"
+        assert populated <= lance
+
+    def test_occurred_at_key_present_matches_nothing(self) -> None:
+        """``metadata.occurred_at $exists true`` keeps NO rows on both sides.
+
+        The mirror of the case above: because no blob carries the key, the
+        positive-existence leaf is empty. A column-into-blob leak would instead make
+        the lance side surface the column-bearing rows the oracle never sees.
+        """
+        ast = parse_to_ast(RecallFilter.model_validate({"metadata.occurred_at": {"$exists": True}}))
+        oracle = _oracle_survivors(ast)
+        lance = _lance_survivors(ast)
+        assert oracle == frozenset(), oracle
+        assert lance == oracle
+
+    def test_whole_blob_eq_matches_via_split_post_filter(self) -> None:
+        """A whole-blob ``$eq`` matches the one record whose stored blob is equal.
+
+        ``{"metadata": {<exact blob>}}`` is an object-equality compare the lance
+        compiler cannot push to SQL, so it defers the WHOLE leaf to the
+        ``compile_python`` post-filter — which reads the SAME stored blob the SQL
+        prefilter would have. r01's blob is unique in the seed, so the match is the
+        strict, non-empty subset ``{r01}`` on both sides.
+        """
+        r01_blob = {"tier": "gold", "score": 10, "tags": ["urgent", "release"]}
+        ast = parse_to_ast(RecallFilter.model_validate({"metadata": r01_blob}))
+        oracle = _oracle_survivors(ast)
+        lance = _lance_survivors(ast)
+        assert oracle == frozenset({"r01"}), oracle
+        assert lance == oracle
+        assert 0 < len(oracle) < len(FIXED_SEED)

@@ -3340,10 +3340,7 @@ class VectorCypherRetriever:
                     namespace_id=r.chunk.namespace_id,
                     document_id=r.chunk.document_id,
                     content=r.chunk.content,
-                    metadata={
-                        "occurred_at": r.chunk.occurred_at.isoformat() if r.chunk.occurred_at else None,
-                        **(r.chunk.metadata or {}),
-                    },
+                    metadata=r.chunk.metadata or {},
                     chunker_info=r.chunk.chunker_info or {},
                     created_at=r.chunk.created_at or r.chunk.occurred_at,
                     # Carry the chunk event-time and the producer's verbatim
@@ -4197,11 +4194,7 @@ class VectorCypherRetriever:
                     namespace_id=namespace_id,
                     document_id=UUID(record["document_id"]),
                     content=record["content"],
-                    metadata={
-                        "occurred_at": record.get("occurred_at"),
-                        "connected_entities": record.get("entity_ids", []),
-                        **(record.get("metadata") or {}),
-                    },
+                    metadata=record.get("metadata") or {},
                     chunker_info=_decode_chunker_info(record.get("chunker_info")),
                     # The graph store carries the chunk event-time (occurred_at)
                     # and the producer time (source_timestamp) as separate
@@ -4288,10 +4281,7 @@ class VectorCypherRetriever:
                         namespace_id=r.chunk.namespace_id,
                         document_id=r.chunk.document_id,
                         content=r.chunk.content,
-                        metadata={
-                            "occurred_at": r.chunk.occurred_at.isoformat() if r.chunk.occurred_at else None,
-                            **(r.chunk.metadata or {}),
-                        },
+                        metadata=r.chunk.metadata or {},
                         chunker_info=r.chunk.chunker_info or {},
                         created_at=r.chunk.created_at or r.chunk.occurred_at,
                         occurred_at=r.chunk.occurred_at,
@@ -4424,8 +4414,8 @@ class VectorCypherRetriever:
             for idx, sim in sim_pairs:
                 chunk, _emb = chunks_with_embedding[idx]
                 # Re-shape into ``(chunk_id, score, Chunk)`` matching
-                # ``_vector_search_chunks``. The Chunk's metadata dict
-                # carries ``occurred_at`` for the downstream recency
+                # ``_vector_search_chunks``. The Chunk's first-class
+                # ``occurred_at`` column feeds the downstream recency
                 # boost (RRF only uses rank position, so the score is
                 # informational).
                 filtered.append(
@@ -4437,19 +4427,14 @@ class VectorCypherRetriever:
                             namespace_id=chunk.namespace_id,
                             document_id=chunk.document_id,
                             content=chunk.content,
-                            metadata={
-                                "occurred_at": (
-                                    chunk.occurred_at.isoformat() if getattr(chunk, "occurred_at", None) else None
-                                ),
-                                **(getattr(chunk, "metadata", None) or {}),
-                            },
+                            metadata=getattr(chunk, "metadata", None) or {},
                             chunker_info=getattr(chunk, "chunker_info", None) or {},
                             created_at=getattr(chunk, "created_at", None) or getattr(chunk, "occurred_at", None),
                             occurred_at=getattr(chunk, "occurred_at", None),
                             # The temporal store carries the chunk event-time
-                            # (occurred_at, surfaced into metadata above) and the
-                            # producer time (source_timestamp); the projection
-                            # uses event-time first, then producer time.
+                            # (occurred_at) and the producer time
+                            # (source_timestamp); the projection uses
+                            # event-time first, then producer time.
                             source_timestamp=getattr(chunk, "source_timestamp", None),
                         ),
                     )
