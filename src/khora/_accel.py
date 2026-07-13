@@ -12,6 +12,7 @@ Control the backend via the KHORA_ACCEL_BACKEND environment variable:
 
 from __future__ import annotations
 
+import heapq
 import math
 import os
 import re
@@ -571,6 +572,22 @@ def batch_sequence_match(
 # ---------------------------------------------------------------------------
 
 
+def _top_k_indices(scores: list[float], k: int) -> list[int]:
+    """Indices of the top-``k`` scored nodes: score descending, ties by index.
+
+    ``heapq.nsmallest(k, ..., key=lambda i: (-scores[i], i))`` is the documented
+    O(n log k) equivalent of ``sorted(range(n), key=lambda i: (-scores[i], i))[:k]``
+    — cheap enough to run every iteration. Kept byte-for-byte equivalent to the
+    Rust ``top_k_indices`` helper (which uses ``select_nth`` for the same result)
+    so the Rust and pure-Python paths stop the #1476 early-stop on the same
+    iteration.
+    """
+    k = min(k, len(scores))
+    if k <= 0:
+        return []
+    return heapq.nsmallest(k, range(len(scores)), key=lambda i: (-scores[i], i))
+
+
 def pagerank(
     n: int,
     edges: list[tuple[int, int, float]],
@@ -578,6 +595,8 @@ def pagerank(
     max_iter: int = 100,
     tol: float = 1e-6,
     personalization: list[float] | None = None,
+    rank_k: int | None = None,
+    stable_iters: int = 3,
 ) -> list[float]:
     """Compute PageRank scores on a weighted directed graph.
 
@@ -595,6 +614,12 @@ def pagerank(
         tol: Convergence threshold.
         personalization: Optional seed distribution of length ``n``.
             None / mismatched length / all-zero → uniform (standard PageRank).
+        rank_k: Optional top-k rank-stability early-stop (#1476). When set, the
+            power iteration also halts once the ordering of the top-``rank_k``
+            nodes (score desc, index asc) is unchanged for ``stable_iters``
+            consecutive iterations. ``None`` keeps the pure global-L1 behaviour.
+        stable_iters: Patience for the ``rank_k`` early-stop. Ignored when
+            ``rank_k`` is ``None`` or ``0``.
 
     Returns:
         List of length n with PageRank scores indexed by node ID.
@@ -603,6 +628,14 @@ def pagerank(
         # Only forward the personalization arg when set so an older
         # khora-accel wheel that still has the 5-arg signature keeps
         # working until it's rebuilt. New wheels accept either path.
+        if rank_k is not None:
+            # Early-stop requires the #1476 kernel (8-arg signature). If the
+            # installed wheel predates it, the call raises TypeError and we fall
+            # through to the pre-#1476 call below (correct, just no early-stop).
+            try:
+                return _rust_pagerank(n, edges, damping, max_iter, tol, personalization, rank_k, stable_iters)
+            except TypeError:
+                pass
         if personalization is None:
             return _rust_pagerank(n, edges, damping, max_iter, tol)
         return _rust_pagerank(n, edges, damping, max_iter, tol, personalization)
@@ -628,7 +661,24 @@ def pagerank(
             incoming[dst].append((src, weight))
             out_degree[src] += weight
 
+    # Precompute the normalized incoming weight `weight / out_degree[src]` once
+    # (mirrors the Rust CSR kernel's `in_wnorm`), dropping the per-iteration
+    # division from O(edges * iters) to O(edges). `weight / out_degree[src]`
+    # yields the same float whether computed here or inline, so
+    # `scores[src] * wnorm` stays bit-identical to the Rust `cur[src] * in_wnorm`
+    # (float ops are non-associative — this grouping is load-bearing). A
+    # zero-out-degree source normalizes to 0.0, matching the kernel's guard
+    # (adding 0.0 is a no-op, so it is equivalent to skipping the edge) (#1476).
+    incoming_norm: list[list[tuple[int, float]]] = [
+        [(src, weight / out_degree[src] if out_degree[src] > 0 else 0.0) for src, weight in row] for row in incoming
+    ]
+
     scores = list(p)  # init from p so the first iteration is already seeded
+
+    # Top-k rank-stability early-stop state (#1476). Mirrors pagerank.rs.
+    capped_rank_k = min(rank_k, n) if rank_k is not None else None
+    prev_top: list[int] = []
+    stable_count = 0
 
     for _ in range(max_iter):
         new_scores = [0.0] * n
@@ -636,9 +686,8 @@ def pagerank(
 
         for node in range(n):
             contrib = 0.0
-            for src, weight in incoming[node]:
-                if out_degree[src] > 0:
-                    contrib += scores[src] * weight / out_degree[src]
+            for src, wnorm in incoming_norm[node]:
+                contrib += scores[src] * wnorm
             new_score = (1.0 - damping) * p[node] + damping * contrib
             diff += abs(new_score - scores[node])
             new_scores[node] = new_score
@@ -646,6 +695,19 @@ def pagerank(
         scores = new_scores
         if diff < tol:
             break
+
+        # Halt once the top-k ordering has been stable for `stable_iters`
+        # consecutive iterations. Checked after the global-L1 test so
+        # rank_k=None reproduces the pre-#1476 behaviour exactly.
+        if capped_rank_k is not None and capped_rank_k > 0 and stable_iters > 0:
+            top = _top_k_indices(scores, capped_rank_k)
+            if top == prev_top:
+                stable_count += 1
+                if stable_count >= stable_iters:
+                    break
+            else:
+                stable_count = 0
+            prev_top = top
 
     return scores
 

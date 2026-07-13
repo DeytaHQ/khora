@@ -1866,6 +1866,51 @@ class QuerySettings(BaseSettings):
             "is never shrunk; seeds are kept first when trimming."
         ),
     )
+    ppr_early_stop_patience: int = Field(
+        default=3,
+        ge=0,
+        le=50,
+        description=(
+            "Top-k rank-stability early-stop patience for the PPR power method "
+            "(khora#1476). The walk halts once the top "
+            "(ppr_top_entities + ppr_early_stop_margin) entity ordering is unchanged "
+            "for this many consecutive iterations, instead of running to global-L1 "
+            "convergence (~2-4x fewer iterations on production graph shapes; the "
+            "top-ppr_top_entities set stays byte-identical, guarded by a parity "
+            "test). 0 disables the early-stop (legacy global-L1 behaviour)."
+        ),
+    )
+    ppr_early_stop_margin: int = Field(
+        default=10,
+        ge=0,
+        le=200,
+        description=(
+            "Extra entities beyond ppr_top_entities tracked for the PPR early-stop "
+            "stability check (khora#1476), so a node just outside the retrieved set "
+            "cannot climb in after the walk halts. Inert when ppr_early_stop_patience "
+            "is 0."
+        ),
+    )
+    ppr_recognition_filter: bool = Field(
+        default=False,
+        description=(
+            "HippoRAG-2 recognition-memory seeding for the PPR path (khora#1476). "
+            "When True, the PPR seed personalization is filtered to entities whose "
+            "evidence chunks are query-relevant (vector-channel cosine) instead of "
+            "seeding from raw entity cosine. QUALITY EXPERIMENT — gated OFF by "
+            "default; validate via the grb#13 retrieval-only eval harness before "
+            "enabling."
+        ),
+    )
+    ppr_recognition_min_similarity: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum source-chunk cosine similarity for a PPR seed to count as "
+            "recognized (khora#1476). Only used when ppr_recognition_filter is True."
+        ),
+    )
 
     @field_validator("enable_hyde", mode="before")
     @classmethod

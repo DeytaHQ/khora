@@ -547,6 +547,18 @@ class RetrieverConfig:
     # the resolved seeds survive into the graph. Below the cap these are inert.
     ppr_neighborhood_per_seed_limit: int = 64
     ppr_max_neighborhood_entities: int = 2000
+    # #1476: top-k rank-stability early-stop for the PPR power method. The walk
+    # halts once the top (ppr_top_entities + ppr_early_stop_margin) ordering is
+    # stable for ppr_early_stop_patience consecutive iterations; the retrieved
+    # top-ppr_top_entities set stays byte-identical to the full-iteration result.
+    # patience=0 disables it (legacy global-L1 convergence).
+    ppr_early_stop_patience: int = 3
+    ppr_early_stop_margin: int = 10
+    # #1476: HippoRAG-2 recognition-memory seeding (quality experiment, OFF by
+    # default). Filters the PPR seed personalization to query-relevant entities.
+    # Validate via the grb#13 retrieval-only eval harness before enabling.
+    ppr_recognition_filter: bool = False
+    ppr_recognition_min_similarity: float = 0.3
 
     # Limits
     max_chunks: int = 50
@@ -986,6 +998,7 @@ class VectorCypherRetriever:
         recency_bias: float | None = None,
         filter_ast: FilterNode | None = None,
         query_embedding_task: Awaitable[list[float]] | None = None,
+        write_epoch: int | None = None,
     ) -> VectorCypherResult:
         """Retrieve relevant chunks using VectorCypher hybrid approach.
 
@@ -1039,6 +1052,11 @@ class VectorCypherRetriever:
                 recency-floor synthesis. ``None`` keeps the historic inline
                 ``self._embedder.embed(query)`` call (no double-embed either
                 way — exactly one embed happens per call).
+            write_epoch: Namespace write-epoch (#1469 recall-cache epoch),
+                threaded from the engine. The opt-in PPR path keys its
+                query-independent base-graph-slice cache on it (#1476), so
+                repeated queries on a slowly-changing namespace skip the entity /
+                relationship DB fetch. ``None`` disables that cache.
 
         Returns:
             VectorCypherResult with chunks, entities, and metadata
@@ -1290,6 +1308,7 @@ class VectorCypherRetriever:
                         hybrid_alpha_override=hybrid_alpha_override,
                         recency_bias=recency_bias,
                         filter_ast=filter_ast,
+                        write_epoch=write_epoch,
                     )
                 except _NEO4J_TRANSIENT_ERRORS as e:
                     logger.warning(f"Graph search failed, falling back to vector-only: {e}")
@@ -1618,6 +1637,7 @@ class VectorCypherRetriever:
         hybrid_alpha_override: float | None = None,
         recency_bias: float | None = None,
         filter_ast: FilterNode | None = None,
+        write_epoch: int | None = None,
     ) -> VectorCypherResult:
         """Internal VectorCypher retrieval with graph traversal.
 
@@ -2138,7 +2158,14 @@ class VectorCypherRetriever:
                         _vc_for_sim = await vector_chunks_task
                     else:
                         _vc_for_sim = []
-                    chunk_similarity = {cid: score for cid, score, _ in _vc_for_sim}
+                    # Prefer the true per-chunk cosine (``raw_cosine_by_id``) over the
+                    # tuple score, which under ``hybrid_alpha < 1.0`` is a vector+BM25
+                    # blend. ``score_chunks_via_ppr`` and ``recognition_filter_seeds``
+                    # both document this map as "cosine similarity to query", and the
+                    # recognition threshold (#1476) is a cosine-scale gate — so the
+                    # raw cosine is what the contract measures. Falls back to the tuple
+                    # score for any chunk missing from the raw-cosine map.
+                    chunk_similarity = {cid: raw_cosine_by_id.get(cid, score) for cid, score, _ in _vc_for_sim}
                 except Exception:  # noqa: S110 - sim is optional; PPR still runs without it
                     chunk_similarity = {}
 
@@ -2154,6 +2181,14 @@ class VectorCypherRetriever:
                     limit=graph_fetch_limit,
                     neighborhood_per_seed_limit=self._config.ppr_neighborhood_per_seed_limit,
                     max_neighborhood_entities=self._config.ppr_max_neighborhood_entities,
+                    early_stop_patience=self._config.ppr_early_stop_patience,
+                    early_stop_margin=self._config.ppr_early_stop_margin,
+                    recognition_filter=self._config.ppr_recognition_filter,
+                    recognition_min_similarity=self._config.ppr_recognition_min_similarity,
+                    # #1476: key the base-graph-slice cache on the namespace
+                    # write-epoch so repeated queries skip the entity /
+                    # relationship DB fetch until the next write.
+                    graph_cache_epoch=write_epoch,
                     # ADR-001 (#1373): surface a Degradation on the engine_info list
                     # when the graph channel silently returns nothing.
                     out_degradations=degradations,

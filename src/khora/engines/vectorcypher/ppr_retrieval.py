@@ -19,6 +19,8 @@ References:
 from __future__ import annotations
 
 import asyncio
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -40,6 +42,46 @@ if TYPE_CHECKING:
 # memory at query time.
 _MAX_ENTITIES_FOR_PPR = 5000
 _MAX_RELATIONSHIPS_FOR_PPR = 50_000
+
+
+# Bounded LRU cache of the query-INDEPENDENT base graph slice
+# (``list_entities`` / ``list_relationships``), keyed on
+# ``(namespace_id, write_epoch)`` (#1476). Repeated queries on a slowly-changing
+# namespace reuse the slice and skip the two DB round-trips, while the walk (seed
+# personalization + PPR) still runs per query. The write-epoch is the #1469
+# recall-cache epoch, bumped on ANY namespace write, so a post-write query
+# captures a fresh epoch and misses — a stale slice is never served (it shares
+# the #1469 epoch-eviction semantics: an epoch reset only after >1000 namespaces
+# evict the epoch map, by which point the tiny slice LRU has long dropped the
+# entry). Small by design: each entry may hold up to _MAX_ENTITIES_FOR_PPR
+# entities + _MAX_RELATIONSHIPS_FOR_PPR relationships, so the cap trades memory
+# for hit rate. Entries are read-only downstream (augmentation builds fresh
+# lists), so sharing one across concurrent recalls is safe.
+_GRAPH_SLICE_CACHE_MAX = 8
+_graph_slice_cache: OrderedDict[tuple[UUID, int], tuple[list[Entity], list[Relationship]]] = OrderedDict()
+_graph_slice_lock = threading.Lock()
+
+
+def _graph_slice_cache_get(key: tuple[UUID, int]) -> tuple[list[Entity], list[Relationship]] | None:
+    with _graph_slice_lock:
+        hit = _graph_slice_cache.get(key)
+        if hit is not None:
+            _graph_slice_cache.move_to_end(key)
+        return hit
+
+
+def _graph_slice_cache_put(key: tuple[UUID, int], value: tuple[list[Entity], list[Relationship]]) -> None:
+    with _graph_slice_lock:
+        _graph_slice_cache[key] = value
+        _graph_slice_cache.move_to_end(key)
+        while len(_graph_slice_cache) > _GRAPH_SLICE_CACHE_MAX:
+            _graph_slice_cache.popitem(last=False)
+
+
+def _clear_graph_slice_cache() -> None:
+    """Drop every cached base slice (test hook)."""
+    with _graph_slice_lock:
+        _graph_slice_cache.clear()
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +122,55 @@ def build_personalization_vector(
         # but we'd rather not feed it junk in the first place.
         vec[idx] = max(float(score), 1e-6)
     return vec
+
+
+def recognition_filter_seeds(
+    entry_entities: list[tuple[UUID, float]],
+    entities_by_id: dict[UUID, Entity],
+    chunk_similarity: dict[UUID, float],
+    *,
+    min_recognition: float,
+) -> list[tuple[UUID, float]]:
+    """HippoRAG-2 recognition-memory step: keep only query-relevant seeds (#1476).
+
+    Raw entity-cosine seeding personalizes PPR from every entity whose *name*
+    embeds close to the query, even when none of that entity's evidence supports
+    the query. HippoRAG-2 instead filters the seed set through a recognition step
+    so the walk starts only from entities the query actually recognizes.
+
+    This is a cheap approximation of that step that reuses signals already on
+    hand (no extra LLM / reranker call on the hot path): a seed is *recognized*
+    when at least one of its source chunks clears ``min_recognition`` cosine
+    similarity to the query (``chunk_similarity``, from the vector channel). Seeds
+    whose Entity is unknown to the graph, or when no ``chunk_similarity`` is
+    available, are kept (we cannot assess them, so we do not drop them). If the
+    filter would remove *every* seed the unfiltered set is returned unchanged, so
+    the personalization vector never collapses to zero (which would silently drop
+    the whole graph channel).
+
+    QUALITY EXPERIMENT — this changes retrieval results, so it is gated OFF by
+    default and must be A/B'd via the retrieval-only eval harness (grb#13) before
+    being enabled anywhere.
+    """
+    if not chunk_similarity:
+        return entry_entities
+    filtered: list[tuple[UUID, float]] = []
+    for eid, score in entry_entities:
+        ent = entities_by_id.get(eid)
+        if ent is None:
+            # Unknown to the graph slice — cannot assess recognition; keep it so
+            # augmentation / teleport still applies.
+            filtered.append((eid, score))
+            continue
+        best = max(
+            (chunk_similarity.get(cid, 0.0) for cid in ent.source_chunk_ids),
+            default=0.0,
+        )
+        if best >= min_recognition:
+            filtered.append((eid, score))
+    # Never zero the seed set: an over-aggressive threshold falls back to raw
+    # seeding rather than dropping the graph channel.
+    return filtered or entry_entities
 
 
 def build_ppr_graph(
@@ -322,6 +413,11 @@ async def ppr_retrieve_chunks(
     limit: int,
     neighborhood_per_seed_limit: int = 64,
     max_neighborhood_entities: int = 2000,
+    early_stop_patience: int = 3,
+    early_stop_margin: int = 10,
+    graph_cache_epoch: int | None = None,
+    recognition_filter: bool = False,
+    recognition_min_similarity: float = 0.3,
     out_degradations: list[Degradation] | None = None,
 ) -> tuple[list[tuple[UUID, float, Chunk]], dict[UUID, float]]:
     """Run query-time PPR over the namespace graph and score chunks.
@@ -353,6 +449,31 @@ async def ppr_retrieve_chunks(
             the entity set; the effective bound is
             ``max(max_neighborhood_entities, len(slice))`` so the base slice is
             never shrunk. Seeds are kept first when trimming.
+        early_stop_patience: Top-k rank-stability early-stop patience (#1476).
+            The PPR power iteration halts once the top ``top_entities +
+            early_stop_margin`` entity ordering is unchanged for this many
+            consecutive iterations instead of running to global-L1 convergence
+            (~2-4x fewer iterations on production graph shapes, top-``top_entities``
+            byte-identical). ``0`` disables the early-stop (legacy global-L1 only).
+        early_stop_margin: Extra entities beyond ``top_entities`` tracked for the
+            early-stop stability check, so a node just outside the retrieved set
+            cannot climb in after the walk halts. Inert when ``early_stop_patience``
+            is ``0``.
+        graph_cache_epoch: When provided, the query-independent base graph slice
+            (``list_entities`` / ``list_relationships``) is cached keyed on
+            ``(namespace_id, graph_cache_epoch)`` (#1476), so repeated queries on
+            a slowly-changing namespace skip the two DB round-trips. The epoch is
+            the #1469 recall-cache write-epoch (bumped on any namespace write), so
+            a stale slice is never served. ``None`` disables the cache (every
+            recall re-fetches — the pre-#1476 behaviour).
+        recognition_filter: HippoRAG-2 recognition-memory seeding (#1476). When
+            ``True``, the seed personalization is filtered to entities whose
+            evidence chunks are query-relevant (see :func:`recognition_filter_seeds`)
+            instead of seeding from raw entity cosine. QUALITY EXPERIMENT — gated
+            OFF by default; validate via the grb#13 retrieval-only eval harness
+            before enabling.
+        recognition_min_similarity: Minimum source-chunk cosine similarity for a
+            seed to count as recognized. Only used when ``recognition_filter``.
         out_degradations: When provided, a structured :class:`Degradation`
             (ADR-001) is appended whenever the graph channel returns nothing on
             a genuine degenerate condition (no seed overlap / still-empty graph
@@ -367,12 +488,24 @@ async def ppr_retrieve_chunks(
             span.set_attribute("fallback_reason", "no_entry_entities")
             return [], {}
 
-        entities = await storage.list_entities(namespace_id, limit=_MAX_ENTITIES_FOR_PPR)
-        if not entities:
-            span.set_attribute("fallback_reason", "empty_entity_graph")
-            return [], {}
+        # #1476: reuse the cached query-independent base slice when the namespace
+        # write-epoch is unchanged, skipping both DB round-trips. The empty-graph
+        # short-circuit only runs on a miss (the cache never holds an empty slice).
+        cache_key = (namespace_id, graph_cache_epoch) if graph_cache_epoch is not None else None
+        cached_slice = _graph_slice_cache_get(cache_key) if cache_key is not None else None
+        if cached_slice is not None:
+            entities, relationships = cached_slice
+            span.set_attribute("graph_cache_hit", True)
+        else:
+            entities = await storage.list_entities(namespace_id, limit=_MAX_ENTITIES_FOR_PPR)
+            if not entities:
+                span.set_attribute("fallback_reason", "empty_entity_graph")
+                return [], {}
 
-        relationships = await storage.list_relationships(namespace_id, limit=_MAX_RELATIONSHIPS_FOR_PPR)
+            relationships = await storage.list_relationships(namespace_id, limit=_MAX_RELATIONSHIPS_FOR_PPR)
+            if cache_key is not None:
+                _graph_slice_cache_put(cache_key, (entities, relationships))
+            span.set_attribute("graph_cache_hit", False)
 
         # #1373: the global slice is ordered query-independently (entities BY
         # name, relationships by created_at DESC) and capped. Below the caps the
@@ -400,7 +533,23 @@ async def ppr_retrieve_chunks(
         ]
 
         graph = build_ppr_graph(entities, edge_triples)
-        personalization = build_personalization_vector(entry_entities, graph.entity_id_to_idx)
+
+        # #1476: optional HippoRAG-2 recognition-memory seeding. Filter the seed
+        # set to query-relevant entities BEFORE projecting the personalization
+        # vector, so the walk starts only from recognized seeds. Gated OFF by
+        # default (quality experiment; A/B via grb#13).
+        seed_entities = entry_entities
+        if recognition_filter:
+            entities_by_id = {e.id: e for e in graph.entities}
+            seed_entities = recognition_filter_seeds(
+                entry_entities,
+                entities_by_id,
+                chunk_similarity or {},
+                min_recognition=recognition_min_similarity,
+            )
+            span.set_attribute("recognition_filtered_seeds", len(seed_entities))
+
+        personalization = build_personalization_vector(seed_entities, graph.entity_id_to_idx)
 
         if sum(personalization) <= 0.0:
             # None of the query entities matched a graph node — fall back.
@@ -424,6 +573,14 @@ async def ppr_retrieve_chunks(
         span.set_attribute("entity_count", n)
         span.set_attribute("edge_count", len(graph.edges))
 
+        # #1476: top-k rank-stability early-stop. Track the top
+        # ``top_entities + margin`` ordering; the retrieved set (top
+        # ``top_entities``) stays byte-identical to the full-iteration result
+        # (guarded by a parity test) while the walk halts ~2-4x sooner. Disabled
+        # (rank_k=None) when patience is 0 → legacy global-L1 behaviour.
+        rank_k = (top_entities + max(0, early_stop_margin)) if early_stop_patience > 0 else None
+        span.set_attribute("early_stop_rank_k", rank_k if rank_k is not None else -1)
+
         pr_scores = _pagerank(
             n=n,
             edges=graph.edges,
@@ -431,6 +588,8 @@ async def ppr_retrieve_chunks(
             max_iter=max_iter,
             tol=tol,
             personalization=personalization,
+            rank_k=rank_k,
+            stable_iters=early_stop_patience,
         )
 
         entity_score_map: dict[UUID, float] = {graph.entities[i].id: pr_scores[i] for i in range(n)}
@@ -514,6 +673,7 @@ async def ppr_retrieve_chunks(
 __all__ = [
     "build_personalization_vector",
     "build_ppr_graph",
+    "recognition_filter_seeds",
     "score_chunks_via_ppr",
     "ppr_retrieve_chunks",
 ]

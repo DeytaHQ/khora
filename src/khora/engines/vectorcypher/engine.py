@@ -953,6 +953,10 @@ class VectorCypherEngine:
             ppr_top_entities=self._config.query.ppr_top_entities,
             ppr_neighborhood_per_seed_limit=self._config.query.ppr_neighborhood_per_seed_limit,
             ppr_max_neighborhood_entities=self._config.query.ppr_max_neighborhood_entities,
+            ppr_early_stop_patience=self._config.query.ppr_early_stop_patience,
+            ppr_early_stop_margin=self._config.query.ppr_early_stop_margin,
+            ppr_recognition_filter=self._config.query.ppr_recognition_filter,
+            ppr_recognition_min_similarity=self._config.query.ppr_recognition_min_similarity,
             metadata_overfetch_multiplier=self._config.query.metadata_overfetch_multiplier,
             # Issue #1018 — QuerySettings tier on the default recall() path.
             # These were inert on VectorCypher because recall() dispatches
@@ -2640,6 +2644,10 @@ class VectorCypherEngine:
             recency_bias=recency_bias,
             filter_ast=filter_ast,
             query_embedding_task=query_embedding_task,
+            # #1476: hand the namespace write-epoch (captured above for the
+            # result cache) to the retriever so the opt-in PPR path can cache its
+            # query-independent base graph slice keyed on it.
+            write_epoch=_cache_epoch,
         )
 
         # When a caller filter narrowed the candidate set below the requested k,

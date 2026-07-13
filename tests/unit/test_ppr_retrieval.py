@@ -575,3 +575,192 @@ class TestSeedAnchoredAugmentation:
         assert e_alice.id in scores
         assert len(degradations) == 1
         assert degradations[0]["reason"] == "chunk_hydration_empty"
+
+
+# ---------------------------------------------------------------------------
+# #1476 — base-graph-slice cache keyed on the namespace write-epoch
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestPPRGraphSliceCache:
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        ppr_retrieval._clear_graph_slice_cache()
+        yield
+        ppr_retrieval._clear_graph_slice_cache()
+
+    def _fixture(self):
+        chunk = _make_chunk("Alice met Bob")
+        e_alice = _make_entity("Alice", [chunk.id])
+        e_bob = _make_entity("Bob", [chunk.id])
+        rels = [_make_relationship(e_alice.id, e_bob.id)]
+        return e_alice, e_bob, rels, {chunk.id: chunk}
+
+    async def _run(self, storage, ns, seed_id, epoch):
+        return await ppr_retrieve_chunks(
+            storage=storage,
+            namespace_id=ns,
+            entry_entities=[(seed_id, 1.0)],
+            damping=0.85,
+            max_iter=50,
+            tol=1e-5,
+            top_entities=10,
+            limit=10,
+            graph_cache_epoch=epoch,
+        )
+
+    @pytest.mark.asyncio
+    async def test_same_epoch_hits_cache_skips_second_db_fetch(self) -> None:
+        ns = uuid4()
+        e_alice, e_bob, rels, chunks_map = self._fixture()
+        storage = _mock_storage(entities=[e_alice, e_bob], relationships=rels, chunks_map=chunks_map)
+
+        r1, s1 = await self._run(storage, ns, e_alice.id, epoch=1)
+        r2, s2 = await self._run(storage, ns, e_alice.id, epoch=1)
+
+        # Second call is a cache hit: the base slice is not re-fetched.
+        assert storage.list_entities.await_count == 1
+        assert storage.list_relationships.await_count == 1
+        # Identical results from cache.
+        assert [cid for cid, _, _ in r1] == [cid for cid, _, _ in r2]
+        assert s1.keys() == s2.keys()
+
+    @pytest.mark.asyncio
+    async def test_new_epoch_invalidates_and_refetches(self) -> None:
+        ns = uuid4()
+        e_alice, e_bob, rels, chunks_map = self._fixture()
+        storage = _mock_storage(entities=[e_alice, e_bob], relationships=rels, chunks_map=chunks_map)
+
+        await self._run(storage, ns, e_alice.id, epoch=1)
+        await self._run(storage, ns, e_alice.id, epoch=2)  # write bumped the epoch
+
+        # A new epoch is a distinct key → both calls re-fetch the slice.
+        assert storage.list_entities.await_count == 2
+        assert storage.list_relationships.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_none_epoch_disables_cache(self) -> None:
+        ns = uuid4()
+        e_alice, e_bob, rels, chunks_map = self._fixture()
+        storage = _mock_storage(entities=[e_alice, e_bob], relationships=rels, chunks_map=chunks_map)
+
+        await self._run(storage, ns, e_alice.id, epoch=None)
+        await self._run(storage, ns, e_alice.id, epoch=None)
+
+        # No epoch → caching off → every recall re-fetches (legacy behaviour).
+        assert storage.list_entities.await_count == 2
+        assert storage.list_relationships.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_empty_slice_is_not_cached(self) -> None:
+        ns = uuid4()
+        storage = _mock_storage(entities=[], relationships=[], chunks_map={})
+
+        # Empty entity graph → early fallback, nothing cached.
+        await self._run(storage, ns, uuid4(), epoch=1)
+        await self._run(storage, ns, uuid4(), epoch=1)
+
+        # Both calls hit the DB (an empty slice is never stored).
+        assert storage.list_entities.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_lru_evicts_oldest_epoch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(ppr_retrieval, "_GRAPH_SLICE_CACHE_MAX", 2)
+        ns = uuid4()
+        e_alice, e_bob, rels, chunks_map = self._fixture()
+        storage = _mock_storage(entities=[e_alice, e_bob], relationships=rels, chunks_map=chunks_map)
+
+        # Fill the cache past its cap: epochs 1, 2, 3 → epoch 1 is evicted.
+        await self._run(storage, ns, e_alice.id, epoch=1)
+        await self._run(storage, ns, e_alice.id, epoch=2)
+        await self._run(storage, ns, e_alice.id, epoch=3)
+        base = storage.list_entities.await_count  # 3 misses so far
+        # epoch 1 was evicted → re-fetch; epoch 3 is still cached → hit.
+        await self._run(storage, ns, e_alice.id, epoch=1)
+        await self._run(storage, ns, e_alice.id, epoch=3)
+        assert storage.list_entities.await_count == base + 1
+
+
+# ---------------------------------------------------------------------------
+# #1476 — HippoRAG-2 recognition-filtered seeding (quality experiment)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestRecognitionFilterSeeds:
+    def test_drops_seed_with_no_query_relevant_chunk(self) -> None:
+        c_rel, c_irrel = uuid4(), uuid4()
+        e_relevant = _make_entity("relevant", [c_rel])
+        e_noise = _make_entity("noise", [c_irrel])
+        entities_by_id = {e_relevant.id: e_relevant, e_noise.id: e_noise}
+        chunk_similarity = {c_rel: 0.8, c_irrel: 0.05}
+
+        out = ppr_retrieval.recognition_filter_seeds(
+            [(e_relevant.id, 0.9), (e_noise.id, 0.9)],
+            entities_by_id,
+            chunk_similarity,
+            min_recognition=0.3,
+        )
+        assert out == [(e_relevant.id, 0.9)]
+
+    def test_never_zeros_seeds(self) -> None:
+        c = uuid4()
+        e = _make_entity("e", [c])
+        # Below threshold → would drop everything → falls back to unfiltered.
+        out = ppr_retrieval.recognition_filter_seeds(
+            [(e.id, 0.9)],
+            {e.id: e},
+            {c: 0.01},
+            min_recognition=0.5,
+        )
+        assert out == [(e.id, 0.9)]
+
+    def test_no_chunk_similarity_is_noop(self) -> None:
+        e = _make_entity("e", [uuid4()])
+        seeds = [(e.id, 0.9)]
+        out = ppr_retrieval.recognition_filter_seeds(seeds, {e.id: e}, {}, min_recognition=0.3)
+        assert out == seeds
+
+    def test_unknown_entity_is_kept(self) -> None:
+        unknown = uuid4()
+        out = ppr_retrieval.recognition_filter_seeds(
+            [(unknown, 0.9)],
+            {},  # not in the graph slice
+            {uuid4(): 0.9},
+            min_recognition=0.3,
+        )
+        assert out == [(unknown, 0.9)]
+
+    @pytest.mark.asyncio
+    async def test_end_to_end_filters_noise_seed(self) -> None:
+        ns = uuid4()
+        c_rel = _make_chunk("query relevant evidence")
+        c_noise = _make_chunk("unrelated")
+        e_rel = _make_entity("relevant", [c_rel.id])
+        e_noise = _make_entity("noise", [c_noise.id])
+        rels = [_make_relationship(e_rel.id, e_noise.id)]
+        storage = _mock_storage(
+            entities=[e_rel, e_noise],
+            relationships=rels,
+            chunks_map={c_rel.id: c_rel, c_noise.id: c_noise},
+        )
+
+        # Both seeds resolve by name-cosine, but only e_rel has a query-relevant
+        # chunk. Recognition filtering drops e_noise from the seed set.
+        results, scores = await ppr_retrieve_chunks(
+            storage=storage,
+            namespace_id=ns,
+            entry_entities=[(e_rel.id, 0.9), (e_noise.id, 0.9)],
+            damping=0.85,
+            max_iter=50,
+            tol=1e-5,
+            top_entities=10,
+            limit=10,
+            chunk_similarity={c_rel.id: 0.8, c_noise.id: 0.02},
+            recognition_filter=True,
+            recognition_min_similarity=0.3,
+        )
+        assert results
+        # e_rel was the only seed → it carries the most PR mass.
+        assert scores[e_rel.id] > scores[e_noise.id]
