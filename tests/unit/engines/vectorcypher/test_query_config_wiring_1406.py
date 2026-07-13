@@ -40,6 +40,8 @@ def _assembled_config(vc_config: VectorCypherConfig | None = None) -> RetrieverC
         # keyword_weight fills the BM25 (lexical) fusion slot.
         ("KHORA_QUERY_KEYWORD_WEIGHT", "0.45", "bm25_weight", 0.45),
         ("KHORA_QUERY_MIN_CHUNK_SIMILARITY", "0.2", "min_chunk_similarity", 0.2),
+        # #1477 - frontier budget for degree-histogram-driven adaptive depth.
+        ("KHORA_QUERY_ADAPTIVE_DEPTH_FRONTIER_BUDGET", "500", "adaptive_depth_frontier_budget", 500),
     ],
 )
 def test_query_env_var_reaches_retriever_config(

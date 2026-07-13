@@ -2202,6 +2202,28 @@ class QuerySettings(BaseSettings):
         description="Time-to-live for each cached recall result, in seconds.",
     )
 
+    # Frontier-budgeted adaptive traversal depth (#1477). The graph-expansion
+    # depth is chosen so the PREDICTED one-hop-plus BFS frontier stays under
+    # this budget, using a cached per-namespace degree histogram (built at
+    # recall time from list_relationships, epoch-invalidated on any write). This
+    # replaces the old entry-entity-count step, which was sign-wrong for hub
+    # seeds on power-law graphs (few high-degree seeds got DEEPER traversal
+    # exactly when the frontier explodes). Falls back to the count rule when the
+    # histogram is missing (fresh namespace / graph-less stack). The default is
+    # tuned so a typical graph reproduces roughly the old depths; lower it to
+    # curb traversal cost on dense graphs, raise it for more context on sparse
+    # ones.
+    adaptive_depth_frontier_budget: int = Field(
+        default=300,
+        ge=1,
+        description=(
+            "Frontier-size budget for degree-histogram-driven adaptive traversal "
+            "depth (#1477). Depth is chosen so the predicted BFS frontier stays "
+            "under this value. Falls back to the entry-entity-count rule when the "
+            "per-namespace degree histogram is unavailable."
+        ),
+    )
+
 
 class KhoraConfig(BaseSettings):
     """Main application configuration."""

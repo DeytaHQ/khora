@@ -26,7 +26,10 @@ from typing import TYPE_CHECKING
 from loguru import logger
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from khora.config.llm import LiteLLMConfig
+    from khora.query.degree_stats import DegreeStats
     from khora.query.temporal_detection import TemporalSignal
 
 
@@ -138,6 +141,15 @@ class RouterConfig:
     adaptive_depth_enabled: bool = True
     adaptive_depth_high_entity_threshold: int = 10  # Shallow depth if >= this many entities
     adaptive_depth_low_entity_threshold: int = 2  # Deeper depth if <= this many entities
+    # #1477 — frontier-budgeted adaptive depth. When per-namespace degree stats
+    # are available, depth is chosen so the PREDICTED one-hop-plus frontier stays
+    # under this budget, instead of stepping on entry-entity count alone (which
+    # is sign-wrong for hub seeds on power-law graphs). The default is tuned so a
+    # typical graph reproduces roughly the old depths; it only diverges at the
+    # extremes the step function got wrong (hub seeds -> shallower, many
+    # low-degree seeds -> deeper). Falls back to the count rule when stats are
+    # missing (fresh namespace / graph-less stack).
+    adaptive_depth_frontier_budget: int = 300
 
 
 class QueryComplexityRouter:
@@ -768,22 +780,100 @@ COMPLEX|Multi-hop query requiring graph traversal"""
         self,
         entry_entity_count: int,
         base_depth: int = 2,
+        *,
+        degree_stats: DegreeStats | None = None,
+        seed_entity_ids: list[UUID] | None = None,
     ) -> int:
-        """Adjust graph traversal depth based on entry entity count.
+        """Choose graph traversal depth to keep the predicted frontier bounded.
 
-        This prevents explosion when many entities are found (shallow traversal)
-        and enables deeper exploration when few entities are found.
+        Two rules:
+
+        * **Frontier-budget (#1477, preferred).** When ``degree_stats`` is
+          available, predict the BFS frontier size from the seeds' actual
+          degrees times the graph's branching factor per hop, and pick the
+          deepest depth whose prediction stays under
+          ``adaptive_depth_frontier_budget``. This fixes the sign error the
+          old count rule had on power-law graphs: two hub seeds predict a huge
+          frontier -> shallow, while many low-degree seeds predict a small one
+          -> deep, regardless of raw seed count.
+        * **Entry-entity count (fallback).** When stats are missing (fresh
+          namespace, graph-less stack), fall back to the original two-threshold
+          step on ``entry_entity_count``.
 
         Args:
-            entry_entity_count: Number of entry entities found
-            base_depth: Base depth from routing decision
+            entry_entity_count: Number of entry entities found.
+            base_depth: Base depth from routing decision.
+            degree_stats: Cached per-namespace degree summary, or None.
+            seed_entity_ids: The entry entities' ids, for per-seed degree lookup.
 
         Returns:
-            Adjusted depth value
+            Adjusted depth value.
         """
         if not self._config.adaptive_depth_enabled:
             return base_depth
 
+        if degree_stats is not None and degree_stats.num_entities > 0:
+            return self._adaptive_depth_by_frontier(base_depth, degree_stats, seed_entity_ids or [])
+
+        return self._adaptive_depth_by_count(entry_entity_count, base_depth)
+
+    def _adaptive_depth_by_frontier(
+        self,
+        base_depth: int,
+        degree_stats: DegreeStats,
+        seed_entity_ids: list[UUID],
+    ) -> int:
+        """Pick the deepest depth whose predicted frontier fits the budget.
+
+        Frontier model: level 1 is the union of the seeds' neighborhoods
+        (``seed_degree_sum``); each further hop multiplies by the mean degree
+        (branching factor ``b``). ``predicted(d) = seed_degree_sum * b**(d-1)``
+        for ``d >= 1``. We scan ``d`` from the ceiling down to 1 and return the
+        first depth whose prediction is within budget; if even depth 1 overflows,
+        we return 1 (the old "shallow" floor - can't drop the graph channel
+        entirely).
+
+        The ceiling is ``min(base_depth + 1, complex_depth + 1)`` - the exact
+        upper bound the old count rule allowed. So the frontier rule can go one
+        hop deeper than the routed depth when the frontier is cheap (what the
+        old ``<=`` branch did for few seeds) but never overrides the router's
+        complexity decision by more than the old rule already did: a MODERATE
+        (base_depth=1) route is never pushed past 2.
+        """
+        ceiling = min(base_depth + 1, self._config.complex_depth + 1)
+        # Overflow floor: when even the shallowest traversal is predicted over
+        # budget, drop to the same shallow depth the old rule's high-count
+        # branch used - ``min(base_depth, 1)`` - so a vector-only (base_depth 0)
+        # route is never given a spurious graph hop.
+        floor = min(base_depth, 1)
+        budget = self._config.adaptive_depth_frontier_budget
+        seed_sum = degree_stats.seed_degree_sum(seed_entity_ids)
+        # Branching factor for hops past the first. Floor at 1.0 so a sparse
+        # graph (mean degree < 1) does not shrink the prediction below the
+        # one-hop frontier.
+        b = max(degree_stats.mean_degree, 1.0)
+
+        for depth in range(ceiling, floor, -1):
+            predicted = seed_sum * (b ** (depth - 1))
+            if predicted <= budget:
+                logger.debug(
+                    f"Adaptive depth (frontier): seed_sum={seed_sum:.0f} b={b:.1f} "
+                    f"budget={budget} -> depth {depth} (predicted {predicted:.0f})"
+                )
+                return depth
+
+        logger.debug(
+            f"Adaptive depth (frontier): seed_sum={seed_sum:.0f} b={b:.1f} exceeds "
+            f"budget={budget} at depth {floor + 1} -> floor {floor}"
+        )
+        return floor
+
+    def _adaptive_depth_by_count(self, entry_entity_count: int, base_depth: int) -> int:
+        """Original entry-entity-count step function (fallback when stats absent).
+
+        This prevents explosion when many entities are found (shallow traversal)
+        and enables deeper exploration when few entities are found.
+        """
         if entry_entity_count >= self._config.adaptive_depth_high_entity_threshold:
             # Many entities: shallow depth to avoid explosion
             adjusted = min(base_depth, 1)

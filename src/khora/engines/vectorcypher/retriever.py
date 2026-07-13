@@ -44,6 +44,7 @@ from khora.filter.model import RecallFilterUnsupportedError
 from khora.filter.report import ChannelPlan
 from khora.filter.telemetry import record_graph_channel_empty
 from khora.query import SearchMode
+from khora.query.degree_stats import build_degree_stats
 from khora.query.hyde import HyDEExpander
 from khora.telemetry import bounded_text_hash, trace_span
 from khora.telemetry.metrics import metric_counter
@@ -69,11 +70,14 @@ from .temporal_detection import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from neo4j import AsyncDriver
 
     from khora.core.temporal import ChunkTemporalFilter
     from khora.extraction.embedders import EmbedderProtocol  # type: ignore[unresolved-import]
     from khora.filter import FilterNode
+    from khora.query.degree_stats import DegreeStats, DegreeStatsCache
     from khora.query.reranking import CrossEncoderReranker, LLMReranker
     from khora.storage import StorageCoordinator
     from khora.storage.temporal import TemporalVectorStore
@@ -341,6 +345,8 @@ class RetrieverConfig:
     adaptive_depth_enabled: bool = True
     adaptive_depth_high_entity_threshold: int = 10  # Shallow depth if >= this many entities
     adaptive_depth_low_entity_threshold: int = 2  # Deeper depth if <= this many entities
+    # #1477 — frontier-budget for degree-histogram-driven adaptive depth.
+    adaptive_depth_frontier_budget: int = 300
 
     # Fusion settings
     rrf_k: int = 60
@@ -674,6 +680,8 @@ class VectorCypherRetriever:
         storage: StorageCoordinator | None = None,
         neo4j_query_timeout: float | None = None,
         backend: str = "postgres",
+        degree_stats_cache: DegreeStatsCache | None = None,
+        epoch_reader: Callable[[UUID], int] | None = None,
     ):
         """Initialize the retriever.
 
@@ -706,6 +714,18 @@ class VectorCypherRetriever:
         self._storage = storage
         self._backend = backend
         self._bm25_empty_warned_ns: set[str] = set()
+        # #1477 — frontier-budgeted adaptive depth. A per-namespace degree
+        # histogram cached under the same #1469 write-epoch the recall cache
+        # uses (``epoch_reader`` reads it; a write bumps it and the next recall
+        # rebuilds). Built lazily on first recall from ``list_relationships``,
+        # never recomputed per recall. When either is absent (unit tests /
+        # graph-less stack), the depth rule falls back to the entity-count step.
+        self._degree_stats_cache = degree_stats_cache
+        self._epoch_reader = epoch_reader
+        # Per-namespace single-flight locks for the histogram build (see
+        # ``_get_degree_stats``). Bounded by distinct-namespace count, same order
+        # as the epoch map; cheap Lock objects.
+        self._degree_stats_locks: dict[UUID, asyncio.Lock] = {}
 
         # Initialize router with config, syncing adaptive depth settings
         if router_config is None:
@@ -713,6 +733,7 @@ class VectorCypherRetriever:
                 adaptive_depth_enabled=self._config.adaptive_depth_enabled,
                 adaptive_depth_high_entity_threshold=self._config.adaptive_depth_high_entity_threshold,
                 adaptive_depth_low_entity_threshold=self._config.adaptive_depth_low_entity_threshold,
+                adaptive_depth_frontier_budget=self._config.adaptive_depth_frontier_budget,
                 complex_depth=self._config.default_depth,
             )
         self._router = QueryComplexityRouter(router_config)
@@ -1527,6 +1548,52 @@ class VectorCypherRetriever:
                 },
             )
 
+    async def _get_degree_stats(self, namespace_id: UUID) -> DegreeStats | None:
+        """Return the namespace's cached degree stats, building them on a miss (#1477).
+
+        Keyed on the #1469 per-namespace write-epoch: a hit is only returned
+        when the cached stats were built under the current epoch, so a write
+        (which bumps the epoch) forces a rebuild on the next recall. Between
+        writes the stats are reused and never recomputed per recall. Returns
+        ``None`` - so the depth rule falls back to the entity-count step - when
+        the cache/epoch-reader/storage are unavailable or the namespace has no
+        edges yet (fresh namespace / graph-less stack).
+        """
+        if self._degree_stats_cache is None or self._epoch_reader is None or self._storage is None:
+            return None
+
+        epoch = self._epoch_reader(namespace_id)
+        cached = self._degree_stats_cache.get(namespace_id, epoch)
+        if cached is not None:
+            return cached
+
+        # Single-flight: building the histogram is a full-namespace scan
+        # (``list_entities`` + ``list_relationships``). A write-epoch bump
+        # invalidates every namespace's stats at once, so a burst of concurrent
+        # recalls right after a write would each miss ``get`` and redundantly run
+        # the same scan (thundering herd). Collapse them onto one build with a
+        # per-namespace lock, then re-check the cache under the lock so only the
+        # first holder pays for the scan.
+        lock = self._degree_stats_locks.setdefault(namespace_id, asyncio.Lock())
+        async with lock:
+            epoch = self._epoch_reader(namespace_id)
+            cached = self._degree_stats_cache.get(namespace_id, epoch)
+            if cached is not None:
+                return cached
+
+            try:
+                entities = await self._storage.list_entities(namespace_id, limit=100_000)
+                relationships = await self._storage.list_relationships(namespace_id, limit=1_000_000)
+            except Exception as exc:  # pragma: no cover - defensive, never blocks recall
+                logger.debug(f"Degree-stats fetch failed for {namespace_id}: {exc}")
+                return None
+
+            entity_ids = [e.id for e in entities]
+            edges = [(r.source_entity_id, r.target_entity_id) for r in relationships]
+            stats = build_degree_stats(entity_ids, edges)
+            self._degree_stats_cache.set(namespace_id, epoch, stats)
+            return stats
+
     async def _vectorcypher_retrieve(
         self,
         query: str,
@@ -1918,11 +1985,17 @@ class VectorCypherRetriever:
                     f"from {len(fanout_channels)} sessions + fallback"
                 )
 
-        # Compute adaptive depth based on entry entity count
-        # This prevents explosion when many entities are found
+        # Compute adaptive depth. #1477: when a cached per-namespace degree
+        # histogram is available, depth is chosen to keep the PREDICTED frontier
+        # under budget (using the seeds' actual degrees, so hub seeds go
+        # shallower and many low-degree seeds go deeper); otherwise it falls
+        # back to the entry-entity-count step.
+        degree_stats = await self._get_degree_stats(namespace_id)
         depth = self._router.compute_adaptive_depth(
             entry_entity_count=len(entry_entities),
             base_depth=base_depth,
+            degree_stats=degree_stats,
+            seed_entity_ids=[e[0] for e in entry_entities],
         )
 
         # Step 4: Cypher expand to find related entities

@@ -59,6 +59,7 @@ from khora.exceptions import EngineCapabilityError
 from khora.extraction.embedders import LiteLLMEmbedder
 from khora.khora import BatchResult, RecallResult, RememberResult, Stats
 from khora.query import SearchMode
+from khora.query.degree_stats import DegreeStatsCache
 from khora.storage import StorageConfig, create_storage_coordinator
 from khora.telemetry import trace, trace_span
 from khora.telemetry.metrics import metric_counter, metric_histogram
@@ -708,6 +709,12 @@ class VectorCypherEngine:
             ttl_seconds=_cache_ttl,
         )
 
+        # #1477: per-namespace degree histogram for frontier-budgeted adaptive
+        # depth, keyed on the same write-epoch as the recall cache above so a
+        # write invalidates both at once. Built lazily by the retriever on first
+        # recall; never recomputed per recall between writes.
+        self._degree_stats_cache = DegreeStatsCache()
+
     @staticmethod
     def _neo4j_driver_kwargs(neo4j_cfg: Any) -> dict[str, Any]:
         """Extract Neo4j driver kwargs from config.
@@ -856,6 +863,8 @@ class VectorCypherEngine:
             storage=self._storage,
             neo4j_query_timeout=neo4j_query_timeout,
             backend=backend,
+            degree_stats_cache=self._degree_stats_cache,
+            epoch_reader=self._recall_cache.current_epoch,
         )
 
         # Initialize telemetry
@@ -954,6 +963,8 @@ class VectorCypherEngine:
             enable_diversity=self._config.query.enable_diversity,
             diversity_lambda=self._config.query.diversity_lambda,
             diversity_min_gap=self._config.query.diversity_min_gap,
+            # #1477 — frontier budget for degree-histogram-driven adaptive depth.
+            adaptive_depth_frontier_budget=self._config.query.adaptive_depth_frontier_budget,
         )
 
     async def disconnect(self) -> None:
@@ -995,6 +1006,8 @@ class VectorCypherEngine:
         self._connected = False
         # #1469: drop cached recall results on disconnect (epochs retained).
         self._recall_cache.clear()
+        # #1477: drop cached degree histograms too.
+        self._degree_stats_cache.clear()
 
         logger.info("VectorCypher engine disconnected")
 
