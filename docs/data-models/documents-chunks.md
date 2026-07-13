@@ -150,7 +150,10 @@ class Chunk:
 
 ``Chunk.metadata`` is the propagated document-level free-form dict (callers'
 own keys). ``Chunk.chunker_info`` carries chunker output (strategy, overlap
-settings, etc.) and is kept separate so chunker keys never shadow document
+settings, etc.) plus the four position-bookkeeping keys ``chunk_index`` /
+``start_char`` / ``end_char`` / ``token_count``, which the writers stamp last
+so the engine's computed values win any collision with chunker-emitted keys.
+The two dicts are kept separate so chunker keys never shadow document
 metadata:
 
 ```python
@@ -162,8 +165,19 @@ chunk.metadata = {
 chunk.chunker_info = {
     "chunker": "semantic",
     "overlap_tokens": 50,
+    # Position bookkeeping, stamped by the engine on every persisted chunk
+    "chunk_index": 3,
+    "start_char": 2048,
+    "end_char": 3071,
+    "token_count": 256,
 }
 ```
+
+The separation also means the namespaces never mix: a caller metadata key
+that happens to be named ``chunk_index`` is user data — it is preserved in
+``metadata`` verbatim and may legitimately differ from
+``chunker_info["chunk_index"]``, which is the authoritative source for chunk
+position.
 
 ## Timestamp Axes
 
