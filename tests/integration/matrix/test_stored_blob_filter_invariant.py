@@ -22,9 +22,14 @@ time. This suite pins the user-observable consequence through a REAL recall:
    does.
 
 4. The raw ``khora_chunks`` blob is exactly what was written: user keys only, no
-   ``occurred_at`` / ``connected_entities`` / ``ppr_score`` injected. Reading the
-   stored row (rather than a recalled projection) also covers the skeleton engine
-   channel, whose rebuilt chunk is internal to the engine.
+   ``occurred_at`` / ``connected_entities`` / ``ppr_score`` injected. This asserts
+   the WRITE path stores a clean blob — the precondition every recall channel then
+   reads back. It does NOT observe the skeleton engine's rebuilt chunk: skeleton
+   drops chunk metadata into an internal ``Chunk`` that never reaches the caller
+   (``RecallChunk`` carries no metadata field), so the skeleton constructor's
+   stored-blob line is a pure dead write with no observable recall surface —
+   covered only indirectly, by this clean-write precondition plus the vector/BM25
+   recall assertions above (which skeleton also serves).
 
 Scope: sqlite_lance only — lightweight, no Docker. The embedded ``khora_chunks``
 table matches the production schema, so the write/read round-trip exercised here

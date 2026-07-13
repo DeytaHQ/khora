@@ -18,6 +18,11 @@ Each test seeds a channel's store boundary with a CLEAN blob plus a populated
 ``occurred_at`` column and asserts the rebuilt chunk keeps the blob intact and
 surfaces the event-time on the column.
 
+The contract is symmetric, so ``TestCallerStoredKeysReturnedVerbatim`` covers the
+other direction: when the caller legitimately stores those same key NAMES
+(``occurred_at`` / ``connected_entities`` / ``ppr_score``) as user data, recall
+returns them verbatim — the pass-through must not SCRUB user keys either.
+
 These are complementary to ``test_retriever_coverage_push.py`` (which already
 pins the ``_vector_search_chunks`` and the ``_fetch_chunks_from_entities``
 dual-nodes channels): the channels here are the remaining producers — the simple
@@ -59,6 +64,20 @@ _INJECTION_KEYS = ("occurred_at", "connected_entities", "ppr_score")
 # in place would be caught by the identity-independent equality assertion.
 _CLEAN_BLOB: dict[str, Any] = {"author": "alice", "tier": "gold", "score": 3}
 
+# The adversarial mirror: a stored blob whose USER keys are named exactly like
+# the read-time bookkeeping (``occurred_at`` / ``connected_entities`` /
+# ``ppr_score``) but hold caller-owned values. The blob is user data, so recall
+# must return these verbatim — never scrub or overwrite them with the first-class
+# column or graph/PPR bookkeeping. The values are deliberately un-column-like (a
+# plain string event-time, a list, a float) so a channel that folded the column
+# in would be caught by the exact-equality check.
+_CALLER_BLOB: dict[str, Any] = {
+    "author": "bob",
+    "occurred_at": "caller-owned-event-string",
+    "connected_entities": ["caller-entity-1", "caller-entity-2"],
+    "ppr_score": 0.123,
+}
+
 
 def _make_retriever(
     *,
@@ -82,6 +101,23 @@ def _assert_stored_blob(chunk: Chunk) -> None:
     for key in _INJECTION_KEYS:
         assert key not in chunk.metadata, f"channel injected {key!r} into the stored blob"
     # The event-time is on the first-class column, not the blob.
+    assert chunk.occurred_at == _OCCURRED_AT
+
+
+def _assert_caller_blob_verbatim(chunk: Chunk) -> None:
+    """The rebuilt chunk returns the caller's blob verbatim, keys and values intact.
+
+    The blob legitimately carries user keys named ``occurred_at`` /
+    ``connected_entities`` / ``ppr_score``. Recall must NOT scrub them (an
+    over-correction) nor overwrite the ``occurred_at`` key with the first-class
+    column: the caller string stays in the blob and the column is surfaced
+    separately on ``chunk.occurred_at``.
+    """
+    assert chunk.metadata == _CALLER_BLOB
+    for key in _INJECTION_KEYS:
+        assert key in chunk.metadata, f"channel scrubbed caller-owned key {key!r} from the stored blob"
+    assert chunk.metadata["occurred_at"] == "caller-owned-event-string"
+    # The caller's blob value is untouched; the real event-time is on the column.
     assert chunk.occurred_at == _OCCURRED_AT
 
 
@@ -468,3 +504,81 @@ class TestGraphChannelPostFilterAgreement:
         miss = self._graph_post_filter({"metadata": {"author": "someone-else"}})
         assert match(chunk) is True
         assert miss(chunk) is False
+
+
+# --------------------------------------------------------------------------- #
+# caller-stored keys are user data — returned verbatim, never scrubbed
+# --------------------------------------------------------------------------- #
+
+
+class TestCallerStoredKeysReturnedVerbatim:
+    """A caller-stored ``occurred_at`` / ``connected_entities`` / ``ppr_score`` in
+    the blob is USER data and comes back verbatim.
+
+    The rest of this suite asserts these keys are ABSENT — but that only guards
+    against read-time INJECTION. The stored-blob contract is symmetric: recall
+    must also not SCRUB a key the caller legitimately stored under one of those
+    names, nor overwrite the caller's ``occurred_at`` value with the first-class
+    column. An over-correction that stripped the bookkeeping names from user blobs
+    would pass every absent-key test but break this one. Covers the two changed
+    constructor sites where the risk is real: the graph fetch (where
+    ``connected_entities`` used to be injected) and the vector search.
+    """
+
+    @pytest.mark.asyncio
+    async def test_graph_fetch_returns_caller_keys_verbatim(self) -> None:
+        ns = uuid4()
+        stored = Chunk(
+            id=uuid4(),
+            namespace_id=ns,
+            document_id=uuid4(),
+            content="graph hit",
+            metadata=dict(_CALLER_BLOB),
+            occurred_at=_OCCURRED_AT,
+        )
+        entity = Entity(
+            id=uuid4(),
+            namespace_id=ns,
+            name="Alice",
+            entity_type="PERSON",
+            source_chunk_ids=[stored.id],
+        )
+        retriever = VectorCypherRetriever.__new__(VectorCypherRetriever)
+        retriever._config = RetrieverConfig()
+        retriever._dual_nodes = None
+        retriever._vector_store = MagicMock()
+        retriever._neo4j_driver = None
+        storage = MagicMock()
+        storage.get_entities_batch = AsyncMock(return_value={entity.id: entity})
+        storage.get_chunks_batch = AsyncMock(return_value={stored.id: stored})
+        retriever._storage = storage
+
+        results = await retriever._fetch_chunks_from_entities(
+            entity_ids=[entity.id],
+            namespace_id=ns,
+            temporal_filter=None,
+            limit=10,
+        )
+        assert len(results) == 1
+        _cid, _score, chunk = results[0]
+        _assert_caller_blob_verbatim(chunk)
+
+    @pytest.mark.asyncio
+    async def test_vector_search_returns_caller_keys_verbatim(self) -> None:
+        ns = uuid4()
+        result = _vector_store_result()
+        result.chunk.namespace_id = ns
+        result.chunk.metadata = dict(_CALLER_BLOB)
+        retriever = _make_retriever()
+        retriever._vector_store.search = AsyncMock(return_value=[result])
+
+        results = await retriever._vector_search_chunks(
+            query_embedding=[0.1, 0.2],
+            namespace_id=ns,
+            temporal_filter=None,
+            query_text="q",
+            limit=5,
+        )
+        assert len(results) == 1
+        _cid, _score, chunk = results[0]
+        _assert_caller_blob_verbatim(chunk)

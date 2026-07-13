@@ -917,19 +917,25 @@ def _field_not(operand: dict[str, Any]) -> dict[str, Any]:
 # date column read consistently on the SQL-pushdown read path.
 # --------------------------------------------------------------------------- #
 #
-# The recall read paths carry the STORED metadata blob verbatim — nothing is
-# injected into ``metadata`` from the first-class ``occurred_at`` /
-# ``source_timestamp`` columns at read time. The fixed seed already models this:
-# records r07–r18 stamp a real ``occurred_at`` / ``source_timestamp`` column, yet
-# NONE of the 18 blobs carries an ``occurred_at`` KEY. So a ``metadata.occurred_at``
-# leaf reads the blob (where the key is absent) — never the column — on both the
-# oracle and the real sqlite_lance read path (the server-side prefilter that the
-# vector + BM25 recall channels share). These deterministic cases pin that
-# equivalence on the exact filters a downstream caller would use to select
-# "chunks with no event-time key in their blob" and to match a chunk by its whole
-# stored blob. They reuse the same oracle-vs-lance seam Property A drives, so a
-# future read path that reintroduced a blob injection (a column value leaking into
-# ``metadata``) would diverge here.
+# The metadata blob and the first-class ``occurred_at`` / ``source_timestamp``
+# columns are DISTINCT fields on the ``khora_chunks`` row. The fixed seed models
+# this: records r07–r18 stamp a real ``occurred_at`` / ``source_timestamp``
+# column, yet NONE of the 18 blobs carries an ``occurred_at`` KEY. So a
+# ``metadata.occurred_at`` leaf addresses the JSON blob (where the key is absent) —
+# never the column — and both the Python oracle (``compile_python`` over the
+# ``_record_mapping``) and the real sqlite_lance read path (``compile_lance`` SQL
+# prefilter ∘ ``compile_python`` post-filter over the seeded raw row) must agree on
+# that. These deterministic cases pin the COMPILER + SCHEMA invariance on the exact
+# filters a downstream caller would use to select "chunks with no event-time key in
+# their blob" and to match a chunk by its whole stored blob. They reuse the same
+# oracle-vs-lance seam Property A drives.
+#
+# SCOPE: this guards the storage/compiler layer — that ``metadata.occurred_at``
+# does not silently coalesce onto the first-class column at the schema or compile
+# level. It does NOT exercise the recall-path ``Chunk`` constructors (those build a
+# public ``Chunk`` from a store result, a step above this seam); the recall
+# constructors' stored-blob pass-through is pinned by the retriever channel tests
+# and the matrix integration lane instead.
 
 
 def _column_populated_ids() -> frozenset[str]:
@@ -942,13 +948,17 @@ def _column_populated_ids() -> frozenset[str]:
 
 
 class TestStoredBlobColumnInvariant:
-    """A populated date COLUMN never leaks into the stored metadata BLOB on read.
+    """The compiler keeps ``metadata.<key>`` addressing the blob, distinct from the
+    first-class date columns.
 
     ``metadata.occurred_at`` addresses the blob key, which is absent on every seed
     record even though many carry a populated ``occurred_at``/``source_timestamp``
-    column. The oracle and the real sqlite_lance read path (the pushdown the vector
-    + BM25 channels share) must agree on that, so a column value silently injected
-    into the blob would surface as an oracle/lance divergence here.
+    column. The Python oracle and the real sqlite_lance read path (the SQL pushdown
+    the vector + BM25 channels share) must agree the leaf reads the blob and never
+    the column — a schema/compile change that coalesced the column onto the
+    ``metadata.occurred_at`` path would surface as an oracle/lance divergence here.
+    (This is a compiler/schema-level guard over the raw row, not a check of the
+    recall-path ``Chunk`` constructors.)
     """
 
     def test_occurred_at_key_absent_matches_every_clean_blob(self) -> None:
