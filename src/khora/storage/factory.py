@@ -90,6 +90,7 @@ class StorageConfig:
     postgresql_pool_size: int = 10
     postgresql_max_overflow: int = 20
     postgresql_pool_pre_ping: bool = False
+    postgresql_upsert_commit_interval: int = 0
 
     # pgvector configuration (can share PostgreSQL URL) — legacy
     pgvector_url: (
@@ -191,6 +192,7 @@ class StorageConfig:
             postgresql_echo=relational.get("echo", False),
             postgresql_pool_size=relational.get("pool_size", 5),
             postgresql_max_overflow=relational.get("max_overflow", 10),
+            postgresql_upsert_commit_interval=relational.get("upsert_commit_interval", 0),
             pgvector_url=pgvector_url,
             pgvector_embedding_dimension=embedding_dimension,
             pgvector_hnsw_ef_search=hnsw_ef_search,
@@ -325,6 +327,7 @@ class StorageFactory:
                     max_overflow=self.config.postgresql_max_overflow,
                     pool_pre_ping=self.config.postgresql_pool_pre_ping,
                     hnsw_ef_search=self.config.pgvector_hnsw_ef_search,
+                    upsert_commit_interval=self.config.postgresql_upsert_commit_interval,
                     use_halfvec=self.config.pgvector_use_halfvec,
                     engine=engine,
                 )
@@ -351,6 +354,7 @@ class StorageFactory:
             max_overflow=self.config.postgresql_max_overflow,
             pool_pre_ping=self.config.postgresql_pool_pre_ping,
             hnsw_ef_search=self.config.pgvector_hnsw_ef_search,
+            upsert_commit_interval=self.config.postgresql_upsert_commit_interval,
             use_halfvec=self.config.pgvector_use_halfvec,
             engine=engine,
         )

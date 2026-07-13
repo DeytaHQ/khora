@@ -1025,3 +1025,60 @@ class TestRetryOnDeadlock:
         with pytest.raises(ValueError):
             await _retry_on_deadlock(bad)
         assert calls["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Configurable commit granularity for batch upserts (upsert_commit_interval)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestCommitGroupedSubBatches:
+    # 10 items @ batch_size 3 -> sub-batch starts [0, 3, 6, 9] (4 sub-batches).
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "interval,expected_commits",
+        [
+            (0, 1),  # whole batch in one transaction/commit (default, fast)
+            (1, 4),  # commit per sub-batch (#1471 behavior)
+            (2, 2),  # every 2 sub-batches
+            (3, 2),  # every 3 -> groups [0,3,6] and [9]
+            (10, 1),  # interval exceeds sub-batch count -> one commit
+        ],
+    )
+    async def test_commit_granularity(self, interval: int, expected_commits: int) -> None:
+        session = MagicMock()
+        session.execute = AsyncMock()
+        session.commit = AsyncMock()
+        backend = _backend_with_session(session)
+        backend._upsert_commit_interval = interval
+
+        applied: list[int] = []
+
+        async def _apply(_session: object, start: int) -> None:
+            applied.append(start)
+
+        await backend._commit_grouped_sub_batches(total=10, batch_size=3, key1=1, key2=2, apply_sub_batch=_apply)
+
+        # Every sub-batch is applied exactly once, in order, regardless of interval.
+        assert applied == [0, 3, 6, 9]
+        # One commit + one advisory-lock acquire per commit group.
+        assert session.commit.await_count == expected_commits
+        assert session.execute.await_count == expected_commits
+
+    @pytest.mark.asyncio
+    async def test_empty_total_is_noop(self) -> None:
+        session = MagicMock()
+        session.execute = AsyncMock()
+        session.commit = AsyncMock()
+        backend = _backend_with_session(session)
+        backend._upsert_commit_interval = 0
+
+        applied: list[int] = []
+
+        async def _apply(_session: object, start: int) -> None:
+            applied.append(start)
+
+        await backend._commit_grouped_sub_batches(total=0, batch_size=3, key1=1, key2=2, apply_sub_batch=_apply)
+        assert applied == []
+        assert session.commit.await_count == 0

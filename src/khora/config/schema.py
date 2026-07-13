@@ -1172,6 +1172,14 @@ class StorageSettings(BaseSettings):
         "Adds a small latency overhead per checkout but prevents errors from idle connections "
         "dropped by the server or network infrastructure.",
     )
+    postgresql_upsert_commit_interval: int = Field(
+        default=0,
+        description="Commit granularity for batch entity/relationship upserts. 0 (default) "
+        "commits the whole batch in one transaction (one advisory-lock hold, fewest WAL fsyncs "
+        "- fastest for single-writer / low-contention ingest). 1 commits per sub-batch so the "
+        "namespace lock releases between sub-batches for concurrent same-namespace writers, at "
+        "one fsync per sub-batch. N>1 commits every N sub-batches.",
+    )
 
     # New-style backend configs
     graph: GraphConfig | None = Field(default=None, description="Graph backend configuration (optional)")
