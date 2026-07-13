@@ -1632,6 +1632,22 @@ class QuerySettings(BaseSettings):
             "Default-OFF; A/B is downstream (#1475)."
         ),
     )
+    # ``confidence_calibration`` selects how ``engine_info['confidence']`` is
+    # derived. "legacy" (default) keeps the #1331 formula byte-identical:
+    # 0.8*clip01(top_cosine/target_cosine) + 0.2*clip01(gap/target_gap), which
+    # saturates the cosine term at ``abstention_confidence_target_cosine`` (0.5)
+    # and computes the gap from post-fusion DISPLAY scores. "raw_cosine"
+    # desaturates the cosine term (uses the full [0,1] cosine magnitude) and
+    # computes the gap from the true raw vector cosines (#1441). Default-OFF so
+    # the public confidence value is unchanged until opted in.
+    confidence_calibration: Literal["legacy", "raw_cosine"] = Field(
+        default="legacy",
+        description=(
+            "How engine_info['confidence'] is derived: 'legacy' (default, "
+            "#1331 formula, unchanged) or 'raw_cosine' (desaturated cosine term "
+            "+ raw-cosine gap, #1475). Default-OFF."
+        ),
+    )
 
     # Temporal settings.
     # `recency_weight` was tightened from 0.2 to 0.35 after BEAM 100K showed

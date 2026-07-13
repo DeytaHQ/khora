@@ -2797,6 +2797,14 @@ class VectorCypherRetriever:
                     (raw_cosine_by_id.get(cid, 0.0) for cid, _, _ in vector_chunks),
                     default=0.0,
                 ),
+                # #1475: 2nd-highest raw vector cosine, so the engine can compute
+                # a true raw-cosine gap for the calibrated confidence formula
+                # (vs the post-fusion display-score gap). 0.0 when < 2 vector hits.
+                "second_raw_vector_score": (
+                    sorted((raw_cosine_by_id.get(cid, 0.0) for cid, _, _ in vector_chunks), reverse=True)[1]
+                    if len(vector_chunks) >= 2
+                    else 0.0
+                ),
                 # Session-aware search telemetry
                 "session_aware_activated": session_aware_activated,
                 # Bi-temporal entity version history (populated for CHANGE queries)
@@ -3105,6 +3113,8 @@ class VectorCypherRetriever:
         temporal_signal: TemporalSignal | None,
         *,
         namespace_id: UUID | None,
+        top_raw_cosine: float | None = None,
+        second_raw_cosine: float | None = None,
     ) -> tuple[bool, str | None]:
         """Centralized gate for the LLM rerank step (issue #814).
 
@@ -3125,6 +3135,15 @@ class VectorCypherRetriever:
         ``candidates`` may be a list of ``FusedResult`` (complex path) or a
         list of ``(Chunk, score)`` tuples (simple path); both shapes are
         handled by ``_extract_candidate_metadata`` / ``_extract_top_scores``.
+
+        The decisive-winner skip runs its absolute-topicality clause on the
+        TRUE raw cosine of the ranked top two candidates when the caller threads
+        ``top_raw_cosine`` / ``second_raw_cosine`` (#1475). This fixes a latent
+        mis-calibration: ``FusedResult.rrf_score`` is scale-ambiguous, and on the
+        raw weighted-RRF scale it is ~1/(k+rank) ≈ 0.016, so the ``0.7``/``0.1``
+        thresholds could never fire — the whole skip was silently dead there.
+        When the raw cosines are not threaded (unit tests, defensive callers) it
+        falls back to the legacy ``rrf_score`` comparison.
 
         Returns ``(should_run, skip_reason)``. ``skip_reason`` is ``None``
         only when ``should_run`` is ``True``.
@@ -3161,11 +3180,24 @@ class VectorCypherRetriever:
                 return False, "no_version_metadata"
 
         # Decisive-winner gate — applies in both auto and always modes.
-        top_score, second_score = _extract_top_two_scores(candidates)
-        if top_score is not None and second_score is not None:
-            gap = top_score - second_score
-            if self._should_skip_llm_rerank(top_score, gap):
-                return False, "decisive_winner"
+        # #1475: run the absolute-topicality + separation checks on the true
+        # raw-cosine scale (an absolute [0,1] signal) when the caller threads it,
+        # so the skip is meaningful regardless of whether cross-encoder /
+        # coherence normalization put ``rrf_score`` on a [0,1] scale. Otherwise
+        # fall back to the legacy scale-ambiguous ``rrf_score`` comparison.
+        if top_raw_cosine is not None:
+            decisive_top: float | None = top_raw_cosine
+            decisive_gap = max(top_raw_cosine - (second_raw_cosine if second_raw_cosine is not None else 0.0), 0.0)
+        else:
+            top_score, second_score = _extract_top_two_scores(candidates)
+            if top_score is not None and second_score is not None:
+                decisive_top = top_score
+                decisive_gap = top_score - second_score
+            else:
+                decisive_top = None
+                decisive_gap = 0.0
+        if decisive_top is not None and self._should_skip_llm_rerank(decisive_top, decisive_gap):
+            return False, "decisive_winner"
 
         return True, None
 
@@ -3371,7 +3403,11 @@ class VectorCypherRetriever:
                 )
 
             chunk_results: list[tuple[Chunk, float]] = []
-            _max_raw_cosine = max((r.similarity for r in results), default=0.0)
+            _sorted_raw_cosines = sorted((r.similarity for r in results), reverse=True)
+            _max_raw_cosine = _sorted_raw_cosines[0] if _sorted_raw_cosines else 0.0
+            # #1475: 2nd-highest raw vector cosine for the calibrated confidence
+            # raw-cosine gap. 0.0 when < 2 vector hits.
+            _second_raw_cosine = _sorted_raw_cosines[1] if len(_sorted_raw_cosines) >= 2 else 0.0
             # Per-chunk raw vector cosine, captured pre-fusion. Used at exit to
             # report an ABSOLUTE relevance score instead of a per-result-set
             # min-max normalized one (#811); boosts/reranking only decide ORDER.
@@ -3504,10 +3540,21 @@ class VectorCypherRetriever:
             # Gating centralised in ``_evaluate_llm_rerank_gate`` (issue #814) —
             # see the parallel comment in ``_vectorcypher_retrieve``.
             if self._config.enable_llm_reranking and chunk_results:
+                # #1475: thread the ranked top-two chunks' true raw cosines
+                # (captured pre-boost) so the decisive-winner skip runs on an
+                # absolute [0,1] scale rather than the scale-ambiguous score.
+                _top_rc = _raw_cosine_by_id.get(chunk_results[0][0].id, chunk_results[0][1])
+                _second_rc = (
+                    _raw_cosine_by_id.get(chunk_results[1][0].id, chunk_results[1][1])
+                    if len(chunk_results) > 1
+                    else None
+                )
                 should_run, skip_reason = self._evaluate_llm_rerank_gate(
                     chunk_results,
                     temporal_signal,
                     namespace_id=namespace_id,
+                    top_raw_cosine=_top_rc,
+                    second_raw_cosine=_second_rc,
                 )
                 if not should_run and skip_reason is not None:
                     _LLM_RERANKING_SKIPPED_COUNTER.add(1, attributes={"reason": skip_reason})
@@ -3721,6 +3768,7 @@ class VectorCypherRetriever:
                     "temporal_sort": temporal_sort,
                     # Max raw cosine similarity (pre-fusion) for abstention system
                     "max_raw_vector_score": _max_raw_cosine,
+                    "second_raw_vector_score": _second_raw_cosine,
                     # Search provenance: all chunks from vector in simple mode
                     "search_methods": search_methods,
                     # ADR-001 (#1158): silent-failure entries from this path
@@ -4947,10 +4995,16 @@ class VectorCypherRetriever:
         # the not-temporal, no-version-metadata, and decisive-winner skips and
         # emits the one-time warning when mode='auto' triggers the version gate.
         if self._config.enable_llm_reranking:
+            # #1475: thread the ranked top-two candidates' true raw cosines so
+            # the decisive-winner skip operates on an absolute [0,1] scale.
+            _top_rc = raw_cosine_by_id.get(fused_results[0].item_id, 0.0) if fused_results else None
+            _second_rc = raw_cosine_by_id.get(fused_results[1].item_id, 0.0) if len(fused_results) > 1 else None
             should_run, skip_reason = self._evaluate_llm_rerank_gate(
                 fused_results,
                 temporal_signal,
                 namespace_id=namespace_id,
+                top_raw_cosine=_top_rc,
+                second_raw_cosine=_second_rc,
             )
             if not should_run and skip_reason is not None:
                 _LLM_RERANKING_SKIPPED_COUNTER.add(1, attributes={"reason": skip_reason})

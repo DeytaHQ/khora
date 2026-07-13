@@ -104,6 +104,7 @@ def compute_confidence(
     top_score_gap: float,
     target_cosine: float = 0.5,
     target_gap: float = 0.1,
+    mode: Literal["legacy", "raw_cosine"] = "legacy",
 ) -> float:
     """Calibrated retrieval confidence in ``[0.0, 1.0]`` (issue #1331).
 
@@ -111,9 +112,21 @@ def compute_confidence(
     score gap between the top two hits (how decisively the engine separates
     the winner). Both inputs are absolute cosines after #1319.
 
+    ``mode="legacy"`` (default, unchanged):
     ``confidence = 0.8 * clip01(top_cosine / target_cosine)
-    + 0.2 * clip01(top_score_gap / target_gap)``.
+    + 0.2 * clip01(top_score_gap / target_gap)``. The cosine term SATURATES
+    at ``target_cosine`` (default 0.5), so a 0.5-cosine and a 0.95-cosine top
+    hit read identically.
+
+    ``mode="raw_cosine"`` (#1475): the cosine term uses the FULL [0,1] cosine
+    magnitude (``0.8 * clip01(top_cosine)``) so it no longer ceilings at 0.5,
+    and the caller supplies ``top_score_gap`` as the true raw-cosine gap rather
+    than a post-fusion display-score gap. The gap term keeps the ``target_gap``
+    saturation.
     """
-    cosine_component = clip01(top_cosine / target_cosine) if target_cosine > 0 else 0.0
+    if mode == "raw_cosine":
+        cosine_component = clip01(top_cosine)
+    else:
+        cosine_component = clip01(top_cosine / target_cosine) if target_cosine > 0 else 0.0
     gap_component = clip01(top_score_gap / target_gap) if target_gap > 0 else 0.0
     return 0.8 * cosine_component + 0.2 * gap_component
