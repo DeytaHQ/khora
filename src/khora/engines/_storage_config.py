@@ -68,6 +68,7 @@ def build_storage_config(config: KhoraConfig, *, skip_graph: bool = False) -> St
         "postgresql_pool_size": config.storage.postgresql_pool_size,
         "postgresql_max_overflow": config.storage.postgresql_max_overflow,
         "postgresql_pool_pre_ping": getattr(config.storage, "postgresql_pool_pre_ping", False),
+        "postgresql_upsert_commit_interval": getattr(config.storage, "postgresql_upsert_commit_interval", 0),
         "pgvector_embedding_dimension": config.storage.embedding_dimension,
         "pgvector_use_halfvec": config.storage.use_halfvec,
         # Query-time HNSW accuracy (KHORA_STORAGE_HNSW_EF_SEARCH). Wired

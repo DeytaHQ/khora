@@ -7,6 +7,7 @@ using pgvector extension in PostgreSQL.
 from __future__ import annotations
 
 import struct
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -209,6 +210,7 @@ class PgVectorBackend(AsyncSessionMixin):
         pool_pre_ping: bool = False,
         hnsw_ef_search: int = 100,
         use_halfvec: bool = True,
+        upsert_commit_interval: int = 0,
         engine: AsyncEngine | None = None,
     ) -> None:
         """Initialize the pgvector backend.
@@ -223,6 +225,13 @@ class PgVectorBackend(AsyncSessionMixin):
             hnsw_ef_search: HNSW ef_search for query-time accuracy
             use_halfvec: Use halfvec (float16) for similarity search.
                 Requires pgvector extension >= 0.7.0.
+            upsert_commit_interval: Commit granularity for the batch entity/
+                relationship upserts. ``<= 0`` (default) commits the whole batch
+                in one transaction (one advisory-lock hold, fewest fsyncs -
+                fastest for single-writer / low-contention ingest). ``1`` commits
+                per sub-batch (#1471) so the lock releases between sub-batches for
+                concurrent same-namespace writers, at one WAL fsync per sub-batch.
+                ``N > 1`` commits every N sub-batches.
             engine: Optional shared engine (skip dispose on disconnect)
         """
         # Convert to async URL if needed
@@ -238,6 +247,7 @@ class PgVectorBackend(AsyncSessionMixin):
         self._max_overflow = max_overflow
         self._pool_pre_ping = pool_pre_ping
         self._hnsw_ef_search = hnsw_ef_search
+        self._upsert_commit_interval = upsert_commit_interval
         self._use_halfvec = use_halfvec
         self._halfvec_available: bool | None = None  # Detected at connect time
         self._engine: AsyncEngine | None = engine
@@ -1203,6 +1213,57 @@ class PgVectorBackend(AsyncSessionMixin):
             updated_at=model.updated_at,
         )
 
+    async def _commit_grouped_sub_batches(
+        self,
+        *,
+        total: int,
+        batch_size: int,
+        key1: int,
+        key2: int,
+        apply_sub_batch: Callable[[AsyncSession, int], Awaitable[None]],
+    ) -> None:
+        """Run ``apply_sub_batch(session, start)`` for each ``batch_size`` slice
+        under the namespace advisory lock, committing every
+        ``self._upsert_commit_interval`` sub-batches.
+
+        - ``interval <= 0`` (default): the whole batch runs in a single
+          transaction under one advisory-lock hold with a single commit - fewest
+          WAL fsyncs, fastest for single-writer / low-contention ingest (the
+          pre-#1471 behavior).
+        - ``interval == 1``: commit per sub-batch (#1471) - the lock releases
+          between sub-batches so a concurrent same-namespace writer can
+          interleave, at one commit (fsync) per sub-batch.
+        - ``interval == N > 1``: commit every N sub-batches.
+
+        Each transaction re-acquires ``pg_advisory_xact_lock`` (auto-released on
+        commit), so the lock still serialises every multi-row ``INSERT ... ON
+        CONFLICT DO UPDATE`` against concurrent same-namespace upserts - where the
+        hub-node deadlock lives (rows locked in Postgres's order, not our sorted
+        order). Committing between groups only drops whole-batch atomicity, which
+        was never promised: a mid-batch failure re-runs the whole upsert
+        idempotently via ``_retry_on_deadlock`` + ``ON CONFLICT``.
+        """
+        interval = self._upsert_commit_interval
+
+        async def _flush(group: list[int]) -> None:
+            async with self._get_session() as session:
+                await session.execute(
+                    text("SELECT pg_advisory_xact_lock(:key1, :key2)"),
+                    {"key1": key1, "key2": key2},
+                )
+                for start in group:
+                    await apply_sub_batch(session, start)
+                await session.commit()
+
+        group: list[int] = []
+        for start in range(0, total, batch_size):
+            group.append(start)
+            if interval > 0 and len(group) >= interval:
+                await _flush(group)
+                group = []
+        if group:
+            await _flush(group)
+
     async def upsert_entities_batch(self, namespace_id: UUID, entities: list, *, batch_size: int = 200) -> list[tuple]:
         """Batch upsert entity records in PostgreSQL.
 
@@ -1249,86 +1310,75 @@ class PgVectorBackend(AsyncSessionMixin):
             # each affected row.
             row_by_key: dict[tuple[str, str], tuple[UUID, bool]] = {}
 
-            # Commit per sub-batch so the namespace advisory lock releases
-            # between sub-batches instead of being held for the batch's full
-            # write duration (#1471). Each sub-batch runs in its own
-            # transaction that re-acquires ``pg_advisory_xact_lock`` and commits
-            # (commit auto-releases the xact-scoped lock). The lock still
-            # serialises every multi-row ``INSERT ... ON CONFLICT DO UPDATE``
-            # against concurrent same-namespace upserts, which is where the
-            # hub-node deadlock lives: a multi-row upsert takes its row locks in
-            # the order Postgres chooses (not our sorted-key order), so two
-            # concurrent statements touching a shared entity could grab rows in
-            # opposite orders and deadlock without the serialiser. Committing
-            # between sub-batches only drops whole-batch atomicity - never
-            # promised; a mid-batch failure re-runs the entire upsert
-            # idempotently via ON CONFLICT (``_retry_on_deadlock``) - and lets a
-            # concurrent same-namespace ingest interleave at sub-batch
-            # granularity instead of blocking on the whole write.
-            for start in range(0, len(sorted_entities), batch_size):
-                async with self._get_session() as session:
-                    await session.execute(
-                        text("SELECT pg_advisory_xact_lock(:key1, :key2)"),
-                        {"key1": key1, "key2": key2},
-                    )
+            # Commit granularity is configurable via ``upsert_commit_interval``
+            # (default: the whole batch in one transaction / one commit). The
+            # advisory lock, re-acquired per commit group, still serialises every
+            # multi-row ``INSERT ... ON CONFLICT DO UPDATE`` against concurrent
+            # same-namespace upserts, fencing the hub-node deadlock (a multi-row
+            # upsert takes row locks in Postgres's order, not our sorted order).
+            # See ``_commit_grouped_sub_batches``.
+            async def _apply(session: AsyncSession, start: int) -> None:
+                batch = sorted_entities[start : start + batch_size]
+                values = [
+                    {
+                        "id": entity.id,
+                        "namespace_id": entity.namespace_id,
+                        "name": entity.name,
+                        "entity_type": (entity.entity_type),
+                        "description": entity.description,
+                        "attributes": entity.attributes,
+                        "source_document_ids": entity.source_document_ids,
+                        "source_chunk_ids": entity.source_chunk_ids,
+                        "mention_count": entity.mention_count,
+                        "embedding": entity.embedding,
+                        "embedding_model": entity.embedding_model,
+                        "valid_from": entity.valid_from,
+                        "valid_until": entity.valid_until,
+                        "confidence": entity.confidence,
+                        "metadata_": entity.metadata,
+                        "created_at": entity.created_at,
+                        "updated_at": entity.updated_at,
+                    }
+                    for entity in batch
+                ]
+                stmt = insert(EntityModel).values(values)
+                stmt = stmt.on_conflict_do_update(
+                    constraint="uq_entities_namespace_name_type",
+                    set_={
+                        "description": stmt.excluded.description,
+                        "attributes": stmt.excluded.attributes,
+                        "source_document_ids": _accumulate_source_ids_sql("source_document_ids"),
+                        "source_chunk_ids": _accumulate_source_ids_sql("source_chunk_ids"),
+                        "mention_count": stmt.excluded.mention_count,
+                        "embedding": stmt.excluded.embedding,
+                        "embedding_model": stmt.excluded.embedding_model,
+                        "valid_from": stmt.excluded.valid_from,
+                        "valid_until": stmt.excluded.valid_until,
+                        "confidence": stmt.excluded.confidence,
+                        "metadata": stmt.excluded.metadata,
+                        "updated_at": stmt.excluded.updated_at,
+                    },
+                )
+                # xmax = 0 on freshly inserted rows; non-zero on rows touched by
+                # the ON CONFLICT DO UPDATE branch - the canonical PG idiom for
+                # distinguishing INSERT vs UPDATE within a single upsert.
+                stmt = stmt.returning(
+                    EntityModel.id,
+                    EntityModel.name,
+                    EntityModel.entity_type,
+                    literal_column("(xmax = 0)").label("is_new"),
+                )
+                result = await session.execute(stmt)
+                for row in result:
+                    row_by_key[(row.name, row.entity_type)] = (row.id, bool(row.is_new))
 
-                    batch = sorted_entities[start : start + batch_size]
-                    values = [
-                        {
-                            "id": entity.id,
-                            "namespace_id": entity.namespace_id,
-                            "name": entity.name,
-                            "entity_type": (entity.entity_type),
-                            "description": entity.description,
-                            "attributes": entity.attributes,
-                            "source_document_ids": entity.source_document_ids,
-                            "source_chunk_ids": entity.source_chunk_ids,
-                            "mention_count": entity.mention_count,
-                            "embedding": entity.embedding,
-                            "embedding_model": entity.embedding_model,
-                            "valid_from": entity.valid_from,
-                            "valid_until": entity.valid_until,
-                            "confidence": entity.confidence,
-                            "metadata_": entity.metadata,
-                            "created_at": entity.created_at,
-                            "updated_at": entity.updated_at,
-                        }
-                        for entity in batch
-                    ]
-                    stmt = insert(EntityModel).values(values)
-                    stmt = stmt.on_conflict_do_update(
-                        constraint="uq_entities_namespace_name_type",
-                        set_={
-                            "description": stmt.excluded.description,
-                            "attributes": stmt.excluded.attributes,
-                            "source_document_ids": _accumulate_source_ids_sql("source_document_ids"),
-                            "source_chunk_ids": _accumulate_source_ids_sql("source_chunk_ids"),
-                            "mention_count": stmt.excluded.mention_count,
-                            "embedding": stmt.excluded.embedding,
-                            "embedding_model": stmt.excluded.embedding_model,
-                            "valid_from": stmt.excluded.valid_from,
-                            "valid_until": stmt.excluded.valid_until,
-                            "confidence": stmt.excluded.confidence,
-                            "metadata": stmt.excluded.metadata,
-                            "updated_at": stmt.excluded.updated_at,
-                        },
-                    )
-                    # xmax = 0 on freshly inserted rows; non-zero on rows
-                    # touched by the ON CONFLICT DO UPDATE branch. Canonical
-                    # PG idiom for distinguishing INSERT vs UPDATE outcomes
-                    # within a single upsert statement.
-                    stmt = stmt.returning(
-                        EntityModel.id,
-                        EntityModel.name,
-                        EntityModel.entity_type,
-                        literal_column("(xmax = 0)").label("is_new"),
-                    )
-                    result = await session.execute(stmt)
-                    for row in result:
-                        row_by_key[(row.name, row.entity_type)] = (row.id, bool(row.is_new))
-
-                    # Commit (and release the advisory lock) per sub-batch.
-                    await session.commit()
+            await self._commit_grouped_sub_batches(
+                total=len(sorted_entities),
+                batch_size=batch_size,
+                key1=key1,
+                key2=key2,
+                apply_sub_batch=_apply,
+            )
 
             # Sync each input entity's id to the canonical stored row id
             # (#1429) - on the ON CONFLICT DO UPDATE branch the row keeps its
@@ -1726,72 +1776,68 @@ class PgVectorBackend(AsyncSessionMixin):
             key1, key2 = _namespace_lock_keys(namespace_id)
             is_new_by_id: dict[Any, bool] = {}
 
-            # Commit per sub-batch so the namespace advisory lock releases
-            # between sub-batches instead of being held for the whole write
-            # (#1471); mirrors upsert_entities_batch. Each sub-batch's own
-            # transaction re-acquires and (on commit) releases the lock, which
-            # still serialises every multi-row upsert against concurrent
-            # same-namespace inserts.
-            for start in range(0, len(relationships), batch_size):
-                async with self._get_session() as session:
-                    await session.execute(
-                        text("SELECT pg_advisory_xact_lock(:key1, :key2)"),
-                        {"key1": key1, "key2": key2},
-                    )
+            # Commit granularity configurable via ``upsert_commit_interval``
+            # (default: whole batch in one commit); mirrors upsert_entities_batch.
+            # The advisory lock (re-acquired per commit group) still serialises
+            # every multi-row upsert against concurrent same-namespace inserts.
+            async def _apply(session: AsyncSession, start: int) -> None:
+                batch = relationships[start : start + batch_size]
+                values = [
+                    {
+                        "id": rel.id,
+                        "namespace_id": rel.namespace_id,
+                        "source_entity_id": rel.source_entity_id,
+                        "target_entity_id": rel.target_entity_id,
+                        "relationship_type": rel.relationship_type,
+                        "description": rel.description,
+                        "properties": rel.properties,
+                        "source_document_ids": rel.source_document_ids,
+                        "source_chunk_ids": rel.source_chunk_ids,
+                        "valid_from": rel.valid_from,
+                        "valid_until": rel.valid_until,
+                        "confidence": rel.confidence,
+                        "weight": rel.weight,
+                        "metadata_": rel.metadata,
+                        "created_at": rel.created_at,
+                        "updated_at": rel.updated_at,
+                    }
+                    for rel in batch
+                ]
+                stmt = insert(RelationshipModel).values(values)
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=["id"],
+                    set_={
+                        "description": stmt.excluded.description,
+                        "properties": stmt.excluded.properties,
+                        "source_document_ids": stmt.excluded.source_document_ids,
+                        "source_chunk_ids": stmt.excluded.source_chunk_ids,
+                        "valid_from": stmt.excluded.valid_from,
+                        "valid_until": stmt.excluded.valid_until,
+                        "confidence": stmt.excluded.confidence,
+                        "weight": stmt.excluded.weight,
+                        "metadata": stmt.excluded.metadata,
+                        "updated_at": stmt.excluded.updated_at,
+                    },
+                )
+                # ``xmax = 0`` is true only for a freshly INSERTed row; a row
+                # touched by ON CONFLICT DO UPDATE carries a non-zero xmax - an
+                # exact created/merged split on the id key. ``literal_column(...)``
+                # (not ``text(...)``) so the column is addressable by name.
+                stmt = stmt.returning(
+                    RelationshipModel.id,
+                    literal_column("(xmax = 0)").label("is_new"),
+                )
+                result = await session.execute(stmt)
+                for row in result.mappings():
+                    is_new_by_id[row["id"]] = bool(row["is_new"])
 
-                    batch = relationships[start : start + batch_size]
-                    values = [
-                        {
-                            "id": rel.id,
-                            "namespace_id": rel.namespace_id,
-                            "source_entity_id": rel.source_entity_id,
-                            "target_entity_id": rel.target_entity_id,
-                            "relationship_type": rel.relationship_type,
-                            "description": rel.description,
-                            "properties": rel.properties,
-                            "source_document_ids": rel.source_document_ids,
-                            "source_chunk_ids": rel.source_chunk_ids,
-                            "valid_from": rel.valid_from,
-                            "valid_until": rel.valid_until,
-                            "confidence": rel.confidence,
-                            "weight": rel.weight,
-                            "metadata_": rel.metadata,
-                            "created_at": rel.created_at,
-                            "updated_at": rel.updated_at,
-                        }
-                        for rel in batch
-                    ]
-                    stmt = insert(RelationshipModel).values(values)
-                    stmt = stmt.on_conflict_do_update(
-                        index_elements=["id"],
-                        set_={
-                            "description": stmt.excluded.description,
-                            "properties": stmt.excluded.properties,
-                            "source_document_ids": stmt.excluded.source_document_ids,
-                            "source_chunk_ids": stmt.excluded.source_chunk_ids,
-                            "valid_from": stmt.excluded.valid_from,
-                            "valid_until": stmt.excluded.valid_until,
-                            "confidence": stmt.excluded.confidence,
-                            "weight": stmt.excluded.weight,
-                            "metadata": stmt.excluded.metadata,
-                            "updated_at": stmt.excluded.updated_at,
-                        },
-                    )
-                    # ``xmax = 0`` is true only for a freshly INSERTed row; a
-                    # row touched by ON CONFLICT DO UPDATE carries a non-zero
-                    # xmax. Gives an exact created/merged split on the id key.
-                    # ``literal_column(...).label(...)`` (not ``text(...)``) so
-                    # the result column is addressable by name in the Row.
-                    stmt = stmt.returning(
-                        RelationshipModel.id,
-                        literal_column("(xmax = 0)").label("is_new"),
-                    )
-                    result = await session.execute(stmt)
-                    for row in result.mappings():
-                        is_new_by_id[row["id"]] = bool(row["is_new"])
-
-                    # Commit (and release the advisory lock) per sub-batch.
-                    await session.commit()
+            await self._commit_grouped_sub_batches(
+                total=len(relationships),
+                batch_size=batch_size,
+                key1=key1,
+                key2=key2,
+                apply_sub_batch=_apply,
+            )
 
             return [(rel, is_new_by_id.get(rel.id, True)) for rel in relationships]
 
