@@ -1612,6 +1612,27 @@ class QuerySettings(BaseSettings):
         default=0.1, ge=0.0, le=1.0, description="Weight of the bigram-coherence re-rank after fusion (0.0 disables)"
     )
 
+    # #1475: score-calibrated fusion. Contiguous block - keep grouped.
+    #
+    # ``fusion_mode`` selects the vector+graph (+BM25) fusion strategy. "rrf"
+    # (default) is rank-only weighted RRF, byte-identical to prior behavior.
+    # "calibrated" is a magnitude-aware convex blend of per-channel
+    # min-max-normalized scores (the vector channel on the true raw cosine,
+    # #1441), so a lone strong-cosine vector hit is not buried below weak-cosine
+    # chunks that merely co-occur across channels. Default-OFF; the A/B on
+    # complex_reasoning + BEAM multi-session is downstream
+    # (khora-graphrag-benchmark#12). Targets multi-hop (complex_reasoning /
+    # contextual_summarization); makes no fact_retrieval claims.
+    fusion_mode: Literal["rrf", "calibrated"] = Field(
+        default="rrf",
+        description=(
+            "Fusion strategy: 'rrf' (default, rank-only weighted RRF, unchanged) "
+            "or 'calibrated' (magnitude-aware convex blend of per-channel "
+            "min-max-normalized scores; surfaces lone strong-cosine winners). "
+            "Default-OFF; A/B is downstream (#1475)."
+        ),
+    )
+
     # Temporal settings.
     # `recency_weight` was tightened from 0.2 to 0.35 after BEAM 100K showed
     # the four weakest categories (event_ordering, contradiction_resolution,

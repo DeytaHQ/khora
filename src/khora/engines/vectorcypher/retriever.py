@@ -58,6 +58,8 @@ from .fusion import (
     apply_recency_boost,
     attach_relevance_scores,
     normalize_scores,
+    score_calibrated_fusion,
+    score_calibrated_fusion_nlist,
     weighted_rrf,
     weighted_rrf_normalized,
 )
@@ -353,6 +355,12 @@ class RetrieverConfig:
     rrf_k: int = 60
     vector_weight: float = 0.6
     graph_weight: float = 0.4
+    # #1475: score-calibrated fusion. "rrf" (default) = rank-only weighted RRF,
+    # unchanged. "calibrated" = magnitude-aware convex fusion of per-channel
+    # min-max-normalized scores, so a lone strong-cosine vector hit is not buried
+    # below weak-cosine chunks that merely co-occur across channels. Default-OFF;
+    # A/B is downstream (khora-graphrag-benchmark#12).
+    fusion_mode: str = "rrf"
 
     # Per-complexity fusion overrides (used when routing is enabled)
     simple_vector_weight: float = 0.8
@@ -4885,6 +4893,10 @@ class VectorCypherRetriever:
             routing=routing,
             is_temporal=_tp.recency_weight > 0.2,
             exclude_bm25_only=min_similarity > 0.0,
+            # #1475: score-calibrated fusion (default "rrf"). Threads the true
+            # raw cosines (#1441) so the calibrated blend weighs magnitude.
+            fusion_mode=self._config.fusion_mode,
+            raw_cosine_by_id=raw_cosine_by_id,
         )
 
         # Step 8: Apply recency boost driven by temporal signal category.
@@ -5048,13 +5060,22 @@ class VectorCypherRetriever:
         routing: RoutingDecision | None = None,
         is_temporal: bool = False,
         exclude_bm25_only: bool = False,
+        fusion_mode: str = "rrf",
+        raw_cosine_by_id: dict[UUID, float] | None = None,
     ) -> list[FusedResult]:
-        """Fuse vector, graph, and optionally BM25 results using weighted RRF.
+        """Fuse vector, graph, and optionally BM25 results.
 
         When ``bm25_chunks`` is provided (BM25 channel active), uses the N-list
         ``reciprocal_rank_fusion`` from :mod:`khora.query.fusion` to fuse all
         three channels. Otherwise falls back to the 2-list
         ``weighted_rrf_normalized`` for vector+graph fusion.
+
+        When ``fusion_mode="calibrated"`` (#1475), rank-only RRF is replaced by
+        the magnitude-aware ``score_calibrated_fusion`` convex blend of
+        per-channel min-max-normalized scores. In calibrated mode the vector
+        channel's scores are the true raw cosines (``raw_cosine_by_id``), so the
+        blend reflects semantic magnitude rather than the store-internal RRF
+        tuple score. Default ``"rrf"`` keeps behavior byte-identical.
 
         Args:
             vector_chunks: Results from vector search
@@ -5122,6 +5143,16 @@ class VectorCypherRetriever:
             span.set_attribute("vector_weight", vector_weight)
             span.set_attribute("graph_weight", graph_weight)
 
+            # #1475: score-calibrated convex fusion (default-OFF). When active,
+            # calibrate the vector channel on the TRUE raw cosine (#1441), not
+            # the store-internal RRF tuple score, so the convex blend reflects
+            # semantic magnitude. Graph/BM25 keep their own scores (each channel
+            # is min-max normalized inside the fuser).
+            calibrated = fusion_mode == "calibrated"
+            span.set_attribute("fusion_mode", fusion_mode)
+            if calibrated and raw_cosine_by_id:
+                vector_chunks = [(cid, raw_cosine_by_id.get(cid, score), chunk) for cid, score, chunk in vector_chunks]
+
             # ── 3-channel fusion (vector + graph + BM25) ────────────────
             if bm25_chunks:
                 from khora.query.fusion import reciprocal_rank_fusion as _nlist_rrf
@@ -5145,12 +5176,24 @@ class VectorCypherRetriever:
                     "bm25": bm25_weight,
                 }
 
-                fused_raw: list[tuple[Chunk, float]] = _nlist_rrf(
-                    ranked_lists,
-                    weights=weights,
-                    k=self._config.rrf_k,
-                    id_extractor=lambda chunk: chunk.id,
-                )
+                fused_raw: list[tuple[Chunk, float]]
+                if calibrated:
+                    # #1475: magnitude-aware convex fusion across all 3 channels.
+                    calibrated_fused = score_calibrated_fusion_nlist(
+                        [
+                            (vector_chunks, vector_weight),
+                            (graph_chunks, graph_weight),
+                            (bm25_chunks, bm25_weight),
+                        ]
+                    )
+                    fused_raw = [(fr.item, fr.rrf_score) for fr in calibrated_fused]
+                else:
+                    fused_raw = _nlist_rrf(
+                        ranked_lists,
+                        weights=weights,
+                        k=self._config.rrf_k,
+                        id_extractor=lambda chunk: chunk.id,
+                    )
 
                 # #1425: with an explicit min_similarity floor, chunks the
                 # lexical channel alone surfaced are excluded from the fused
@@ -5190,6 +5233,14 @@ class VectorCypherRetriever:
                 ]
 
             # ── 2-channel fusion (vector + graph) ──────────────────────
+            if calibrated:
+                # #1475: magnitude-aware convex fusion of vector + graph.
+                return score_calibrated_fusion(
+                    vector_results=vector_chunks,
+                    graph_results=graph_chunks,
+                    vector_weight=vector_weight,
+                    graph_weight=graph_weight,
+                )
             if use_normalization:
                 return weighted_rrf_normalized(
                     vector_results=vector_chunks,

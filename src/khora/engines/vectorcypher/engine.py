@@ -905,6 +905,10 @@ class VectorCypherEngine:
             # disables it (#1056). Previously hardcoded to the RetrieverConfig
             # default and unreachable from public config.
             coherence_weight=self._config.query.coherence_weight,
+            # #1475: score-calibrated fusion selector. Read straight from
+            # KhoraConfig.query (no VectorCypherConfig equivalent), mirroring
+            # coherence_weight above. Default "rrf" = unchanged.
+            fusion_mode=self._config.query.fusion_mode,
             min_entity_similarity=self._vc_config.retriever_min_entity_similarity,
             # Issue #1406 - chunk-channel cosine floor. Read straight from
             # KhoraConfig.query (no VectorCypherConfig equivalent exists),
