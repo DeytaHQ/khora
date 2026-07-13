@@ -32,7 +32,12 @@ from khora.storage.temporal import TemporalFilter
 
 
 def _chunk(occurred_at: datetime | None, *, source_system: str | None = None) -> Chunk:
-    """Build a chunk with optional occurred_at and source_system metadata."""
+    """Build a chunk with optional occurred_at and source_system metadata.
+
+    ``occurred_at`` is stamped on the first-class column (the recency reader
+    now reads it there); the metadata blob keeps mirroring it as the pipeline
+    still does during the reader-flip transition.
+    """
     custom: dict[str, object] = {}
     if occurred_at is not None:
         custom["occurred_at"] = occurred_at.isoformat()
@@ -44,6 +49,7 @@ def _chunk(occurred_at: datetime | None, *, source_system: str | None = None) ->
         document_id=uuid4(),
         content="test",
         metadata=custom,
+        occurred_at=occurred_at,
     )
 
 

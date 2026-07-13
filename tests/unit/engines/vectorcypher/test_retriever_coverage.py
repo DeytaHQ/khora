@@ -29,6 +29,8 @@ from khora.engines.vectorcypher.fusion import FusedResult
 from khora.engines.vectorcypher.retriever import (
     RetrieverConfig,
     VectorCypherRetriever,
+    _coerce_occurred_at,
+    _extract_occurred_at,
 )
 from khora.engines.vectorcypher.router import QueryComplexity, RoutingDecision
 from khora.engines.vectorcypher.temporal_detection import (
@@ -62,6 +64,9 @@ def _make_chunk(
         document_id=uuid4(),
         content=content,
         metadata=custom,
+        # Mirror occurred_at onto the first-class column - the recency reader
+        # reads it there now; the blob above is a transitional dead write.
+        occurred_at=_coerce_occurred_at(occurred_at),
     )
 
 
@@ -224,12 +229,62 @@ class TestCalculateRecencyScoresReferenceModes:
         retriever = _make_retriever()
         assert retriever._calculate_recency_scores([]) == {}
 
+    def test_naive_occurred_at_column_is_normalized(self) -> None:
+        """A naive first-class occurred_at (embedded backends carry no tz) is
+        normalized to UTC instead of crashing on a naive/aware subtraction."""
+        retriever = _make_retriever()
+        now = datetime.now(UTC)
+        chunk = Chunk(
+            id=uuid4(),
+            namespace_id=uuid4(),
+            document_id=uuid4(),
+            content="naive",
+            occurred_at=(now - timedelta(days=10)).replace(tzinfo=None),
+        )
+        scores = retriever._calculate_recency_scores(
+            [FusedResult(item_id=chunk.id, item=chunk, rrf_score=0.9)],
+            reference_mode="wall_clock",
+        )
+        assert 0.0 < scores[chunk.id] < 1.0
+
     def test_unparseable_date_gets_default_score(self) -> None:
         """Chunks with no parseable occurred_at get the 0.5 default score."""
         retriever = _make_retriever()
         c = _make_chunk(occurred_at="not-a-date")
         scores = retriever._calculate_recency_scores([FusedResult(item_id=c.id, item=c, rrf_score=0.9)])
         assert scores[c.id] == 0.5
+
+    def test_first_class_column_overrides_dead_metadata_blob(self) -> None:
+        """Recency reads the occurred_at column, not the (now dead) blob.
+
+        Stage 1 keeps mirroring occurred_at into the metadata blob. A chunk
+        whose stale 1999 blob disagrees with a fresh 2026 column must be both
+        extracted and scored from the column - if the blob leaked, ``fresh``
+        would tie the genuinely-1999 ``stale`` chunk.
+        """
+        retriever = _make_retriever()
+        fresh = Chunk(
+            id=uuid4(),
+            namespace_id=uuid4(),
+            document_id=uuid4(),
+            content="fresh",
+            metadata={"occurred_at": "1999-01-01T00:00:00+00:00"},
+            occurred_at=datetime(2026, 5, 1, tzinfo=UTC),
+        )
+        stale = Chunk(
+            id=uuid4(),
+            namespace_id=uuid4(),
+            document_id=uuid4(),
+            content="stale",
+            occurred_at=datetime(1999, 1, 1, tzinfo=UTC),
+        )
+        assert _extract_occurred_at(fresh) == datetime(2026, 5, 1, tzinfo=UTC)
+        results = [
+            FusedResult(item_id=fresh.id, item=fresh, rrf_score=0.9),
+            FusedResult(item_id=stale.id, item=stale, rrf_score=0.9),
+        ]
+        scores = retriever._calculate_recency_scores(results, reference_mode="wall_clock")
+        assert scores[fresh.id] > scores[stale.id]
 
     def test_decay_zero_falls_back_to_config(self) -> None:
         """A pathological decay=0 override falls back to recency_decay_days."""

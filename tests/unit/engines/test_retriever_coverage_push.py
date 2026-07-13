@@ -34,6 +34,7 @@ from khora.engines.vectorcypher.retriever import (
     RetrieverConfig,
     VectorCypherResult,
     VectorCypherRetriever,
+    _coerce_occurred_at,
     _extract_occurred_at,
     _extract_source_system,
     _has_target_date,
@@ -70,6 +71,9 @@ def _make_chunk(
         document_id=uuid4(),
         content=content,
         metadata=custom,
+        # Mirror occurred_at onto the first-class column - the recency reader
+        # reads it there now; the blob above is a transitional dead write.
+        occurred_at=_coerce_occurred_at(occurred_at),
     )
 
 
@@ -98,15 +102,14 @@ def _make_retriever(
 class TestModuleHelpers:
     def test_extract_occurred_at_from_chunk(self) -> None:
         chunk = _make_chunk(occurred_at="2026-04-01T00:00:00+00:00")
-        assert _extract_occurred_at(chunk) == "2026-04-01T00:00:00+00:00"
+        assert _extract_occurred_at(chunk) == datetime(2026, 4, 1, tzinfo=UTC)
 
-    def test_extract_occurred_at_chunk_without_metadata(self) -> None:
+    def test_extract_occurred_at_chunk_without_occurred_at(self) -> None:
         chunk = Chunk(id=uuid4(), namespace_id=uuid4(), document_id=uuid4(), content="x")
-        chunk.metadata = None  # type: ignore[assignment]
         assert _extract_occurred_at(chunk) is None
 
     def test_extract_occurred_at_from_dict(self) -> None:
-        assert _extract_occurred_at({"occurred_at": "2026-01-02"}) == "2026-01-02"
+        assert _extract_occurred_at({"occurred_at": "2026-01-02"}) == datetime(2026, 1, 2)
 
     def test_extract_occurred_at_from_unknown(self) -> None:
         assert _extract_occurred_at("not a chunk") is None
@@ -478,14 +481,15 @@ class TestApplyReranking:
 
     @pytest.mark.asyncio
     async def test_temporal_prefix_in_candidate_content(self) -> None:
-        """Reranker receives content with [Session: X, Date: Y] prefix when metadata
-        contains session_id / occurred_at."""
+        """Reranker receives content with [Session: X, Date: Y] prefix.
+
+        ``session_id`` is a user-space blob key (still read from metadata);
+        ``occurred_at`` is now read from the first-class column.
+        """
         chunk = _make_chunk(
             "the meeting notes",
-            extra={
-                "session_id": "S123",
-                "occurred_at": "2026-04-01T12:34:56+00:00",
-            },
+            occurred_at="2026-04-01T12:34:56+00:00",
+            extra={"session_id": "S123"},
         )
         fused = [FusedResult(item=chunk, item_id=chunk.id, rrf_score=0.5)]
         retriever = _make_retriever()
@@ -585,6 +589,50 @@ class TestApplyLLMReranking:
 
         result = await retriever._apply_llm_reranking("q", fused, limit=5, namespace_id=uuid4())
         assert result == fused
+
+    @pytest.mark.asyncio
+    async def test_temporal_prefix_in_candidate_content(self) -> None:
+        """LLM reranker candidate content carries [Session: X, Date: Y].
+
+        Mirrors the cross-encoder prefix test: ``session_id`` is a user-space
+        blob key, ``occurred_at`` is read from the first-class column.
+        """
+        chunk = _make_chunk(
+            "the meeting notes",
+            occurred_at="2026-04-01T12:34:56+00:00",
+            extra={"session_id": "S123"},
+        )
+        fused = [FusedResult(item=chunk, item_id=chunk.id, rrf_score=0.5)]
+        retriever = _make_retriever()
+
+        from khora.query.reranking import RerankResult
+
+        captured: list[Any] = []
+
+        class CaptureReranker:
+            async def rerank(
+                self,
+                query: str,
+                candidates: Any,
+                *,
+                top_k: int = 10,
+                blend_weight: float = 0.7,
+            ) -> list[RerankResult]:
+                captured.extend(candidates)
+                return [
+                    RerankResult(
+                        item=candidates[0].item,
+                        original_score=0.5,
+                        rerank_score=0.7,
+                        final_score=0.7,
+                    )
+                ]
+
+        retriever._llm_reranker = CaptureReranker()  # type: ignore[assignment]
+        await retriever._apply_llm_reranking("q", fused, limit=5, namespace_id=uuid4())
+        assert captured
+        assert "Session: S123" in captured[0].content
+        assert "Date: 2026-04-01" in captured[0].content
 
     @pytest.mark.asyncio
     async def test_lazy_init_llm_reranker(self) -> None:

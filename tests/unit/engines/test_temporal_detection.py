@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -330,6 +331,7 @@ class TestRelativeRecency:
             document_id=uuid4(),
             content="January event",
             metadata={"occurred_at": "2024-01-15T00:00:00+00:00"},
+            occurred_at=datetime(2024, 1, 15, tzinfo=UTC),
         )
         chunk_may = Chunk(
             id=may_id,
@@ -337,6 +339,7 @@ class TestRelativeRecency:
             document_id=uuid4(),
             content="May event",
             metadata={"occurred_at": "2024-05-15T00:00:00+00:00"},
+            occurred_at=datetime(2024, 5, 15, tzinfo=UTC),
         )
 
         fused = [
@@ -381,6 +384,7 @@ class TestRelativeRecency:
             document_id=uuid4(),
             content="Old",
             metadata={"occurred_at": "2020-01-01T00:00:00+00:00"},
+            occurred_at=datetime(2020, 1, 1, tzinfo=UTC),
         )
         chunk2 = Chunk(
             id=id2,
@@ -388,6 +392,7 @@ class TestRelativeRecency:
             document_id=uuid4(),
             content="New",
             metadata={"occurred_at": "2020-05-01T00:00:00+00:00"},
+            occurred_at=datetime(2020, 5, 1, tzinfo=UTC),
         )
 
         fused = [
@@ -457,6 +462,7 @@ class TestRelativeRecency:
             document_id=uuid4(),
             content="Old",
             metadata={"occurred_at": "2024-01-01T00:00:00+00:00"},
+            occurred_at=datetime(2024, 1, 1, tzinfo=UTC),
         )
         chunk2 = Chunk(
             id=id2,
@@ -464,6 +470,7 @@ class TestRelativeRecency:
             document_id=uuid4(),
             content="New",
             metadata={"occurred_at": "2024-01-08T00:00:00+00:00"},
+            occurred_at=datetime(2024, 1, 8, tzinfo=UTC),
         )
 
         fused = [

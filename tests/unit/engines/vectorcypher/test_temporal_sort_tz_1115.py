@@ -2,14 +2,14 @@
 
 The temporal sort in ``VectorCypherRetriever._simple_retrieve`` re-orders
 chunks by ``occurred_at`` for RECENCY / STATE_QUERY style queries. The sort
-key ``_ts`` parsed ``metadata['occurred_at']`` via ``fromisoformat`` with no
-tzinfo normalization, fell back to ``created_at`` (tz-aware from the DB), and
-finally to naive ``datetime.min``. Sorting a list that mixes naive and aware
-datetimes raises ``TypeError: can't compare offset-naive and offset-aware
-datetimes`` and crashes the whole recall. The metadata dict is built as
-``{'occurred_at': <column iso>, **(chunk.metadata or {})}``, so a
-user-supplied naive ISO string overrides the column value - reachable by
-default since ``enable_reranking`` defaults to ``False``.
+key ``_ts`` reads the first-class ``occurred_at`` column, falls back to
+``created_at`` (tz-aware from the DB), and finally to naive ``datetime.min``.
+The first-class column is naive on embedded backends (no tz) and tz-aware on
+Postgres, so ``_ts`` must normalize naive→UTC: sorting a list that mixes
+naive and aware datetimes otherwise raises ``TypeError: can't compare
+offset-naive and offset-aware datetimes`` and crashes the whole recall. This
+path is reachable by default since ``enable_reranking`` defaults to
+``False``.
 
 Same tz-boundary class as fb6ede76; ``_calculate_recency_scores`` in the
 same file is the reference normalization pattern.
@@ -83,20 +83,18 @@ class TestTemporalSortTimezoneNormalization1115:
 
     @pytest.mark.asyncio
     async def test_mixed_naive_and_aware_timestamps_sort_without_typeerror(self) -> None:
-        """Naive metadata occurred_at + aware created_at + datetime.min sentinel.
+        """Naive occurred_at column + aware created_at + datetime.min sentinel.
 
         Pre-fix this raised ``TypeError: can't compare offset-naive and
         offset-aware datetimes`` mid-recall. Post-fix all keys are normalized
         to UTC and the descending order is (aware created_at 2024-05-01) >
         (naive occurred_at 2024-03-01, treated as UTC) > (sentinel).
         """
-        # (a) user-supplied NAIVE ISO string in chunk metadata overrides the
-        # occurred_at column value in the metadata dict.
+        # (a) NAIVE first-class occurred_at column (embedded backends carry no
+        # tz) -> _ts must normalize it to UTC before comparing.
         naive_meta = _make_search_result(
             "naive-meta",
-            occurred_at=datetime(2024, 1, 1, tzinfo=UTC),
-            created_at=datetime(2024, 1, 1, tzinfo=UTC),
-            metadata={"occurred_at": "2024-03-01T12:00:00"},
+            occurred_at=datetime(2024, 3, 1, 12, 0, 0),
         )
         # (b) no occurred_at -> falls back to tz-AWARE created_at.
         aware_created = _make_search_result(
@@ -123,15 +121,15 @@ class TestTemporalSortTimezoneNormalization1115:
         assert contents == ["aware-created", "naive-meta", "sentinel"]
 
     @pytest.mark.asyncio
-    async def test_z_suffix_occurred_at_parses_and_sorts(self) -> None:
-        """'Z'-suffixed ISO strings normalize like _calculate_recency_scores."""
+    async def test_aware_and_naive_occurred_at_columns_sort(self) -> None:
+        """Aware + naive first-class occurred_at columns normalize and sort."""
         z_suffix = _make_search_result(
             "z-suffix",
-            metadata={"occurred_at": "2024-06-01T00:00:00Z"},
+            occurred_at=datetime(2024, 6, 1, tzinfo=UTC),
         )
         naive = _make_search_result(
             "naive",
-            metadata={"occurred_at": "2024-02-01T00:00:00"},
+            occurred_at=datetime(2024, 2, 1),
         )
 
         retriever = _make_retriever()

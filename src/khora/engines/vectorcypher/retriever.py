@@ -559,12 +559,20 @@ class RetrieverConfig:
     metadata_overfetch_multiplier: int = 3
 
 
-def _extract_occurred_at(item: Any) -> str | None:
-    """Extract occurred_at string from a Chunk or dict item."""
+def _extract_occurred_at(item: Any) -> datetime | None:
+    """Extract the ``occurred_at`` datetime from a Chunk or dict item.
+
+    Chunk-shaped items read the first-class ``occurred_at`` column
+    (already a ``datetime``); there is deliberately no fallback to
+    ``source_timestamp`` so the boost/sort semantics match the column
+    that the (now dead) ``metadata['occurred_at']`` blob mirrored. Dict
+    items are coerced via :func:`_coerce_occurred_at` so the return type
+    is always ``datetime | None``.
+    """
     if isinstance(item, Chunk):
-        return (item.metadata or {}).get("occurred_at")
+        return item.occurred_at
     elif isinstance(item, dict):
-        return item.get("occurred_at")
+        return _coerce_occurred_at(item.get("occurred_at"))
     return None
 
 
@@ -1325,12 +1333,8 @@ class VectorCypherRetriever:
                     # depending on the path; unwrap defensively.
                     raw = result.chunks[0]
                     top_chunk = raw[0] if isinstance(raw, tuple) else raw
-                    occurred_at_iso = None
-                    meta = getattr(top_chunk, "metadata", None)
-                    if isinstance(meta, dict):
-                        occurred_at_iso = meta.get("occurred_at")
-                    if occurred_at_iso:
-                        occurred_at = datetime.fromisoformat(occurred_at_iso.replace("Z", "+00:00"))
+                    occurred_at = getattr(top_chunk, "occurred_at", None)
+                    if occurred_at is not None:
                         if occurred_at.tzinfo is None:
                             occurred_at = occurred_at.replace(tzinfo=UTC)
                         age_days = (datetime.now(UTC) - occurred_at).total_seconds() / 86400.0
@@ -2969,7 +2973,7 @@ class VectorCypherRetriever:
                     session_id = raw.get("session_id") or raw.get("conversation_id")
                     if session_id:
                         prefix_parts.append(f"Session: {session_id}")
-                    occurred_at = raw.get("occurred_at") or raw.get("source_timestamp")
+                    occurred_at = getattr(r.item, "occurred_at", None) or getattr(r.item, "source_timestamp", None)
                     if occurred_at:
                         prefix_parts.append(f"Date: {str(occurred_at)[:10]}")
                     if prefix_parts:
@@ -3171,7 +3175,7 @@ class VectorCypherRetriever:
                     session_id = raw.get("session_id") or raw.get("conversation_id")
                     if session_id:
                         prefix_parts.append(f"Session: {session_id}")
-                    occurred_at = raw.get("occurred_at") or raw.get("source_timestamp")
+                    occurred_at = getattr(r.item, "occurred_at", None) or getattr(r.item, "source_timestamp", None)
                     if occurred_at:
                         prefix_parts.append(f"Date: {str(occurred_at)[:10]}")
                     if prefix_parts:
@@ -3527,24 +3531,20 @@ class VectorCypherRetriever:
             if temporal_sort and chunk_results and not self._config.enable_reranking:
                 from datetime import datetime as _dt
 
-                # Normalize every key to tz-aware UTC: metadata occurred_at
-                # may be a user-supplied naive ISO string (it overrides the
-                # column value in the metadata dict), created_at is tz-aware
-                # from the DB, and the sentinel must match. Mixing naive and
-                # aware datetimes in one sort raises TypeError (#1115). Same
+                # Normalize every key to tz-aware UTC: the first-class
+                # occurred_at column may be naive (embedded backends carry no
+                # tz) or tz-aware (Postgres), created_at is tz-aware from the
+                # DB, and the sentinel must match. Mixing naive and aware
+                # datetimes in one sort raises TypeError (#1115). Same
                 # normalization as _calculate_recency_scores.
                 _ts_sentinel = _dt.min.replace(tzinfo=UTC)
 
                 def _ts(pair: tuple[Chunk, float]) -> _dt:
-                    occ = (pair[0].metadata or {}).get("occurred_at") if isinstance(pair[0].metadata, dict) else None
-                    if occ:
-                        try:
-                            parsed = _dt.fromisoformat(occ.replace("Z", "+00:00"))
-                            if parsed.tzinfo is None:
-                                parsed = parsed.replace(tzinfo=UTC)
-                            return parsed
-                        except (ValueError, TypeError, AttributeError):
-                            pass
+                    occ = pair[0].occurred_at
+                    if occ is not None:
+                        if occ.tzinfo is None:
+                            occ = occ.replace(tzinfo=UTC)
+                        return occ
                     created = pair[0].created_at
                     if created is None:
                         return _ts_sentinel
@@ -5226,18 +5226,16 @@ class VectorCypherRetriever:
         """
         scores: dict[UUID, float] = {}
 
-        # First pass: extract all occurred_at timestamps.
+        # First pass: extract all occurred_at timestamps. The reader now
+        # returns a first-class ``datetime`` (not an ISO string), so the
+        # only normalization left is naive→UTC before the reference math.
         parsed_times: dict[UUID, datetime] = {}
         for r in results:
-            occurred_at_str = _extract_occurred_at(r.item)
-            if occurred_at_str:
-                try:
-                    occurred_at = datetime.fromisoformat(occurred_at_str.replace("Z", "+00:00"))
-                    if occurred_at.tzinfo is None:
-                        occurred_at = occurred_at.replace(tzinfo=UTC)
-                    parsed_times[r.item_id] = occurred_at
-                except (ValueError, TypeError):
-                    pass
+            occurred_at = _extract_occurred_at(r.item)
+            if occurred_at is not None:
+                if occurred_at.tzinfo is None:
+                    occurred_at = occurred_at.replace(tzinfo=UTC)
+                parsed_times[r.item_id] = occurred_at
 
         # Resolve reference mode from explicit arg → bench env → config flag.
         # Bench-mode env wins to keep benchmark replays deterministic even
