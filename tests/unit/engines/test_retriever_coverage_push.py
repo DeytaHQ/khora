@@ -484,12 +484,18 @@ class TestApplyReranking:
         """Reranker receives content with [Session: X, Date: Y] prefix.
 
         ``session_id`` is a user-space blob key (still read from metadata);
-        ``occurred_at`` is now read from the first-class column.
+        ``occurred_at`` is now read from the first-class column. The blob's
+        ``occurred_at`` is deliberately set to a stale, divergent value so this
+        test fails if the reader is reverted to sourcing the prefix from the
+        blob instead of the column.
         """
-        chunk = _make_chunk(
-            "the meeting notes",
-            occurred_at="2026-04-01T12:34:56+00:00",
-            extra={"session_id": "S123"},
+        chunk = Chunk(
+            id=uuid4(),
+            namespace_id=uuid4(),
+            document_id=uuid4(),
+            content="the meeting notes",
+            metadata={"session_id": "S123", "occurred_at": "1999-01-01T00:00:00+00:00"},
+            occurred_at=datetime(2026, 4, 1, 12, 34, 56, tzinfo=UTC),
         )
         fused = [FusedResult(item=chunk, item_id=chunk.id, rrf_score=0.5)]
         retriever = _make_retriever()
@@ -522,6 +528,8 @@ class TestApplyReranking:
         assert captured
         assert "Session: S123" in captured[0].content
         assert "Date: 2026-04-01" in captured[0].content
+        # The stale blob date must NOT leak: prefix is sourced from the column.
+        assert "1999" not in captured[0].content
 
 
 # ---------------------------------------------------------------------------
@@ -595,12 +603,17 @@ class TestApplyLLMReranking:
         """LLM reranker candidate content carries [Session: X, Date: Y].
 
         Mirrors the cross-encoder prefix test: ``session_id`` is a user-space
-        blob key, ``occurred_at`` is read from the first-class column.
+        blob key, ``occurred_at`` is read from the first-class column. The
+        blob's ``occurred_at`` is a stale, divergent value so the test fails if
+        the reader is reverted to sourcing the prefix from the blob.
         """
-        chunk = _make_chunk(
-            "the meeting notes",
-            occurred_at="2026-04-01T12:34:56+00:00",
-            extra={"session_id": "S123"},
+        chunk = Chunk(
+            id=uuid4(),
+            namespace_id=uuid4(),
+            document_id=uuid4(),
+            content="the meeting notes",
+            metadata={"session_id": "S123", "occurred_at": "1999-01-01T00:00:00+00:00"},
+            occurred_at=datetime(2026, 4, 1, 12, 34, 56, tzinfo=UTC),
         )
         fused = [FusedResult(item=chunk, item_id=chunk.id, rrf_score=0.5)]
         retriever = _make_retriever()
@@ -633,6 +646,8 @@ class TestApplyLLMReranking:
         assert captured
         assert "Session: S123" in captured[0].content
         assert "Date: 2026-04-01" in captured[0].content
+        # The stale blob date must NOT leak: prefix is sourced from the column.
+        assert "1999" not in captured[0].content
 
     @pytest.mark.asyncio
     async def test_lazy_init_llm_reranker(self) -> None:

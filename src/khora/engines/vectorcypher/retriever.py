@@ -1326,7 +1326,7 @@ class VectorCypherRetriever:
             # operators can spot temporal-quality drift in production
             # (the dashboard slices it by temporal_category via the span
             # parent context). Only fires when the top chunk carries a
-            # parseable occurred_at; skipped on empty result sets.
+            # non-null occurred_at column; skipped on empty result sets.
             if result.chunks:
                 try:
                     # result.chunks may be list[Chunk] or list[tuple[Chunk, score]]
@@ -3165,7 +3165,8 @@ class VectorCypherRetriever:
 
         candidates = []
         for r in candidates_to_rerank:
-            # Build content with temporal metadata prefix
+            # Build content with temporal prefix (date from the first-class
+            # column; session id still from the metadata blob) for LLM context
             chunk_content = r.item.content if hasattr(r.item, "content") else str(r.item)
             if hasattr(r.item, "metadata") and r.item.metadata:
                 meta = r.item.metadata
