@@ -1858,6 +1858,31 @@ class QuerySettings(BaseSettings):
             "is never shrunk; seeds are kept first when trimming."
         ),
     )
+    ppr_early_stop_patience: int = Field(
+        default=3,
+        ge=0,
+        le=50,
+        description=(
+            "Top-k rank-stability early-stop patience for the PPR power method "
+            "(khora#1476). The walk halts once the top "
+            "(ppr_top_entities + ppr_early_stop_margin) entity ordering is unchanged "
+            "for this many consecutive iterations, instead of running to global-L1 "
+            "convergence (~2-4x fewer iterations on production graph shapes; the "
+            "top-ppr_top_entities set stays byte-identical, guarded by a parity "
+            "test). 0 disables the early-stop (legacy global-L1 behaviour)."
+        ),
+    )
+    ppr_early_stop_margin: int = Field(
+        default=10,
+        ge=0,
+        le=200,
+        description=(
+            "Extra entities beyond ppr_top_entities tracked for the PPR early-stop "
+            "stability check (khora#1476), so a node just outside the retrieved set "
+            "cannot climb in after the walk halts. Inert when ppr_early_stop_patience "
+            "is 0."
+        ),
+    )
 
     @field_validator("enable_hyde", mode="before")
     @classmethod

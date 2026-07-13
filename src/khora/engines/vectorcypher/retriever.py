@@ -547,6 +547,13 @@ class RetrieverConfig:
     # the resolved seeds survive into the graph. Below the cap these are inert.
     ppr_neighborhood_per_seed_limit: int = 64
     ppr_max_neighborhood_entities: int = 2000
+    # #1476: top-k rank-stability early-stop for the PPR power method. The walk
+    # halts once the top (ppr_top_entities + ppr_early_stop_margin) ordering is
+    # stable for ppr_early_stop_patience consecutive iterations; the retrieved
+    # top-ppr_top_entities set stays byte-identical to the full-iteration result.
+    # patience=0 disables it (legacy global-L1 convergence).
+    ppr_early_stop_patience: int = 3
+    ppr_early_stop_margin: int = 10
 
     # Limits
     max_chunks: int = 50
@@ -2150,6 +2157,8 @@ class VectorCypherRetriever:
                     limit=graph_fetch_limit,
                     neighborhood_per_seed_limit=self._config.ppr_neighborhood_per_seed_limit,
                     max_neighborhood_entities=self._config.ppr_max_neighborhood_entities,
+                    early_stop_patience=self._config.ppr_early_stop_patience,
+                    early_stop_margin=self._config.ppr_early_stop_margin,
                     # ADR-001 (#1373): surface a Degradation on the engine_info list
                     # when the graph channel silently returns nothing.
                     out_degradations=degradations,

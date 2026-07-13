@@ -325,6 +325,94 @@ class TestPageRank:
 
 
 # ---------------------------------------------------------------------------
+# PageRank top-k rank-stability early-stop (#1476)
+# ---------------------------------------------------------------------------
+
+
+def _pr_test_graph(n: int) -> list[tuple[int, int, float]]:
+    """Deterministic scale-free-ish weighted graph.
+
+    Low-index hub nodes accumulate the most PR mass, so the top-k set stabilizes
+    well before global-L1 convergence — the property the #1476 early-stop
+    exploits. Mirrors ``build_test_graph`` in ``pagerank.rs`` so the Rust and
+    Python paths are exercised on the same shape.
+    """
+    edges: list[tuple[int, int, float]] = []
+    for dst in range(1, n):
+        for step in (1, 2, 3):
+            src = (dst * step) % dst
+            w = 1.0 + float((dst * 7 + step * 13) % 5)
+            edges.append((src, dst, w))
+            edges.append((dst, src, w))
+    return edges
+
+
+def _top(scores: list[float], k: int) -> list[int]:
+    return sorted(range(len(scores)), key=lambda i: (-scores[i], i))[:k]
+
+
+class TestPageRankEarlyStop:
+    def test_top_k_indices_helper_tie_break(self, force_python):
+        # Ties broken by ascending index; descending by score otherwise.
+        assert accel._top_k_indices([0.5, 0.5, 0.5, 0.5], 3) == [0, 1, 2]
+        assert accel._top_k_indices([0.1, 0.9, 0.5, 0.7], 2) == [1, 3]
+        # k larger than n clamps.
+        assert accel._top_k_indices([0.2, 0.4], 10) == [1, 0]
+
+    def test_early_stop_topk_byte_identical_python(self, force_python):
+        # Pure-Python path: early-stopped top-30 must be byte-identical to the
+        # full-iteration top-30 — the #1476 safety guarantee.
+        n = 400
+        edges = _pr_test_graph(n)
+        seed = [1.0 if i % 40 == 0 else 0.0 for i in range(n)]
+        full = accel.pagerank(n, edges, 0.85, 50, 1e-5, personalization=seed)
+        early = accel.pagerank(n, edges, 0.85, 50, 1e-5, personalization=seed, rank_k=40, stable_iters=3)
+        assert _top(full, 30) == _top(early, 30)
+
+    def test_early_stop_disabled_matches_legacy_python(self, force_python):
+        # rank_k=None and stable_iters=0 both reproduce the pure global-L1 path.
+        n = 200
+        edges = _pr_test_graph(n)
+        seed = [1.0 if i < 3 else 0.0 for i in range(n)]
+        legacy = accel.pagerank(n, edges, 0.85, 50, 1e-5, personalization=seed)
+        rank_none = accel.pagerank(n, edges, 0.85, 50, 1e-5, personalization=seed, rank_k=None, stable_iters=3)
+        zero_patience = accel.pagerank(n, edges, 0.85, 50, 1e-5, personalization=seed, rank_k=40, stable_iters=0)
+        assert legacy == rank_none == zero_patience
+
+    @pytest.mark.skipif(not accel._HAS_RUST, reason="Rust extension not built")
+    def test_rust_python_parity_early_stop(self, monkeypatch):
+        # The Rust kernel and the pure-Python fallback must produce bit-identical
+        # scores AND a byte-identical top-30 under the early-stop, so switching
+        # backends never changes results (the known Rust-vs-numpy parity concern).
+        n = 500
+        edges = _pr_test_graph(n)
+        seed = [1.0 if i < 5 else 0.0 for i in range(n)]
+
+        rust = accel.pagerank(n, edges, 0.85, 50, 1e-5, personalization=seed, rank_k=40, stable_iters=3)
+
+        monkeypatch.setattr(accel, "_HAS_RUST", False)
+        py = accel.pagerank(n, edges, 0.85, 50, 1e-5, personalization=seed, rank_k=40, stable_iters=3)
+
+        assert len(rust) == len(py) == n
+        for r, p in zip(rust, py, strict=True):
+            assert r == pytest.approx(p, abs=1e-12, rel=1e-12)
+        assert _top(rust, 30) == _top(py, 30)
+
+    @pytest.mark.skipif(not accel._HAS_RUST, reason="Rust extension not built")
+    def test_rust_python_parity_no_early_stop(self, monkeypatch):
+        # Parity must also hold on the legacy (no early-stop) path.
+        n = 300
+        edges = _pr_test_graph(n)
+        seed = [1.0 if i < 4 else 0.0 for i in range(n)]
+
+        rust = accel.pagerank(n, edges, 0.85, 50, 1e-6, personalization=seed)
+        monkeypatch.setattr(accel, "_HAS_RUST", False)
+        py = accel.pagerank(n, edges, 0.85, 50, 1e-6, personalization=seed)
+        for r, p in zip(rust, py, strict=True):
+            assert r == pytest.approx(p, abs=1e-12, rel=1e-12)
+
+
+# ---------------------------------------------------------------------------
 # Build chunk edges
 # ---------------------------------------------------------------------------
 

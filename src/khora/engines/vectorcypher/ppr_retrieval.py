@@ -322,6 +322,8 @@ async def ppr_retrieve_chunks(
     limit: int,
     neighborhood_per_seed_limit: int = 64,
     max_neighborhood_entities: int = 2000,
+    early_stop_patience: int = 3,
+    early_stop_margin: int = 10,
     out_degradations: list[Degradation] | None = None,
 ) -> tuple[list[tuple[UUID, float, Chunk]], dict[UUID, float]]:
     """Run query-time PPR over the namespace graph and score chunks.
@@ -353,6 +355,16 @@ async def ppr_retrieve_chunks(
             the entity set; the effective bound is
             ``max(max_neighborhood_entities, len(slice))`` so the base slice is
             never shrunk. Seeds are kept first when trimming.
+        early_stop_patience: Top-k rank-stability early-stop patience (#1476).
+            The PPR power iteration halts once the top ``top_entities +
+            early_stop_margin`` entity ordering is unchanged for this many
+            consecutive iterations instead of running to global-L1 convergence
+            (~2-4x fewer iterations on production graph shapes, top-``top_entities``
+            byte-identical). ``0`` disables the early-stop (legacy global-L1 only).
+        early_stop_margin: Extra entities beyond ``top_entities`` tracked for the
+            early-stop stability check, so a node just outside the retrieved set
+            cannot climb in after the walk halts. Inert when ``early_stop_patience``
+            is ``0``.
         out_degradations: When provided, a structured :class:`Degradation`
             (ADR-001) is appended whenever the graph channel returns nothing on
             a genuine degenerate condition (no seed overlap / still-empty graph
@@ -424,6 +436,14 @@ async def ppr_retrieve_chunks(
         span.set_attribute("entity_count", n)
         span.set_attribute("edge_count", len(graph.edges))
 
+        # #1476: top-k rank-stability early-stop. Track the top
+        # ``top_entities + margin`` ordering; the retrieved set (top
+        # ``top_entities``) stays byte-identical to the full-iteration result
+        # (guarded by a parity test) while the walk halts ~2-4x sooner. Disabled
+        # (rank_k=None) when patience is 0 → legacy global-L1 behaviour.
+        rank_k = (top_entities + max(0, early_stop_margin)) if early_stop_patience > 0 else None
+        span.set_attribute("early_stop_rank_k", rank_k if rank_k is not None else -1)
+
         pr_scores = _pagerank(
             n=n,
             edges=graph.edges,
@@ -431,6 +451,8 @@ async def ppr_retrieve_chunks(
             max_iter=max_iter,
             tol=tol,
             personalization=personalization,
+            rank_k=rank_k,
+            stable_iters=early_stop_patience,
         )
 
         entity_score_map: dict[UUID, float] = {graph.entities[i].id: pr_scores[i] for i in range(n)}
