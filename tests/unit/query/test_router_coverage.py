@@ -24,9 +24,11 @@ External LLM is mocked at the import site inside ``_llm_route``.
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
+from uuid import uuid4
 
 import pytest
 
+from khora.query.degree_stats import DegreeStats
 from khora.query.router import (
     QueryComplexity,
     QueryComplexityRouter,
@@ -396,6 +398,154 @@ class TestComputeAdaptiveDepth:
             )
         )
         assert r.compute_adaptive_depth(entry_entity_count=5, base_depth=2) == 2
+
+
+# ---------------------------------------------------------------------------
+# Frontier-budgeted adaptive depth (#1477)
+# ---------------------------------------------------------------------------
+
+
+def _stats(degree_map: dict, mean: float, *, num_entities: int = 10_000) -> DegreeStats:
+    return DegreeStats(
+        num_entities=num_entities,
+        mean_degree=mean,
+        median_degree=1.0,
+        max_degree=max(degree_map.values(), default=0),
+        degree_by_entity=degree_map,
+    )
+
+
+class TestFrontierBudgetedDepth:
+    """The #1477 rule: predict frontier from seed degree x branching factor.
+
+    The old count-only rule is sign-wrong on power-law graphs. With a degree
+    histogram, hub seeds (few but high-degree) must go SHALLOWER than the old
+    rule, many low-degree seeds must go DEEPER, and a missing histogram must
+    fall back to the exact old count rule.
+    """
+
+    def test_hub_seeds_go_shallower_than_old_rule(self) -> None:
+        # Two hub seeds (degree 5000 each) on a power-law graph. The old rule
+        # keys on count (2 <= low threshold) and DEEPENS to base+1=3 - exactly
+        # when the one-hop frontier (~10000) explodes. The frontier rule sees
+        # the seeds' actual degrees blow the budget and drops to depth 1.
+        r = QueryComplexityRouter(RouterConfig(complex_depth=2, adaptive_depth_frontier_budget=300))
+        seeds = [uuid4(), uuid4()]
+        stats = _stats({seeds[0]: 5000, seeds[1]: 5000}, mean=4.0)
+
+        old = r.compute_adaptive_depth(entry_entity_count=2, base_depth=2)
+        new = r.compute_adaptive_depth(
+            entry_entity_count=2,
+            base_depth=2,
+            degree_stats=stats,
+            seed_entity_ids=seeds,
+        )
+
+        assert old == 3  # sign-wrong: deepens the hub query
+        assert new == 1  # frontier rule: shallow because the frontier explodes
+        assert new < old
+
+    def test_many_low_degree_seeds_go_deeper_than_old_rule(self) -> None:
+        # Fifteen low-degree seeds (degree 2 each). The old rule keys on count
+        # (15 >= high threshold) and caps depth at 1 - leaving cheap context
+        # unexplored. The frontier rule predicts a small frontier and goes deep.
+        r = QueryComplexityRouter(RouterConfig(complex_depth=2, adaptive_depth_frontier_budget=300))
+        seeds = [uuid4() for _ in range(15)]
+        stats = _stats({s: 2 for s in seeds}, mean=2.0)
+
+        old = r.compute_adaptive_depth(entry_entity_count=15, base_depth=2)
+        new = r.compute_adaptive_depth(
+            entry_entity_count=15,
+            base_depth=2,
+            degree_stats=stats,
+            seed_entity_ids=seeds,
+        )
+
+        assert old == 1  # sign-wrong: caps a cheap frontier
+        assert new == 3  # frontier rule: deep because the frontier stays small
+        assert new > old
+
+    def test_missing_stats_falls_back_to_old_count_rule(self) -> None:
+        # No histogram (fresh namespace / graph-less stack) -> the frontier rule
+        # is not consulted at all; the exact old count rule decides.
+        r = QueryComplexityRouter(RouterConfig(complex_depth=2, adaptive_depth_frontier_budget=300))
+        # High-count fallback: 15 >= threshold -> shallow (1).
+        assert r.compute_adaptive_depth(entry_entity_count=15, base_depth=2, degree_stats=None) == 1
+        # Low-count fallback: 2 <= threshold -> deeper (3).
+        assert r.compute_adaptive_depth(entry_entity_count=2, base_depth=2, degree_stats=None) == 3
+        # Mid-range fallback: base_depth unchanged.
+        assert r.compute_adaptive_depth(entry_entity_count=5, base_depth=2, degree_stats=None) == 2
+
+    def test_empty_graph_stats_fall_back_to_count_rule(self) -> None:
+        # A DegreeStats with num_entities == 0 (edgeless namespace) is treated
+        # as "no signal" and falls back to the count rule.
+        r = QueryComplexityRouter(RouterConfig(complex_depth=2, adaptive_depth_frontier_budget=300))
+        empty = _stats({}, mean=0.0, num_entities=0)
+        assert r.compute_adaptive_depth(entry_entity_count=15, base_depth=2, degree_stats=empty) == 1
+
+    def test_typical_graph_reproduces_base_depth(self) -> None:
+        # Conservatism guard: on a typical mid-range recall (5 seeds, mean
+        # degree 5) the frontier rule reproduces the old base_depth, so the
+        # default budget does not silently deepen every ordinary query.
+        r = QueryComplexityRouter(RouterConfig(complex_depth=2, adaptive_depth_frontier_budget=300))
+        seeds = [uuid4() for _ in range(5)]
+        stats = _stats({s: 5 for s in seeds}, mean=5.0)
+        new = r.compute_adaptive_depth(
+            entry_entity_count=5,
+            base_depth=2,
+            degree_stats=stats,
+            seed_entity_ids=seeds,
+        )
+        assert new == 2
+
+    def test_moderate_route_not_pushed_past_base_plus_one(self) -> None:
+        # A MODERATE route (base_depth=1) with a cheap frontier can reach 2 but
+        # never 3 - the frontier rule respects the router's complexity ceiling
+        # (min(base+1, complex+1)) exactly like the old count rule did.
+        r = QueryComplexityRouter(RouterConfig(complex_depth=2, adaptive_depth_frontier_budget=300))
+        seeds = [uuid4()]
+        stats = _stats({seeds[0]: 3}, mean=3.0)
+        new = r.compute_adaptive_depth(
+            entry_entity_count=1,
+            base_depth=1,
+            degree_stats=stats,
+            seed_entity_ids=seeds,
+        )
+        assert new == 2
+
+    def test_disabled_flag_ignores_stats(self) -> None:
+        r = QueryComplexityRouter(RouterConfig(adaptive_depth_enabled=False))
+        seeds = [uuid4()]
+        stats = _stats({seeds[0]: 5000}, mean=4.0)
+        assert (
+            r.compute_adaptive_depth(
+                entry_entity_count=1,
+                base_depth=2,
+                degree_stats=stats,
+                seed_entity_ids=seeds,
+            )
+            == 2
+        )
+
+    def test_unknown_seed_uses_mean_degree(self) -> None:
+        # A seed absent from the histogram (e.g. dropped past the list cap) is
+        # charged the mean degree, not zero - so it still contributes to the
+        # frontier prediction rather than silently vanishing.
+        r = QueryComplexityRouter(RouterConfig(complex_depth=2, adaptive_depth_frontier_budget=300))
+        known = uuid4()
+        unknown = uuid4()
+        # mean 400 -> a single unknown seed alone predicts 400 > budget 300 at
+        # depth 1, forcing the shallow floor.
+        stats = _stats({known: 1}, mean=400.0)
+        assert (
+            r.compute_adaptive_depth(
+                entry_entity_count=1,
+                base_depth=2,
+                degree_stats=stats,
+                seed_entity_ids=[unknown],
+            )
+            == 1
+        )
 
 
 # ---------------------------------------------------------------------------
