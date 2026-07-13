@@ -1432,3 +1432,115 @@ class TestHybridDisplayScoreContract:
             f"rank must be fusion-driven and unaffected by the display-score rewrite; "
             f"got {returned_order}, expected {expected_order}"
         )
+
+
+@pytest.mark.unit
+class TestScoreAndRank:
+    """Isolated tests for the extracted _score_and_rank scoring pipeline (#1480).
+
+    _score_and_rank owns the fusion + boosts + rerank + MMR sequence. Testing it
+    directly (rather than only through retrieve()) pins the ordered pipeline and
+    the effective_recency derivation without standing up the full channel
+    fan-out.
+    """
+
+    @pytest.fixture
+    def retriever(self) -> VectorCypherRetriever:
+        return VectorCypherRetriever(
+            vector_store=AsyncMock(),
+            neo4j_driver=AsyncMock(),
+            embedder=AsyncMock(),
+        )
+
+    def _params(self):
+        from khora.query.temporal_detection import RETRIEVAL_PARAMS, TemporalCategory
+
+        return RETRIEVAL_PARAMS[TemporalCategory.NONE]
+
+    def _routing(self) -> RoutingDecision:
+        return RoutingDecision(
+            complexity=QueryComplexity.MODERATE,
+            use_graph=True,
+            graph_depth=2,
+            confidence=0.8,
+            reasoning="moderate",
+        )
+
+    async def test_fuses_and_returns_ordered_with_effective_recency(self, retriever: VectorCypherRetriever) -> None:
+        """Fuses vector+graph, returns FusedResult list ordered by rank plus the
+        derived effective_recency (NONE category -> the configured base weight)."""
+        ns = uuid4()
+        id1, id2 = uuid4(), uuid4()
+        c1 = Chunk(id=id1, namespace_id=ns, document_id=uuid4(), content="alpha chunk content here now")
+        c2 = Chunk(id=id2, namespace_id=ns, document_id=uuid4(), content="beta chunk content here now")
+        params = self._params()
+
+        fused, effective_recency = await retriever._score_and_rank(
+            [(id1, 0.9, c1)],
+            [(id2, 0.8, c2)],
+            [],
+            query="q",
+            query_embedding=[0.1, 0.2, 0.3],
+            namespace_id=ns,
+            limit=10,
+            routing=self._routing(),
+            temporal_params=params,
+            temporal_signal=None,
+            temporal_filter=None,
+            recency_bias=None,
+            min_similarity=0.0,
+            raw_cosine_by_id={id1: 0.9, id2: 0.0},
+        )
+
+        assert {fr.item_id for fr in fused} == {id1, id2}
+        # NONE-category, no recency_bias, no temporal_filter -> base recency weight.
+        assert effective_recency == params.recency_weight
+
+    async def test_recency_bias_override_wins(self, retriever: VectorCypherRetriever) -> None:
+        """An explicit recency_bias overrides the signal-derived weight (#1156)."""
+        ns = uuid4()
+        cid = uuid4()
+        chunk = Chunk(id=cid, namespace_id=ns, document_id=uuid4(), content="content here now today")
+
+        _fused, effective_recency = await retriever._score_and_rank(
+            [(cid, 0.9, chunk)],
+            [],
+            [],
+            query="q",
+            query_embedding=[0.1, 0.2, 0.3],
+            namespace_id=ns,
+            limit=10,
+            routing=self._routing(),
+            temporal_params=self._params(),
+            temporal_signal=None,
+            temporal_filter=None,
+            recency_bias=0.77,
+            min_similarity=0.0,
+            raw_cosine_by_id={cid: 0.9},
+        )
+        assert effective_recency == 0.77
+
+    async def test_attach_relevance_sets_display_score_from_raw_cosine(self, retriever: VectorCypherRetriever) -> None:
+        """The exit rrf_score is the raw cosine (display value), not the internal
+        RRF blend (#811 / #1433) - proving attach_relevance_scores ran last."""
+        ns = uuid4()
+        cid = uuid4()
+        chunk = Chunk(id=cid, namespace_id=ns, document_id=uuid4(), content="single chunk content here now")
+
+        fused, _ = await retriever._score_and_rank(
+            [(cid, 0.05, chunk)],  # tuple score is a small hybrid blend, not cosine
+            [],
+            [],
+            query="q",
+            query_embedding=[0.1, 0.2, 0.3],
+            namespace_id=ns,
+            limit=10,
+            routing=self._routing(),
+            temporal_params=self._params(),
+            temporal_signal=None,
+            temporal_filter=None,
+            recency_bias=None,
+            min_similarity=0.0,
+            raw_cosine_by_id={cid: 0.83},
+        )
+        assert fused[0].rrf_score == pytest.approx(0.83)

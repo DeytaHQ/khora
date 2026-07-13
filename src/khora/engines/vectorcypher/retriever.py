@@ -2405,167 +2405,26 @@ class VectorCypherRetriever:
             if bm25_filter_plan_sink:
                 filter_channel_plans["bm25"] = bm25_filter_plan_sink[0]
 
-        # Step 7: RRF fusion with score normalization and dynamic weights.
-        # An explicit min_similarity floor excludes lexical-only chunks from
-        # the fused set (#1425) - they never passed the vector floor.
-        fused_results = self._fuse_results(
-            vector_chunks=vector_chunks,
-            graph_chunks=graph_chunks,
-            bm25_chunks=bm25_chunks if bm25_chunks else None,
-            use_normalization=True,
-            routing=routing,
-            is_temporal=_tp.recency_weight > 0.2,
-            exclude_bm25_only=min_similarity > 0.0,
-        )
-
-        # Step 8: Apply recency boost driven by temporal signal category.
-        # A per-call ``recency_bias`` (threaded explicitly from the engine,
-        # #1156) overrides the signal-derived weight and the WS4 clamp below.
-        if recency_bias is not None:
-            effective_recency = recency_bias
-        else:
-            effective_recency = _tp.recency_weight
-            # WS4: Also boost when explicit temporal filter is active
-            if temporal_filter is not None and effective_recency > 0:
-                effective_recency = max(effective_recency, 0.4)
-        if effective_recency > 0:
-            with trace_span("khora.vectorcypher.recency_boost", chunk_count=len(fused_results)):
-                recency_scores = self._calculate_recency_scores(
-                    fused_results, decay_days_override=_tp.decay_days_override
-                )
-                fused_results = apply_recency_boost(
-                    fused_results,
-                    recency_scores,
-                    recency_weight=effective_recency,
-                    recency_floor=_tp.recency_floor,
-                )
-
-        # Step 8b: Apply coherence scoring to penalize word-shuffled confounders
-        if self._config.coherence_weight > 0:
-            with trace_span("khora.vectorcypher.coherence_boost", chunk_count=len(fused_results)):
-                # Normalize fused scores to [0, 1] BEFORE the convex blend so
-                # coherence_weight behaves as the documented ~w nudge. Without
-                # this, the raw weighted-RRF scale (top ~0.02 at k=60) makes the
-                # w*coherence term (up to w) dominate ranking and demote the
-                # relevance winner (#1056). This is an internal-only normalization
-                # feeding the blend; the reported score is set absolutely at the
-                # exit via attach_relevance_scores (#811).
-                fused_results = normalize_scores(fused_results)
-                fused_results = apply_coherence_boost(
-                    fused_results,
-                    coherence_weight=self._config.coherence_weight,
-                )
-
-        # Step 8c: Cross-encoder reranking (after boosts, before version scoring)
-        if self._config.enable_reranking:
-            with trace_span("khora.vectorcypher.reranking", candidate_count=len(fused_results)):
-                fused_results = await self._apply_reranking(query, fused_results, limit, namespace_id=namespace_id)
-
-        # Step 8d: LLM reranking of top-N for temporal queries (after cross-encoder).
-        # Gating centralised in ``_evaluate_llm_rerank_gate`` (issue #814) — covers
-        # the not-temporal, no-version-metadata, and decisive-winner skips and
-        # emits the one-time warning when mode='auto' triggers the version gate.
-        if self._config.enable_llm_reranking:
-            should_run, skip_reason = self._evaluate_llm_rerank_gate(
-                fused_results,
-                temporal_signal,
-                namespace_id=namespace_id,
-            )
-            if not should_run and skip_reason is not None:
-                _LLM_RERANKING_SKIPPED_COUNTER.add(1, attributes={"reason": skip_reason})
-            if should_run:
-                with trace_span(
-                    "khora.vectorcypher.llm_reranking",
-                    candidate_count=len(fused_results),
-                    mode=self._config.llm_reranking_mode,
-                ):
-                    fused_results = await self._apply_llm_reranking(
-                        query, fused_results, limit, namespace_id=namespace_id
-                    )
-
-        # Step 8e: Version-aware scoring — the FINAL score adjustment.
-        # Applied after ALL reranking (cross-encoder + LLM) so nothing can
-        # undo the version preference. The LLM reranker provides valuable
-        # content understanding but has no temporal awareness; version scoring
-        # layers recency preference on top of the LLM's relevance baseline.
-        # CHANGE excluded: needs both old and new versions for comparison.
-        # ORDINAL excluded: needs full version history for ordering.
-        if temporal_signal and temporal_signal.category in (
-            TemporalCategory.STATE_QUERY,
-            TemporalCategory.RECENCY,
-        ):
-            from collections import defaultdict
-
-            entity_versions: dict[str, int] = defaultdict(int)  # entity -> max version
-            chunk_versions: dict[UUID, int] = {}  # chunk_id -> version
-
-            for r in fused_results:
-                meta = r.item.metadata if hasattr(r.item, "metadata") and r.item.metadata else {}
-                if isinstance(meta, dict):
-                    version = meta.get("version") or meta.get("entity_version", 0)
-                    if version:
-                        chunk_versions[r.item_id] = int(version)
-                        for ref in meta.get("entity_refs") or []:
-                            entity_versions[ref] = max(entity_versions[ref], int(version))
-
-            if entity_versions:
-                _VERSION_DECAY = 0.7  # Stronger penalty: v1/v5 → 0.44 (was 0.6 with 0.5)
-                for r in fused_results:
-                    v = chunk_versions.get(r.item_id, 0)
-                    if v > 0:
-                        meta = r.item.metadata if hasattr(r.item, "metadata") and r.item.metadata else {}
-                        if isinstance(meta, dict):
-                            for ref in meta.get("entity_refs") or []:
-                                max_v = entity_versions.get(ref, v)
-                                if max_v > v:
-                                    ratio = v / max_v
-                                    r.rrf_score *= 1.0 - _VERSION_DECAY * (1.0 - ratio)
-                                    break
-
-        # Capture the POST-boost/rerank ranking score BEFORE attach_relevance_scores
-        # overwrites rrf_score with the display cosine (#1463). MMR's relevance
-        # term must be this ranking signal (which carries every boost + both
-        # rerankers), not a freshly recomputed query-chunk cosine. Normalized to
-        # [0, 1] over the candidate set below so lambda behaves consistently.
-        mmr_ranking_scores = [r.rrf_score for r in fused_results]
-
-        # Surface an ABSOLUTE relevance score (raw vector cosine) on each chunk
-        # instead of the per-result-set min-max normalized RRF score (#811).
-        # Min-max forced the top chunk to 1.0 and the bottom to 0.0 regardless
-        # of actual relevance, so off-topic queries still reported score=1.0 and
-        # no threshold was meaningful. Ranking is unchanged - order is decided by
-        # rrf_score (after fusion + boosts + reranking); this only rewrites the
-        # reported VALUE to the raw cosine captured pre-fusion (#1433:
-        # ``raw_cosine_by_id`` carries the true ``r.similarity``, because on
-        # HYBRID stores the fusion tuple score is the store-internal RRF blend,
-        # not a cosine). Graph-only chunks report a cosine computed against the
-        # query embedding when they carry one, else 0.0 - never the
-        # mentions-scale graph rank input.
-        fused_results = attach_relevance_scores(
-            fused_results,
-            raw_cosine_by_id=raw_cosine_by_id,
+        # Steps 7-8f: fusion + boosts + rerank + MMR. Extracted into
+        # ``_score_and_rank`` (#1480) so the ordered scoring sequence is testable
+        # in isolation; the load-bearing per-stage re-sort contracts are
+        # documented on that method.
+        fused_results, effective_recency = await self._score_and_rank(
+            vector_chunks,
+            graph_chunks,
+            bm25_chunks,
+            query=query,
             query_embedding=query_embedding,
+            namespace_id=namespace_id,
+            limit=limit,
+            routing=routing,
+            temporal_params=_tp,
+            temporal_signal=temporal_signal,
+            temporal_filter=temporal_filter,
+            recency_bias=recency_bias,
+            min_similarity=min_similarity,
+            raw_cosine_by_id=raw_cosine_by_id,
         )
-
-        # Step 8f: MMR diversity selection (#1018, #1463). When enabled, choose
-        # the top-``limit`` fused results by Maximal Marginal Relevance over the
-        # broad-recall pool instead of pure score order, so near-duplicate
-        # chunks don't crowd out diverse-but-relevant ones. Honors
-        # ``query.enable_diversity`` / ``query.diversity_lambda`` (previously
-        # inert on VectorCypher). The adaptive gate (#1463) skips MMR when a
-        # decisive winner exists so diversity re-ranking cannot demote it.
-        # Reorders ``fused_results`` so the selected results lead; the existing
-        # ``[:limit]`` slices below pick them up.
-        if self._config.enable_diversity and len(fused_results) > limit:
-            normalized_scores = _min_max_normalize(mmr_ranking_scores)
-            skip_reason = self._diversity_skip_reason(normalized_scores)
-            if skip_reason is not None:
-                _MMR_SKIPPED_COUNTER.add(1, attributes={"reason": skip_reason})
-            else:
-                with trace_span("khora.vectorcypher.mmr_diversity", candidate_count=len(fused_results), k=limit):
-                    fused_results = self._mmr_select_fused(
-                        fused_results, normalized_scores, k=limit, lambda_param=self._config.diversity_lambda
-                    )
 
         # Build result
         chunk_results = [(r.item, r.rrf_score) for r in fused_results[:limit]]
@@ -4864,6 +4723,219 @@ class VectorCypherRetriever:
                 self._expansion_cache[chunk_id] = 0.0
 
         return results
+
+    async def _score_and_rank(
+        self,
+        vector_chunks: list[tuple[UUID, float, Chunk]],
+        graph_chunks: list[tuple[UUID, float, Chunk]],
+        bm25_chunks: list[tuple[UUID, float, Chunk]],
+        *,
+        query: str,
+        query_embedding: list[float],
+        namespace_id: UUID,
+        limit: int,
+        routing: RoutingDecision,
+        temporal_params: RetrievalParams,
+        temporal_signal: TemporalSignal | None,
+        temporal_filter: ChunkTemporalFilter | None,
+        recency_bias: float | None,
+        min_similarity: float,
+        raw_cosine_by_id: dict[UUID, float],
+    ) -> tuple[list[FusedResult], float]:
+        """The VectorCypher scoring pipeline: fusion + boosts + rerank + MMR.
+
+        Extracted verbatim from ``_vectorcypher_retrieve`` (#1480) so the ordered
+        scoring sequence is testable in isolation. Takes the three fused-channel
+        candidate lists plus the per-call scoring parameters and returns the
+        final ordered ``FusedResult`` list (the caller slices ``[:limit]``) plus
+        the ``effective_recency`` weight it derived (surfaced in recall metadata).
+
+        Stage-order contract (LOAD-BEARING — the #1433 / #1463 / #1056
+        regressions live in exactly these interactions; do NOT reorder or add a
+        blanket "each stage returns a sorted list" invariant):
+
+        1. ``_fuse_results`` — produces the initial RRF-ranked list (sorted).
+        2. recency boost — mutates + RE-SORTS by adjusted score.
+        3. normalize + coherence — RE-SORTS (normalize is internal-only, feeds
+           the coherence convex blend; the two are a coupled pair, #1056).
+        4. cross-encoder rerank / LLM rerank — reorder when they fire.
+        5. version decay — mutates ``rrf_score`` in place and does NOT re-sort;
+           a decayed chunk keeps its position, so the list is intentionally no
+           longer sorted by ``rrf_score`` after this step.
+        6. ``mmr_ranking_scores`` snapshot — captures the CURRENT order's
+           ranking scores (post-decay, pre-attach). MMR's relevance term uses
+           this, NOT a recomputed cosine (#1463). Must be taken here.
+        7. ``attach_relevance_scores`` — OVERWRITES ``rrf_score`` with the
+           display cosine and does NOT re-sort (#811 / #1433). After this,
+           ``rrf_score`` is a display value, not a ranking key — nothing may
+           re-rank on it downstream.
+        8. MMR diversity — conditionally reorders + truncates to ``limit`` using
+           the step-6 snapshot; emits the skip counter when the gate vetoes it.
+        """
+        # Step 7: RRF fusion with score normalization and dynamic weights.
+        # An explicit min_similarity floor excludes lexical-only chunks from
+        # the fused set (#1425) - they never passed the vector floor.
+        _tp = temporal_params
+        fused_results = self._fuse_results(
+            vector_chunks=vector_chunks,
+            graph_chunks=graph_chunks,
+            bm25_chunks=bm25_chunks if bm25_chunks else None,
+            use_normalization=True,
+            routing=routing,
+            is_temporal=_tp.recency_weight > 0.2,
+            exclude_bm25_only=min_similarity > 0.0,
+        )
+
+        # Step 8: Apply recency boost driven by temporal signal category.
+        # A per-call ``recency_bias`` (threaded explicitly from the engine,
+        # #1156) overrides the signal-derived weight and the WS4 clamp below.
+        if recency_bias is not None:
+            effective_recency = recency_bias
+        else:
+            effective_recency = _tp.recency_weight
+            # WS4: Also boost when explicit temporal filter is active
+            if temporal_filter is not None and effective_recency > 0:
+                effective_recency = max(effective_recency, 0.4)
+        if effective_recency > 0:
+            with trace_span("khora.vectorcypher.recency_boost", chunk_count=len(fused_results)):
+                recency_scores = self._calculate_recency_scores(
+                    fused_results, decay_days_override=_tp.decay_days_override
+                )
+                fused_results = apply_recency_boost(
+                    fused_results,
+                    recency_scores,
+                    recency_weight=effective_recency,
+                    recency_floor=_tp.recency_floor,
+                )
+
+        # Step 8b: Apply coherence scoring to penalize word-shuffled confounders
+        if self._config.coherence_weight > 0:
+            with trace_span("khora.vectorcypher.coherence_boost", chunk_count=len(fused_results)):
+                # Normalize fused scores to [0, 1] BEFORE the convex blend so
+                # coherence_weight behaves as the documented ~w nudge. Without
+                # this, the raw weighted-RRF scale (top ~0.02 at k=60) makes the
+                # w*coherence term (up to w) dominate ranking and demote the
+                # relevance winner (#1056). This is an internal-only normalization
+                # feeding the blend; the reported score is set absolutely at the
+                # exit via attach_relevance_scores (#811).
+                fused_results = normalize_scores(fused_results)
+                fused_results = apply_coherence_boost(
+                    fused_results,
+                    coherence_weight=self._config.coherence_weight,
+                )
+
+        # Step 8c: Cross-encoder reranking (after boosts, before version scoring)
+        if self._config.enable_reranking:
+            with trace_span("khora.vectorcypher.reranking", candidate_count=len(fused_results)):
+                fused_results = await self._apply_reranking(query, fused_results, limit, namespace_id=namespace_id)
+
+        # Step 8d: LLM reranking of top-N for temporal queries (after cross-encoder).
+        # Gating centralised in ``_evaluate_llm_rerank_gate`` (issue #814) — covers
+        # the not-temporal, no-version-metadata, and decisive-winner skips and
+        # emits the one-time warning when mode='auto' triggers the version gate.
+        if self._config.enable_llm_reranking:
+            should_run, skip_reason = self._evaluate_llm_rerank_gate(
+                fused_results,
+                temporal_signal,
+                namespace_id=namespace_id,
+            )
+            if not should_run and skip_reason is not None:
+                _LLM_RERANKING_SKIPPED_COUNTER.add(1, attributes={"reason": skip_reason})
+            if should_run:
+                with trace_span(
+                    "khora.vectorcypher.llm_reranking",
+                    candidate_count=len(fused_results),
+                    mode=self._config.llm_reranking_mode,
+                ):
+                    fused_results = await self._apply_llm_reranking(
+                        query, fused_results, limit, namespace_id=namespace_id
+                    )
+
+        # Step 8e: Version-aware scoring — the FINAL score adjustment.
+        # Applied after ALL reranking (cross-encoder + LLM) so nothing can
+        # undo the version preference. The LLM reranker provides valuable
+        # content understanding but has no temporal awareness; version scoring
+        # layers recency preference on top of the LLM's relevance baseline.
+        # CHANGE excluded: needs both old and new versions for comparison.
+        # ORDINAL excluded: needs full version history for ordering.
+        if temporal_signal and temporal_signal.category in (
+            TemporalCategory.STATE_QUERY,
+            TemporalCategory.RECENCY,
+        ):
+            from collections import defaultdict
+
+            entity_versions: dict[str, int] = defaultdict(int)  # entity -> max version
+            chunk_versions: dict[UUID, int] = {}  # chunk_id -> version
+
+            for r in fused_results:
+                meta = r.item.metadata if hasattr(r.item, "metadata") and r.item.metadata else {}
+                if isinstance(meta, dict):
+                    version = meta.get("version") or meta.get("entity_version", 0)
+                    if version:
+                        chunk_versions[r.item_id] = int(version)
+                        for ref in meta.get("entity_refs") or []:
+                            entity_versions[ref] = max(entity_versions[ref], int(version))
+
+            if entity_versions:
+                _VERSION_DECAY = 0.7  # Stronger penalty: v1/v5 → 0.44 (was 0.6 with 0.5)
+                for r in fused_results:
+                    v = chunk_versions.get(r.item_id, 0)
+                    if v > 0:
+                        meta = r.item.metadata if hasattr(r.item, "metadata") and r.item.metadata else {}
+                        if isinstance(meta, dict):
+                            for ref in meta.get("entity_refs") or []:
+                                max_v = entity_versions.get(ref, v)
+                                if max_v > v:
+                                    ratio = v / max_v
+                                    r.rrf_score *= 1.0 - _VERSION_DECAY * (1.0 - ratio)
+                                    break
+
+        # Capture the POST-boost/rerank ranking score BEFORE attach_relevance_scores
+        # overwrites rrf_score with the display cosine (#1463). MMR's relevance
+        # term must be this ranking signal (which carries every boost + both
+        # rerankers), not a freshly recomputed query-chunk cosine. Normalized to
+        # [0, 1] over the candidate set below so lambda behaves consistently.
+        mmr_ranking_scores = [r.rrf_score for r in fused_results]
+
+        # Surface an ABSOLUTE relevance score (raw vector cosine) on each chunk
+        # instead of the per-result-set min-max normalized RRF score (#811).
+        # Min-max forced the top chunk to 1.0 and the bottom to 0.0 regardless
+        # of actual relevance, so off-topic queries still reported score=1.0 and
+        # no threshold was meaningful. Ranking is unchanged - order is decided by
+        # rrf_score (after fusion + boosts + reranking); this only rewrites the
+        # reported VALUE to the raw cosine captured pre-fusion (#1433:
+        # ``raw_cosine_by_id`` carries the true ``r.similarity``, because on
+        # HYBRID stores the fusion tuple score is the store-internal RRF blend,
+        # not a cosine). Graph-only chunks report a cosine computed against the
+        # query embedding when they carry one, else 0.0 - never the
+        # mentions-scale graph rank input.
+        fused_results = attach_relevance_scores(
+            fused_results,
+            raw_cosine_by_id=raw_cosine_by_id,
+            query_embedding=query_embedding,
+        )
+
+        # Step 8f: MMR diversity selection (#1018, #1463). When enabled, choose
+        # the top-``limit`` fused results by Maximal Marginal Relevance over the
+        # broad-recall pool instead of pure score order, so near-duplicate
+        # chunks don't crowd out diverse-but-relevant ones. Honors
+        # ``query.enable_diversity`` / ``query.diversity_lambda`` (previously
+        # inert on VectorCypher). The adaptive gate (#1463) skips MMR when a
+        # decisive winner exists so diversity re-ranking cannot demote it.
+        # Reorders ``fused_results`` so the selected results lead; the existing
+        # ``[:limit]`` slices below pick them up.
+        if self._config.enable_diversity and len(fused_results) > limit:
+            normalized_scores = _min_max_normalize(mmr_ranking_scores)
+            skip_reason = self._diversity_skip_reason(normalized_scores)
+            if skip_reason is not None:
+                _MMR_SKIPPED_COUNTER.add(1, attributes={"reason": skip_reason})
+            else:
+                with trace_span("khora.vectorcypher.mmr_diversity", candidate_count=len(fused_results), k=limit):
+                    fused_results = self._mmr_select_fused(
+                        fused_results, normalized_scores, k=limit, lambda_param=self._config.diversity_lambda
+                    )
+
+        return fused_results, effective_recency
 
     def _fuse_results(
         self,

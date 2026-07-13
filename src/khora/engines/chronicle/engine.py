@@ -40,9 +40,9 @@ from khora.core.models import Chunk, Document, Entity, MemoryNamespace
 from khora.core.models.recall import (
     DocumentProjection,
     RecallChunk,
-    RecallEntity,
 )
 from khora.core.recall_abstention import compute_abstention_signals, compute_confidence
+from khora.core.recall_projection import project_document_stubs, project_entities
 from khora.core.recall_scoring import min_max_normalize
 from khora.engines._forget_cascade import _FORGET_DEGRADED_COUNTER, cascade_forget_extraction
 from khora.engines._stats import gather_counts
@@ -2312,55 +2312,15 @@ class ChronicleEngine:
             )
             entity_hits = [(entity, score_by_id[entity.id]) for entity in kept_entities]
 
-        recall_entities = [
-            RecallEntity(
-                id=entity.id,
-                name=entity.name,
-                entity_type=entity.entity_type,
-                description=entity.description or "",
-                score=score,
-                attributes=dict(entity.attributes or {}),
-                mention_count=entity.mention_count or 0,
-                source_document_ids=list(entity.source_document_ids),
-                source_chunk_ids=list(entity.source_chunk_ids),
-            )
-            for entity, score in entity_hits
-        ]
-
-        # Document stubs — fuller projections land with the recall-method rewrite.
-        seen_doc_ids: set[UUID] = set()
-        documents: list[DocumentProjection] = []
-        for chunk, _ in chunks_with_scores:
-            if chunk.document_id in seen_doc_ids:
-                continue
-            seen_doc_ids.add(chunk.document_id)
-            src = chunk.source_document
-            documents.append(
-                DocumentProjection(
-                    id=chunk.document_id,
-                    created_at=chunk.created_at,
-                    source_type=(src.source_type if src and src.source_type else "library"),
-                    title=(src.title if src and src.title else None),
-                    source=(src.source if src and src.source else None),
-                    source_timestamp=(src.source_timestamp if src else None),
-                    metadata=dict(chunk.metadata or {}),
-                )
-            )
-        # Producer invariant: every id in entities[i].source_document_ids must
-        # appear in documents[]. Add stubs for entity-referenced docs not
-        # already covered by the chunk loop above.
-        for re_ in recall_entities:
-            for did in re_.source_document_ids:
-                if did in seen_doc_ids:
-                    continue
-                seen_doc_ids.add(did)
-                documents.append(
-                    DocumentProjection(
-                        id=did,
-                        created_at=datetime.now(UTC),
-                        source_type="library",
-                    )
-                )
+        # Entity + doc-stub projection is shared with VectorCypher via the #1480
+        # seam. Chronicle does NOT opt into the entity source_document_ids
+        # fallback (byte-parity with its prior inline projection) and has no
+        # relationship surface, so it passes ``None`` for relationships (the
+        # third doc-stub loop is then a no-op). The chunk projection stays
+        # engine-local: Chronicle min-max normalizes chunk scores (#834), unlike
+        # VectorCypher's absolute display score (#1433).
+        recall_entities = project_entities(entity_hits)
+        documents = project_document_stubs(chunks_with_scores, recall_entities, None)
 
         # ── Reinforcement on recall (#855) ──────────────────────────────
         # Fire-and-forget: stamp ``last_accessed_at = now`` on the chunks
