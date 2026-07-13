@@ -722,6 +722,10 @@ class VectorCypherRetriever:
         # graph-less stack), the depth rule falls back to the entity-count step.
         self._degree_stats_cache = degree_stats_cache
         self._epoch_reader = epoch_reader
+        # Per-namespace single-flight locks for the histogram build (see
+        # ``_get_degree_stats``). Bounded by distinct-namespace count, same order
+        # as the epoch map; cheap Lock objects.
+        self._degree_stats_locks: dict[UUID, asyncio.Lock] = {}
 
         # Initialize router with config, syncing adaptive depth settings
         if router_config is None:
@@ -1563,18 +1567,32 @@ class VectorCypherRetriever:
         if cached is not None:
             return cached
 
-        try:
-            entities = await self._storage.list_entities(namespace_id, limit=100_000)
-            relationships = await self._storage.list_relationships(namespace_id, limit=1_000_000)
-        except Exception as exc:  # pragma: no cover - defensive, never blocks recall
-            logger.debug(f"Degree-stats fetch failed for {namespace_id}: {exc}")
-            return None
+        # Single-flight: building the histogram is a full-namespace scan
+        # (``list_entities`` + ``list_relationships``). A write-epoch bump
+        # invalidates every namespace's stats at once, so a burst of concurrent
+        # recalls right after a write would each miss ``get`` and redundantly run
+        # the same scan (thundering herd). Collapse them onto one build with a
+        # per-namespace lock, then re-check the cache under the lock so only the
+        # first holder pays for the scan.
+        lock = self._degree_stats_locks.setdefault(namespace_id, asyncio.Lock())
+        async with lock:
+            epoch = self._epoch_reader(namespace_id)
+            cached = self._degree_stats_cache.get(namespace_id, epoch)
+            if cached is not None:
+                return cached
 
-        entity_ids = [e.id for e in entities]
-        edges = [(r.source_entity_id, r.target_entity_id) for r in relationships]
-        stats = build_degree_stats(entity_ids, edges)
-        self._degree_stats_cache.set(namespace_id, epoch, stats)
-        return stats
+            try:
+                entities = await self._storage.list_entities(namespace_id, limit=100_000)
+                relationships = await self._storage.list_relationships(namespace_id, limit=1_000_000)
+            except Exception as exc:  # pragma: no cover - defensive, never blocks recall
+                logger.debug(f"Degree-stats fetch failed for {namespace_id}: {exc}")
+                return None
+
+            entity_ids = [e.id for e in entities]
+            edges = [(r.source_entity_id, r.target_entity_id) for r in relationships]
+            stats = build_degree_stats(entity_ids, edges)
+            self._degree_stats_cache.set(namespace_id, epoch, stats)
+            return stats
 
     async def _vectorcypher_retrieve(
         self,

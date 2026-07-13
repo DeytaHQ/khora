@@ -8,6 +8,7 @@ are absent.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -123,3 +124,21 @@ async def test_storage_failure_degrades_to_none() -> None:
     retriever = _make_retriever(storage, cache, {"epoch": 1})
     # A fetch failure must not blow up recall - it returns None (count fallback).
     assert await retriever._get_degree_stats(ns) is None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_misses_single_flight_one_build() -> None:
+    # A burst of concurrent recalls after a write-epoch bump must collapse onto
+    # a single histogram build (single-flight), not one full scan per recall.
+    ns = uuid4()
+    a, b = uuid4(), uuid4()
+    storage = _make_storage([_entity(a), _entity(b)], [_rel(a, b)])
+    cache = DegreeStatsCache()
+    retriever = _make_retriever(storage, cache, {"epoch": 1})
+
+    results = await asyncio.gather(*[retriever._get_degree_stats(ns) for _ in range(10)])
+
+    assert all(r is results[0] for r in results)
+    # Exactly one scan despite 10 concurrent misses.
+    assert storage.list_relationships.await_count == 1
+    assert storage.list_entities.await_count == 1
