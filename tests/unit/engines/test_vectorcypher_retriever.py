@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
@@ -512,6 +512,7 @@ class TestRetrieverRecencyScores:
             document_id=uuid4(),
             content="old",
             metadata={"occurred_at": "2020-01-01T00:00:00+00:00"},
+            occurred_at=datetime(2020, 1, 1, tzinfo=UTC),
         )
         chunk2 = Chunk(
             id=id2,
@@ -519,6 +520,7 @@ class TestRetrieverRecencyScores:
             document_id=uuid4(),
             content="recent",
             metadata={"occurred_at": "2026-02-14T00:00:00+00:00"},
+            occurred_at=datetime(2026, 2, 14, tzinfo=UTC),
         )
         results = [
             FusedResult(item_id=id1, item=chunk1, rrf_score=0.9),

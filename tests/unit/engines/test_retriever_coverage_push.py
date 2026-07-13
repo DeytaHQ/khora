@@ -34,6 +34,7 @@ from khora.engines.vectorcypher.retriever import (
     RetrieverConfig,
     VectorCypherResult,
     VectorCypherRetriever,
+    _coerce_occurred_at,
     _extract_occurred_at,
     _extract_source_system,
     _has_target_date,
@@ -70,6 +71,9 @@ def _make_chunk(
         document_id=uuid4(),
         content=content,
         metadata=custom,
+        # Mirror occurred_at onto the first-class column - the recency reader
+        # reads it there now; the blob above is a transitional dead write.
+        occurred_at=_coerce_occurred_at(occurred_at),
     )
 
 
@@ -98,15 +102,14 @@ def _make_retriever(
 class TestModuleHelpers:
     def test_extract_occurred_at_from_chunk(self) -> None:
         chunk = _make_chunk(occurred_at="2026-04-01T00:00:00+00:00")
-        assert _extract_occurred_at(chunk) == "2026-04-01T00:00:00+00:00"
+        assert _extract_occurred_at(chunk) == datetime(2026, 4, 1, tzinfo=UTC)
 
-    def test_extract_occurred_at_chunk_without_metadata(self) -> None:
+    def test_extract_occurred_at_chunk_without_occurred_at(self) -> None:
         chunk = Chunk(id=uuid4(), namespace_id=uuid4(), document_id=uuid4(), content="x")
-        chunk.metadata = None  # type: ignore[assignment]
         assert _extract_occurred_at(chunk) is None
 
     def test_extract_occurred_at_from_dict(self) -> None:
-        assert _extract_occurred_at({"occurred_at": "2026-01-02"}) == "2026-01-02"
+        assert _extract_occurred_at({"occurred_at": "2026-01-02"}) == datetime(2026, 1, 2)
 
     def test_extract_occurred_at_from_unknown(self) -> None:
         assert _extract_occurred_at("not a chunk") is None
@@ -478,14 +481,21 @@ class TestApplyReranking:
 
     @pytest.mark.asyncio
     async def test_temporal_prefix_in_candidate_content(self) -> None:
-        """Reranker receives content with [Session: X, Date: Y] prefix when metadata
-        contains session_id / occurred_at."""
-        chunk = _make_chunk(
-            "the meeting notes",
-            extra={
-                "session_id": "S123",
-                "occurred_at": "2026-04-01T12:34:56+00:00",
-            },
+        """Reranker receives content with [Session: X, Date: Y] prefix.
+
+        ``session_id`` is a user-space blob key (still read from metadata);
+        ``occurred_at`` is now read from the first-class column. The blob's
+        ``occurred_at`` is deliberately set to a stale, divergent value so this
+        test fails if the reader is reverted to sourcing the prefix from the
+        blob instead of the column.
+        """
+        chunk = Chunk(
+            id=uuid4(),
+            namespace_id=uuid4(),
+            document_id=uuid4(),
+            content="the meeting notes",
+            metadata={"session_id": "S123", "occurred_at": "1999-01-01T00:00:00+00:00"},
+            occurred_at=datetime(2026, 4, 1, 12, 34, 56, tzinfo=UTC),
         )
         fused = [FusedResult(item=chunk, item_id=chunk.id, rrf_score=0.5)]
         retriever = _make_retriever()
@@ -518,6 +528,58 @@ class TestApplyReranking:
         assert captured
         assert "Session: S123" in captured[0].content
         assert "Date: 2026-04-01" in captured[0].content
+        # The stale blob date must NOT leak: prefix is sourced from the column.
+        assert "1999" not in captured[0].content
+
+    @pytest.mark.asyncio
+    async def test_date_prefix_with_empty_metadata_blob(self) -> None:
+        """Date prefix is built from the column even when the blob is empty.
+
+        This is the empty-blob BM25/PPR population the reader flip targets: the
+        ``occurred_at`` column drives the ``Date:`` prefix independently of the
+        metadata blob, and ``Session:`` (a blob-only key) is absent. Guards the
+        follow-up stage that removes the transitional dead-write injections from
+        silently dropping the rerank date prefix.
+        """
+        chunk = Chunk(
+            id=uuid4(),
+            namespace_id=uuid4(),
+            document_id=uuid4(),
+            content="the meeting notes",
+            metadata={},
+            occurred_at=datetime(2026, 4, 1, 12, 34, 56, tzinfo=UTC),
+        )
+        fused = [FusedResult(item=chunk, item_id=chunk.id, rrf_score=0.5)]
+        retriever = _make_retriever()
+
+        from khora.query.reranking import RerankResult
+
+        captured: list[Any] = []
+
+        class CaptureReranker:
+            async def rerank(
+                self,
+                query: str,
+                candidates: Any,
+                *,
+                top_k: int = 10,
+                blend_weight: float = 0.7,
+            ) -> list[RerankResult]:
+                captured.extend(candidates)
+                return [
+                    RerankResult(
+                        item=candidates[0].item,
+                        original_score=0.5,
+                        rerank_score=0.7,
+                        final_score=0.7,
+                    )
+                ]
+
+        retriever._reranker = CaptureReranker()  # type: ignore[assignment]
+        await retriever._apply_reranking("q", fused, limit=5, namespace_id=uuid4())
+        assert captured
+        assert "Date: 2026-04-01" in captured[0].content
+        assert "Session:" not in captured[0].content
 
 
 # ---------------------------------------------------------------------------
@@ -585,6 +647,105 @@ class TestApplyLLMReranking:
 
         result = await retriever._apply_llm_reranking("q", fused, limit=5, namespace_id=uuid4())
         assert result == fused
+
+    @pytest.mark.asyncio
+    async def test_temporal_prefix_in_candidate_content(self) -> None:
+        """LLM reranker candidate content carries [Session: X, Date: Y].
+
+        Mirrors the cross-encoder prefix test: ``session_id`` is a user-space
+        blob key, ``occurred_at`` is read from the first-class column. The
+        blob's ``occurred_at`` is a stale, divergent value so the test fails if
+        the reader is reverted to sourcing the prefix from the blob.
+        """
+        chunk = Chunk(
+            id=uuid4(),
+            namespace_id=uuid4(),
+            document_id=uuid4(),
+            content="the meeting notes",
+            metadata={"session_id": "S123", "occurred_at": "1999-01-01T00:00:00+00:00"},
+            occurred_at=datetime(2026, 4, 1, 12, 34, 56, tzinfo=UTC),
+        )
+        fused = [FusedResult(item=chunk, item_id=chunk.id, rrf_score=0.5)]
+        retriever = _make_retriever()
+
+        from khora.query.reranking import RerankResult
+
+        captured: list[Any] = []
+
+        class CaptureReranker:
+            async def rerank(
+                self,
+                query: str,
+                candidates: Any,
+                *,
+                top_k: int = 10,
+                blend_weight: float = 0.7,
+            ) -> list[RerankResult]:
+                captured.extend(candidates)
+                return [
+                    RerankResult(
+                        item=candidates[0].item,
+                        original_score=0.5,
+                        rerank_score=0.7,
+                        final_score=0.7,
+                    )
+                ]
+
+        retriever._llm_reranker = CaptureReranker()  # type: ignore[assignment]
+        await retriever._apply_llm_reranking("q", fused, limit=5, namespace_id=uuid4())
+        assert captured
+        assert "Session: S123" in captured[0].content
+        assert "Date: 2026-04-01" in captured[0].content
+        # The stale blob date must NOT leak: prefix is sourced from the column.
+        assert "1999" not in captured[0].content
+
+    @pytest.mark.asyncio
+    async def test_date_prefix_with_empty_metadata_blob(self) -> None:
+        """LLM path: Date prefix comes from the column with an empty blob.
+
+        Mirrors the cross-encoder empty-blob test: the ``occurred_at`` column
+        drives the ``Date:`` prefix independently of the metadata blob, and
+        ``Session:`` (a blob-only key) is absent.
+        """
+        chunk = Chunk(
+            id=uuid4(),
+            namespace_id=uuid4(),
+            document_id=uuid4(),
+            content="the meeting notes",
+            metadata={},
+            occurred_at=datetime(2026, 4, 1, 12, 34, 56, tzinfo=UTC),
+        )
+        fused = [FusedResult(item=chunk, item_id=chunk.id, rrf_score=0.5)]
+        retriever = _make_retriever()
+
+        from khora.query.reranking import RerankResult
+
+        captured: list[Any] = []
+
+        class CaptureReranker:
+            async def rerank(
+                self,
+                query: str,
+                candidates: Any,
+                *,
+                top_k: int = 10,
+                blend_weight: float = 0.7,
+            ) -> list[RerankResult]:
+                captured.extend(candidates)
+                return [
+                    RerankResult(
+                        item=candidates[0].item,
+                        original_score=0.5,
+                        rerank_score=0.7,
+                        final_score=0.7,
+                    )
+                ]
+
+        retriever._llm_reranker = CaptureReranker()  # type: ignore[assignment]
+        await retriever._apply_llm_reranking("q", fused, limit=5, namespace_id=uuid4())
+        assert captured
+        assert "Date: 2026-04-01" in captured[0].content
+        assert "Session:" not in captured[0].content
 
     @pytest.mark.asyncio
     async def test_lazy_init_llm_reranker(self) -> None:
