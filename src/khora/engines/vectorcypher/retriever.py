@@ -3185,9 +3185,11 @@ class VectorCypherRetriever:
         # so the skip is meaningful regardless of whether cross-encoder /
         # coherence normalization put ``rrf_score`` on a [0,1] scale. Otherwise
         # fall back to the legacy scale-ambiguous ``rrf_score`` comparison.
-        if top_raw_cosine is not None:
+        # Requires a ranked top TWO (like the legacy _extract_top_two_scores),
+        # so a single candidate never trips the skip.
+        if top_raw_cosine is not None and second_raw_cosine is not None:
             decisive_top: float | None = top_raw_cosine
-            decisive_gap = max(top_raw_cosine - (second_raw_cosine if second_raw_cosine is not None else 0.0), 0.0)
+            decisive_gap = max(top_raw_cosine - second_raw_cosine, 0.0)
         else:
             top_score, second_score = _extract_top_two_scores(candidates)
             if top_score is not None and second_score is not None:
@@ -3542,13 +3544,13 @@ class VectorCypherRetriever:
             if self._config.enable_llm_reranking and chunk_results:
                 # #1475: thread the ranked top-two chunks' true raw cosines
                 # (captured pre-boost) so the decisive-winner skip runs on an
-                # absolute [0,1] scale rather than the scale-ambiguous score.
-                _top_rc = _raw_cosine_by_id.get(chunk_results[0][0].id, chunk_results[0][1])
-                _second_rc = (
-                    _raw_cosine_by_id.get(chunk_results[1][0].id, chunk_results[1][1])
-                    if len(chunk_results) > 1
-                    else None
-                )
+                # absolute [0,1] scale rather than the scale-ambiguous score. A
+                # chunk with no captured cosine (BM25-only under HYBRID) falls
+                # back to 0.0 - never its RRF/boost-scale score, which would
+                # reintroduce the exact ambiguity this fixes - matching the
+                # complex path's convention.
+                _top_rc = _raw_cosine_by_id.get(chunk_results[0][0].id, 0.0)
+                _second_rc = _raw_cosine_by_id.get(chunk_results[1][0].id, 0.0) if len(chunk_results) > 1 else None
                 should_run, skip_reason = self._evaluate_llm_rerank_gate(
                     chunk_results,
                     temporal_signal,
