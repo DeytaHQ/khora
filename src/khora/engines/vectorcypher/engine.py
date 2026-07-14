@@ -905,6 +905,10 @@ class VectorCypherEngine:
             # disables it (#1056). Previously hardcoded to the RetrieverConfig
             # default and unreachable from public config.
             coherence_weight=self._config.query.coherence_weight,
+            # #1475: score-calibrated fusion selector. Read straight from
+            # KhoraConfig.query (no VectorCypherConfig equivalent), mirroring
+            # coherence_weight above. Default "rrf" = unchanged.
+            fusion_mode=self._config.query.fusion_mode,
             min_entity_similarity=self._vc_config.retriever_min_entity_similarity,
             # Issue #1406 - chunk-channel cosine floor. Read straight from
             # KhoraConfig.query (no VectorCypherConfig equivalent exists),
@@ -2761,13 +2765,29 @@ class VectorCypherEngine:
             mode=_abst_cfg.abstention_mode,
         )
         # Calibrated retrieval confidence (#1331). Inputs are absolute cosines
-        # after #1319 (max_raw_vector_score) plus the top-two display-score gap.
-        confidence = compute_confidence(
-            top_cosine=max_raw_vector_score,
-            top_score_gap=top_score_gap,
-            target_cosine=_abst_cfg.abstention_confidence_target_cosine,
-            target_gap=_abst_cfg.abstention_confidence_target_gap,
-        )
+        # after #1319 (max_raw_vector_score) plus the top-two score gap.
+        #
+        # #1475: ``confidence_calibration="raw_cosine"`` (default-OFF) desaturates
+        # the cosine term (it otherwise ceilings at target_cosine=0.5) and swaps
+        # the post-fusion DISPLAY-score gap for the true raw-cosine gap
+        # (max - second raw vector cosine). "legacy" keeps the value unchanged.
+        if _abst_cfg.confidence_calibration == "raw_cosine":
+            second_raw_vector_score = float(result.metadata.get("second_raw_vector_score") or 0.0)
+            raw_cosine_gap = max(max_raw_vector_score - second_raw_vector_score, 0.0)
+            confidence = compute_confidence(
+                top_cosine=max_raw_vector_score,
+                top_score_gap=raw_cosine_gap,
+                target_cosine=_abst_cfg.abstention_confidence_target_cosine,
+                target_gap=_abst_cfg.abstention_confidence_target_gap,
+                mode="raw_cosine",
+            )
+        else:
+            confidence = compute_confidence(
+                top_cosine=max_raw_vector_score,
+                top_score_gap=top_score_gap,
+                target_cosine=_abst_cfg.abstention_confidence_target_cosine,
+                target_gap=_abst_cfg.abstention_confidence_target_gap,
+            )
 
         if abstention_signals["entities_empty"]:
             _VC_ABSTENTION_SIGNAL_COUNTER.add(1, attributes={"signal": "entities_empty"})

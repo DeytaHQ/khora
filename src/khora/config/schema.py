@@ -1612,6 +1612,43 @@ class QuerySettings(BaseSettings):
         default=0.1, ge=0.0, le=1.0, description="Weight of the bigram-coherence re-rank after fusion (0.0 disables)"
     )
 
+    # #1475: score-calibrated fusion. Contiguous block - keep grouped.
+    #
+    # ``fusion_mode`` selects the vector+graph (+BM25) fusion strategy. "rrf"
+    # (default) is rank-only weighted RRF, byte-identical to prior behavior.
+    # "calibrated" is a magnitude-aware convex blend of per-channel
+    # min-max-normalized scores (the vector channel on the true raw cosine,
+    # #1441), so a lone strong-cosine vector hit is not buried below weak-cosine
+    # chunks that merely co-occur across channels. Default-OFF; the A/B on
+    # complex_reasoning + BEAM multi-session is downstream
+    # (khora-graphrag-benchmark#12). Targets multi-hop (complex_reasoning /
+    # contextual_summarization); makes no fact_retrieval claims.
+    fusion_mode: Literal["rrf", "calibrated"] = Field(
+        default="rrf",
+        description=(
+            "Fusion strategy: 'rrf' (default, rank-only weighted RRF, unchanged) "
+            "or 'calibrated' (magnitude-aware convex blend of per-channel "
+            "min-max-normalized scores; surfaces lone strong-cosine winners). "
+            "Default-OFF; A/B is downstream (#1475)."
+        ),
+    )
+    # ``confidence_calibration`` selects how ``engine_info['confidence']`` is
+    # derived. "legacy" (default) keeps the #1331 formula byte-identical:
+    # 0.8*clip01(top_cosine/target_cosine) + 0.2*clip01(gap/target_gap), which
+    # saturates the cosine term at ``abstention_confidence_target_cosine`` (0.5)
+    # and computes the gap from post-fusion DISPLAY scores. "raw_cosine"
+    # desaturates the cosine term (uses the full [0,1] cosine magnitude) and
+    # computes the gap from the true raw vector cosines (#1441). Default-OFF so
+    # the public confidence value is unchanged until opted in.
+    confidence_calibration: Literal["legacy", "raw_cosine"] = Field(
+        default="legacy",
+        description=(
+            "How engine_info['confidence'] is derived: 'legacy' (default, "
+            "#1331 formula, unchanged) or 'raw_cosine' (desaturated cosine term "
+            "+ raw-cosine gap, #1475). Default-OFF."
+        ),
+    )
+
     # Temporal settings.
     # `recency_weight` was tightened from 0.2 to 0.35 after BEAM 100K showed
     # the four weakest categories (event_ordering, contradiction_resolution,

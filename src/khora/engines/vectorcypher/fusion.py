@@ -367,6 +367,120 @@ def weighted_rrf_normalized(
     return fused
 
 
+def score_calibrated_fusion(
+    vector_results: list[tuple[UUID, float, Any]],
+    graph_results: list[tuple[UUID, float, Any]],
+    *,
+    vector_weight: float = 0.6,
+    graph_weight: float = 0.4,
+) -> list[FusedResult]:
+    """Score-calibrated convex fusion (#1475) - a magnitude-aware alternative to RRF.
+
+    Rank-only RRF fuses by POSITION: a lone strong-cosine vector hit (present in
+    only one channel) is buried below weak-cosine chunks that merely CO-OCCUR
+    across channels, because summed ``weight / (k + rank)`` rewards multi-channel
+    presence over single-channel magnitude - it never sees the score values.
+    #1441 made the true raw cosine available on every chunk, so fusion can
+    finally weigh magnitude.
+
+    This fuses by SCORE instead of rank: each channel's raw scores are min-max
+    normalized to [0, 1] (``vector_results`` scores should be the true cosines;
+    ``graph_results`` scores are the mentions-scale graph weights), then combined
+    convexly::
+
+        score = vector_weight * norm_vector + graph_weight * norm_graph
+
+    where a channel a chunk is absent from contributes 0. A lone 0.95-cosine
+    vector hit (channel-normalized to 1.0) scores ``vector_weight`` and outranks
+    a weak chunk that merely tops the graph channel (``graph_weight``) whenever
+    ``vector_weight > graph_weight`` - the burial the ticket targets.
+
+    Behind ``query.fusion_mode="calibrated"``; the default fusion path stays RRF.
+
+    Args:
+        vector_results: Results from vector search (item_id, score, item). The
+            score should be the true raw cosine (see ``_fuse_results``).
+        graph_results: Results from graph traversal (item_id, score, item).
+        vector_weight: Convex weight for the vector channel (default: 0.6).
+        graph_weight: Convex weight for the graph channel (default: 0.4).
+
+    Returns:
+        List of FusedResult sorted by the calibrated convex score (highest first).
+        ``rrf_score`` carries the calibrated score (the field is the pipeline's
+        generic ranking key, shared with the RRF fusers).
+    """
+    items: dict[UUID, Any] = {}
+    vector_ranks: dict[UUID, int] = {}
+    graph_ranks: dict[UUID, int] = {}
+    vector_scores: dict[UUID, float] = {}
+    graph_scores: dict[UUID, float] = {}
+    norm_vector: dict[UUID, float] = {}
+    norm_graph: dict[UUID, float] = {}
+
+    if vector_results:
+        normalized = _min_max_normalize([score for _, score, _ in vector_results])
+        for rank, ((item_id, score, item), norm) in enumerate(zip(vector_results, normalized), start=1):
+            items[item_id] = item
+            vector_ranks[item_id] = rank
+            vector_scores[item_id] = score
+            norm_vector[item_id] = norm
+
+    if graph_results:
+        normalized = _min_max_normalize([score for _, score, _ in graph_results])
+        for rank, ((item_id, score, item), norm) in enumerate(zip(graph_results, normalized), start=1):
+            if item_id not in items:
+                items[item_id] = item
+            graph_ranks[item_id] = rank
+            graph_scores[item_id] = score
+            norm_graph[item_id] = norm
+
+    fused = [
+        FusedResult(
+            item_id=item_id,
+            item=item,
+            rrf_score=vector_weight * norm_vector.get(item_id, 0.0) + graph_weight * norm_graph.get(item_id, 0.0),
+            vector_rank=vector_ranks.get(item_id),
+            graph_rank=graph_ranks.get(item_id),
+            vector_score=vector_scores.get(item_id),
+            graph_score=graph_scores.get(item_id),
+        )
+        for item_id, item in items.items()
+    ]
+
+    fused.sort(key=lambda x: x.rrf_score, reverse=True)
+    return fused
+
+
+def score_calibrated_fusion_nlist(
+    sources: list[tuple[list[tuple[UUID, float, Any]], float]],
+) -> list[FusedResult]:
+    """N-source score-calibrated convex fusion (#1475).
+
+    ``sources`` is a list of ``(results, weight)`` pairs mirroring
+    :func:`weighted_rrf_nlist`, used for the 3-channel (vector + graph + BM25)
+    path. Each source's raw scores are min-max normalized to [0, 1] and combined
+    convexly. Per-source ranks are NOT populated - the 3-channel caller
+    back-fills vector/graph provenance, matching ``weighted_rrf_nlist``.
+    """
+    calibrated: dict[UUID, float] = defaultdict(float)
+    items: dict[UUID, Any] = {}
+
+    for results, weight in sources:
+        if not results:
+            continue
+        normalized = _min_max_normalize([score for _, score, _ in results])
+        for (item_id, _score, item), norm in zip(results, normalized):
+            calibrated[item_id] += weight * norm
+            if item_id not in items:
+                items[item_id] = item
+
+    fused = [
+        FusedResult(item_id=item_id, item=items[item_id], rrf_score=score) for item_id, score in calibrated.items()
+    ]
+    fused.sort(key=lambda x: x.rrf_score, reverse=True)
+    return fused
+
+
 def weighted_rrf_nlist(
     sources: list[tuple[list[tuple[UUID, float, Any]], float]],
     *,
@@ -522,6 +636,8 @@ __all__ = [
     "bigram_coherence_score",
     "normalize_scores",
     "reciprocal_rank_fusion",
+    "score_calibrated_fusion",
+    "score_calibrated_fusion_nlist",
     "weighted_rrf",
     "weighted_rrf_normalized",
 ]
