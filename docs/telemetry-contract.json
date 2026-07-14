@@ -1179,6 +1179,28 @@
       "description": "Issue #1467 (ADR-001). VectorCypher session fan-out per-channel silent fallback - incremented once per per-session (or unscoped fallback) vector search that raises in the session-aware fan-out gather (return_exceptions=True) and has its chunks dropped from the merged result. The recall still degrades to the surviving channels + unscoped fallback. The same event is also appended to RecallResult.engine_info['degradations']. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
     },
     {
+      "name": "khora.vectorcypher.reverse_seed.degraded_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "owner": "vectorcypher",
+      "labels": [
+        {"name": "reason", "values": ["lookup_failed"], "_comment": "Low-cardinality enum; extend when adding new reverse-seeding fallback paths."}
+      ],
+      "description": "Issue #1473 (ADR-001). VectorCypher reverse-seeding silent fallback - incremented when the chunk->entity provenance lookup (list_entities(source_chunk_ids=...)) raises while augmenting the graph entry-entity set from the top vector chunks, so the entry set is left un-augmented. Only reachable when KHORA_QUERY_ENABLE_REVERSE_SEEDING is set (default OFF). The same event is also appended to RecallResult.engine_info['degradations']. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
+    },
+    {
+      "name": "khora.vectorcypher.per_mention_seed.degraded_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "owner": "vectorcypher",
+      "labels": [
+        {"name": "reason", "values": ["seed_failed"], "_comment": "Low-cardinality enum; extend when adding new per-mention seeding fallback paths."}
+      ],
+      "description": "Issue #1473 (ADR-001). VectorCypher per-mention seeding silent fallback - incremented when per-mention diversified seeding raises (e.g. a mention embedding fault) and the seed step degrades to the global single-embedding entry-entity search. Only reachable when KHORA_QUERY_ENABLE_PER_MENTION_SEEDING is set (default OFF). The same event is also appended to RecallResult.engine_info['degradations']. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
+    },
+    {
       "name": "khora.query.hyde.degraded_total",
       "type": "counter",
       "stability": "internal",

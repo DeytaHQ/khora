@@ -19,6 +19,7 @@ import contextlib
 import json
 import math
 import os
+import re
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -265,6 +266,44 @@ _SESSION_FANOUT_DEGRADED_COUNTER = metric_counter(
     ),
 )
 
+# Reverse-seeding degradation counter (issue #1473, ADR-001). When
+# enable_reverse_seeding is on, ``_reverse_seed_entities`` looks up the entities
+# connected to the top vector chunks via ``list_entities(source_chunk_ids=...)``.
+# If that provenance lookup raises, the augmentation is skipped (recall falls
+# back to the vector-near entry set unchanged) and this counter bumps so the
+# dropped augmentation is observable. NO namespace_id label - cardinality rule.
+_REVERSE_SEED_DEGRADED_COUNTER = metric_counter(
+    "khora.vectorcypher.reverse_seed.degraded_total",
+    unit="1",
+    description=(
+        "Issue #1473 (ADR-001). VectorCypher reverse-seeding silent fallback. "
+        "Incremented when the chunk->entity provenance lookup "
+        "(list_entities(source_chunk_ids=...)) raises, so the entry-entity set is "
+        "left un-augmented. The same event is also appended to "
+        "RecallResult.engine_info['degradations']. Labels: reason (lookup_failed). "
+        "NO namespace_id label - cardinality rule."
+    ),
+)
+
+# Per-mention seeding degradation counter (issue #1473, ADR-001). When
+# enable_per_mention_seeding is on and the query names 2+ entities,
+# ``_per_mention_seed_entities`` embeds each mention and searches entities per
+# mention. If the per-mention path raises (embedding fault), it degrades to the
+# global single-embedding entry-entity search; this counter bumps so the
+# fallback is observable. NO namespace_id label - cardinality rule.
+_PER_MENTION_SEED_DEGRADED_COUNTER = metric_counter(
+    "khora.vectorcypher.per_mention_seed.degraded_total",
+    unit="1",
+    description=(
+        "Issue #1473 (ADR-001). VectorCypher per-mention seeding silent fallback. "
+        "Incremented when per-mention diversified seeding raises (e.g. a mention "
+        "embedding fault) and the seed step degrades to the global "
+        "single-embedding entry-entity search. The same event is also appended to "
+        "RecallResult.engine_info['degradations']. Labels: reason (seed_failed). "
+        "NO namespace_id label - cardinality rule."
+    ),
+)
+
 
 # #1474 leg 2: static relationship-type priors for typed/weighted expansion.
 # A small hand-set table (learnable later, grb#12 A/B). Explicit typed relations
@@ -300,6 +339,109 @@ def _consume_task_exc(task: asyncio.Future) -> None:
     if task.cancelled():
         return
     task.exception()
+
+
+def _extract_query_mentions(query: str) -> list[str]:
+    """#1473: extract candidate entity mentions from a query for per-mention seeding.
+
+    Mirrors the router's ``_count_potential_entities`` heuristic so a query the
+    router already scored as multi-entity decomposes into the same mentions:
+    quoted spans (any position), consecutive capitalized proper-noun sequences
+    (skipping the sentence-initial word, whose capital is grammatical, and
+    all-caps acronyms), and the same technical-identifier tokens the router also
+    counts - CamelCase, snake_case, and @/# tags. Returned in first-seen order,
+    de-duplicated case-insensitively.
+    """
+    # Collect (offset, text) candidates from every heuristic, then sort by
+    # textual position before de-duping, so the returned order is true first-seen
+    # order regardless of which pass matched. This matters because
+    # ``_per_mention_seed_entities`` truncates at ``per_mention_max_mentions``: a
+    # textually-earlier technical identifier must not be dropped for a later
+    # proper noun just because the proper-noun pass runs first.
+    candidates: list[tuple[int, str]] = []
+
+    # Quoted spans anywhere in the query.
+    for m in re.finditer(r'"([^"]+)"|\'([^\']+)\'', query):
+        text = (m.group(1) or m.group(2)).strip()
+        if text:
+            candidates.append((m.start(), text))
+
+    # Capitalized proper-noun sequences, skipping the sentence-initial word.
+    # Iterate word matches (not query.split()) so each phrase keeps its offset.
+    word_matches = list(re.finditer(r"\S+", query))
+    i = 0
+    while i < len(word_matches):
+        wm = word_matches[i]
+        stripped = wm.group(0).strip(",.?!:;\"'")
+        if i > 0 and stripped and stripped[0].isupper() and not stripped.isupper():
+            phrase = [stripped]
+            j = i + 1
+            while j < len(word_matches):
+                nxt = word_matches[j].group(0).strip(",.?!:;\"'")
+                if nxt and nxt[0].isupper() and not nxt.isupper():
+                    phrase.append(nxt)
+                    j += 1
+                else:
+                    break
+            candidates.append((wm.start(), " ".join(phrase)))
+            i = j
+            continue
+        i += 1
+
+    # Technical-identifier mentions the router also counts (mirrors
+    # _count_potential_entities): CamelCase (incl. sentence-initial, which the
+    # capitalized-phrase pass above skips), snake_case, and @/# tags (marker
+    # stripped so the embedded text is the bare identifier).
+    for m in re.finditer(r"\b[A-Z][a-z]+[A-Z][a-zA-Z]*\b", query):
+        candidates.append((m.start(), m.group(0)))
+    for m in re.finditer(r"\b[a-z]+_[a-z_]+\b", query):
+        candidates.append((m.start(), m.group(0)))
+    for m in re.finditer(r"[@#](\w+)", query):
+        candidates.append((m.start(), m.group(1)))
+
+    # Sort by offset (stable), then de-dup case-insensitively - first textual
+    # occurrence wins.
+    candidates.sort(key=lambda t: t[0])
+    mentions: list[str] = []
+    seen: set[str] = set()
+    for _, text in candidates:
+        key = text.lower()
+        if key not in seen:
+            seen.add(key)
+            mentions.append(text)
+    return mentions
+
+
+def _round_robin_seeds(
+    per_mention: list[list[tuple[UUID, float]]],
+    *,
+    cap: int,
+) -> list[tuple[UUID, float]]:
+    """Interleave per-mention entity lists round-robin, de-duped, capped at ``cap``.
+
+    Each mention's list is assumed sorted by descending relevance. Taking the
+    rank-0 entity from every mention before any rank-1 entity guarantees every
+    mention contributes to the entry set (the point of diversified seeding),
+    instead of a global top-K that a single dominant mention can monopolize.
+    """
+    merged: list[tuple[UUID, float]] = []
+    seen: set[UUID] = set()
+    depth = 0
+    while len(merged) < cap:
+        progressed = False
+        for lst in per_mention:
+            if depth < len(lst):
+                progressed = True
+                eid, score = lst[depth]
+                if eid not in seen:
+                    seen.add(eid)
+                    merged.append((eid, score))
+                    if len(merged) >= cap:
+                        break
+        if not progressed:
+            break
+        depth += 1
+    return merged
 
 
 def _decode_chunker_info(value: Any) -> dict[str, Any]:
@@ -600,6 +742,19 @@ class RetrieverConfig:
     enable_typed_weighted_expansion: bool = False
     enable_seed_weighted_chunk_scoring: bool = False
 
+    # #1473 graph-channel seeding upgrades (all default OFF; A/B-pending). See
+    # KhoraConfig.query for the operator-facing docs. Wired through engine.py.
+    enable_reverse_seeding: bool = False
+    reverse_seed_top_chunks: int = 5
+    reverse_seed_max_entities: int = 5
+    enable_per_mention_seeding: bool = False
+    per_mention_max_mentions: int = 4
+    # Evidence-based graph channel gate. Threaded onto the RouterConfig (the gate
+    # decision lives on the router); the retriever calls it before cypher_expand.
+    evidence_graph_gate_enabled: bool = False
+    evidence_graph_gate_min_top_score: float = 0.5
+    evidence_graph_gate_min_gap: float = 0.25
+
     # Limits
     max_chunks: int = 50
     max_entities: int = 30
@@ -796,6 +951,10 @@ class VectorCypherRetriever:
                 adaptive_depth_low_entity_threshold=self._config.adaptive_depth_low_entity_threshold,
                 adaptive_depth_frontier_budget=self._config.adaptive_depth_frontier_budget,
                 complex_depth=self._config.default_depth,
+                # #1473 evidence-based graph channel gate (default OFF).
+                evidence_graph_gate_enabled=self._config.evidence_graph_gate_enabled,
+                evidence_graph_gate_min_top_score=self._config.evidence_graph_gate_min_top_score,
+                evidence_graph_gate_min_gap=self._config.evidence_graph_gate_min_gap,
             )
         self._router = QueryComplexityRouter(router_config)
         # Forward Neo4jBackend when available so pool metrics observe
@@ -1825,13 +1984,44 @@ class VectorCypherRetriever:
                 )
             )
 
-        # Step 3a: Find entry entities via vector search (runs in parallel with vector_chunks_task)
-        entry_entities = await self._vector_search_entities(
+        # Step 3a: Find entry entities via vector search (runs in parallel with
+        # vector_chunks_task). #1473: ``_seed_entry_entities`` picks the global
+        # top-K search (default / single-mention) or per-mention diversified
+        # seeding (flag on + multi-mention query); it is byte-identical to the
+        # historic ``_vector_search_entities`` call when the flag is off.
+        entry_entities = await self._seed_entry_entities(
+            query=query,
             query_embedding=query_embedding,
             namespace_id=namespace_id,
-            limit=entry_limit,
+            entry_limit=entry_limit,
             degradations=degradations,
         )
+
+        # #1473 reverse-seeding: augment the entry set with entities connected to
+        # the top vector chunks. Grounds graph expansion in passages that matched
+        # the query and rescues the "no near entity -> vector-only fallback" case
+        # (when the entry set is empty, the reverse seeds keep the graph path
+        # alive below). Default OFF; when off this block is skipped entirely and
+        # ``entry_entities`` is byte-identical to the vector-search result.
+        reverse_seeded_count = 0
+        if self._config.enable_reverse_seeding and vector_chunks_task is not None:
+            _rev_pool = await vector_chunks_task
+            reverse_seeds = await self._reverse_seed_entities(
+                _rev_pool,
+                namespace_id=namespace_id,
+                raw_cosine_by_id=raw_cosine_by_id,
+                top_chunks=self._config.reverse_seed_top_chunks,
+                max_entities=self._config.reverse_seed_max_entities,
+                degradations=degradations,
+            )
+            if reverse_seeds:
+                before = len(entry_entities)
+                entry_entities = self._merge_seed_entities(
+                    entry_entities,
+                    reverse_seeds,
+                    max_added=self._config.reverse_seed_max_entities,
+                )
+                reverse_seeded_count = len(entry_entities) - before
 
         if not entry_entities:
             logger.debug("No entry entities found, falling back to simple retrieval")
@@ -2065,6 +2255,32 @@ class VectorCypherRetriever:
             seed_entity_ids=[e[0] for e in entry_entities],
         )
 
+        # #1473 evidence-based graph channel gate. When the vector channel has a
+        # decisive score-gap winner, the graph channel measurably injects noise
+        # on single-fact questions - suppress it for this recall (skip
+        # cypher_expand + the graph chunk fetch, so graph_chunks stays []). A
+        # channel-level refinement on the router's SIMPLE/COMPLEX split. Default
+        # OFF; never fires on COMPLEX (multi-hop needs the graph), on temporal
+        # queries (they need the graph for cross-session linking / recency), or
+        # when the vector channel is skipped (mode=GRAPH - nothing to judge). The
+        # gate peeks the resolved vector scores, which forces the vector search
+        # to finish before expansion only when the gate is enabled.
+        suppress_graph = False
+        graph_gate_reasoning: str | None = None
+        if (
+            self._config.evidence_graph_gate_enabled
+            and not skip_vector_channel
+            and not (temporal_signal is not None and temporal_signal.is_temporal)
+        ):
+            gate_scores = await self._vector_scores_for_gate(
+                vector_chunks_task, _session_aware_chunks, raw_cosine_by_id
+            )
+            gate = self._router.evaluate_graph_gate(gate_scores, complexity=routing.complexity)
+            suppress_graph = gate.suppress
+            graph_gate_reasoning = gate.reasoning
+            if suppress_graph:
+                logger.debug(f"Evidence graph gate suppressed graph channel: {gate.reasoning}")
+
         # Step 4: Cypher expand to find related entities
         # For temporal queries (STATE_QUERY/RECENCY/CHANGE), prefer currently-valid
         # entities by filtering out those whose valid_until has passed.
@@ -2093,23 +2309,30 @@ class VectorCypherRetriever:
             else contextlib.nullcontext()
         )
         async with _graph_session_ctx:
-            try:
-                expanded_entities, entity_info_map = await self._cypher_expand(
-                    entry_entity_ids=[e[0] for e in entry_entities],
-                    namespace_id=namespace_id,
-                    depth=depth,
-                    prefer_current=_tp.prefer_current,
-                    degradations=degradations,
-                )
-            except _NEO4J_TRANSIENT_ERRORS as exc:
-                logger.warning(
-                    f"Neo4j unavailable during cypher_expand for namespace={namespace_id}, "
-                    f"falling back to vector-only results: {type(exc).__name__}: {exc}"
-                )
+            if suppress_graph:
+                # #1473 gate fired: skip the graph expansion entirely. Entry
+                # entities are still carried for the projection below, but no
+                # neighborhood is fetched and graph_chunks stays [] (see Step 5).
                 expanded_entities = {}
                 entity_info_map = {}
-                graph_fallback = True
-                graph_error_msg = type(exc).__name__
+            else:
+                try:
+                    expanded_entities, entity_info_map = await self._cypher_expand(
+                        entry_entity_ids=[e[0] for e in entry_entities],
+                        namespace_id=namespace_id,
+                        depth=depth,
+                        prefer_current=_tp.prefer_current,
+                        degradations=degradations,
+                    )
+                except _NEO4J_TRANSIENT_ERRORS as exc:
+                    logger.warning(
+                        f"Neo4j unavailable during cypher_expand for namespace={namespace_id}, "
+                        f"falling back to vector-only results: {type(exc).__name__}: {exc}"
+                    )
+                    expanded_entities = {}
+                    entity_info_map = {}
+                    graph_fallback = True
+                    graph_error_msg = type(exc).__name__
 
             # Step 4b: Bi-temporal version filtering
             # For EXPLICIT temporal queries with a parsed date, narrow entities to
@@ -2180,7 +2403,10 @@ class VectorCypherRetriever:
             # paths push nothing and leave it empty, so every leaf falls to
             # ``post_filtered_keys`` for them.
             graph_pushed_keys_sink: list[frozenset[str]] = []
-            if graph_fallback:
+            if graph_fallback or suppress_graph:
+                # graph_fallback: Neo4j unavailable. suppress_graph (#1473): the
+                # evidence gate dropped the graph channel. Either way the graph
+                # chunk channel contributes nothing and fusion runs vector-only.
                 graph_chunks: list[tuple[UUID, float, Chunk]] = []
             elif self._config.enable_ppr_retrieval and self._storage is not None:
                 from khora.engines.vectorcypher.ppr_retrieval import ppr_retrieve_chunks
@@ -2817,6 +3043,20 @@ class VectorCypherRetriever:
             routing_decision=routing,
             metadata={
                 "entry_entities": len(entry_entities),
+                # #1473: number of entry entities contributed by reverse-seeding
+                # (0 when the flag is off or nothing was added).
+                "reverse_seeded_entities": reverse_seeded_count,
+                # #1473: True when per-mention diversified seeding was applicable
+                # (flag on + a multi-mention query). Short-circuits to False with
+                # no extra work when the flag is off.
+                "per_mention_seeding_activated": (
+                    self._config.enable_per_mention_seeding and len(_extract_query_mentions(query)) >= 2
+                ),
+                # #1473: True when the evidence graph gate suppressed the graph
+                # channel this recall (False when the flag is off or it did not
+                # fire). ``graph_gate_reasoning`` carries the human-readable why.
+                "graph_gate_suppressed": suppress_graph,
+                "graph_gate_reasoning": graph_gate_reasoning,
                 "expanded_entities": len(expanded_entities),
                 "graph_depth": depth,
                 "base_depth": base_depth,
@@ -3826,6 +4066,205 @@ class VectorCypherRetriever:
                     "_filter_channel_plans": filter_channel_plans,
                 },
             )
+
+    @staticmethod
+    def _merge_seed_entities(
+        primary: list[tuple[UUID, float]],
+        extra: list[tuple[UUID, float]],
+        *,
+        max_added: int,
+    ) -> list[tuple[UUID, float]]:
+        """Append up to ``max_added`` new seeds from ``extra`` onto ``primary``.
+
+        Never displaces a ``primary`` (vector-near) seed - it only fills the
+        graph entry set with additional entities, preserving order. ``extra`` is
+        assumed pre-sorted by descending relevance; duplicates (by entity id,
+        already present in ``primary`` or seen earlier in ``extra``) are skipped.
+        """
+        seen = {eid for eid, _ in primary}
+        merged = list(primary)
+        added = 0
+        for eid, score in extra:
+            if added >= max_added:
+                break
+            if eid in seen:
+                continue
+            seen.add(eid)
+            merged.append((eid, score))
+            added += 1
+        return merged
+
+    async def _reverse_seed_entities(
+        self,
+        vector_chunks: list[tuple[UUID, float, Chunk]],
+        *,
+        namespace_id: UUID,
+        raw_cosine_by_id: dict[UUID, float],
+        top_chunks: int,
+        max_entities: int,
+        degradations: list[Degradation],
+    ) -> list[tuple[UUID, float]]:
+        """#1473: seed graph entry entities from the top vector chunks' entities.
+
+        Grounds graph expansion in the passages that actually matched the query:
+        the top-``top_chunks`` vector chunks (by raw cosine) are looked up for
+        their connected entities via ``list_entities(source_chunk_ids=...)``
+        (chunk->entity provenance). Each returned entity is scored by the best
+        cosine among the seeding chunks that mention it, so a stronger passage
+        yields a stronger seed. Returns the reverse-seeded entities sorted by
+        descending score, capped at ``max_entities``.
+
+        Degrades to ``[]`` (recording a Degradation and bumping
+        ``_REVERSE_SEED_DEGRADED_COUNTER``) if the provenance lookup raises, so a
+        failed augmentation leaves the entry set unchanged rather than crashing.
+        """
+        if not vector_chunks or not self._storage:
+            return []
+        # Rank the chunk pool by raw cosine (falls back to the tuple score for
+        # any chunk missing from the cosine map) and take the strongest few.
+        ranked = sorted(
+            vector_chunks,
+            key=lambda c: raw_cosine_by_id.get(c[0], c[1]),
+            reverse=True,
+        )[:top_chunks]
+        chunk_score: dict[UUID, float] = {c[0]: raw_cosine_by_id.get(c[0], c[1]) for c in ranked}
+        if not chunk_score:
+            return []
+        try:
+            # Over-fetch relative to ``max_entities``: several chunks may share
+            # entities, and we score+cap after the overlap join below.
+            entities = await self._storage.list_entities(
+                namespace_id,
+                source_chunk_ids=list(chunk_score),
+                limit=max(max_entities * 4, max_entities),
+            )
+        except Exception as e:
+            logger.warning(f"Reverse-seed entity lookup failed: {e}", exc_info=True)
+            _REVERSE_SEED_DEGRADED_COUNTER.add(1, attributes={"reason": "lookup_failed"})
+            degradations.append(
+                Degradation(
+                    component="vectorcypher.reverse_seed",
+                    reason="lookup_failed",
+                    detail=str(e)[:200] or None,
+                    exception=type(e).__name__,
+                )
+            )
+            return []
+        scored: list[tuple[UUID, float]] = []
+        for ent in entities:
+            overlap = [chunk_score[cid] for cid in (ent.source_chunk_ids or []) if cid in chunk_score]
+            if not overlap:
+                continue
+            scored.append((ent.id, max(overlap)))
+        scored.sort(key=lambda t: t[1], reverse=True)
+        return scored[:max_entities]
+
+    async def _vector_scores_for_gate(
+        self,
+        vector_chunks_task: asyncio.Task[list[tuple[UUID, float, Chunk]]] | None,
+        session_aware_chunks: list[tuple[UUID, float, Chunk]] | None,
+        raw_cosine_by_id: dict[UUID, float],
+    ) -> list[float]:
+        """#1473: resolve the vector channel's per-chunk cosine scores for the gate.
+
+        Prefers the session-aware merged pool when the fan-out replaced the
+        global search; otherwise awaits the global vector task (asyncio caches
+        the result, so the later Step 6 await is free). Returns the raw cosine
+        per chunk (falling back to the tuple score for any chunk missing from
+        the cosine map), matching how the PPR path reads vector relevance.
+        """
+        if session_aware_chunks is not None:
+            pool = session_aware_chunks
+        elif vector_chunks_task is not None:
+            pool = await vector_chunks_task
+        else:
+            return []
+        return [raw_cosine_by_id.get(cid, score) for cid, score, _ in pool]
+
+    async def _seed_entry_entities(
+        self,
+        *,
+        query: str,
+        query_embedding: list[float],
+        namespace_id: UUID,
+        entry_limit: int,
+        degradations: list[Degradation],
+    ) -> list[tuple[UUID, float]]:
+        """Choose the graph entry-entity set for this recall (#1473).
+
+        Default path (per-mention seeding OFF, or a single-mention query): the
+        historic global top-K vector entity search, byte-identical to a direct
+        ``_vector_search_entities`` call. When per-mention seeding is ON and the
+        query names 2+ entities, decompose it and round-robin the budget across
+        mentions instead (``_per_mention_seed_entities``); an empty per-mention
+        result falls back to the global search so recall never regresses to no
+        seeds.
+        """
+        if self._config.enable_per_mention_seeding:
+            mentions = _extract_query_mentions(query)
+            if len(mentions) >= 2:
+                seeds = await self._per_mention_seed_entities(
+                    mentions,
+                    namespace_id=namespace_id,
+                    entry_limit=entry_limit,
+                    degradations=degradations,
+                )
+                if seeds:
+                    return seeds
+        return await self._vector_search_entities(
+            query_embedding=query_embedding,
+            namespace_id=namespace_id,
+            limit=entry_limit,
+            degradations=degradations,
+        )
+
+    async def _per_mention_seed_entities(
+        self,
+        mentions: list[str],
+        *,
+        namespace_id: UUID,
+        entry_limit: int,
+        degradations: list[Degradation],
+    ) -> list[tuple[UUID, float]]:
+        """#1473: seed entities per query mention, round-robin over the budget.
+
+        Each mention is embedded independently and searched against the entity
+        vector index; the per-mention hit lists are interleaved round-robin
+        (``_round_robin_seeds``) and capped at ``entry_limit`` so every mention
+        contributes seeds. Degrades to ``[]`` (recording a Degradation and
+        bumping ``_PER_MENTION_SEED_DEGRADED_COUNTER``) if the mention embedding
+        raises, so the caller falls back to the global single-embedding search.
+        """
+        mentions = mentions[: self._config.per_mention_max_mentions]
+        per_budget = max(1, entry_limit // len(mentions))
+        try:
+            embeddings = await asyncio.gather(*[self._embedder.embed(m) for m in mentions])
+        except Exception as e:
+            logger.warning(f"Per-mention seeding embed failed: {e}", exc_info=True)
+            _PER_MENTION_SEED_DEGRADED_COUNTER.add(1, attributes={"reason": "seed_failed"})
+            degradations.append(
+                Degradation(
+                    component="vectorcypher.per_mention_seed",
+                    reason="seed_failed",
+                    detail=str(e)[:200] or None,
+                    exception=type(e).__name__,
+                )
+            )
+            return []
+        # Over-fetch per mention (budget * 2) so the round-robin has depth to
+        # de-dup against; the final cap is entry_limit.
+        per_lists = await asyncio.gather(
+            *[
+                self._vector_search_entities(
+                    query_embedding=emb,
+                    namespace_id=namespace_id,
+                    limit=per_budget * 2,
+                    degradations=degradations,
+                )
+                for emb in embeddings
+            ]
+        )
+        return _round_robin_seeds(list(per_lists), cap=entry_limit)
 
     async def _vector_search_entities(
         self,

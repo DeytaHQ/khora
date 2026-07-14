@@ -2341,6 +2341,87 @@ class QuerySettings(BaseSettings):
         ),
     )
 
+    # #1473: graph-channel seeding upgrades. Three independently-flagged,
+    # default-OFF quality experiments that improve GRAPH-channel seed quality.
+    # A/B validation is a downstream gated step (khora-graphrag-benchmark#12);
+    # these flags + telemetry only make it measurable. Do NOT flip the defaults.
+    enable_reverse_seeding: bool = Field(
+        default=False,
+        description=(
+            "#1473 reverse-seeding: augment the graph entry-entity set with "
+            "entities connected to the top vector CHUNKS (chunk->entity provenance "
+            "via source_chunk_ids). Grounds graph expansion in passages that "
+            "actually matched the query and rescues the 'no near entity -> "
+            "vector-only fallback' case. Default OFF (byte-identical when off)."
+        ),
+    )
+    reverse_seed_top_chunks: int = Field(
+        default=5,
+        ge=1,
+        description=(
+            "#1473: how many of the top-scoring vector chunks to reverse-seed "
+            "from. Only used when enable_reverse_seeding is True."
+        ),
+    )
+    reverse_seed_max_entities: int = Field(
+        default=5,
+        ge=1,
+        description=(
+            "#1473: max number of reverse-seeded entities appended to the entry "
+            "set (never displaces the vector-near entities). Only used when "
+            "enable_reverse_seeding is True."
+        ),
+    )
+    enable_per_mention_seeding: bool = Field(
+        default=False,
+        description=(
+            "#1473 per-mention diversified seeding: when a query names 2+ "
+            "entities, embed each mention independently and round-robin the "
+            "entry-entity budget across mentions instead of taking a single "
+            "global top-K (which can starve a mention on multi-entity queries). "
+            "Single-mention queries keep the global search. Default OFF "
+            "(byte-identical when off)."
+        ),
+    )
+    per_mention_max_mentions: int = Field(
+        default=4,
+        ge=2,
+        description=(
+            "#1473: cap on how many query mentions seed independently (bounds the "
+            "per-query embedding calls). Only used when enable_per_mention_seeding "
+            "is True."
+        ),
+    )
+    enable_evidence_graph_gate: bool = Field(
+        default=False,
+        description=(
+            "#1473 evidence-based graph channel gate: when the vector channel has "
+            "a decisive score-gap winner, suppress the graph channel for this "
+            "recall (it injects noise on single-fact questions). A channel-level "
+            "refinement on top of the SIMPLE/COMPLEX router split; COMPLEX "
+            "(multi-hop) and temporal recalls are never gated. Default OFF."
+        ),
+    )
+    evidence_graph_gate_min_top_score: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "#1473: the top vector cosine must clear this floor for the evidence "
+            "graph gate to fire. Only used when enable_evidence_graph_gate is True."
+        ),
+    )
+    evidence_graph_gate_min_gap: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "#1473: the top-vs-second vector cosine gap must reach this for the "
+            "evidence graph gate to fire. Only used when enable_evidence_graph_gate "
+            "is True."
+        ),
+    )
+
 
 class KhoraConfig(BaseSettings):
     """Main application configuration."""
