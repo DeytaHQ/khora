@@ -61,7 +61,7 @@ _NEO4J_TIMEOUT_CODES = (
 _BOUND_SESSION: ContextVar[AsyncSession | None] = ContextVar("khora_dualnode_bound_session", default=None)
 
 
-def _build_neighborhood_query(depth: int, prefer_current: bool) -> str:
+def _build_neighborhood_query(depth: int, prefer_current: bool, include_edge_metadata: bool = False) -> str:
     """Build the bounded per-hop neighborhood expansion query (issue #1419).
 
     Replaces the former ``OPTIONAL MATCH path = (e)-[*1..depth]-(related:Entity)``
@@ -106,6 +106,13 @@ def _build_neighborhood_query(depth: int, prefer_current: bool) -> str:
     Args:
         depth: Number of hops to unroll (caller clamps to 1-4).
         prefer_current: Whether to add per-hop valid_until filtering.
+        include_edge_metadata: When True (typed/weighted expansion, #1474 leg
+            2), each reported entity additionally carries ``rel_type``,
+            ``rel_confidence`` and ``rel_direction`` of a representative edge on
+            the shortest path to it. Off by default so the flag-gated feature
+            adds zero query cost (and zero shape change) to the default path -
+            the returned distances and BFS structure are byte-identical either
+            way, so the #1419 min-distance contract is preserved.
 
     Returns:
         Cypher query string with ``$entity_ids``, ``$namespace_id``,
@@ -127,23 +134,52 @@ def _build_neighborhood_query(depth: int, prefer_current: bool) -> str:
     for i in range(1, depth + 1):
         rel_filter = f"\n  AND (_r{i}.valid_until IS NULL OR _r{i}.valid_until > _now)" if prefer_current else ""
         node_filter = "\n         AND (x.valid_until IS NULL OR x.valid_until > _now)" if prefer_current else ""
-        lines.append(
-            # An empty frontier must not kill the row (UNWIND [] discards it),
-            # so substitute [null]; OPTIONAL MATCH on a null start node then
-            # yields a null neighbor, which collect() ignores.
-            f"UNWIND (CASE WHEN size(_frontier) = 0 THEN [null] ELSE _frontier END) AS _cur{i}\n"
-            f"OPTIONAL MATCH (_cur{i})-[_r{i}]-(_nb{i})\n"
-            f"WHERE NOT _nb{i} IN _visited{rel_filter}\n"
-            f"WITH e{now_carry}, _visited, _found, collect(DISTINCT _nb{i})[0..$hop_limit] AS _next{i}\n"
-            f"WITH e{now_carry}, _visited + _next{i} AS _visited, _next{i} AS _frontier,\n"
-            f"     _found + [x IN _next{i}\n"
-            f"       WHERE 'Entity' IN labels(x)\n"
-            f"         AND x.namespace_id = $namespace_id\n"
-            f"         AND x.id <> e.id{node_filter}\n"
-            f"       | {{id: x.id, name: x.name, entity_type: x.entity_type,\n"
-            f"          description: x.description, source_tool: x.source_tool,\n"
-            f"          distance: {i}}}] AS _found"
-        )
+        if include_edge_metadata:
+            # #1474 leg 2: alongside the DISTINCT-node frontier (unchanged, so
+            # distances stay identical), collect one candidate row per traversed
+            # edge carrying (type, confidence, direction). The reported map then
+            # picks a representative edge per neighbor via ``head([... WHERE
+            # _c.node = x])``. Null-neighbor rows (empty frontier / already
+            # visited) collect a junk map that is never matched (x is non-null).
+            lines.append(
+                f"UNWIND (CASE WHEN size(_frontier) = 0 THEN [null] ELSE _frontier END) AS _cur{i}\n"
+                f"OPTIONAL MATCH (_cur{i})-[_r{i}]-(_nb{i})\n"
+                f"WHERE NOT _nb{i} IN _visited{rel_filter}\n"
+                f"WITH e{now_carry}, _visited, _found,\n"
+                f"     collect(DISTINCT _nb{i})[0..$hop_limit] AS _next{i},\n"
+                f"     collect({{node: _nb{i}, rtype: type(_r{i}),\n"
+                f"              rconf: coalesce(_r{i}.confidence, 1.0),\n"
+                f"              rdir: CASE WHEN startNode(_r{i}) = _cur{i} THEN 'out' ELSE 'in' END}}) AS _cands{i}\n"
+                f"WITH e{now_carry}, _visited + _next{i} AS _visited, _next{i} AS _frontier,\n"
+                f"     _found + [x IN _next{i}\n"
+                f"       WHERE 'Entity' IN labels(x)\n"
+                f"         AND x.namespace_id = $namespace_id\n"
+                f"         AND x.id <> e.id{node_filter}\n"
+                f"       | {{id: x.id, name: x.name, entity_type: x.entity_type,\n"
+                f"          description: x.description, source_tool: x.source_tool,\n"
+                f"          rel_type: head([_c IN _cands{i} WHERE _c.node = x | _c.rtype]),\n"
+                f"          rel_confidence: head([_c IN _cands{i} WHERE _c.node = x | _c.rconf]),\n"
+                f"          rel_direction: head([_c IN _cands{i} WHERE _c.node = x | _c.rdir]),\n"
+                f"          distance: {i}}}] AS _found"
+            )
+        else:
+            lines.append(
+                # An empty frontier must not kill the row (UNWIND [] discards it),
+                # so substitute [null]; OPTIONAL MATCH on a null start node then
+                # yields a null neighbor, which collect() ignores.
+                f"UNWIND (CASE WHEN size(_frontier) = 0 THEN [null] ELSE _frontier END) AS _cur{i}\n"
+                f"OPTIONAL MATCH (_cur{i})-[_r{i}]-(_nb{i})\n"
+                f"WHERE NOT _nb{i} IN _visited{rel_filter}\n"
+                f"WITH e{now_carry}, _visited, _found, collect(DISTINCT _nb{i})[0..$hop_limit] AS _next{i}\n"
+                f"WITH e{now_carry}, _visited + _next{i} AS _visited, _next{i} AS _frontier,\n"
+                f"     _found + [x IN _next{i}\n"
+                f"       WHERE 'Entity' IN labels(x)\n"
+                f"         AND x.namespace_id = $namespace_id\n"
+                f"         AND x.id <> e.id{node_filter}\n"
+                f"       | {{id: x.id, name: x.name, entity_type: x.entity_type,\n"
+                f"          description: x.description, source_tool: x.source_tool,\n"
+                f"          distance: {i}}}] AS _found"
+            )
     lines.append(
         "RETURN e.id AS source_id,\n"
         "       e.name AS source_name,\n"
@@ -820,6 +856,7 @@ class DualNodeManager:
         limit_per_entity: int = 20,
         prefer_current: bool = False,
         hop_limit: int = 200,
+        include_edge_metadata: bool = False,
         degradations: list[Degradation] | None = None,
     ) -> dict[str, list[dict[str, Any]]]:
         """Get neighborhood of entities via bounded per-hop graph expansion.
@@ -851,6 +888,11 @@ class DualNodeManager:
                 still be rediscovered later at a larger distance). The
                 default comfortably exceeds ``limit_per_entity`` (20 at the
                 retriever call site) so realistic neighborhoods are unaffected.
+            include_edge_metadata: When True (typed/weighted expansion, #1474),
+                each related-entity dict additionally carries ``rel_type``,
+                ``rel_confidence`` and ``rel_direction`` for a representative
+                edge on the shortest path. Default False keeps the query and
+                its results byte-identical to the pre-#1474 path.
             degradations: Optional ADR-001 sink. When the query times out
                 (``query_timeout``), a structured ``Degradation``
                 (component=``vectorcypher.cypher_expand``,
@@ -865,7 +907,7 @@ class DualNodeManager:
 
         depth = min(max(1, depth), 4)  # Clamp to 1-4
 
-        query = _build_neighborhood_query(depth, prefer_current)
+        query = _build_neighborhood_query(depth, prefer_current, include_edge_metadata)
 
         async def _work(tx):
             result = await tx.run(

@@ -1949,6 +1949,33 @@ class QuerySettings(BaseSettings):
         ),
     )
 
+    # #1474: typed/weighted expansion + query-aware graph-chunk scoring.
+    # Both default OFF (A/B pending, khora-graphrag-benchmark#12). These gate
+    # only the SCORING that consumes the graph's typed/confidence/relevance
+    # signal; populating relationship.weight at ingest is unconditional and
+    # additive.
+    enable_typed_weighted_expansion: bool = Field(
+        default=False,
+        description=(
+            "Enable typed/confidence-weighted graph expansion in VectorCypher "
+            "(khora#1474). Scores each expansion hop as 1/(1+distance) * "
+            "relationship.confidence * a static per-type prior (instead of pure "
+            "distance decay), and returns (type, confidence, direction) per hop "
+            "from the neighborhood query. Default OFF; A/B pending via "
+            "khora-graphrag-benchmark#12."
+        ),
+    )
+    enable_seed_weighted_chunk_scoring: bool = Field(
+        default=False,
+        description=(
+            "Enable seed-relevance-weighted graph-chunk scoring in VectorCypher "
+            "(khora#1474). Weights each graph-channel chunk by its connected "
+            "entities' query relevance (entry-entity cosine + expansion score) "
+            "instead of the query-agnostic mention-count * entity-coverage "
+            "boost. Default OFF; A/B pending via khora-graphrag-benchmark#12."
+        ),
+    )
+
     @field_validator("enable_hyde", mode="before")
     @classmethod
     def _normalize_enable_hyde(cls, v: Any) -> str:
