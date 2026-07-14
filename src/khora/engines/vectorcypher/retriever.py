@@ -2241,6 +2241,18 @@ class VectorCypherRetriever:
                     len(ppr_entity_scores),
                 )
             else:
+                # #1474 leg 3: when seed-relevance-weighted chunk scoring is on,
+                # build a per-entity query-relevance map so the graph channel
+                # weights each chunk by how query-relevant its connected entities
+                # are, instead of the query-agnostic mention-count * coverage
+                # boost. Entry entities carry their true cosine similarity;
+                # expanded entities carry their expansion score (a relevance
+                # proxy) without overriding a seed's cosine.
+                seed_relevance: dict[UUID, float] | None = None
+                if self._config.enable_seed_weighted_chunk_scoring:
+                    seed_relevance = {eid: sim for eid, sim in entry_entities}
+                    for eid, escore in expanded_entities.items():
+                        seed_relevance.setdefault(eid, escore)
                 graph_chunks = await self._fetch_chunks_from_entities(
                     entity_ids=all_entity_ids,
                     namespace_id=namespace_id,
@@ -2250,6 +2262,7 @@ class VectorCypherRetriever:
                     prefer_current=_tp.prefer_current,
                     filter_ast=filter_ast,
                     graph_pushed_keys_out=graph_pushed_keys_sink,
+                    seed_relevance=seed_relevance,
                 )
 
         # Step 6: Wait for parallel vector chunk search to complete
@@ -4247,6 +4260,7 @@ class VectorCypherRetriever:
         prefer_current: bool = False,
         filter_ast: FilterNode | None = None,
         graph_pushed_keys_out: list[frozenset[str]] | None = None,
+        seed_relevance: dict[UUID, float] | None = None,
     ) -> list[tuple[UUID, float, Chunk]]:
         """Fetch chunks connected to entities via MENTIONED_IN.
 
@@ -4265,6 +4279,15 @@ class VectorCypherRetriever:
                 the compile actually spliced into the executed ``WHERE``. The
                 SurrealDB storage-fallback and empty branches never touch it, so
                 they leave it empty (nothing pushed).
+            seed_relevance: #1474 leg 3 - when provided (seed-relevance-weighted
+                chunk scoring is on), maps entity_id -> query relevance
+                (entry-entity cosine or expansion score). Each chunk is then
+                scored ``total_mentions * sum(relevance of its connected
+                entities)`` instead of the query-agnostic
+                ``total_mentions * (1 + 0.1 * entity_count)``. ``None`` (default)
+                keeps the legacy score byte-identical. A chunk whose connected
+                entities carry no relevance signal (e.g. the SurrealDB fallback
+                with empty ``entity_ids``) falls back to the legacy score.
 
         Returns:
             List of (chunk_id, score, chunk) tuples
@@ -4325,10 +4348,28 @@ class VectorCypherRetriever:
             results: list[tuple[UUID, float, Chunk]] = []
             for record in chunk_records:
                 chunk_id = UUID(record["chunk_id"])
-                # Score based on mention count and entity coverage
-                score = float(record.get("total_mentions", 1))
-                entity_count = len(record.get("entity_ids", []))
-                score = score * (1 + 0.1 * entity_count)  # Boost for multiple entity connections
+                total_mentions = float(record.get("total_mentions", 1))
+                connected = record.get("entity_ids", [])
+                if seed_relevance is not None:
+                    # #1474 leg 3: weight the chunk by how query-relevant its
+                    # connected entities are, instead of the query-agnostic
+                    # mention-count * entity-coverage boost.
+                    relevance_sum = 0.0
+                    for raw in connected:
+                        try:
+                            eid = raw if isinstance(raw, UUID) else UUID(str(raw))
+                        except (ValueError, TypeError):
+                            continue
+                        relevance_sum += seed_relevance.get(eid, 0.0)
+                    if relevance_sum > 0.0:
+                        score = total_mentions * relevance_sum
+                    else:
+                        # No seed-relevance signal for this chunk (e.g. SurrealDB
+                        # fallback with empty entity_ids): keep the legacy score.
+                        score = total_mentions * (1 + 0.1 * len(connected))
+                else:
+                    # Score based on mention count and entity coverage
+                    score = total_mentions * (1 + 0.1 * len(connected))  # Boost for multiple entity connections
 
                 chunk = Chunk(
                     id=chunk_id,
