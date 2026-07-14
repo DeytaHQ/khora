@@ -2341,6 +2341,38 @@ class QuerySettings(BaseSettings):
         ),
     )
 
+    # #1473: graph-channel seeding upgrades. Three independently-flagged,
+    # default-OFF quality experiments that improve GRAPH-channel seed quality.
+    # A/B validation is a downstream gated step (khora-graphrag-benchmark#12);
+    # these flags + telemetry only make it measurable. Do NOT flip the defaults.
+    enable_reverse_seeding: bool = Field(
+        default=False,
+        description=(
+            "#1473 reverse-seeding: augment the graph entry-entity set with "
+            "entities connected to the top vector CHUNKS (chunk->entity provenance "
+            "via source_chunk_ids). Grounds graph expansion in passages that "
+            "actually matched the query and rescues the 'no near entity -> "
+            "vector-only fallback' case. Default OFF (byte-identical when off)."
+        ),
+    )
+    reverse_seed_top_chunks: int = Field(
+        default=5,
+        ge=1,
+        description=(
+            "#1473: how many of the top-scoring vector chunks to reverse-seed "
+            "from. Only used when enable_reverse_seeding is True."
+        ),
+    )
+    reverse_seed_max_entities: int = Field(
+        default=5,
+        ge=1,
+        description=(
+            "#1473: max number of reverse-seeded entities appended to the entry "
+            "set (never displaces the vector-near entities). Only used when "
+            "enable_reverse_seeding is True."
+        ),
+    )
+
 
 class KhoraConfig(BaseSettings):
     """Main application configuration."""

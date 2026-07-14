@@ -976,6 +976,10 @@ class VectorCypherEngine:
             diversity_min_gap=self._config.query.diversity_min_gap,
             # #1477 — frontier budget for degree-histogram-driven adaptive depth.
             adaptive_depth_frontier_budget=self._config.query.adaptive_depth_frontier_budget,
+            # #1473 — graph-channel seeding upgrades (all default OFF, A/B-pending).
+            enable_reverse_seeding=self._config.query.enable_reverse_seeding,
+            reverse_seed_top_chunks=self._config.query.reverse_seed_top_chunks,
+            reverse_seed_max_entities=self._config.query.reverse_seed_max_entities,
         )
 
     async def disconnect(self) -> None:

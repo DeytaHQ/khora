@@ -265,6 +265,25 @@ _SESSION_FANOUT_DEGRADED_COUNTER = metric_counter(
     ),
 )
 
+# Reverse-seeding degradation counter (issue #1473, ADR-001). When
+# enable_reverse_seeding is on, ``_reverse_seed_entities`` looks up the entities
+# connected to the top vector chunks via ``list_entities(source_chunk_ids=...)``.
+# If that provenance lookup raises, the augmentation is skipped (recall falls
+# back to the vector-near entry set unchanged) and this counter bumps so the
+# dropped augmentation is observable. NO namespace_id label - cardinality rule.
+_REVERSE_SEED_DEGRADED_COUNTER = metric_counter(
+    "khora.vectorcypher.reverse_seed.degraded_total",
+    unit="1",
+    description=(
+        "Issue #1473 (ADR-001). VectorCypher reverse-seeding silent fallback. "
+        "Incremented when the chunk->entity provenance lookup "
+        "(list_entities(source_chunk_ids=...)) raises, so the entry-entity set is "
+        "left un-augmented. The same event is also appended to "
+        "RecallResult.engine_info['degradations']. Labels: reason (lookup_failed). "
+        "NO namespace_id label - cardinality rule."
+    ),
+)
+
 
 # #1474 leg 2: static relationship-type priors for typed/weighted expansion.
 # A small hand-set table (learnable later, grb#12 A/B). Explicit typed relations
@@ -599,6 +618,12 @@ class RetrieverConfig:
     # weights each chunk by its connected entities' query relevance.
     enable_typed_weighted_expansion: bool = False
     enable_seed_weighted_chunk_scoring: bool = False
+
+    # #1473 graph-channel seeding upgrades (all default OFF; A/B-pending). See
+    # KhoraConfig.query for the operator-facing docs. Wired through engine.py.
+    enable_reverse_seeding: bool = False
+    reverse_seed_top_chunks: int = 5
+    reverse_seed_max_entities: int = 5
 
     # Limits
     max_chunks: int = 50
@@ -1833,6 +1858,32 @@ class VectorCypherRetriever:
             degradations=degradations,
         )
 
+        # #1473 reverse-seeding: augment the entry set with entities connected to
+        # the top vector chunks. Grounds graph expansion in passages that matched
+        # the query and rescues the "no near entity -> vector-only fallback" case
+        # (when the entry set is empty, the reverse seeds keep the graph path
+        # alive below). Default OFF; when off this block is skipped entirely and
+        # ``entry_entities`` is byte-identical to the vector-search result.
+        reverse_seeded_count = 0
+        if self._config.enable_reverse_seeding and vector_chunks_task is not None:
+            _rev_pool = await vector_chunks_task
+            reverse_seeds = await self._reverse_seed_entities(
+                _rev_pool,
+                namespace_id=namespace_id,
+                raw_cosine_by_id=raw_cosine_by_id,
+                top_chunks=self._config.reverse_seed_top_chunks,
+                max_entities=self._config.reverse_seed_max_entities,
+                degradations=degradations,
+            )
+            if reverse_seeds:
+                before = len(entry_entities)
+                entry_entities = self._merge_seed_entities(
+                    entry_entities,
+                    reverse_seeds,
+                    max_added=self._config.reverse_seed_max_entities,
+                )
+                reverse_seeded_count = len(entry_entities) - before
+
         if not entry_entities:
             logger.debug("No entry entities found, falling back to simple retrieval")
             # Cancel the parallel tasks since we're taking a different path
@@ -2817,6 +2868,9 @@ class VectorCypherRetriever:
             routing_decision=routing,
             metadata={
                 "entry_entities": len(entry_entities),
+                # #1473: number of entry entities contributed by reverse-seeding
+                # (0 when the flag is off or nothing was added).
+                "reverse_seeded_entities": reverse_seeded_count,
                 "expanded_entities": len(expanded_entities),
                 "graph_depth": depth,
                 "base_depth": base_depth,
@@ -3826,6 +3880,98 @@ class VectorCypherRetriever:
                     "_filter_channel_plans": filter_channel_plans,
                 },
             )
+
+    @staticmethod
+    def _merge_seed_entities(
+        primary: list[tuple[UUID, float]],
+        extra: list[tuple[UUID, float]],
+        *,
+        max_added: int,
+    ) -> list[tuple[UUID, float]]:
+        """Append up to ``max_added`` new seeds from ``extra`` onto ``primary``.
+
+        Never displaces a ``primary`` (vector-near) seed - it only fills the
+        graph entry set with additional entities, preserving order. ``extra`` is
+        assumed pre-sorted by descending relevance; duplicates (by entity id,
+        already present in ``primary`` or seen earlier in ``extra``) are skipped.
+        """
+        seen = {eid for eid, _ in primary}
+        merged = list(primary)
+        added = 0
+        for eid, score in extra:
+            if added >= max_added:
+                break
+            if eid in seen:
+                continue
+            seen.add(eid)
+            merged.append((eid, score))
+            added += 1
+        return merged
+
+    async def _reverse_seed_entities(
+        self,
+        vector_chunks: list[tuple[UUID, float, Chunk]],
+        *,
+        namespace_id: UUID,
+        raw_cosine_by_id: dict[UUID, float],
+        top_chunks: int,
+        max_entities: int,
+        degradations: list[Degradation],
+    ) -> list[tuple[UUID, float]]:
+        """#1473: seed graph entry entities from the top vector chunks' entities.
+
+        Grounds graph expansion in the passages that actually matched the query:
+        the top-``top_chunks`` vector chunks (by raw cosine) are looked up for
+        their connected entities via ``list_entities(source_chunk_ids=...)``
+        (chunk->entity provenance). Each returned entity is scored by the best
+        cosine among the seeding chunks that mention it, so a stronger passage
+        yields a stronger seed. Returns the reverse-seeded entities sorted by
+        descending score, capped at ``max_entities``.
+
+        Degrades to ``[]`` (recording a Degradation and bumping
+        ``_REVERSE_SEED_DEGRADED_COUNTER``) if the provenance lookup raises, so a
+        failed augmentation leaves the entry set unchanged rather than crashing.
+        """
+        if not vector_chunks or not self._storage:
+            return []
+        # Rank the chunk pool by raw cosine (falls back to the tuple score for
+        # any chunk missing from the cosine map) and take the strongest few.
+        ranked = sorted(
+            vector_chunks,
+            key=lambda c: raw_cosine_by_id.get(c[0], c[1]),
+            reverse=True,
+        )[:top_chunks]
+        chunk_score: dict[UUID, float] = {c[0]: raw_cosine_by_id.get(c[0], c[1]) for c in ranked}
+        if not chunk_score:
+            return []
+        try:
+            # Over-fetch relative to ``max_entities``: several chunks may share
+            # entities, and we score+cap after the overlap join below.
+            entities = await self._storage.list_entities(
+                namespace_id,
+                source_chunk_ids=list(chunk_score),
+                limit=max(max_entities * 4, max_entities),
+            )
+        except Exception as e:
+            logger.warning(f"Reverse-seed entity lookup failed: {e}", exc_info=True)
+            _REVERSE_SEED_DEGRADED_COUNTER.add(1, attributes={"reason": "lookup_failed"})
+            degradations.append(
+                Degradation(
+                    component="vectorcypher.reverse_seed",
+                    reason="lookup_failed",
+                    detail=str(e)[:200] or None,
+                    exception=type(e).__name__,
+                )
+            )
+            return []
+        scored: list[tuple[UUID, float]] = []
+        for ent in entities:
+            overlap = [chunk_score[cid] for cid in (ent.source_chunk_ids or []) if cid in chunk_score]
+            if not overlap:
+                continue
+            scored.append((ent.id, max(overlap)))
+        scored.sort(key=lambda t: t[1], reverse=True)
+        return scored[:max_entities]
 
     async def _vector_search_entities(
         self,
