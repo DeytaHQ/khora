@@ -28,6 +28,8 @@ from khora.core.models import Chunk, Entity
 from khora.engines.vectorcypher.retriever import (
     RetrieverConfig,
     VectorCypherRetriever,
+    _extract_query_mentions,
+    _round_robin_seeds,
 )
 
 pytestmark = pytest.mark.unit
@@ -210,6 +212,193 @@ class TestReverseSeedEntities:
 
 
 # ---------------------------------------------------------------------------
+# _extract_query_mentions
+# ---------------------------------------------------------------------------
+
+
+class TestExtractQueryMentions:
+    def test_skips_sentence_initial_and_finds_proper_nouns(self) -> None:
+        assert _extract_query_mentions("How is Alice connected to Bob?") == ["Alice", "Bob"]
+
+    def test_multi_word_proper_noun_is_one_mention(self) -> None:
+        assert _extract_query_mentions("What did Project Phoenix decide?") == ["Project Phoenix"]
+
+    def test_quoted_spans_any_position(self) -> None:
+        mentions = _extract_query_mentions('compare "red team" and "blue team"')
+        assert mentions == ["red team", "blue team"]
+
+    def test_all_caps_acronym_excluded(self) -> None:
+        # Matches the router's ``not .isupper()`` acronym exclusion.
+        assert _extract_query_mentions("what is the API doing") == []
+
+    def test_dedup_case_insensitive(self) -> None:
+        assert _extract_query_mentions("did Alice meet Alice") == ["Alice"]
+
+    def test_single_mention_query(self) -> None:
+        assert _extract_query_mentions("tell me about Kubernetes") == ["Kubernetes"]
+
+
+# ---------------------------------------------------------------------------
+# _round_robin_seeds
+# ---------------------------------------------------------------------------
+
+
+class TestRoundRobinSeeds:
+    def test_interleaves_across_mentions(self) -> None:
+        a0, a1 = uuid4(), uuid4()
+        b0, b1 = uuid4(), uuid4()
+        merged = _round_robin_seeds([[(a0, 0.9), (a1, 0.5)], [(b0, 0.8), (b1, 0.4)]], cap=10)
+        # rank-0 of each mention comes before any rank-1 entity.
+        assert merged[:2] == [(a0, 0.9), (b0, 0.8)]
+        assert set(merged[2:]) == {(a1, 0.5), (b1, 0.4)}
+
+    def test_caps_total(self) -> None:
+        lists = [[(uuid4(), 0.9)] for _ in range(6)]
+        merged = _round_robin_seeds(lists, cap=3)
+        assert len(merged) == 3
+
+    def test_dedups_shared_entity(self) -> None:
+        shared = uuid4()
+        other = uuid4()
+        merged = _round_robin_seeds([[(shared, 0.9)], [(shared, 0.8), (other, 0.7)]], cap=10)
+        ids = [eid for eid, _ in merged]
+        assert ids.count(shared) == 1
+        assert other in ids
+
+    def test_uneven_lists(self) -> None:
+        a0 = uuid4()
+        b0, b1 = uuid4(), uuid4()
+        merged = _round_robin_seeds([[(a0, 0.9)], [(b0, 0.8), (b1, 0.4)]], cap=10)
+        assert {eid for eid, _ in merged} == {a0, b0, b1}
+
+
+# ---------------------------------------------------------------------------
+# _seed_entry_entities / _per_mention_seed_entities
+# ---------------------------------------------------------------------------
+
+
+class TestSeedEntryEntities:
+    async def test_flag_off_uses_global_search(self) -> None:
+        """Flag OFF: byte-identical to a direct _vector_search_entities call."""
+        ent = uuid4()
+        storage = AsyncMock()
+        storage.search_similar_entities.return_value = [(ent, 0.7)]
+        embedder = AsyncMock()
+        retriever = _make_retriever(
+            config=RetrieverConfig(enable_per_mention_seeding=False),
+            storage=storage,
+            embedder=embedder,
+        )
+        seeds = await retriever._seed_entry_entities(
+            query="How is Alice connected to Bob?",
+            query_embedding=[0.1, 0.2],
+            namespace_id=uuid4(),
+            entry_limit=10,
+            degradations=[],
+        )
+        assert seeds == [(ent, 0.7)]
+        # Global path: exactly one entity search, no per-mention embeds.
+        storage.search_similar_entities.assert_awaited_once()
+        embedder.embed.assert_not_called()
+
+    async def test_single_mention_query_uses_global_even_when_on(self) -> None:
+        ent = uuid4()
+        storage = AsyncMock()
+        storage.search_similar_entities.return_value = [(ent, 0.7)]
+        embedder = AsyncMock()
+        retriever = _make_retriever(
+            config=RetrieverConfig(enable_per_mention_seeding=True),
+            storage=storage,
+            embedder=embedder,
+        )
+        seeds = await retriever._seed_entry_entities(
+            query="tell me about Kubernetes",  # one mention
+            query_embedding=[0.1, 0.2],
+            namespace_id=uuid4(),
+            entry_limit=10,
+            degradations=[],
+        )
+        assert seeds == [(ent, 0.7)]
+        embedder.embed.assert_not_called()
+
+    async def test_multi_mention_query_seeds_per_mention(self) -> None:
+        alice_ent, bob_ent = uuid4(), uuid4()
+        storage = AsyncMock()
+
+        def _search(_ns: Any, emb: Any, *, limit: int, min_similarity: float) -> list:
+            # Distinct results keyed by the (mention) embedding. Plain function
+            # used as an AsyncMock side_effect: its return value is the awaited
+            # result of ``search_similar_entities``.
+            if emb == [1.0]:
+                return [(alice_ent, 0.9)]
+            return [(bob_ent, 0.8)]
+
+        storage.search_similar_entities.side_effect = _search
+        embedder = AsyncMock()
+        embedder.embed.side_effect = [[1.0], [2.0]]  # Alice -> [1.0], Bob -> [2.0]
+        retriever = _make_retriever(
+            config=RetrieverConfig(enable_per_mention_seeding=True),
+            storage=storage,
+            embedder=embedder,
+        )
+        seeds = await retriever._seed_entry_entities(
+            query="How is Alice connected to Bob?",
+            query_embedding=[0.5],
+            namespace_id=uuid4(),
+            entry_limit=10,
+            degradations=[],
+        )
+        ids = {eid for eid, _ in seeds}
+        assert ids == {alice_ent, bob_ent}  # every mention contributed
+        assert embedder.embed.await_count == 2
+
+    async def test_per_mention_degrades_to_global_on_embed_error(self) -> None:
+        ent = uuid4()
+        storage = AsyncMock()
+        storage.search_similar_entities.return_value = [(ent, 0.7)]
+        embedder = AsyncMock()
+        embedder.embed.side_effect = RuntimeError("embed boom")
+        retriever = _make_retriever(
+            config=RetrieverConfig(enable_per_mention_seeding=True),
+            storage=storage,
+            embedder=embedder,
+        )
+        degradations: list[Degradation] = []
+        seeds = await retriever._seed_entry_entities(
+            query="How is Alice connected to Bob?",
+            query_embedding=[0.5],
+            namespace_id=uuid4(),
+            entry_limit=10,
+            degradations=degradations,
+        )
+        # Degraded to the global single-embedding search.
+        assert seeds == [(ent, 0.7)]
+        assert any(d["component"] == "vectorcypher.per_mention_seed" for d in degradations)
+
+    async def test_respects_max_mentions_cap(self) -> None:
+        storage = AsyncMock()
+        storage.search_similar_entities.return_value = [(uuid4(), 0.7)]
+        embedder = AsyncMock()
+        embedder.embed.return_value = [1.0]
+        retriever = _make_retriever(
+            config=RetrieverConfig(enable_per_mention_seeding=True, per_mention_max_mentions=2),
+            storage=storage,
+            embedder=embedder,
+        )
+        await retriever._seed_entry_entities(
+            # 4 mentions separated by lowercase words (so they don't merge into
+            # one multi-word proper-noun phrase).
+            query="did Alice meet Bob and Carol and Dave",
+            query_embedding=[0.5],
+            namespace_id=uuid4(),
+            entry_limit=10,
+            degradations=[],
+        )
+        # Only the first 2 mentions were embedded (cap).
+        assert embedder.embed.await_count == 2
+
+
+# ---------------------------------------------------------------------------
 # Config wiring (flag default OFF)
 # ---------------------------------------------------------------------------
 
@@ -221,6 +410,11 @@ class TestSeedingConfigDefaults:
         assert cfg.reverse_seed_top_chunks == 5
         assert cfg.reverse_seed_max_entities == 5
 
+    def test_per_mention_default_off(self) -> None:
+        cfg = RetrieverConfig()
+        assert cfg.enable_per_mention_seeding is False
+        assert cfg.per_mention_max_mentions == 4
+
     def test_query_settings_default_off(self) -> None:
         from khora.config.schema import QuerySettings
 
@@ -228,3 +422,5 @@ class TestSeedingConfigDefaults:
         assert qs.enable_reverse_seeding is False
         assert qs.reverse_seed_top_chunks == 5
         assert qs.reverse_seed_max_entities == 5
+        assert qs.enable_per_mention_seeding is False
+        assert qs.per_mention_max_mentions == 4

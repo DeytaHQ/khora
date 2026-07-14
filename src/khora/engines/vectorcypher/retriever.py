@@ -19,6 +19,7 @@ import contextlib
 import json
 import math
 import os
+import re
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -284,6 +285,25 @@ _REVERSE_SEED_DEGRADED_COUNTER = metric_counter(
     ),
 )
 
+# Per-mention seeding degradation counter (issue #1473, ADR-001). When
+# enable_per_mention_seeding is on and the query names 2+ entities,
+# ``_per_mention_seed_entities`` embeds each mention and searches entities per
+# mention. If the per-mention path raises (embedding fault), it degrades to the
+# global single-embedding entry-entity search; this counter bumps so the
+# fallback is observable. NO namespace_id label - cardinality rule.
+_PER_MENTION_SEED_DEGRADED_COUNTER = metric_counter(
+    "khora.vectorcypher.per_mention_seed.degraded_total",
+    unit="1",
+    description=(
+        "Issue #1473 (ADR-001). VectorCypher per-mention seeding silent fallback. "
+        "Incremented when per-mention diversified seeding raises (e.g. a mention "
+        "embedding fault) and the seed step degrades to the global "
+        "single-embedding entry-entity search. The same event is also appended to "
+        "RecallResult.engine_info['degradations']. Labels: reason (seed_failed). "
+        "NO namespace_id label - cardinality rule."
+    ),
+)
+
 
 # #1474 leg 2: static relationship-type priors for typed/weighted expansion.
 # A small hand-set table (learnable later, grb#12 A/B). Explicit typed relations
@@ -319,6 +339,85 @@ def _consume_task_exc(task: asyncio.Future) -> None:
     if task.cancelled():
         return
     task.exception()
+
+
+def _extract_query_mentions(query: str) -> list[str]:
+    """#1473: extract candidate entity mentions from a query for per-mention seeding.
+
+    Mirrors the router's ``_count_potential_entities`` heuristic so a query the
+    router already scored as multi-entity decomposes into the same mentions:
+    quoted spans (any position) plus consecutive capitalized proper-noun
+    sequences, skipping the sentence-initial word (its capital is grammatical,
+    not a name) and all-caps tokens (acronyms, matching the router). Returned in
+    first-seen order, de-duplicated case-insensitively.
+    """
+    mentions: list[str] = []
+    seen: set[str] = set()
+
+    def _add(text: str) -> None:
+        text = text.strip()
+        key = text.lower()
+        if text and key not in seen:
+            seen.add(key)
+            mentions.append(text)
+
+    # Quoted spans anywhere in the query.
+    for m in re.finditer(r'"([^"]+)"|\'([^\']+)\'', query):
+        _add(m.group(1) or m.group(2))
+
+    # Capitalized proper-noun sequences, skipping the sentence-initial word.
+    words = query.split()
+    i = 0
+    while i < len(words):
+        stripped = words[i].strip(",.?!:;\"'")
+        if i > 0 and stripped and stripped[0].isupper() and not stripped.isupper():
+            phrase = [stripped]
+            j = i + 1
+            while j < len(words):
+                nxt = words[j].strip(",.?!:;\"'")
+                if nxt and nxt[0].isupper() and not nxt.isupper():
+                    phrase.append(nxt)
+                    j += 1
+                else:
+                    break
+            _add(" ".join(phrase))
+            i = j
+            continue
+        i += 1
+
+    return mentions
+
+
+def _round_robin_seeds(
+    per_mention: list[list[tuple[UUID, float]]],
+    *,
+    cap: int,
+) -> list[tuple[UUID, float]]:
+    """Interleave per-mention entity lists round-robin, de-duped, capped at ``cap``.
+
+    Each mention's list is assumed sorted by descending relevance. Taking the
+    rank-0 entity from every mention before any rank-1 entity guarantees every
+    mention contributes to the entry set (the point of diversified seeding),
+    instead of a global top-K that a single dominant mention can monopolize.
+    """
+    merged: list[tuple[UUID, float]] = []
+    seen: set[UUID] = set()
+    depth = 0
+    while len(merged) < cap:
+        progressed = False
+        for lst in per_mention:
+            if depth < len(lst):
+                progressed = True
+                eid, score = lst[depth]
+                if eid not in seen:
+                    seen.add(eid)
+                    merged.append((eid, score))
+                    if len(merged) >= cap:
+                        break
+        if not progressed:
+            break
+        depth += 1
+    return merged
 
 
 def _decode_chunker_info(value: Any) -> dict[str, Any]:
@@ -624,6 +723,8 @@ class RetrieverConfig:
     enable_reverse_seeding: bool = False
     reverse_seed_top_chunks: int = 5
     reverse_seed_max_entities: int = 5
+    enable_per_mention_seeding: bool = False
+    per_mention_max_mentions: int = 4
 
     # Limits
     max_chunks: int = 50
@@ -1850,11 +1951,16 @@ class VectorCypherRetriever:
                 )
             )
 
-        # Step 3a: Find entry entities via vector search (runs in parallel with vector_chunks_task)
-        entry_entities = await self._vector_search_entities(
+        # Step 3a: Find entry entities via vector search (runs in parallel with
+        # vector_chunks_task). #1473: ``_seed_entry_entities`` picks the global
+        # top-K search (default / single-mention) or per-mention diversified
+        # seeding (flag on + multi-mention query); it is byte-identical to the
+        # historic ``_vector_search_entities`` call when the flag is off.
+        entry_entities = await self._seed_entry_entities(
+            query=query,
             query_embedding=query_embedding,
             namespace_id=namespace_id,
-            limit=entry_limit,
+            entry_limit=entry_limit,
             degradations=degradations,
         )
 
@@ -2871,6 +2977,12 @@ class VectorCypherRetriever:
                 # #1473: number of entry entities contributed by reverse-seeding
                 # (0 when the flag is off or nothing was added).
                 "reverse_seeded_entities": reverse_seeded_count,
+                # #1473: True when per-mention diversified seeding was applicable
+                # (flag on + a multi-mention query). Short-circuits to False with
+                # no extra work when the flag is off.
+                "per_mention_seeding_activated": (
+                    self._config.enable_per_mention_seeding and len(_extract_query_mentions(query)) >= 2
+                ),
                 "expanded_entities": len(expanded_entities),
                 "graph_depth": depth,
                 "base_depth": base_depth,
@@ -3972,6 +4084,91 @@ class VectorCypherRetriever:
             scored.append((ent.id, max(overlap)))
         scored.sort(key=lambda t: t[1], reverse=True)
         return scored[:max_entities]
+
+    async def _seed_entry_entities(
+        self,
+        *,
+        query: str,
+        query_embedding: list[float],
+        namespace_id: UUID,
+        entry_limit: int,
+        degradations: list[Degradation],
+    ) -> list[tuple[UUID, float]]:
+        """Choose the graph entry-entity set for this recall (#1473).
+
+        Default path (per-mention seeding OFF, or a single-mention query): the
+        historic global top-K vector entity search, byte-identical to a direct
+        ``_vector_search_entities`` call. When per-mention seeding is ON and the
+        query names 2+ entities, decompose it and round-robin the budget across
+        mentions instead (``_per_mention_seed_entities``); an empty per-mention
+        result falls back to the global search so recall never regresses to no
+        seeds.
+        """
+        if self._config.enable_per_mention_seeding:
+            mentions = _extract_query_mentions(query)
+            if len(mentions) >= 2:
+                seeds = await self._per_mention_seed_entities(
+                    mentions,
+                    namespace_id=namespace_id,
+                    entry_limit=entry_limit,
+                    degradations=degradations,
+                )
+                if seeds:
+                    return seeds
+        return await self._vector_search_entities(
+            query_embedding=query_embedding,
+            namespace_id=namespace_id,
+            limit=entry_limit,
+            degradations=degradations,
+        )
+
+    async def _per_mention_seed_entities(
+        self,
+        mentions: list[str],
+        *,
+        namespace_id: UUID,
+        entry_limit: int,
+        degradations: list[Degradation],
+    ) -> list[tuple[UUID, float]]:
+        """#1473: seed entities per query mention, round-robin over the budget.
+
+        Each mention is embedded independently and searched against the entity
+        vector index; the per-mention hit lists are interleaved round-robin
+        (``_round_robin_seeds``) and capped at ``entry_limit`` so every mention
+        contributes seeds. Degrades to ``[]`` (recording a Degradation and
+        bumping ``_PER_MENTION_SEED_DEGRADED_COUNTER``) if the mention embedding
+        raises, so the caller falls back to the global single-embedding search.
+        """
+        mentions = mentions[: self._config.per_mention_max_mentions]
+        per_budget = max(1, entry_limit // len(mentions))
+        try:
+            embeddings = await asyncio.gather(*[self._embedder.embed(m) for m in mentions])
+        except Exception as e:
+            logger.warning(f"Per-mention seeding embed failed: {e}", exc_info=True)
+            _PER_MENTION_SEED_DEGRADED_COUNTER.add(1, attributes={"reason": "seed_failed"})
+            degradations.append(
+                Degradation(
+                    component="vectorcypher.per_mention_seed",
+                    reason="seed_failed",
+                    detail=str(e)[:200] or None,
+                    exception=type(e).__name__,
+                )
+            )
+            return []
+        # Over-fetch per mention (budget * 2) so the round-robin has depth to
+        # de-dup against; the final cap is entry_limit.
+        per_lists = await asyncio.gather(
+            *[
+                self._vector_search_entities(
+                    query_embedding=emb,
+                    namespace_id=namespace_id,
+                    limit=per_budget * 2,
+                    degradations=degradations,
+                )
+                for emb in embeddings
+            ]
+        )
+        return _round_robin_seeds(list(per_lists), cap=entry_limit)
 
     async def _vector_search_entities(
         self,

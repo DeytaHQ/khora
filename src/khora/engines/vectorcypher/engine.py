@@ -980,6 +980,8 @@ class VectorCypherEngine:
             enable_reverse_seeding=self._config.query.enable_reverse_seeding,
             reverse_seed_top_chunks=self._config.query.reverse_seed_top_chunks,
             reverse_seed_max_entities=self._config.query.reverse_seed_max_entities,
+            enable_per_mention_seeding=self._config.query.enable_per_mention_seeding,
+            per_mention_max_mentions=self._config.query.per_mention_max_mentions,
         )
 
     async def disconnect(self) -> None:

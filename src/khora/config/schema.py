@@ -2372,6 +2372,26 @@ class QuerySettings(BaseSettings):
             "enable_reverse_seeding is True."
         ),
     )
+    enable_per_mention_seeding: bool = Field(
+        default=False,
+        description=(
+            "#1473 per-mention diversified seeding: when a query names 2+ "
+            "entities, embed each mention independently and round-robin the "
+            "entry-entity budget across mentions instead of taking a single "
+            "global top-K (which can starve a mention on multi-entity queries). "
+            "Single-mention queries keep the global search. Default OFF "
+            "(byte-identical when off)."
+        ),
+    )
+    per_mention_max_mentions: int = Field(
+        default=4,
+        ge=2,
+        description=(
+            "#1473: cap on how many query mentions seed independently (bounds the "
+            "per-query embedding calls). Only used when enable_per_mention_seeding "
+            "is True."
+        ),
+    )
 
 
 class KhoraConfig(BaseSettings):
