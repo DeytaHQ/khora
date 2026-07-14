@@ -105,6 +105,48 @@ def _find_entity_key(normalized_name: str, all_entities: dict[str, Any]) -> str 
     return best_key
 
 
+# #1474 leg 1: cap the unique entities considered per chunk when counting
+# co-mentions, so a pathological chunk (hundreds of entities) cannot blow the
+# pair enumeration up to O(n^2). Far above realistic per-chunk entity counts,
+# so real weights are unaffected; it only bounds the worst case.
+_MAX_COMENTION_ENTITIES_PER_CHUNK = 64
+
+
+def _assign_comention_weights(
+    chunks: list[Any],
+    all_entities: dict[str, Any],
+    chunk_entity_keys: dict[UUID, list[str]],
+    relationships: list[Relationship],
+) -> None:
+    """Populate ``relationship.weight`` from co-mention frequency (#1474 leg 1).
+
+    ``weight`` previously defaulted to a constant ``1.0`` for every edge,
+    discarding a signal the graph already implies: how many chunks evidence the
+    link between two entities. For each unordered entity pair, count the number
+    of chunks in which BOTH endpoints appear, and stamp that count as the edge
+    weight so downstream typed/weighted expansion and (future) PPR edge weights
+    have a real connection-strength prior. Additive and backward-compatible - a
+    previously-inert column is now populated. Pairs with no single-chunk
+    co-occurrence (e.g. pure cross-chunk edges) keep the ``1.0`` default.
+    """
+    comention_counts: dict[tuple[UUID, UUID], int] = {}
+    for chunk in chunks:
+        ids = sorted(
+            {all_entities[k].id for k in dict.fromkeys(chunk_entity_keys.get(chunk.id, [])) if k in all_entities}
+        )[:_MAX_COMENTION_ENTITIES_PER_CHUNK]
+        for a_idx in range(len(ids)):
+            for b_idx in range(a_idx + 1, len(ids)):
+                pair = (ids[a_idx], ids[b_idx])
+                comention_counts[pair] = comention_counts.get(pair, 0) + 1
+
+    for rel in relationships:
+        src, tgt = rel.source_entity_id, rel.target_entity_id
+        pair = (src, tgt) if src <= tgt else (tgt, src)
+        count = comention_counts.get(pair)
+        if count:
+            rel.weight = float(count)
+
+
 async def _extract_cross_chunk_relationships(
     chunks: list,
     entities_by_chunk: dict,
@@ -481,6 +523,12 @@ async def stream_extract_and_embed_entities(
                         )
                         added_cross += 1
                     logger.debug(f"Cross-chunk extraction: added {added_cross} new relationships")
+
+            # #1474 leg 1: stamp each edge's weight with its endpoints'
+            # co-mention frequency (chunks where both entities appear) so the
+            # previously-inert weight column carries a real connection-strength
+            # signal for typed/weighted expansion and future PPR edge weights.
+            _assign_comention_weights(chunks, all_entities, chunk_entity_keys, all_relationships)
 
         finally:
             # Signal completion
