@@ -266,6 +266,27 @@ _SESSION_FANOUT_DEGRADED_COUNTER = metric_counter(
 )
 
 
+# #1474 leg 2: static relationship-type priors for typed/weighted expansion.
+# A small hand-set table (learnable later, grb#12 A/B). Explicit typed relations
+# keep the full 1.0 prior; the weak generic / co-occurrence types are
+# downweighted so a genuinely typed edge outranks mere co-occurrence at equal
+# hop distance. Only consulted when enable_typed_weighted_expansion is on.
+_RELATIONSHIP_TYPE_PRIORS: dict[str, float] = {
+    # Co-occurrence edge (two entities merely share a chunk; confidence ~0.4).
+    "ASSOCIATED_WITH": 0.4,
+    # Generic fallback relation the extractor emits when no specific type fits.
+    "RELATES_TO": 0.7,
+}
+_DEFAULT_RELATIONSHIP_TYPE_PRIOR = 1.0
+
+
+def _relationship_type_prior(rel_type: str | None) -> float:
+    """Static per-type prior for typed/weighted graph expansion (#1474 leg 2)."""
+    if not rel_type:
+        return _DEFAULT_RELATIONSHIP_TYPE_PRIOR
+    return _RELATIONSHIP_TYPE_PRIORS.get(rel_type, _DEFAULT_RELATIONSHIP_TYPE_PRIOR)
+
+
 def _consume_task_exc(task: asyncio.Future) -> None:
     """Swallow a speculative task's result/exception when nobody awaited it (#1469).
 
@@ -567,6 +588,17 @@ class RetrieverConfig:
     # Validate via the grb#13 retrieval-only eval harness before enabling.
     ppr_recognition_filter: bool = False
     ppr_recognition_min_similarity: float = 0.3
+
+    # #1474: typed/weighted expansion + query-aware graph-chunk scoring.
+    # Both default OFF (A/B pending, khora-graphrag-benchmark#12). Threaded from
+    # ``KhoraConfig.query.enable_typed_weighted_expansion`` /
+    # ``enable_seed_weighted_chunk_scoring``. When
+    # ``enable_typed_weighted_expansion`` is on, ``_cypher_expand`` scores each
+    # hop as 1/(1+distance) * relationship.confidence * static type-prior; when
+    # ``enable_seed_weighted_chunk_scoring`` is on, ``_fetch_chunks_from_entities``
+    # weights each chunk by its connected entities' query relevance.
+    enable_typed_weighted_expansion: bool = False
+    enable_seed_weighted_chunk_scoring: bool = False
 
     # Limits
     max_chunks: int = 50
@@ -3862,6 +3894,11 @@ class VectorCypherRetriever:
         with trace_span("khora.vectorcypher.cypher_expand", entry_count=len(entry_entity_ids), depth=depth) as span:
             depth = min(max(1, depth), self._config.max_depth)
 
+            # #1474 leg 2: request per-hop (type, confidence, direction) only
+            # when typed/weighted expansion is enabled, so the default path pays
+            # no extra query cost.
+            typed_weighted = self._config.enable_typed_weighted_expansion
+
             # Get neighborhoods from dual node manager (Neo4j) or storage coordinator (SurrealDB)
             if self._dual_nodes is not None:
                 neighborhoods = await self._dual_nodes.get_entity_neighborhoods(
@@ -3870,6 +3907,7 @@ class VectorCypherRetriever:
                     depth=depth,
                     limit_per_entity=20,
                     prefer_current=prefer_current,
+                    include_edge_metadata=typed_weighted,
                     degradations=degradations,
                 )
             elif self._storage and self._storage._graph:
@@ -3946,8 +3984,20 @@ class VectorCypherRetriever:
                         m = re.search(r"[0-9a-fA-F\-]{36}", str(raw_id))
                         entity_id = UUID(m.group(0)) if m else UUID(int=0)
                     distance = entity_info.get("distance", 1)
-                    # Score decreases with distance
-                    score = 1.0 / (1 + distance)
+                    if typed_weighted:
+                        # #1474 leg 2: decay * relationship.confidence * static
+                        # per-type prior. Missing rel metadata (SurrealDB /
+                        # graph-less neighborhoods that never return it) falls
+                        # back to confidence 1.0 and the default type prior, so
+                        # the score gracefully degrades toward the pure-decay
+                        # value on backends that cannot supply the signal.
+                        decay = 1.0 / (1 + distance)
+                        rel_conf = entity_info.get("rel_confidence")
+                        rel_conf = float(rel_conf) if rel_conf is not None else 1.0
+                        score = decay * rel_conf * _relationship_type_prior(entity_info.get("rel_type"))
+                    else:
+                        # Score decreases with distance
+                        score = 1.0 / (1 + distance)
 
                     if entity_id in entity_scores:
                         # Take max score if entity reached multiple ways

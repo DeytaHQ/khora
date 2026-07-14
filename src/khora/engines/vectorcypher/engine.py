@@ -961,6 +961,9 @@ class VectorCypherEngine:
             ppr_early_stop_margin=self._config.query.ppr_early_stop_margin,
             ppr_recognition_filter=self._config.query.ppr_recognition_filter,
             ppr_recognition_min_similarity=self._config.query.ppr_recognition_min_similarity,
+            # #1474 — typed/weighted expansion + query-aware graph-chunk scoring.
+            enable_typed_weighted_expansion=self._config.query.enable_typed_weighted_expansion,
+            enable_seed_weighted_chunk_scoring=self._config.query.enable_seed_weighted_chunk_scoring,
             metadata_overfetch_multiplier=self._config.query.metadata_overfetch_multiplier,
             # Issue #1018 — QuerySettings tier on the default recall() path.
             # These were inert on VectorCypher because recall() dispatches
