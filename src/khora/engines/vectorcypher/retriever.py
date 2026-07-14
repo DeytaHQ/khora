@@ -346,10 +346,11 @@ def _extract_query_mentions(query: str) -> list[str]:
 
     Mirrors the router's ``_count_potential_entities`` heuristic so a query the
     router already scored as multi-entity decomposes into the same mentions:
-    quoted spans (any position) plus consecutive capitalized proper-noun
-    sequences, skipping the sentence-initial word (its capital is grammatical,
-    not a name) and all-caps tokens (acronyms, matching the router). Returned in
-    first-seen order, de-duplicated case-insensitively.
+    quoted spans (any position), consecutive capitalized proper-noun sequences
+    (skipping the sentence-initial word, whose capital is grammatical, and
+    all-caps acronyms), and the same technical-identifier tokens the router also
+    counts - CamelCase, snake_case, and @/# tags. Returned in first-seen order,
+    de-duplicated case-insensitively.
     """
     mentions: list[str] = []
     seen: set[str] = set()
@@ -384,6 +385,17 @@ def _extract_query_mentions(query: str) -> list[str]:
             i = j
             continue
         i += 1
+
+    # Technical-identifier mentions the router also counts (mirrors
+    # _count_potential_entities): CamelCase (incl. sentence-initial, which the
+    # capitalized-phrase pass above skips), snake_case, and @/# tags (marker
+    # stripped so the embedded text is the bare identifier). Deduped by _add.
+    for m in re.finditer(r"\b[A-Z][a-z]+[A-Z][a-zA-Z]*\b", query):
+        _add(m.group(0))
+    for m in re.finditer(r"\b[a-z]+_[a-z_]+\b", query):
+        _add(m.group(0))
+    for m in re.finditer(r"[@#](\w+)", query):
+        _add(m.group(1))
 
     return mentions
 

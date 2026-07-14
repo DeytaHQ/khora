@@ -237,6 +237,22 @@ class TestExtractQueryMentions:
     def test_single_mention_query(self) -> None:
         assert _extract_query_mentions("tell me about Kubernetes") == ["Kubernetes"]
 
+    def test_snake_case_identifiers(self) -> None:
+        # Router counts snake_case as entities; the extractor must too.
+        assert _extract_query_mentions("compare auth_service and user_service") == [
+            "auth_service",
+            "user_service",
+        ]
+
+    def test_at_and_hash_tags_marker_stripped(self) -> None:
+        assert _extract_query_mentions("did @alice mention #phoenix") == ["alice", "phoenix"]
+
+    def test_sentence_initial_camelcase(self) -> None:
+        # The capitalized-phrase pass skips the sentence-initial word; the
+        # CamelCase pass still catches it, matching the router.
+        mentions = _extract_query_mentions("UserService talks to PaymentGateway")
+        assert set(mentions) == {"UserService", "PaymentGateway"}
+
 
 # ---------------------------------------------------------------------------
 # _round_robin_seeds
