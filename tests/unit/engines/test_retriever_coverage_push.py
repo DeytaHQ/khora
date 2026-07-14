@@ -1579,8 +1579,13 @@ class TestFetchChunksFromEntities:
         assert chunk.document_id == doc_id
         # Score: 3 * (1 + 0.1 * 2) = 3.6
         assert score == pytest.approx(3.6)
-        assert chunk.metadata["author"] == "alice"
-        assert chunk.metadata["occurred_at"] == "2026-04-01"
+        # Recall returns the STORED metadata blob verbatim: no injected
+        # ``occurred_at`` / ``connected_entities`` keys.
+        assert chunk.metadata == {"author": "alice"}
+        # ``occurred_at`` moved to the first-class Chunk column. The record
+        # supplies a date-only string, so ``_coerce_occurred_at`` yields a naive
+        # datetime.
+        assert chunk.occurred_at == datetime(2026, 4, 1)
 
     @pytest.mark.asyncio
     async def test_no_dual_nodes_and_no_storage_returns_empty(self) -> None:
@@ -1653,8 +1658,11 @@ class TestVectorSearchChunksAndEntities:
         assert len(result) == 1
         cid, score, chunk = result[0]
         assert score == 0.7  # combined_score takes precedence
-        assert chunk.metadata["source"] == "x"
-        assert chunk.metadata["occurred_at"] == "2026-04-01T00:00:00+00:00"
+        # STORED blob verbatim: no injected ``occurred_at`` key.
+        assert chunk.metadata == {"source": "x"}
+        # ``occurred_at`` moved to the first-class Chunk column, passed through
+        # from the store result unchanged (tz-aware).
+        assert chunk.occurred_at == _dt(2026, 4, 1, tzinfo=UTC)
 
     @pytest.mark.asyncio
     async def test_vector_search_chunks_hybrid_alpha_override(self) -> None:

@@ -571,10 +571,7 @@ class SkeletonConstructionEngine:
                 namespace_id=result.chunk.namespace_id,
                 document_id=result.chunk.document_id,
                 content=result.chunk.content,
-                metadata={
-                    "occurred_at": result.chunk.occurred_at.isoformat() if result.chunk.occurred_at else None,
-                    **(result.chunk.metadata or {}),
-                },
+                metadata=result.chunk.metadata or {},
                 created_at=result.chunk.created_at or result.chunk.occurred_at or datetime.now(UTC),
                 occurred_at=result.chunk.occurred_at,
                 source_timestamp=result.chunk.source_timestamp,

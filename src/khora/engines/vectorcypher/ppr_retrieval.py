@@ -638,13 +638,7 @@ async def ppr_retrieve_chunks(
                         namespace_id=chunk.namespace_id,
                         document_id=chunk.document_id,
                         content=chunk.content,
-                        metadata={
-                            "occurred_at": (
-                                chunk.metadata.get("occurred_at") if isinstance(chunk.metadata, dict) else None
-                            ),
-                            "ppr_score": score_map[cid],
-                            **(chunk.metadata if isinstance(chunk.metadata, dict) else {}),
-                        },
+                        metadata=chunk.metadata if isinstance(chunk.metadata, dict) else {},
                         created_at=getattr(chunk, "created_at", None),
                         occurred_at=chunk.occurred_at,
                         source_timestamp=chunk.source_timestamp,
