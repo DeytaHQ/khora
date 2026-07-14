@@ -982,6 +982,9 @@ class VectorCypherEngine:
             reverse_seed_max_entities=self._config.query.reverse_seed_max_entities,
             enable_per_mention_seeding=self._config.query.enable_per_mention_seeding,
             per_mention_max_mentions=self._config.query.per_mention_max_mentions,
+            evidence_graph_gate_enabled=self._config.query.enable_evidence_graph_gate,
+            evidence_graph_gate_min_top_score=self._config.query.evidence_graph_gate_min_top_score,
+            evidence_graph_gate_min_gap=self._config.query.evidence_graph_gate_min_gap,
         )
 
     async def disconnect(self) -> None:

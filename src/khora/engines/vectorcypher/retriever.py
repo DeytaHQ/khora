@@ -725,6 +725,11 @@ class RetrieverConfig:
     reverse_seed_max_entities: int = 5
     enable_per_mention_seeding: bool = False
     per_mention_max_mentions: int = 4
+    # Evidence-based graph channel gate. Threaded onto the RouterConfig (the gate
+    # decision lives on the router); the retriever calls it before cypher_expand.
+    evidence_graph_gate_enabled: bool = False
+    evidence_graph_gate_min_top_score: float = 0.5
+    evidence_graph_gate_min_gap: float = 0.25
 
     # Limits
     max_chunks: int = 50
@@ -922,6 +927,10 @@ class VectorCypherRetriever:
                 adaptive_depth_low_entity_threshold=self._config.adaptive_depth_low_entity_threshold,
                 adaptive_depth_frontier_budget=self._config.adaptive_depth_frontier_budget,
                 complex_depth=self._config.default_depth,
+                # #1473 evidence-based graph channel gate (default OFF).
+                evidence_graph_gate_enabled=self._config.evidence_graph_gate_enabled,
+                evidence_graph_gate_min_top_score=self._config.evidence_graph_gate_min_top_score,
+                evidence_graph_gate_min_gap=self._config.evidence_graph_gate_min_gap,
             )
         self._router = QueryComplexityRouter(router_config)
         # Forward Neo4jBackend when available so pool metrics observe
@@ -2222,6 +2231,32 @@ class VectorCypherRetriever:
             seed_entity_ids=[e[0] for e in entry_entities],
         )
 
+        # #1473 evidence-based graph channel gate. When the vector channel has a
+        # decisive score-gap winner, the graph channel measurably injects noise
+        # on single-fact questions - suppress it for this recall (skip
+        # cypher_expand + the graph chunk fetch, so graph_chunks stays []). A
+        # channel-level refinement on the router's SIMPLE/COMPLEX split. Default
+        # OFF; never fires on COMPLEX (multi-hop needs the graph), on temporal
+        # queries (they need the graph for cross-session linking / recency), or
+        # when the vector channel is skipped (mode=GRAPH - nothing to judge). The
+        # gate peeks the resolved vector scores, which forces the vector search
+        # to finish before expansion only when the gate is enabled.
+        suppress_graph = False
+        graph_gate_reasoning: str | None = None
+        if (
+            self._config.evidence_graph_gate_enabled
+            and not skip_vector_channel
+            and not (temporal_signal is not None and temporal_signal.is_temporal)
+        ):
+            gate_scores = await self._vector_scores_for_gate(
+                vector_chunks_task, _session_aware_chunks, raw_cosine_by_id
+            )
+            gate = self._router.evaluate_graph_gate(gate_scores, complexity=routing.complexity)
+            suppress_graph = gate.suppress
+            graph_gate_reasoning = gate.reasoning
+            if suppress_graph:
+                logger.debug(f"Evidence graph gate suppressed graph channel: {gate.reasoning}")
+
         # Step 4: Cypher expand to find related entities
         # For temporal queries (STATE_QUERY/RECENCY/CHANGE), prefer currently-valid
         # entities by filtering out those whose valid_until has passed.
@@ -2250,23 +2285,30 @@ class VectorCypherRetriever:
             else contextlib.nullcontext()
         )
         async with _graph_session_ctx:
-            try:
-                expanded_entities, entity_info_map = await self._cypher_expand(
-                    entry_entity_ids=[e[0] for e in entry_entities],
-                    namespace_id=namespace_id,
-                    depth=depth,
-                    prefer_current=_tp.prefer_current,
-                    degradations=degradations,
-                )
-            except _NEO4J_TRANSIENT_ERRORS as exc:
-                logger.warning(
-                    f"Neo4j unavailable during cypher_expand for namespace={namespace_id}, "
-                    f"falling back to vector-only results: {type(exc).__name__}: {exc}"
-                )
+            if suppress_graph:
+                # #1473 gate fired: skip the graph expansion entirely. Entry
+                # entities are still carried for the projection below, but no
+                # neighborhood is fetched and graph_chunks stays [] (see Step 5).
                 expanded_entities = {}
                 entity_info_map = {}
-                graph_fallback = True
-                graph_error_msg = type(exc).__name__
+            else:
+                try:
+                    expanded_entities, entity_info_map = await self._cypher_expand(
+                        entry_entity_ids=[e[0] for e in entry_entities],
+                        namespace_id=namespace_id,
+                        depth=depth,
+                        prefer_current=_tp.prefer_current,
+                        degradations=degradations,
+                    )
+                except _NEO4J_TRANSIENT_ERRORS as exc:
+                    logger.warning(
+                        f"Neo4j unavailable during cypher_expand for namespace={namespace_id}, "
+                        f"falling back to vector-only results: {type(exc).__name__}: {exc}"
+                    )
+                    expanded_entities = {}
+                    entity_info_map = {}
+                    graph_fallback = True
+                    graph_error_msg = type(exc).__name__
 
             # Step 4b: Bi-temporal version filtering
             # For EXPLICIT temporal queries with a parsed date, narrow entities to
@@ -2337,7 +2379,10 @@ class VectorCypherRetriever:
             # paths push nothing and leave it empty, so every leaf falls to
             # ``post_filtered_keys`` for them.
             graph_pushed_keys_sink: list[frozenset[str]] = []
-            if graph_fallback:
+            if graph_fallback or suppress_graph:
+                # graph_fallback: Neo4j unavailable. suppress_graph (#1473): the
+                # evidence gate dropped the graph channel. Either way the graph
+                # chunk channel contributes nothing and fusion runs vector-only.
                 graph_chunks: list[tuple[UUID, float, Chunk]] = []
             elif self._config.enable_ppr_retrieval and self._storage is not None:
                 from khora.engines.vectorcypher.ppr_retrieval import ppr_retrieve_chunks
@@ -2983,6 +3028,11 @@ class VectorCypherRetriever:
                 "per_mention_seeding_activated": (
                     self._config.enable_per_mention_seeding and len(_extract_query_mentions(query)) >= 2
                 ),
+                # #1473: True when the evidence graph gate suppressed the graph
+                # channel this recall (False when the flag is off or it did not
+                # fire). ``graph_gate_reasoning`` carries the human-readable why.
+                "graph_gate_suppressed": suppress_graph,
+                "graph_gate_reasoning": graph_gate_reasoning,
                 "expanded_entities": len(expanded_entities),
                 "graph_depth": depth,
                 "base_depth": base_depth,
@@ -4084,6 +4134,28 @@ class VectorCypherRetriever:
             scored.append((ent.id, max(overlap)))
         scored.sort(key=lambda t: t[1], reverse=True)
         return scored[:max_entities]
+
+    async def _vector_scores_for_gate(
+        self,
+        vector_chunks_task: asyncio.Task[list[tuple[UUID, float, Chunk]]] | None,
+        session_aware_chunks: list[tuple[UUID, float, Chunk]] | None,
+        raw_cosine_by_id: dict[UUID, float],
+    ) -> list[float]:
+        """#1473: resolve the vector channel's per-chunk cosine scores for the gate.
+
+        Prefers the session-aware merged pool when the fan-out replaced the
+        global search; otherwise awaits the global vector task (asyncio caches
+        the result, so the later Step 6 await is free). Returns the raw cosine
+        per chunk (falling back to the tuple score for any chunk missing from
+        the cosine map), matching how the PPR path reads vector relevance.
+        """
+        if session_aware_chunks is not None:
+            pool = session_aware_chunks
+        elif vector_chunks_task is not None:
+            pool = await vector_chunks_task
+        else:
+            return []
+        return [raw_cosine_by_id.get(cid, score) for cid, score, _ in pool]
 
     async def _seed_entry_entities(
         self,

@@ -151,6 +151,32 @@ class RouterConfig:
     # missing (fresh namespace / graph-less stack).
     adaptive_depth_frontier_budget: int = 300
 
+    # #1473 evidence-based graph channel gate. A CHANNEL-selection refinement on
+    # top of the coarse SIMPLE/COMPLEX split: when the vector channel has a
+    # decisive score-gap winner, the graph channel measurably injects noise on
+    # single-fact questions, so ``evaluate_graph_gate`` recommends suppressing it.
+    # Default OFF; COMPLEX (multi-hop) routing is always protected from the gate.
+    evidence_graph_gate_enabled: bool = False
+    evidence_graph_gate_min_top_score: float = 0.5
+    evidence_graph_gate_min_gap: float = 0.25
+
+
+@dataclass
+class GraphGateDecision:
+    """Result of the #1473 evidence-based graph channel gate.
+
+    ``suppress`` is True when the vector channel is a decisive enough winner
+    that the graph channel should be dropped from this recall (it tends to
+    inject noise on single-fact questions). ``top_score`` / ``gap`` are the
+    evidence the decision was made on (the top vector score and the top-vs-second
+    score gap), surfaced for telemetry and A/B analysis.
+    """
+
+    suppress: bool
+    reasoning: str
+    top_score: float
+    gap: float
+
 
 class QueryComplexityRouter:
     """Routes queries based on complexity heuristics with optional LLM fallback.
@@ -895,6 +921,63 @@ COMPLEX|Multi-hop query requiring graph traversal"""
 
         return base_depth
 
+    def evaluate_graph_gate(
+        self,
+        vector_scores: list[float],
+        *,
+        complexity: QueryComplexity,
+    ) -> GraphGateDecision:
+        """#1473: decide whether to suppress the graph channel for this recall.
+
+        A CHANNEL-selection gate that augments the coarse SIMPLE/COMPLEX router
+        split. When the vector channel has a decisive score-gap winner (a strong
+        top score AND a large top-vs-second gap), the answer is almost certainly
+        in one passage, and the graph channel measurably injects noise on such
+        single-fact questions - so recommend dropping it.
+
+        Guards (return ``suppress=False``):
+
+        * gate disabled (``evidence_graph_gate_enabled`` is False),
+        * COMPLEX routing - multi-hop queries need the graph; never gated,
+        * fewer than two vector scores - not enough evidence to judge a "gap".
+
+        Args:
+            vector_scores: The vector channel's per-chunk relevance scores
+                (raw cosine preferred). Order-independent; ranked internally.
+            complexity: The routed query complexity.
+
+        Returns:
+            A :class:`GraphGateDecision` with the ``suppress`` recommendation and
+            the ``top_score`` / ``gap`` evidence it was based on.
+        """
+        cfg = self._config
+        if not cfg.evidence_graph_gate_enabled:
+            return GraphGateDecision(False, "gate disabled", 0.0, 0.0)
+        if complexity == QueryComplexity.COMPLEX:
+            return GraphGateDecision(False, "complex query - graph protected", 0.0, 0.0)
+
+        scores = sorted((s for s in vector_scores if s is not None), reverse=True)
+        if len(scores) < 2:
+            top = scores[0] if scores else 0.0
+            return GraphGateDecision(False, "insufficient vector evidence", top, 0.0)
+
+        top, second = scores[0], scores[1]
+        gap = top - second
+        if top >= cfg.evidence_graph_gate_min_top_score and gap >= cfg.evidence_graph_gate_min_gap:
+            return GraphGateDecision(
+                True,
+                f"decisive vector winner (top={top:.3f} >= {cfg.evidence_graph_gate_min_top_score}, "
+                f"gap={gap:.3f} >= {cfg.evidence_graph_gate_min_gap})",
+                top,
+                gap,
+            )
+        return GraphGateDecision(
+            False,
+            f"no decisive winner (top={top:.3f}, gap={gap:.3f})",
+            top,
+            gap,
+        )
+
     def get_routing_stats(self) -> dict[str, int]:
         """Get routing decision statistics for analysis.
 
@@ -918,6 +1001,7 @@ COMPLEX|Multi-hop query requiring graph traversal"""
 __all__ = [
     "TYPED_ENTITY_NOUN_MAP",
     "TYPED_ENTITY_RECENCY_PATTERN",
+    "GraphGateDecision",
     "QueryComplexity",
     "QueryComplexityRouter",
     "RouterConfig",

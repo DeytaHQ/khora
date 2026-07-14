@@ -2392,6 +2392,35 @@ class QuerySettings(BaseSettings):
             "is True."
         ),
     )
+    enable_evidence_graph_gate: bool = Field(
+        default=False,
+        description=(
+            "#1473 evidence-based graph channel gate: when the vector channel has "
+            "a decisive score-gap winner, suppress the graph channel for this "
+            "recall (it injects noise on single-fact questions). A channel-level "
+            "refinement on top of the SIMPLE/COMPLEX router split; COMPLEX "
+            "(multi-hop) and temporal recalls are never gated. Default OFF."
+        ),
+    )
+    evidence_graph_gate_min_top_score: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "#1473: the top vector cosine must clear this floor for the evidence "
+            "graph gate to fire. Only used when enable_evidence_graph_gate is True."
+        ),
+    )
+    evidence_graph_gate_min_gap: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "#1473: the top-vs-second vector cosine gap must reach this for the "
+            "evidence graph gate to fire. Only used when enable_evidence_graph_gate "
+            "is True."
+        ),
+    )
 
 
 class KhoraConfig(BaseSettings):
