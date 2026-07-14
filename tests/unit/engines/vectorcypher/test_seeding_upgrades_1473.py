@@ -253,6 +253,13 @@ class TestExtractQueryMentions:
         mentions = _extract_query_mentions("UserService talks to PaymentGateway")
         assert set(mentions) == {"UserService", "PaymentGateway"}
 
+    def test_preserves_textual_order_across_heuristics(self) -> None:
+        # A sentence-initial CamelCase token (caught by the technical pass) must
+        # still precede a later proper noun (caught by the capitalized pass), so
+        # per_mention truncation keeps the textually-earlier mention.
+        assert _extract_query_mentions("UserService relates to Alice") == ["UserService", "Alice"]
+        assert _extract_query_mentions("did Alice touch auth_service") == ["Alice", "auth_service"]
+
 
 # ---------------------------------------------------------------------------
 # _round_robin_seeds

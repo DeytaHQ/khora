@@ -352,36 +352,38 @@ def _extract_query_mentions(query: str) -> list[str]:
     counts - CamelCase, snake_case, and @/# tags. Returned in first-seen order,
     de-duplicated case-insensitively.
     """
-    mentions: list[str] = []
-    seen: set[str] = set()
-
-    def _add(text: str) -> None:
-        text = text.strip()
-        key = text.lower()
-        if text and key not in seen:
-            seen.add(key)
-            mentions.append(text)
+    # Collect (offset, text) candidates from every heuristic, then sort by
+    # textual position before de-duping, so the returned order is true first-seen
+    # order regardless of which pass matched. This matters because
+    # ``_per_mention_seed_entities`` truncates at ``per_mention_max_mentions``: a
+    # textually-earlier technical identifier must not be dropped for a later
+    # proper noun just because the proper-noun pass runs first.
+    candidates: list[tuple[int, str]] = []
 
     # Quoted spans anywhere in the query.
     for m in re.finditer(r'"([^"]+)"|\'([^\']+)\'', query):
-        _add(m.group(1) or m.group(2))
+        text = (m.group(1) or m.group(2)).strip()
+        if text:
+            candidates.append((m.start(), text))
 
     # Capitalized proper-noun sequences, skipping the sentence-initial word.
-    words = query.split()
+    # Iterate word matches (not query.split()) so each phrase keeps its offset.
+    word_matches = list(re.finditer(r"\S+", query))
     i = 0
-    while i < len(words):
-        stripped = words[i].strip(",.?!:;\"'")
+    while i < len(word_matches):
+        wm = word_matches[i]
+        stripped = wm.group(0).strip(",.?!:;\"'")
         if i > 0 and stripped and stripped[0].isupper() and not stripped.isupper():
             phrase = [stripped]
             j = i + 1
-            while j < len(words):
-                nxt = words[j].strip(",.?!:;\"'")
+            while j < len(word_matches):
+                nxt = word_matches[j].group(0).strip(",.?!:;\"'")
                 if nxt and nxt[0].isupper() and not nxt.isupper():
                     phrase.append(nxt)
                     j += 1
                 else:
                     break
-            _add(" ".join(phrase))
+            candidates.append((wm.start(), " ".join(phrase)))
             i = j
             continue
         i += 1
@@ -389,14 +391,24 @@ def _extract_query_mentions(query: str) -> list[str]:
     # Technical-identifier mentions the router also counts (mirrors
     # _count_potential_entities): CamelCase (incl. sentence-initial, which the
     # capitalized-phrase pass above skips), snake_case, and @/# tags (marker
-    # stripped so the embedded text is the bare identifier). Deduped by _add.
+    # stripped so the embedded text is the bare identifier).
     for m in re.finditer(r"\b[A-Z][a-z]+[A-Z][a-zA-Z]*\b", query):
-        _add(m.group(0))
+        candidates.append((m.start(), m.group(0)))
     for m in re.finditer(r"\b[a-z]+_[a-z_]+\b", query):
-        _add(m.group(0))
+        candidates.append((m.start(), m.group(0)))
     for m in re.finditer(r"[@#](\w+)", query):
-        _add(m.group(1))
+        candidates.append((m.start(), m.group(1)))
 
+    # Sort by offset (stable), then de-dup case-insensitively - first textual
+    # occurrence wins.
+    candidates.sort(key=lambda t: t[0])
+    mentions: list[str] = []
+    seen: set[str] = set()
+    for _, text in candidates:
+        key = text.lower()
+        if key not in seen:
+            seen.add(key)
+            mentions.append(text)
     return mentions
 
 
