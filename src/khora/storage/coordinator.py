@@ -73,8 +73,9 @@ def _replace_partial_failure_counter() -> Any:
 def _delete_namespace_partial_failure_counter() -> Any:
     """Counter for cross-backend namespace-delete partial failures (#1460).
 
-    Incremented once per backend (temporal / vector / graph / relational) whose
-    purge raised during ``StorageCoordinator.delete_namespace``. Mirrors
+    Incremented once per failing (backend, namespace row-id) pair whose purge
+    raised during ``StorageCoordinator.delete_namespace`` - the same count as the
+    ADR-001 degradations recorded on the result. Mirrors
     ``khora.storage.replace_document.partial_failure``. NO namespace_id label -
     cardinality rule."""
     return metric_counter(
@@ -705,7 +706,20 @@ class StorageCoordinator:
         unreachable). Each failing backend is recorded as an ADR-001
         ``Degradation`` on the result and the remaining backends still run, so a
         half-deleted namespace is surfaced rather than raised
-        (``result.partial_failure``).
+        (``result.partial_failure``). When any satellite (temporal / vector /
+        graph) purge fails the relational ``memory_namespaces`` rows are RETAINED
+        (not cascade-deleted) so the operation stays re-runnable: calling
+        ``delete_namespace`` again no-ops the already-purged satellites and then
+        completes the relational cascade. Re-run until ``partial_failure`` is
+        False.
+
+        NOT concurrency-safe: version ids are enumerated before the purge, so a
+        namespace write or version creation racing this call may leave stranded
+        rows. The safe sequence is ``deactivate_namespace`` first (which stops
+        active-namespace resolution for new writes and recall) then
+        ``delete_namespace``. Like ``replace_document_extraction`` and the dream
+        mirror, this is eventual-consistency + degradation, not a distributed
+        lock.
         """
         if not self._relational:
             raise RuntimeError("Relational backend not configured")
@@ -794,24 +808,37 @@ class StorageCoordinator:
                     )
             return total
 
-        # Purge the non-cascaded satellite stores first, then the authoritative
-        # relational rows last so the row ids stay valid throughout.
+        # Purge the non-cascaded satellite stores first. The authoritative
+        # relational rows are the anchor that lets a caller reach the namespace
+        # again, so we only cascade-delete them once every satellite purge
+        # succeeded. If a satellite failed, retaining the rows keeps the delete
+        # RE-RUNNABLE (idempotent: already-purged satellites no-op, then the
+        # cascade completes) instead of orphaning unreachable satellite data.
         result.chunks_removed = await _purge(self._temporal_store, "temporal")
         result.vector_rows_removed = await _purge(self._vector, "vector")
         result.graph_nodes_removed = await _purge(self._graph, "graph")
 
-        try:
-            result.namespaces_removed = await delete_rows(row_ids)
-        except Exception as exc:
-            logger.error("delete_namespace: relational cascade delete failed: {}", exc, exc_info=True)
-            result.degradations.append(
-                Degradation(
-                    component="storage.delete_namespace.relational",
-                    reason="cascade_delete_failed",
-                    detail=f"row ids {row_ids}",
-                    exception=repr(exc),
-                )
+        if result.degradations:
+            logger.warning(
+                "delete_namespace({}): {} satellite purge(s) failed; retaining {} namespace "
+                "row(s) so the delete can be retried (partial_failure=True)",
+                namespace_id,
+                len(result.degradations),
+                len(row_ids),
             )
+        else:
+            try:
+                result.namespaces_removed = await delete_rows(row_ids)
+            except Exception as exc:
+                logger.error("delete_namespace: relational cascade delete failed: {}", exc, exc_info=True)
+                result.degradations.append(
+                    Degradation(
+                        component="storage.delete_namespace.relational",
+                        reason="cascade_delete_failed",
+                        detail=f"row ids {row_ids}",
+                        exception=repr(exc),
+                    )
+                )
 
         if result.degradations:
             _delete_namespace_partial_failure_counter().add(len(result.degradations))

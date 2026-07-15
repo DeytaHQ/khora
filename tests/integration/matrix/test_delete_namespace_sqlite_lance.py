@@ -140,10 +140,7 @@ async def kb(paths: tuple[Path, Path]) -> AsyncIterator[Khora]:
     try:
         yield kb
     finally:
-        try:
-            await kb.disconnect()
-        except Exception:
-            pass
+        await kb.disconnect()
 
 
 # ---------------------------------------------------------------------------
