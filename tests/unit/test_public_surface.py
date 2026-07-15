@@ -46,6 +46,7 @@ EXPECTED_PUBLIC_SURFACE = frozenset(
         "KhoraConfig",
         "KhoraError",
         "LLMUsage",
+        "NamespaceDeletionResult",
         "Op",
         "OpKind",
         "RecallChunk",

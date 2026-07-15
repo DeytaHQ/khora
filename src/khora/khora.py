@@ -188,7 +188,7 @@ if TYPE_CHECKING:
     from khora.extraction.chunkers import ChunkStrategy
     from khora.extraction.skills import ExpertiseConfig
     from khora.filter import RecallFilter
-    from khora.storage import StorageConfig, StorageCoordinator
+    from khora.storage import NamespaceDeletionResult, StorageConfig, StorageCoordinator
 
 
 # LLMUsage is a public API type consumed by external cost-tracking integrations.
@@ -1508,6 +1508,56 @@ class Khora:
         """
         resolved_id = await self._resolve_namespace(namespace_id)
         return await self._get_engine().get_namespace(resolved_id)
+
+    async def delete_namespace(self, namespace: str | UUID) -> NamespaceDeletionResult:
+        """Delete a namespace and reclaim ALL its storage across every backend.
+
+        This is the inverse of :meth:`create_namespace`: it cascade-removes the
+        namespace's documents, chunks, entities, relationships, graph nodes, and
+        vector-index rows from every configured backend and drops the namespace
+        row(s) themselves, freeing the storage.
+
+        Semantics:
+
+        - ``namespace`` may be a stable ``namespace_id`` OR a row-level id of any
+          version. **ALL versions** sharing that stable id are deleted together
+          along with all their data ("delete the namespace" means all of it).
+        - Works on an **active OR deactivated** namespace. Resolution here does
+          NOT go through the ``is_active`` filter, so a namespace that
+          :meth:`kb.storage.deactivate_namespace` stranded can be reclaimed.
+        - After deletion the namespace no longer lists (active or not) and no
+          longer resolves; ``recall`` / ``stats`` / ``forget`` for it raise
+          ``ValueError`` (no such namespace), same as any never-created id.
+
+        A cross-backend delete can partially fail (e.g. the graph backend is
+        unreachable). Rather than raise, the failing backend is recorded as an
+        ADR-001 ``Degradation`` on the result and the other backends still run.
+        Inspect :attr:`NamespaceDeletionResult.partial_failure` /
+        ``.degradations`` to detect a half-deleted namespace.
+
+        Args:
+            namespace: Stable ``namespace_id`` or a version row id (UUID or str).
+
+        Returns:
+            NamespaceDeletionResult with removed counts and any degradations.
+            When nothing matched, every count is 0 and ``removed_row_ids`` empty.
+        """
+        if isinstance(namespace, str):
+            try:
+                namespace = UUID(namespace)
+            except ValueError:
+                raise ValueError(f"Invalid namespace: {namespace!r}. Must be a valid UUID.") from None
+
+        with trace_span("khora.delete_namespace", namespace_id=str(namespace)):
+            result = await self.storage.delete_namespace(namespace)
+
+        # Any recall results cached for the deleted rows are now invalid (#1469).
+        engine = self._engine
+        invalidate = getattr(engine, "invalidate_recall_cache", None)
+        if invalidate is not None:
+            for row_id in result.removed_row_ids:
+                invalidate(row_id)
+        return result
 
     # =========================================================================
     # Core API: remember, recall, forget

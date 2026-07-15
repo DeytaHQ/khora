@@ -422,6 +422,21 @@ class PgVectorTemporalStore(TemporalVectorStore):
 
         return result.rowcount  # type: ignore[unresolved-attribute]
 
+    async def delete_namespace(self, namespace_id: UUID) -> int:
+        """Delete every ``khora_chunks`` row for ``namespace_id`` (#1460).
+
+        ``khora_chunks`` carries a bare ``namespace_id`` column with no FK to
+        ``memory_namespaces``, so a namespace-row cascade never reaches it —
+        the coordinator's ``delete_namespace`` calls this explicitly to reclaim
+        the temporal-chunk footprint. Returns the number of rows deleted.
+        """
+        async with self._get_session() as session:
+            stmt = khora_chunks_table.delete().where(khora_chunks_table.c.namespace_id == namespace_id)
+            result = await session.execute(stmt)
+            await session.commit()
+
+        return result.rowcount  # type: ignore[unresolved-attribute]
+
     async def count_chunks(self, namespace_id: UUID) -> int:
         """Count chunks in ``khora_chunks`` for the given namespace (#1070).
 

@@ -20,6 +20,7 @@ from uuid import UUID, uuid4
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from khora.core.diagnostics import Degradation
 from khora.core.models import (
     Chunk,
     CommunityNode,
@@ -65,6 +66,25 @@ def _replace_partial_failure_counter() -> Any:
             "re-attempt of the persisted plan failed). The graph is "
             "in a partial-mirror state; the plan is queued on "
             "documents.graph_mirror_pending for the reconciler."
+        ),
+    )
+
+
+def _delete_namespace_partial_failure_counter() -> Any:
+    """Counter for cross-backend namespace-delete partial failures (#1460).
+
+    Incremented once per failing (backend, namespace row-id) pair whose purge
+    raised during ``StorageCoordinator.delete_namespace`` - the same count as the
+    ADR-001 degradations recorded on the result. Mirrors
+    ``khora.storage.replace_document.partial_failure``. NO namespace_id label -
+    cardinality rule."""
+    return metric_counter(
+        "khora.storage.delete_namespace.partial_failure",
+        unit="1",
+        description=(
+            "A backend purge inside StorageCoordinator.delete_namespace raised. "
+            "The namespace may be half-deleted; the failing backends are recorded "
+            "as ADR-001 Degradation entries on the returned NamespaceDeletionResult."
         ),
     )
 
@@ -219,6 +239,32 @@ class StorageHealth:
 
 
 @dataclass
+class NamespaceDeletionResult:
+    """Outcome of :meth:`StorageCoordinator.delete_namespace` (#1460).
+
+    Carries best-effort removed counts and any per-backend ``Degradation``
+    entries (ADR-001). A cross-backend delete can partially fail (e.g. the
+    graph backend is unreachable); rather than raise, the coordinator records
+    the failing backend here and continues, so a half-deleted namespace is
+    always surfaced. ``partial_failure`` is True when any backend failed.
+    """
+
+    namespace_id: UUID
+    removed_row_ids: list[UUID] = field(default_factory=list)
+    namespaces_removed: int = 0
+    documents_removed: int = 0
+    chunks_removed: int = 0
+    vector_rows_removed: int = 0
+    graph_nodes_removed: int = 0
+    degradations: list[Degradation] = field(default_factory=list)
+
+    @property
+    def partial_failure(self) -> bool:
+        """True when at least one backend purge failed."""
+        return bool(self.degradations)
+
+
+@dataclass
 class StorageCoordinator:
     """Coordinates operations across all storage backends.
 
@@ -236,10 +282,12 @@ class StorageCoordinator:
     _graph: GraphBackendProtocol | None = field(default=None, init=False, repr=False)
     _event_store: EventStoreProtocol | None = field(default=None, init=False, repr=False)
 
-    # Engine-attached temporal chunk store (#1459). VectorCypher/Skeleton write
-    # chunks to the temporal store's ``khora_chunks`` table, not the relational
-    # ``chunks`` table; when an engine attaches its store here, ``count_chunks``
-    # routes the count there so a populated namespace reports its true count.
+    # Engine-attached temporal chunk store (``khora_chunks``), created and owned
+    # by the engine (VectorCypher/Skeleton write chunks here, not to the
+    # relational ``chunks`` table). The engine sets this after connect() so
+    # namespace-scoped ops can reach it: ``count_chunks`` routes the count there
+    # (#1459) and ``delete_namespace`` purges it (#1460). None on stacks without
+    # one.
     _temporal_store: TemporalVectorStore | None = field(default=None, init=False, repr=False)
 
     _connected: bool = field(default=False, init=False)
@@ -626,6 +674,187 @@ class StorageCoordinator:
         if not self._relational:
             raise RuntimeError("Relational backend not configured")
         await self._relational.deactivate_namespace(namespace_id)
+
+    async def delete_namespace(self, namespace_id: UUID) -> NamespaceDeletionResult:
+        """Cascade-delete a namespace and reclaim its storage across all backends (#1460).
+
+        Deletes EVERY version under the stable ``namespace_id`` (passing a row
+        id resolves to its stable id and deletes all siblings too) and all data
+        those versions own:
+
+        - **relational**: the ``memory_namespaces`` rows, cascading via
+          ``ON DELETE CASCADE`` to ``documents`` / ``chunks`` / ``entities`` /
+          ``relationships`` / ``episodes`` / ``memory_events``;
+        - **temporal**: the ``khora_chunks`` store (+ its vector table), which
+          has no FK to the namespace and would otherwise survive;
+        - **vector**: LanceDB ``chunks_vec`` / ``entities_vec`` (embedded stack;
+          pgvector shares the cascaded relational tables so needs no extra work);
+        - **graph**: the graph backend's namespace-scoped nodes + edges (Neo4j
+          ``:Entity`` / ``:Chunk`` / ...; the embedded graph shares the
+          relational tables, so it needs no extra work).
+
+        Resolution does NOT filter on ``is_active``, so a deactivated (stranded)
+        namespace is reclaimable — this is the recovery path for a namespace
+        that ``deactivate_namespace`` orphaned.
+
+        Entity-resolution-merged entities/relationships are NOT 1:1 with any
+        document, so this purges the namespace-scoped stores wholesale rather
+        than routing per-document ``forget`` — nothing scoped to the namespace
+        survives.
+
+        Cross-backend deletes can partially fail (e.g. the graph backend is
+        unreachable). Each failing backend is recorded as an ADR-001
+        ``Degradation`` on the result and the remaining backends still run, so a
+        half-deleted namespace is surfaced rather than raised
+        (``result.partial_failure``). When any satellite (temporal / vector /
+        graph) purge fails the relational ``memory_namespaces`` rows are RETAINED
+        (not cascade-deleted) so the operation stays re-runnable: calling
+        ``delete_namespace`` again no-ops the already-purged satellites and then
+        completes the relational cascade. Re-run until ``partial_failure`` is
+        False.
+
+        NOT concurrency-safe: version ids are enumerated before the purge, so a
+        namespace write or version creation racing this call may leave stranded
+        rows. The safe sequence is ``deactivate_namespace`` first (which stops
+        active-namespace resolution for new writes and recall) then
+        ``delete_namespace``. Like ``replace_document_extraction`` and the dream
+        mirror, this is eventual-consistency + degradation, not a distributed
+        lock.
+        """
+        if not self._relational:
+            raise RuntimeError("Relational backend not configured")
+
+        # ``list_namespace_versions`` / ``delete_namespace`` are relational
+        # helpers the coordinator dispatches dynamically (like the graph
+        # cascade methods above); a backend that lacks them (e.g. the SurrealDB
+        # unified adapter, whose namespace delete is a separate follow-up) is
+        # surfaced as a degradation rather than an AttributeError crash.
+        list_versions = getattr(self._relational, "list_namespace_versions", None)
+        delete_rows = getattr(self._relational, "delete_namespace", None)
+        result = NamespaceDeletionResult(namespace_id=namespace_id)
+        if not callable(list_versions) or not callable(delete_rows):
+            logger.error(
+                "delete_namespace: relational backend {} does not support namespace deletion",
+                type(self._relational).__name__,
+            )
+            result.degradations.append(
+                Degradation(
+                    component="storage.delete_namespace.relational",
+                    reason="unsupported_backend",
+                    detail=f"{type(self._relational).__name__} has no delete_namespace",
+                )
+            )
+            _delete_namespace_partial_failure_counter().add(1)
+            return result
+
+        try:
+            row_ids = await list_versions(namespace_id)
+        except Exception as exc:
+            # Resolution itself failed (e.g. the relational DB is unreachable).
+            # Surface it as a degradation rather than raising, matching the
+            # per-backend-purge contract (nothing was removed).
+            logger.error("delete_namespace: namespace-version lookup failed: {}", exc, exc_info=True)
+            result.degradations.append(
+                Degradation(
+                    component="storage.delete_namespace.relational",
+                    reason="version_lookup_failed",
+                    detail=f"namespace {namespace_id}",
+                    exception=repr(exc),
+                )
+            )
+            _delete_namespace_partial_failure_counter().add(1)
+            return result
+        result.removed_row_ids = list(row_ids)
+        if not row_ids:
+            return result
+
+        # Best-effort document count for the result (the relational cascade
+        # returns only the namespace-row count, not per-child counts).
+        for rid in row_ids:
+            try:
+                result.documents_removed += await self._relational.count_documents(rid)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("delete_namespace: count_documents({}) failed: {}", rid, exc)
+
+        async def _purge(store: Any, component: str) -> int:
+            """Run ``store.delete_namespace`` per row id, recording degradations.
+
+            A store without the method contributes nothing (its footprint is
+            covered elsewhere - e.g. pgvector/embedded-graph share the cascaded
+            relational tables). A raising store is recorded per ADR-001 and does
+            not abort the other backends."""
+            fn = getattr(store, "delete_namespace", None)
+            if not callable(fn):
+                return 0
+            total = 0
+            for rid in row_ids:
+                try:
+                    total += await fn(rid) or 0
+                except Exception as exc:
+                    logger.warning(
+                        "delete_namespace: {} purge failed for {}: {}",
+                        component,
+                        rid,
+                        exc,
+                        exc_info=True,
+                    )
+                    result.degradations.append(
+                        Degradation(
+                            component=f"storage.delete_namespace.{component}",
+                            reason="purge_failed",
+                            detail=f"namespace row {rid}",
+                            exception=repr(exc),
+                        )
+                    )
+            return total
+
+        # Purge the non-cascaded satellite stores first. The authoritative
+        # relational rows are the anchor that lets a caller reach the namespace
+        # again, so we only cascade-delete them once every satellite purge
+        # succeeded. If a satellite failed, retaining the rows keeps the delete
+        # RE-RUNNABLE (idempotent: already-purged satellites no-op, then the
+        # cascade completes) instead of orphaning unreachable satellite data.
+        result.chunks_removed = await _purge(self._temporal_store, "temporal")
+        result.vector_rows_removed = await _purge(self._vector, "vector")
+        result.graph_nodes_removed = await _purge(self._graph, "graph")
+
+        if result.degradations:
+            logger.warning(
+                "delete_namespace({}): {} satellite purge(s) failed; retaining {} namespace "
+                "row(s) so the delete can be retried (partial_failure=True)",
+                namespace_id,
+                len(result.degradations),
+                len(row_ids),
+            )
+        else:
+            try:
+                result.namespaces_removed = await delete_rows(row_ids)
+            except Exception as exc:
+                logger.error("delete_namespace: relational cascade delete failed: {}", exc, exc_info=True)
+                result.degradations.append(
+                    Degradation(
+                        component="storage.delete_namespace.relational",
+                        reason="cascade_delete_failed",
+                        detail=f"row ids {row_ids}",
+                        exception=repr(exc),
+                    )
+                )
+
+        if result.degradations:
+            _delete_namespace_partial_failure_counter().add(len(result.degradations))
+
+        logger.info(
+            "delete_namespace({}): removed {} namespace row(s), {} document(s), "
+            "{} temporal chunk(s), {} vector row(s), {} graph node(s); partial_failure={}",
+            namespace_id,
+            result.namespaces_removed,
+            result.documents_removed,
+            result.chunks_removed,
+            result.vector_rows_removed,
+            result.graph_nodes_removed,
+            result.partial_failure,
+        )
+        return result
 
     # =========================================================================
     # Document operations (delegated to relational)

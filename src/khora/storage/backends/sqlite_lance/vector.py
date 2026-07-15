@@ -432,6 +432,49 @@ class SQLiteLanceVectorAdapter:
 
         return rowcount if rowcount is not None else count
 
+    async def delete_namespace(self, namespace_id: UUID) -> int:
+        """Delete all ``chunks_vec`` + ``entities_vec`` vectors for a namespace (#1460).
+
+        The SQLite ``chunks`` / ``entities`` metadata rows are reclaimed by the
+        relational namespace-row FK cascade; the LanceDB embedding tables are
+        separate files with no FK, so the coordinator calls this to purge them.
+        Returns the number of LanceDB rows removed (chunks_vec + entities_vec).
+
+        Unlike ``delete_chunks_by_document`` (which swallows LanceDB errors for
+        per-doc eventual convergence), a namespace delete must reclaim storage:
+        both tables are attempted, then any failure is re-raised so the
+        coordinator records it as an ADR-001 degradation (``partial_failure``)
+        instead of silently leaving orphaned vectors.
+        """
+        ns_text = uuid_to_text(namespace_id)
+        removed = 0
+        failures: list[tuple[str, Exception]] = []
+        where = f"namespace_id = '{ns_text}'"
+        for name, table_getter in (("chunks_vec", self._chunks_table), ("entities_vec", self._entities_table)):
+            try:
+                tbl = await table_getter()
+            except Exception as exc:
+                failures.append((name, exc))
+                logger.warning("LanceDB namespace delete: could not open {} for {}", name, ns_text, exc_info=True)
+                continue
+            async with self._lance_write_lock:
+                # count_rows is best-effort (informational return value); the
+                # delete is the load-bearing op and must run even if the count
+                # fails, so they get independent error paths.
+                try:
+                    removed += await tbl.count_rows(where)
+                except Exception:
+                    logger.debug("LanceDB count_rows failed for {} in {}", ns_text, name, exc_info=True)
+                try:
+                    await tbl.delete(where)
+                except Exception as exc:
+                    failures.append((name, exc))
+                    logger.warning("LanceDB namespace delete failed for {} in {}", ns_text, name, exc_info=True)
+        if failures:
+            names = ", ".join(name for name, _ in failures)
+            raise RuntimeError(f"LanceDB namespace purge failed for {names}") from failures[0][1]
+        return removed
+
     async def update_last_accessed(
         self,
         namespace_id: UUID,

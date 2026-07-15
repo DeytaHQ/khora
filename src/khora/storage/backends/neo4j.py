@@ -4583,6 +4583,50 @@ RETURN DISTINCT com ORDER BY com.id
         async with self._session() as session:
             return await session.execute_write(_delete)
 
+    async def delete_namespace(self, namespace_id: UUID, *, batch_size: int = 10_000) -> int:
+        """Purge every node carrying ``namespace_id`` and its edges (#1460).
+
+        A namespace delete must remove all graph state scoped to the namespace:
+        ``:Entity`` / ``:Chunk`` / ``:EntityVersion`` / ``:Community`` nodes and
+        every relationship incident to them. We match label-lessly on the
+        ``namespace_id`` property so no node type is missed, and ``DETACH
+        DELETE`` drops the edges with the nodes. Work is batched into separate
+        write transactions (``LIMIT $batch_size``) so a large namespace does not
+        build one giant transaction.
+
+        Trade-off: the label-less match is an all-node scan rather than an
+        index seek; this is a rare admin op, not a hot path, so completeness
+        (nothing survives) is favored over the indexed per-label alternative.
+
+        Returns the total number of nodes deleted.
+        """
+        if batch_size <= 0:
+            raise ValueError(f"batch_size must be positive, got {batch_size}")
+        ns_str = str(namespace_id)
+
+        async def _delete_batch(tx: AsyncManagedTransaction) -> int:
+            result = await tx.run(
+                """
+                MATCH (n {namespace_id: $namespace_id})
+                WITH n LIMIT $batch_size
+                DETACH DELETE n
+                RETURN count(*) AS deleted
+                """,
+                namespace_id=ns_str,
+                batch_size=batch_size,
+            )
+            record = await result.single()
+            return record["deleted"] if record else 0
+
+        total = 0
+        async with self._session() as session:
+            while True:
+                deleted = await session.execute_write(_delete_batch)
+                total += deleted
+                if deleted < batch_size:
+                    break
+        return total
+
     async def remove_document_from_entity_sources_batch(
         self,
         entity_ids: list[UUID],

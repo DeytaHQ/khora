@@ -733,3 +733,62 @@ class TestHalfvec:
         # float16 precision is lossy but cosine similarity to e0 for e0
         # should still be very near 1.0 for unit basis vectors.
         assert math.isclose(results[0][1], 1.0, abs_tol=5e-3)
+
+
+class TestDeleteNamespace:
+    """``delete_namespace`` purges the LanceDB chunks_vec + entities_vec (#1460)."""
+
+    async def test_purges_both_lance_tables(self, adapter: SQLiteLanceVectorAdapter, graph):
+        from khora.storage.backends.sqlite_lance._helpers import uuid_to_text
+
+        ns, doc = uuid4(), uuid4()
+        await adapter.create_chunks_batch([_make_chunk(ns, doc, embedding=_unit(8, i), index=i) for i in range(3)])
+        for name in ("alice", "bob"):
+            e = _make_entity(ns, name=name, embedding=_unit(8, 0))
+            await graph.create_entity(e)
+            await adapter.create_entity(e)
+
+        ns_text = uuid_to_text(ns)
+        chunks_tbl = await adapter._chunks_table()  # type: ignore[reportPrivateUsage]
+        entities_tbl = await adapter._entities_table()  # type: ignore[reportPrivateUsage]
+        assert await chunks_tbl.count_rows(f"namespace_id = '{ns_text}'") == 3
+        assert await entities_tbl.count_rows(f"namespace_id = '{ns_text}'") == 2
+
+        removed = await adapter.delete_namespace(ns)
+        assert removed == 5  # 3 chunk vectors + 2 entity vectors
+
+        assert await chunks_tbl.count_rows(f"namespace_id = '{ns_text}'") == 0
+        assert await entities_tbl.count_rows(f"namespace_id = '{ns_text}'") == 0
+
+    async def test_leaves_other_namespaces_intact(self, adapter: SQLiteLanceVectorAdapter, graph):
+        from khora.storage.backends.sqlite_lance._helpers import uuid_to_text
+
+        keep, drop, doc = uuid4(), uuid4(), uuid4()
+        for ns in (keep, drop):
+            await adapter.create_chunks_batch([_make_chunk(ns, doc, embedding=_unit(8, 0))])
+            e = _make_entity(ns, embedding=_unit(8, 0))
+            await graph.create_entity(e)
+            await adapter.create_entity(e)
+
+        await adapter.delete_namespace(drop)
+
+        keep_text, drop_text = uuid_to_text(keep), uuid_to_text(drop)
+        chunks_tbl = await adapter._chunks_table()  # type: ignore[reportPrivateUsage]
+        entities_tbl = await adapter._entities_table()  # type: ignore[reportPrivateUsage]
+        assert await chunks_tbl.count_rows(f"namespace_id = '{drop_text}'") == 0
+        assert await entities_tbl.count_rows(f"namespace_id = '{drop_text}'") == 0
+        assert await chunks_tbl.count_rows(f"namespace_id = '{keep_text}'") == 1
+        assert await entities_tbl.count_rows(f"namespace_id = '{keep_text}'") == 1
+
+    async def test_lance_failure_raises_for_coordinator_degradation(
+        self, adapter: SQLiteLanceVectorAdapter, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A LanceDB purge failure must raise so the coordinator records an
+        ADR-001 degradation (partial_failure) rather than silently orphaning."""
+
+        async def _boom() -> object:
+            raise RuntimeError("lance offline")
+
+        monkeypatch.setattr(adapter, "_entities_table", _boom)
+        with pytest.raises(RuntimeError, match="LanceDB namespace purge failed"):
+            await adapter.delete_namespace(uuid4())

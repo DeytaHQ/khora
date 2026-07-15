@@ -78,6 +78,7 @@ from .khora import (
     UsageSummary,
 )
 from .search_mode import SearchMode
+from .storage import NamespaceDeletionResult
 
 __version__ = __import__("importlib").metadata.version("khora")
 
@@ -98,6 +99,7 @@ __all__ = [
     "BatchHandle",
     "DocumentResult",
     "Stats",
+    "NamespaceDeletionResult",
     "SearchMode",
     "KhoraConfig",
     "DocumentSource",

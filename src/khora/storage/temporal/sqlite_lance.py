@@ -390,6 +390,35 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
                 )
         return rowcount
 
+    async def delete_namespace(self, namespace_id: UUID) -> int:
+        """Delete all ``khora_chunks`` rows + ``khora_chunks_vec`` vectors for a namespace (#1460).
+
+        ``khora_chunks`` (SQLite) and ``khora_chunks_vec`` (LanceDB) both key on
+        a bare ``namespace_id`` with no FK to ``memory_namespaces``, so the
+        relational namespace-row cascade never reaches them — the coordinator
+        calls this explicitly to reclaim the temporal footprint. Returns the
+        number of SQLite rows deleted.
+
+        The LanceDB purge runs UNCONDITIONALLY (not gated on the SQLite
+        rowcount): an earlier per-document delete may have removed the SQLite
+        metadata while its best-effort LanceDB compensation left vectors
+        orphaned, so a rowcount-gated purge would skip them forever. A LanceDB
+        failure is re-raised so the coordinator records an ADR-001 degradation
+        rather than silently leaving orphaned vectors.
+        """
+        ns_text = uuid_to_text(namespace_id)
+        cur = await self._sqlite.execute(
+            "DELETE FROM khora_chunks WHERE namespace_id = ?",
+            (ns_text,),
+        )
+        rowcount = cur.rowcount or 0
+        await self._sqlite.commit()
+
+        tbl = await self._vec_table()
+        async with self._lance_write_lock:
+            await tbl.delete(f"namespace_id = '{ns_text}'")
+        return rowcount
+
     # ------------------------------------------------------------------
     # Search
     # ------------------------------------------------------------------

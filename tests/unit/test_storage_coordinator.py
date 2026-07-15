@@ -1564,3 +1564,62 @@ class TestUpdateEntityOrdering:
         ]
         assert len(partial_failure_calls) == 1, metric_counter_patched.call_args_list
         counter_mock.add.assert_called_once_with(1)
+
+
+class TestDeleteNamespace:
+    """delete_namespace cross-backend orchestration (#1460)."""
+
+    def _relational(self, row_id):
+        rel = MagicMock()
+        rel.list_namespace_versions = AsyncMock(return_value=[row_id])
+        rel.count_documents = AsyncMock(return_value=0)
+        rel.delete_namespace = AsyncMock(return_value=1)
+        return rel
+
+    @pytest.mark.asyncio
+    async def test_all_backends_succeed_deletes_relational_rows(self) -> None:
+        row_id = uuid4()
+        rel = self._relational(row_id)
+        graph = MagicMock()
+        graph.delete_namespace = AsyncMock(return_value=3)
+
+        coord = StorageCoordinator(relational=rel, graph=graph)
+        result = await coord.delete_namespace(uuid4())
+
+        assert not result.partial_failure
+        assert result.namespaces_removed == 1
+        assert result.graph_nodes_removed == 3
+        assert result.removed_row_ids == [row_id]
+        rel.delete_namespace.assert_awaited_once_with([row_id])
+
+    @pytest.mark.asyncio
+    async def test_satellite_failure_retains_relational_rows(self) -> None:
+        """A failed satellite purge must NOT cascade-delete the namespace rows —
+        they stay as the anchor so the delete can be retried."""
+        row_id = uuid4()
+        rel = self._relational(row_id)
+        graph = MagicMock()
+        graph.delete_namespace = AsyncMock(side_effect=RuntimeError("graph unreachable"))
+
+        coord = StorageCoordinator(relational=rel, graph=graph)
+        result = await coord.delete_namespace(uuid4())
+
+        assert result.partial_failure
+        assert result.namespaces_removed == 0
+        # Relational rows retained: delete_namespace NOT called on the backend.
+        rel.delete_namespace.assert_not_awaited()
+        assert any(d["component"] == "storage.delete_namespace.graph" for d in result.degradations)
+
+    @pytest.mark.asyncio
+    async def test_unknown_namespace_is_a_noop(self) -> None:
+        rel = MagicMock()
+        rel.list_namespace_versions = AsyncMock(return_value=[])
+        rel.delete_namespace = AsyncMock()
+
+        coord = StorageCoordinator(relational=rel)
+        result = await coord.delete_namespace(uuid4())
+
+        assert result.namespaces_removed == 0
+        assert result.removed_row_ids == []
+        assert not result.partial_failure
+        rel.delete_namespace.assert_not_awaited()

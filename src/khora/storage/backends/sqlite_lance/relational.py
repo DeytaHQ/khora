@@ -332,6 +332,46 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
             )
             await session.commit()
 
+    async def list_namespace_versions(self, identifier: UUID) -> list[UUID]:
+        """Return every namespace ROW id sharing ``identifier``'s stable id.
+
+        Accepts a stable ``namespace_id`` or a row ``id`` of any version and
+        does NOT filter ``is_active`` so a deactivated namespace still
+        resolves (the reclaim path). Returns ``[]`` when nothing matches.
+        """
+        async with self._get_session() as session:
+            stable_rows = await session.execute(
+                select(MemoryNamespaceModel.namespace_id).where(
+                    or_(
+                        MemoryNamespaceModel.namespace_id == identifier,
+                        MemoryNamespaceModel.id == identifier,
+                    )
+                )
+            )
+            stable_ids = {row for row in stable_rows.scalars().all()}
+            if not stable_ids:
+                return []
+            row_result = await session.execute(
+                select(MemoryNamespaceModel.id).where(MemoryNamespaceModel.namespace_id.in_(stable_ids))
+            )
+            return list(row_result.scalars().all())
+
+    async def delete_namespace(self, row_ids: list[UUID]) -> int:
+        """Hard-delete namespace rows by row id; SQLite FK cascade (``foreign_keys=ON``)
+        propagates to ``documents`` / ``chunks`` / ``entities`` / ``relationships``.
+
+        LanceDB vector tables and the temporal ``khora_chunks`` store are not
+        FK-linked and are purged separately by the coordinator. Returns the
+        number of namespace rows deleted.
+        """
+        if not row_ids:
+            return 0
+        async with self._get_session() as session:
+            result = await session.execute(delete(MemoryNamespaceModel).where(MemoryNamespaceModel.id.in_(row_ids)))
+            await session.commit()
+            rowcount: int = getattr(result, "rowcount", 0)
+            return rowcount
+
     def _namespace_model_to_domain(self, model: MemoryNamespaceModel) -> MemoryNamespace:
         return MemoryNamespace(
             id=model.id,
