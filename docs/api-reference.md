@@ -210,7 +210,7 @@ result: RecallResult = await kb.recall(
 - `mode` - one of `SearchMode.VECTOR`, `GRAPH`, `HYBRID`, `ALL`, or `KEYWORD`.
 - `min_similarity` - a hard cosine floor honored by every mode (VECTOR / GRAPH / HYBRID / ALL / KEYWORD) as of #1438/#1445: candidates below the floor are dropped before fusion. BM25/keyword evidence can still boost a chunk that clears the floor, but cannot rescue one below it. Default `0.0` disables the floor (falling back to the configured `min_chunk_similarity`, itself `0.0` by default). See [Recall semantics](query-engine/recall-semantics.md).
 - `start_time` / `end_time` - **Deprecated.** Explicit temporal filter; bypasses NLP temporal detection. Both-naive or both-aware datetimes are required. Honored on all three engines (chronicle, vectorcypher, skeleton). Prefer the `filter` form: `filter={"occurred_at": {"$gte": ..., "$lt": ...}}`. Cannot be combined with `filter=`.
-- To skip LLM-side work (reranking, HyDE expansion), set the config flags `enable_llm_reranking=False` and `enable_hyde="never"` on `KhoraConfig.query` (env: `KHORA_QUERY_ENABLE_LLM_RERANKING`, `KHORA_QUERY_ENABLE_HYDE`).
+- To skip LLM-side work: LLM listwise reranking is off by default (enable via `query.enable_llm_reranking=True` / `KHORA_QUERY_ENABLE_LLM_RERANKING`), and set `enable_hyde="never"` on `KhoraConfig.query` (env: `KHORA_QUERY_ENABLE_HYDE`) to disable HyDE expansion. Note the cross-encoder reranker is on by default and runs locally (not an LLM call); disable it with `KHORA_QUERY_ENABLE_RERANKING=false`.
 
 ### `context_text`
 
