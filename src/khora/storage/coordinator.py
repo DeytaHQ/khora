@@ -236,6 +236,12 @@ class StorageCoordinator:
     _graph: GraphBackendProtocol | None = field(default=None, init=False, repr=False)
     _event_store: EventStoreProtocol | None = field(default=None, init=False, repr=False)
 
+    # Engine-attached temporal chunk store (#1459). VectorCypher/Skeleton write
+    # chunks to the temporal store's ``khora_chunks`` table, not the relational
+    # ``chunks`` table; when an engine attaches its store here, ``count_chunks``
+    # routes the count there so a populated namespace reports its true count.
+    _temporal_store: TemporalVectorStore | None = field(default=None, init=False, repr=False)
+
     _connected: bool = field(default=False, init=False)
     _is_unified_backend: bool = field(default=False, init=False)
     _hook_dispatcher: Any = field(default=None, init=False)
@@ -513,6 +519,20 @@ class StorageCoordinator:
         )
         await store.connect()
         return store
+
+    def attach_temporal_store(self, store: TemporalVectorStore | None) -> None:
+        """Register (or clear) the engine's temporal chunk store (#1459).
+
+        VectorCypher/Skeleton write chunks to the temporal store's
+        ``khora_chunks`` table rather than the relational ``chunks`` table.
+        Attaching that store here lets :meth:`count_chunks` report the true
+        chunk count for a populated namespace via both
+        ``kb.storage.count_chunks()`` and ``stats().chunks`` (which routes
+        through ``count_chunks`` via ``gather_counts``). Pass ``None`` to
+        detach (e.g. on engine disconnect). The coordinator does not own the
+        store's lifecycle — the engine that created it still disconnects it.
+        """
+        self._temporal_store = store
 
     # =========================================================================
     # Tenancy operations (delegated to relational)
@@ -1474,11 +1494,23 @@ class StorageCoordinator:
     async def count_chunks(self, namespace_id: UUID) -> int:
         """Count chunks in a namespace.
 
-        Chunks live in the vector backend on every topology (sqlite_lance
-        writes chunk metadata to the SQLite ``chunks`` table too). A backend
-        missing the method raises ``NotImplementedError`` so callers can
-        record the gap instead of seeing a confusing ``AttributeError``.
+        When an engine has attached a temporal chunk store (#1459) the count
+        is routed there: VectorCypher/Skeleton write chunks to the temporal
+        store's ``khora_chunks`` table, not the relational ``chunks`` table,
+        so counting the vector backend's ``chunks`` table would report 0 for a
+        fully populated, recallable namespace. Absent a temporal store (pure
+        relational / Chronicle topologies) the count falls back to the vector
+        backend, where chunks live on every non-temporal topology (sqlite_lance
+        writes chunk metadata to the SQLite ``chunks`` table too).
+
+        A backend missing the method raises ``NotImplementedError`` so callers
+        can record the gap instead of seeing a confusing ``AttributeError``.
         """
+        temporal = self._temporal_store
+        if temporal is not None:
+            temporal_impl = getattr(temporal, "count_chunks", None)
+            if temporal_impl is not None:
+                return await temporal_impl(namespace_id)
         if not self._vector:
             raise RuntimeError("Vector backend not configured")
         impl = getattr(self._vector, "count_chunks", None)

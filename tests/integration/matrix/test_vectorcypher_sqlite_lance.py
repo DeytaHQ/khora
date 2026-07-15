@@ -606,6 +606,74 @@ async def test_vc_recall_empty_namespace(kb: Khora) -> None:
     assert result.engine_info.get("engine") == "vectorcypher"
 
 
+async def test_vc_stats_chunk_count_nonzero_matches_temporal_store(tmp_path: Path) -> None:
+    """``stats().chunks`` and ``kb.storage.count_chunks()`` equal the true count (#1459).
+
+    VectorCypher writes chunks to the temporal store's ``khora_chunks`` table,
+    not the relational ``chunks`` table, so before the fix both counters read the
+    empty ``chunks`` table and reported 0 for a fully populated, recallable
+    namespace. A small ``chunk_size`` (30, overlap 0) splits one document into
+    several chunks — ruling out an off-by-one — and we assert both counters equal
+    the number of chunks actually created (``RememberResult.chunks_created``,
+    the ground truth) while recall proves the chunks are recallable.
+
+    Uses its own Khora rather than the module ``kb`` fixture because that fixture
+    pins ``chunk_size=1024`` (single-chunk docs); the multi-chunk shape is the
+    whole point here. The autouse ``_patch_llm`` fixture still stubs the embedder
+    and extractor, so no external LLM is called.
+    """
+    config = KhoraConfig()
+    config.storage.backend = "sqlite_lance"
+    config.storage.sqlite_lance = SQLiteLanceConfig(
+        db_path=str(tmp_path / "khora.db"),
+        lance_path=str(tmp_path / "khora.lance"),
+        embedding_dimension=EMBED_DIM,
+    )
+    config.llm.embedding_dimension = EMBED_DIM
+    config.storage.embedding_dimension = EMBED_DIM
+    config.neo4j_url = None
+    config.pipelines.chunk_size = 30  # small => several chunks (rules out off-by-one)
+    config.pipelines.chunk_overlap = 0
+    config.pipelines.extract_entities = True
+    config.pipelines.selective_extraction = False
+
+    kb = Khora(config, engine="vectorcypher", run_migrations=True)
+    await kb.connect()
+    try:
+        ns = await kb.create_namespace()
+        stable = ns.namespace_id
+
+        doc = (
+            "Photosynthesis converts light energy into chemical energy in plants. "
+            "The light-dependent reactions occur in the thylakoid membranes. "
+            "The Calvin cycle fixes carbon dioxide into glucose in the stroma. "
+            "Chlorophyll absorbs light in the blue and red wavelengths. "
+            "Oxygen is released as a byproduct when water molecules are split."
+        )
+        rem = await _remember(kb, namespace_id=stable, content=doc)
+        n_created = rem.chunks_created
+        assert n_created > 1, f"expected a multi-chunk document, got chunks_created={n_created}"
+
+        recalled = await kb.recall("photosynthesis light energy", namespace=stable, limit=50)
+        assert len(recalled.chunks) >= 1, "chunks must be recallable for the bug premise to hold"
+
+        st = await kb.stats(namespace=stable)
+        assert st.documents == 1
+        assert st.chunks == n_created, f"stats().chunks={st.chunks} != created {n_created} (#1459)"
+        # ADR-001: a correct count must NOT have degraded through gather_counts.
+        assert "errors" not in st.metadata
+
+        resolved = await kb.storage.resolve_namespace(stable)
+        assert await kb.storage.count_chunks(resolved) == n_created, (
+            "kb.storage.count_chunks() must equal the true chunk count (#1459)"
+        )
+    finally:
+        try:
+            await kb.disconnect()
+        except Exception:
+            pass
+
+
 async def test_vc_recall_handles_punctuated_query(kb: Khora, namespace_id: UUID) -> None:
     """Regression for issue #526 at the **vectorcypher engine layer**.
 

@@ -809,6 +809,13 @@ class VectorCypherEngine:
         temporal_backend = backend if is_surrealdb or is_sqlite_lance else "pgvector"
         self._temporal_store = await self._storage.temporal_store(temporal_backend, self._config)
 
+        # VectorCypher writes chunks to the temporal store's ``khora_chunks``
+        # table, not the relational ``chunks`` table. Attach the store to the
+        # coordinator so ``count_chunks`` (and therefore ``kb.storage.count_chunks``
+        # and ``stats().chunks`` via ``gather_counts``) report the true count
+        # instead of 0 for a populated, recallable namespace (#1459).
+        self._storage.attach_temporal_store(self._temporal_store)
+
         # Create embedder
         # Connector fields are forwarded so YAML-configured values reach the
         # shared aiohttp session via configure_litellm — without this hop they
@@ -1008,6 +1015,9 @@ class VectorCypherEngine:
         # Neo4jBackend) BEFORE closing the shared driver, so the backend's
         # pool sampler task is stopped while the pool is still alive.
         if self._storage:
+            # Detach the temporal store before tearing it down so a stale,
+            # disconnected store is never left routing count_chunks (#1459).
+            self._storage.attach_temporal_store(None)
             await self._storage.disconnect()
             self._storage = None
 
