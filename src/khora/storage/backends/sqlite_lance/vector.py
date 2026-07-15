@@ -432,6 +432,31 @@ class SQLiteLanceVectorAdapter:
 
         return rowcount if rowcount is not None else count
 
+    async def delete_namespace(self, namespace_id: UUID) -> int:
+        """Delete all ``chunks_vec`` + ``entities_vec`` vectors for a namespace (#1460).
+
+        The SQLite ``chunks`` / ``entities`` metadata rows are reclaimed by the
+        relational namespace-row FK cascade; the LanceDB embedding tables are
+        separate files with no FK, so the coordinator calls this to purge them.
+        Returns the number of LanceDB rows removed (chunks_vec + entities_vec).
+        A LanceDB failure is logged, not raised (eventual convergence on next
+        compaction), matching ``delete_chunks_by_document``.
+        """
+        ns_text = uuid_to_text(namespace_id)
+        removed = 0
+        for table_getter in (self._chunks_table, self._entities_table):
+            try:
+                tbl = await table_getter()
+                async with self._lance_write_lock:
+                    removed += await tbl.count_rows(f"namespace_id = '{ns_text}'")
+                    await tbl.delete(f"namespace_id = '{ns_text}'")
+            except Exception:
+                logger.warning(
+                    "LanceDB namespace delete failed for {} — orphaned vectors remain until next compaction",
+                    ns_text,
+                )
+        return removed
+
     async def update_last_accessed(
         self,
         namespace_id: UUID,

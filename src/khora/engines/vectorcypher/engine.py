@@ -808,6 +808,10 @@ class VectorCypherEngine:
         # / SQLAlchemy engine) and returns an already-connected store.
         temporal_backend = backend if is_surrealdb or is_sqlite_lance else "pgvector"
         self._temporal_store = await self._storage.temporal_store(temporal_backend, self._config)
+        # The temporal store (``khora_chunks``) is engine-owned; register it on
+        # the coordinator so namespace-scoped ops that must reach it - e.g.
+        # delete_namespace (#1460) - can purge it alongside the other backends.
+        self._storage._temporal_store = self._temporal_store
 
         # VectorCypher writes chunks to the temporal store's ``khora_chunks``
         # table, not the relational ``chunks`` table. Attach the store to the

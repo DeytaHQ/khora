@@ -289,6 +289,11 @@
       "owner": "khora"
     },
     {
+      "name": "khora.delete_namespace",
+      "stability": "public",
+      "owner": "khora"
+    },
+    {
       "name": "khora.gc.expire_sessions",
       "stability": "public",
       "owner": "khora"
@@ -1663,6 +1668,14 @@
       "unit": "1",
       "description": "PG transaction committed (chunks + COMPLETED status stamp) but the post-commit graph-mirror phase of StorageCoordinator.replace_document_extraction raised - or a #1430 reconcile re-attempt of the persisted plan failed. The graph backend is in a partial-mirror state; the computed graph plan is durably queued on documents.graph_mirror_pending and replayed by reconcile_replace_graph_mirror (drained at the start of the next replace in the namespace). Caller surfaces a degradation on RememberResult.metadata so downstream consumers can act on the divergence.",
       "_comment": "Issues #884 + #1430. Shared between the original mirror failure and reconcile re-attempt failures, mirroring khora.dream.graph_mirror.partial_failure. NO namespace_id label - cardinality rule."
+    },
+    {
+      "name": "khora.storage.delete_namespace.partial_failure",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "description": "Issue #1460. A backend purge inside StorageCoordinator.delete_namespace raised (temporal khora_chunks, LanceDB vector tables, the graph backend, or the relational cascade). Incremented once per failing backend/row. The namespace may be half-deleted; each failure is also recorded as an ADR-001 Degradation on the returned NamespaceDeletionResult so callers can detect the divergence via result.partial_failure. NO namespace_id label - cardinality rule.",
+      "_comment": "Issue #1460. Mirrors khora.storage.replace_document.partial_failure."
     },
     {
       "name": "khora.documents.orphans_reclaimed_total",

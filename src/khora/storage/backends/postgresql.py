@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from loguru import logger
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from khora.core.models import Document, MemoryNamespace, TenancyMode
@@ -354,6 +354,50 @@ class PostgreSQLBackend(AsyncSessionMixin):
             )
             await session.commit()
             logger.info(f"Deactivated namespace {namespace_id}")
+
+    async def list_namespace_versions(self, identifier: UUID) -> list[UUID]:
+        """Return every namespace ROW id that shares ``identifier``'s stable id.
+
+        ``identifier`` may be either a stable ``namespace_id`` or a row-level
+        ``id`` of any version. Resolution does NOT filter on ``is_active`` so a
+        deactivated (stranded) namespace still resolves — this is what lets
+        :meth:`delete_namespace` reclaim it. Returns ``[]`` when nothing
+        matches.
+        """
+        async with self._get_session() as session:
+            stable_rows = await session.execute(
+                select(MemoryNamespaceModel.namespace_id).where(
+                    or_(
+                        MemoryNamespaceModel.namespace_id == identifier,
+                        MemoryNamespaceModel.id == identifier,
+                    )
+                )
+            )
+            stable_ids = {row for row in stable_rows.scalars().all()}
+            if not stable_ids:
+                return []
+            row_result = await session.execute(
+                select(MemoryNamespaceModel.id).where(MemoryNamespaceModel.namespace_id.in_(stable_ids))
+            )
+            return list(row_result.scalars().all())
+
+    async def delete_namespace(self, row_ids: list[UUID]) -> int:
+        """Hard-delete namespace rows by row id, cascading to all children.
+
+        The ``memory_namespaces.id`` FK carries ``ON DELETE CASCADE`` on
+        ``documents`` / ``chunks`` / ``entities`` / ``relationships`` /
+        ``episodes`` / ``memory_events`` (and every other namespace-scoped
+        table), so a single ``DELETE`` reclaims the relational footprint.
+        Non-FK stores (temporal ``khora_chunks``, LanceDB, the graph backend)
+        are purged separately by the coordinator. Returns the number of
+        namespace rows deleted.
+        """
+        if not row_ids:
+            return 0
+        async with self._get_session() as session:
+            result = await session.execute(delete(MemoryNamespaceModel).where(MemoryNamespaceModel.id.in_(row_ids)))
+            await session.commit()
+            return result.rowcount  # type: ignore[unresolved-attribute]
 
     # =========================================================================
     # Document operations
