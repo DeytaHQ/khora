@@ -60,6 +60,40 @@ class ChatEngine:
 
         self.prompt_generator = PromptGenerator(persona)
 
+    @staticmethod
+    def _build_question_card(query: str, reason: str) -> dict[str, Any]:
+        """Build structured metadata for a knowledge-gap question card."""
+        normalized = query.strip()
+        title = normalized.rstrip(" ?") or "Unanswered question"
+        return {
+            "kind": "knowledge_gap",
+            "title": title,
+            "question": normalized,
+            "reason": reason,
+            "cta": "Add this question to the knowledge base",
+        }
+
+    @staticmethod
+    def _should_show_question_card(query: str, recall_result: Any) -> tuple[bool, str]:
+        """Return whether retrieval is too weak to support a grounded answer."""
+        engine_info = getattr(recall_result, "engine_info", {}) or {}
+        abstention = engine_info.get("abstention_signals", {}) or {}
+        chunks = getattr(recall_result, "chunks", []) or []
+        entities = getattr(recall_result, "entities", []) or []
+        has_raw_top = engine_info.get("max_raw_vector_score") is not None
+        raw_top = float(engine_info.get("max_raw_vector_score", 0.0) or 0.0)
+        understanding = engine_info.get("understanding", {}) or {}
+        intent = str(understanding.get("intent", "")).upper()
+        is_question_like = query.strip().endswith("?") or intent in {"QUESTION", "COMPARISON", "AGGREGATION"}
+
+        if abstention.get("should_abstain"):
+            return True, "retrieval_abstained"
+        if not chunks and not entities:
+            return True, "no_results"
+        if has_raw_top and is_question_like and raw_top < 0.3 and len(chunks) < 2 and not entities:
+            return True, "weak_evidence"
+        return False, ""
+
     async def chat(
         self,
         query: str,
@@ -93,6 +127,10 @@ class ChatEngine:
             namespace=namespace_id,
             limit=10,
         )
+        engine_info = recall_result.engine_info or {}
+        understanding = engine_info.get("understanding", {}) or {}
+
+        should_show_question_card, question_card_reason = self._should_show_question_card(query, recall_result)
 
         # Convert to simple dict format for prompt
         # Resolve source_system from parent documents (chunks don't store it directly)
@@ -143,7 +181,7 @@ class ChatEngine:
         entity_context: list[dict[str, Any]] = []
         if recall_result.entities:
             for entity in recall_result.entities[:10]:
-                if not entity.description:
+                if not entity.description and not entity.attributes:
                     continue
                 entry: dict[str, Any] = {
                     "name": entity.name,
@@ -160,6 +198,27 @@ class ChatEngine:
         # 2. Get conversation context
         history_summary, recent_messages = self.history_manager.get_context_messages(conv_id)
 
+        if should_show_question_card:
+            response_content = "I couldn't find enough grounded information in the knowledge base to answer that yet."
+            question_card = self._build_question_card(query, question_card_reason)
+            self.history_manager.add_message(conv_id, "user", query, search_results)
+            assistant_msg = self.history_manager.add_message(conv_id, "assistant", response_content)
+
+            return ChatResponse(
+                content=response_content,
+                conversation_id=conv_id,
+                message_id=assistant_msg.id,
+                sources=search_results,
+                metadata={
+                    "model": None,
+                    "search_count": len(recall_result.chunks),
+                    "abstained": True,
+                    "show_question_card": True,
+                    "question_card": question_card,
+                    "question_card_reason": question_card_reason,
+                },
+            )
+
         # 3. Build prompt
         messages = self.prompt_generator.build_messages(
             query,
@@ -167,6 +226,7 @@ class ChatEngine:
             history_summary,
             recent_messages,
             entity_context=entity_context,
+            understanding=understanding,
         )
 
         # 4. Generate response
@@ -221,6 +281,8 @@ class ChatEngine:
             metadata={
                 "model": self.llm_model,
                 "search_count": len(recall_result.chunks),
+                "abstained": False,
+                "show_question_card": False,
             },
         )
 

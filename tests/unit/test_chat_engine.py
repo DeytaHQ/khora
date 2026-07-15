@@ -63,6 +63,20 @@ def _make_mock_kb() -> MagicMock:
     return kb
 
 
+def _make_mock_recall_result(
+    *,
+    chunks: list[MagicMock] | None = None,
+    entities: list[MagicMock] | None = None,
+    engine_info: dict | None = None,
+) -> MagicMock:
+    """Create a mock recall result."""
+    mock_recall = MagicMock()
+    mock_recall.chunks = chunks or []
+    mock_recall.entities = entities or []
+    mock_recall.engine_info = engine_info or {}
+    return mock_recall
+
+
 def _make_litellm_response(content: str = "Generated response") -> MagicMock:
     """Create a mock litellm response."""
     response = MagicMock()
@@ -328,6 +342,63 @@ class TestChatEngineChat:
         assert len(result.sources) == 1
         assert result.sources[0]["source"] == "confluence"
         assert result.sources[0]["content"] == "relevant document content"
+
+    async def test_chat_returns_question_card_when_recall_abstains(self) -> None:
+        """Weak retrieval returns question-card metadata and skips the LLM."""
+        persona = _make_persona(compression_enabled=False)
+        kb = _make_mock_kb()
+        kb.recall = AsyncMock(
+            return_value=_make_mock_recall_result(
+                engine_info={"abstention_signals": {"should_abstain": True}},
+            )
+        )
+        engine = ChatEngine(persona, kb)
+
+        ns_id = uuid4()
+
+        with (
+            patch("khora.chat.engine.litellm") as mock_litellm,
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            result = await engine.chat("Who's most into running?", namespace_id=ns_id)
+
+        mock_litellm.acompletion.assert_not_called()
+        assert result.metadata["abstained"] is True
+        assert result.metadata["show_question_card"] is True
+        assert result.metadata["question_card"]["question"] == "Who's most into running?"
+        assert result.metadata["question_card_reason"] == "retrieval_abstained"
+
+    async def test_chat_passes_understanding_to_prompt(self) -> None:
+        """Prompt generation receives query-understanding metadata from recall."""
+        persona = _make_persona(compression_enabled=False)
+        kb = _make_mock_kb()
+        kb.recall.return_value.engine_info = {
+            "understanding": {"intent": "QUESTION", "answer_type": "SUMMARY", "entities": ["running"]}
+        }
+        engine = ChatEngine(persona, kb)
+        engine.prompt_generator.build_messages = MagicMock(
+            return_value=[{"role": "system", "content": "sys"}, {"role": "user", "content": "user"}]
+        )
+
+        ns_id = uuid4()
+        mock_response = _make_litellm_response()
+
+        with (
+            patch("khora.chat.engine.litellm") as mock_litellm,
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+            patch("khora.telemetry.get_collector") as mock_get_collector,
+        ):
+            mock_litellm.acompletion = AsyncMock(return_value=mock_response)
+            mock_get_collector.return_value = MagicMock()
+            await engine.chat("Who's most into running?", namespace_id=ns_id)
+
+        assert engine.prompt_generator.build_messages.call_args.kwargs["understanding"] == {
+            "intent": "QUESTION",
+            "answer_type": "SUMMARY",
+            "entities": ["running"],
+        }
 
 
 # ---------------------------------------------------------------------------

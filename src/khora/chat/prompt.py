@@ -19,10 +19,11 @@ class PromptGenerator:
 {{ persona.background }}
 
 When answering questions:
-1. Draw from the provided search results and entity knowledge to form comprehensive answers
-2. Be direct and actionable
-3. Acknowledge when you don't have specific information
-4. Consider both the direct text excerpts and the knowledge graph entities for context
+1. Answer the user's actual question in the first sentence when the evidence supports it
+2. Synthesize across the provided search results and entity knowledge instead of paraphrasing one snippet
+3. For implicit or comparative questions, infer the best-supported answer from the evidence and explain why
+4. If the evidence is partial or mixed, say what is known and what remains uncertain
+5. Never fabricate specifics that are not supported by the provided context
 
 {% if history_summary %}
 Previous conversation context:
@@ -61,6 +62,7 @@ Previous conversation context:
         recent_messages: list[ChatMessage],
         *,
         entity_context: list[dict] | None = None,
+        understanding: dict | None = None,
     ) -> list[dict]:
         """Build the complete message list for LLM.
 
@@ -94,7 +96,12 @@ Previous conversation context:
             )
 
         # Build user message with search context
-        user_content = self._format_user_message(user_query, search_results, entity_context=entity_context)
+        user_content = self._format_user_message(
+            user_query,
+            search_results,
+            entity_context=entity_context,
+            understanding=understanding,
+        )
         messages.append(
             {
                 "role": "user",
@@ -110,6 +117,7 @@ Previous conversation context:
         search_results: list[dict],
         *,
         entity_context: list[dict] | None = None,
+        understanding: dict | None = None,
     ) -> str:
         """Format user query with search context.
 
@@ -123,6 +131,19 @@ Previous conversation context:
         """
         parts = []
 
+        if understanding:
+            parts.append("Query analysis:\n")
+            intent = understanding.get("intent")
+            answer_type = understanding.get("answer_type")
+            entities = understanding.get("entities") or []
+            if intent:
+                parts.append(f"- intent: {intent}\n")
+            if answer_type:
+                parts.append(f"- expected_answer: {answer_type}\n")
+            if entities:
+                parts.append(f"- mentioned_entities: {', '.join(entities[:8])}\n")
+            parts.append("\n")
+
         # Entity context section (before chunk results)
         if entity_context:
             parts.append("Relevant entities from knowledge graph:\n")
@@ -131,7 +152,9 @@ Previous conversation context:
                 etype = ent.get("type", "")
                 desc = ent.get("description", "")
                 attrs = ent.get("attributes", {})
-                line = f"- {name} ({etype}): {desc}"
+                line = f"- {name} ({etype})"
+                if desc:
+                    line += f": {desc}"
                 if attrs:
                     attr_parts = [f"{k}={v}" for k, v in attrs.items()]
                     line += f" [{', '.join(attr_parts)}]"

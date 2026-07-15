@@ -226,6 +226,25 @@ class TestBuildMessages:
         assert "B is related to A." in messages[3]["content"]
         assert "How does B relate to A?" in messages[3]["content"]
 
+    def test_includes_query_understanding(self) -> None:
+        """User message includes query analysis when provided."""
+        persona = _make_persona()
+        gen = PromptGenerator(persona)
+
+        messages = gen.build_messages(
+            "Who's most into running?",
+            [],
+            "",
+            [],
+            understanding={"intent": "QUESTION", "answer_type": "SUMMARY", "entities": ["running"]},
+        )
+
+        user_content = messages[-1]["content"]
+        assert "Query analysis" in user_content
+        assert "intent: QUESTION" in user_content
+        assert "expected_answer: SUMMARY" in user_content
+        assert "mentioned_entities: running" in user_content
+
 
 # ---------------------------------------------------------------------------
 # _format_user_message
@@ -273,3 +292,18 @@ class TestFormatUserMessage:
         # The content portion should be at most 500 chars
         assert "A" * 500 in result
         assert "A" * 501 not in result
+
+    def test_entity_without_description_keeps_attributes(self) -> None:
+        """Entities without descriptions still appear when they have attributes."""
+        persona = _make_persona()
+        gen = PromptGenerator(persona)
+
+        result = gen._format_user_message(
+            "Who likes running?",
+            [],
+            entity_context=[
+                {"name": "Ava", "type": "PERSON", "description": "", "attributes": {"interest": "running"}}
+            ],
+        )
+
+        assert "Ava (PERSON) [interest=running]" in result
