@@ -449,15 +449,27 @@ class SQLiteLanceVectorAdapter:
         ns_text = uuid_to_text(namespace_id)
         removed = 0
         failures: list[tuple[str, Exception]] = []
+        where = f"namespace_id = '{ns_text}'"
         for name, table_getter in (("chunks_vec", self._chunks_table), ("entities_vec", self._entities_table)):
             try:
                 tbl = await table_getter()
-                async with self._lance_write_lock:
-                    removed += await tbl.count_rows(f"namespace_id = '{ns_text}'")
-                    await tbl.delete(f"namespace_id = '{ns_text}'")
             except Exception as exc:
                 failures.append((name, exc))
-                logger.warning("LanceDB namespace delete failed for {} in {}", ns_text, name, exc_info=True)
+                logger.warning("LanceDB namespace delete: could not open {} for {}", name, ns_text, exc_info=True)
+                continue
+            async with self._lance_write_lock:
+                # count_rows is best-effort (informational return value); the
+                # delete is the load-bearing op and must run even if the count
+                # fails, so they get independent error paths.
+                try:
+                    removed += await tbl.count_rows(where)
+                except Exception:
+                    logger.debug("LanceDB count_rows failed for {} in {}", ns_text, name, exc_info=True)
+                try:
+                    await tbl.delete(where)
+                except Exception as exc:
+                    failures.append((name, exc))
+                    logger.warning("LanceDB namespace delete failed for {} in {}", ns_text, name, exc_info=True)
         if failures:
             names = ", ".join(name for name, _ in failures)
             raise RuntimeError(f"LanceDB namespace purge failed for {names}") from failures[0][1]
