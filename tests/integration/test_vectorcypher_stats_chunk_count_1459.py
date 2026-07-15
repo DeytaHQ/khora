@@ -167,10 +167,9 @@ async def kb_vc(_patch_llm: None) -> AsyncIterator[Khora]:
     try:
         yield instance
     finally:
-        try:
-            await instance.disconnect()
-        except Exception:
-            pass
+        # This test exercises the connect/disconnect lifecycle the fix changes,
+        # so a teardown failure is signal — do not swallow it (#1459 review).
+        await instance.disconnect()
 
 
 @pytest.mark.skipif(

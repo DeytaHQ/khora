@@ -668,10 +668,9 @@ async def test_vc_stats_chunk_count_nonzero_matches_temporal_store(tmp_path: Pat
             "kb.storage.count_chunks() must equal the true chunk count (#1459)"
         )
     finally:
-        try:
-            await kb.disconnect()
-        except Exception:
-            pass
+        # This test exercises the connect/disconnect lifecycle the fix changes,
+        # so a teardown failure is signal — do not swallow it (#1459 review).
+        await kb.disconnect()
 
 
 async def test_vc_recall_handles_punctuated_query(kb: Khora, namespace_id: UUID) -> None:
