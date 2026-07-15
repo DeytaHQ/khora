@@ -4600,6 +4600,8 @@ RETURN DISTINCT com ORDER BY com.id
 
         Returns the total number of nodes deleted.
         """
+        if batch_size <= 0:
+            raise ValueError(f"batch_size must be positive, got {batch_size}")
         ns_str = str(namespace_id)
 
         async def _delete_batch(tx: AsyncManagedTransaction) -> int:

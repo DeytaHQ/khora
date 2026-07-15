@@ -1546,7 +1546,7 @@ class Khora:
             try:
                 namespace = UUID(namespace)
             except ValueError:
-                raise ValueError(f"Invalid namespace: {namespace!r}. Must be a valid UUID.")
+                raise ValueError(f"Invalid namespace: {namespace!r}. Must be a valid UUID.") from None
 
         with trace_span("khora.delete_namespace", namespace_id=str(namespace)):
             result = await self.storage.delete_namespace(namespace)

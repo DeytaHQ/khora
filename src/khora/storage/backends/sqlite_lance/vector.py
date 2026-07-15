@@ -439,22 +439,28 @@ class SQLiteLanceVectorAdapter:
         relational namespace-row FK cascade; the LanceDB embedding tables are
         separate files with no FK, so the coordinator calls this to purge them.
         Returns the number of LanceDB rows removed (chunks_vec + entities_vec).
-        A LanceDB failure is logged, not raised (eventual convergence on next
-        compaction), matching ``delete_chunks_by_document``.
+
+        Unlike ``delete_chunks_by_document`` (which swallows LanceDB errors for
+        per-doc eventual convergence), a namespace delete must reclaim storage:
+        both tables are attempted, then any failure is re-raised so the
+        coordinator records it as an ADR-001 degradation (``partial_failure``)
+        instead of silently leaving orphaned vectors.
         """
         ns_text = uuid_to_text(namespace_id)
         removed = 0
-        for table_getter in (self._chunks_table, self._entities_table):
+        failures: list[tuple[str, Exception]] = []
+        for name, table_getter in (("chunks_vec", self._chunks_table), ("entities_vec", self._entities_table)):
             try:
                 tbl = await table_getter()
                 async with self._lance_write_lock:
                     removed += await tbl.count_rows(f"namespace_id = '{ns_text}'")
                     await tbl.delete(f"namespace_id = '{ns_text}'")
-            except Exception:
-                logger.warning(
-                    "LanceDB namespace delete failed for {} — orphaned vectors remain until next compaction",
-                    ns_text,
-                )
+            except Exception as exc:
+                failures.append((name, exc))
+                logger.warning("LanceDB namespace delete failed for {} in {}", ns_text, name, exc_info=True)
+        if failures:
+            names = ", ".join(name for name, _ in failures)
+            raise RuntimeError(f"LanceDB namespace purge failed for {names}") from failures[0][1]
         return removed
 
     async def update_last_accessed(

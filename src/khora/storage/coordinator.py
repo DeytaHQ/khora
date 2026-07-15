@@ -733,7 +733,23 @@ class StorageCoordinator:
             _delete_namespace_partial_failure_counter().add(1)
             return result
 
-        row_ids = await list_versions(namespace_id)
+        try:
+            row_ids = await list_versions(namespace_id)
+        except Exception as exc:
+            # Resolution itself failed (e.g. the relational DB is unreachable).
+            # Surface it as a degradation rather than raising, matching the
+            # per-backend-purge contract (nothing was removed).
+            logger.error("delete_namespace: namespace-version lookup failed: {}", exc, exc_info=True)
+            result.degradations.append(
+                Degradation(
+                    component="storage.delete_namespace.relational",
+                    reason="version_lookup_failed",
+                    detail=f"namespace {namespace_id}",
+                    exception=repr(exc),
+                )
+            )
+            _delete_namespace_partial_failure_counter().add(1)
+            return result
         result.removed_row_ids = list(row_ids)
         if not row_ids:
             return result
