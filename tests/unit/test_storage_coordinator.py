@@ -307,6 +307,89 @@ class TestChunkOps:
             await coord.create_chunk(MagicMock())
 
 
+class TestCountChunks:
+    """Tests for count_chunks temporal-store routing (#1459)."""
+
+    @pytest.mark.asyncio
+    async def test_counts_vector_when_no_temporal_store(self) -> None:
+        """Without an attached temporal store, count from the vector backend.
+
+        Pure-relational / Chronicle topologies keep chunks in the relational
+        ``chunks`` table (the vector adapter), so nothing changes for them.
+        """
+        ns_id = uuid4()
+        vec = MagicMock()
+        vec.count_chunks = AsyncMock(return_value=7)
+        coord = StorageCoordinator(vector=vec)
+        assert await coord.count_chunks(ns_id) == 7
+        vec.count_chunks.assert_awaited_once_with(ns_id)
+
+    @pytest.mark.asyncio
+    async def test_routes_to_temporal_store_when_attached(self) -> None:
+        """An attached temporal store owns the count (VectorCypher/Skeleton, #1459).
+
+        VectorCypher writes chunks to ``khora_chunks`` (the temporal store), so
+        the vector backend's ``chunks`` table is empty and would report 0. The
+        attached temporal store's ``count_chunks`` returns the true count.
+        """
+        ns_id = uuid4()
+        vec = MagicMock()
+        vec.count_chunks = AsyncMock(return_value=0)  # relational chunks table is empty
+        temporal = MagicMock()
+        temporal.count_chunks = AsyncMock(return_value=3)
+        coord = StorageCoordinator(vector=vec)
+        coord.attach_temporal_store(temporal)
+
+        assert await coord.count_chunks(ns_id) == 3
+        temporal.count_chunks.assert_awaited_once_with(ns_id)
+        vec.count_chunks.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_detach_reverts_to_vector(self) -> None:
+        """attach_temporal_store(None) restores the vector-backend count path."""
+        ns_id = uuid4()
+        vec = MagicMock()
+        vec.count_chunks = AsyncMock(return_value=5)
+        temporal = MagicMock()
+        temporal.count_chunks = AsyncMock(return_value=3)
+        coord = StorageCoordinator(vector=vec)
+        coord.attach_temporal_store(temporal)
+        coord.attach_temporal_store(None)
+
+        assert await coord.count_chunks(ns_id) == 5
+        vec.count_chunks.assert_awaited_once_with(ns_id)
+        temporal.count_chunks.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_temporal_store_without_method_falls_back_to_vector(self) -> None:
+        """A temporal store lacking count_chunks degrades to the vector backend."""
+        ns_id = uuid4()
+        vec = MagicMock()
+        vec.count_chunks = AsyncMock(return_value=9)
+        temporal = MagicMock(spec=[])  # no count_chunks attribute
+        coord = StorageCoordinator(vector=vec)
+        coord.attach_temporal_store(temporal)
+
+        assert await coord.count_chunks(ns_id) == 9
+        vec.count_chunks.assert_awaited_once_with(ns_id)
+
+    @pytest.mark.asyncio
+    async def test_no_temporal_and_vector_missing_method_raises(self) -> None:
+        """Preserve the NotImplementedError contract when no count path exists."""
+        ns_id = uuid4()
+        vec = MagicMock(spec=[])  # no count_chunks attribute
+        coord = StorageCoordinator(vector=vec)
+        with pytest.raises(NotImplementedError, match="Vector backend has no count_chunks"):
+            await coord.count_chunks(ns_id)
+
+    @pytest.mark.asyncio
+    async def test_no_vector_no_temporal_raises_runtime(self) -> None:
+        """No vector and no temporal store raises the configured-backend error."""
+        coord = StorageCoordinator()
+        with pytest.raises(RuntimeError, match="Vector backend not configured"):
+            await coord.count_chunks(uuid4())
+
+
 class TestEntityOps:
     """Tests for entity operations (cross-backend)."""
 
