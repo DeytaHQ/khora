@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
+from jinja2.exceptions import SecurityError
 from loguru import logger
 from tenacity import (
     AsyncRetrying,
@@ -1731,6 +1732,10 @@ class LLMEntityExtractor(EntityExtractor):
                 expertise=expertise,
                 context=context,
             )
+        except SecurityError as e:
+            # Fail closed: never downgrade a blocked SSTI attempt to a fallback prompt.
+            logger.warning(f"Blocked unsafe construct in expertise system prompt: {e}")
+            raise
         except Exception as e:
             logger.warning(f"Failed to render system prompt: {e}")
             return expertise.system_prompt or DEFAULT_SYSTEM_PROMPT
@@ -1875,6 +1880,10 @@ class LLMEntityExtractor(EntityExtractor):
                     expertise=expertise,
                     context=prompt_context,
                 )
+            except SecurityError as e:
+                # Fail closed: never downgrade a blocked SSTI attempt to the default prompt.
+                logger.warning(f"Blocked unsafe construct in expertise extraction prompt: {e}")
+                raise
             except Exception as e:
                 logger.warning(f"Failed to render extraction prompt: {e}")
 
@@ -2336,6 +2345,10 @@ Each section follows the entity/relationship format from the instructions above.
                     expertise=expertise,
                     context=prompt_context,
                 )
+            except SecurityError as e:
+                # Fail closed: never downgrade a blocked SSTI attempt to the default prompt.
+                logger.warning(f"Blocked unsafe construct in expertise extraction prompt: {e}")
+                raise
             except Exception as e:
                 logger.warning(f"Failed to render extraction prompt for batch: {e}")
                 # Fall through to default prompt below

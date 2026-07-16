@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from jinja2.exceptions import SecurityError
+from jinja2.sandbox import ImmutableSandboxedEnvironment
 from loguru import logger
 
 from .base import (
@@ -21,6 +23,11 @@ from .base import (
 
 if TYPE_CHECKING:
     from .loader import ExpertiseLoader
+
+# Shared sandboxed environment for rendering untrusted prompt templates.
+# ImmutableSandboxedEnvironment blocks attribute access to dunders / mutating
+# operations, closing the SSTI -> RCE surface of raw ``jinja2.Template``.
+_SANDBOX_ENV = ImmutableSandboxedEnvironment()
 
 
 class ExpertiseComposer:
@@ -144,29 +151,27 @@ class ExpertiseComposer:
         if not template:
             return ""
 
+        user_ctx = context or {}
+        ctx = {
+            "expertise": expertise,
+            "entity_types": expertise.entity_types if expertise else [],
+            "relationship_types": expertise.relationship_types if expertise else [],
+            "tool_schemas": expertise.tool_schemas if expertise else {},
+            "tools": list(expertise.tool_schemas.keys()) if expertise else [],
+            "parent_prompt": parent_prompt or "",
+            "source_tool": user_ctx.get("source_tool", ""),
+            "tool_context": user_ctx.get("tool_context", ""),
+            **user_ctx,
+        }
+
         try:
-            from jinja2 import Template
+            return _SANDBOX_ENV.from_string(template).render(**ctx)
 
-            user_ctx = context or {}
-            ctx = {
-                "expertise": expertise,
-                "entity_types": expertise.entity_types if expertise else [],
-                "relationship_types": expertise.relationship_types if expertise else [],
-                "tool_schemas": expertise.tool_schemas if expertise else {},
-                "tools": list(expertise.tool_schemas.keys()) if expertise else [],
-                "parent_prompt": parent_prompt or "",
-                "source_tool": user_ctx.get("source_tool", ""),
-                "tool_context": user_ctx.get("tool_context", ""),
-                **user_ctx,
-            }
-
-            jinja_template = Template(template)
-            return jinja_template.render(**ctx)
-
-        except ImportError:
-            # Jinja2 not installed, return template as-is
-            logger.debug("Jinja2 not installed, returning template without rendering")
-            return template
+        except SecurityError as e:
+            # Sandbox blocked an unsafe construct (SSTI attempt) - never fail
+            # open by returning the raw template; surface the attempt loudly.
+            logger.warning(f"Blocked unsafe construct in prompt template: {e}")
+            raise
 
         except Exception as e:
             logger.warning(f"Failed to render prompt template: {e}")

@@ -4,11 +4,18 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from jinja2 import Template
+from jinja2.exceptions import SecurityError
+from jinja2.sandbox import ImmutableSandboxedEnvironment
+from loguru import logger
 
 if TYPE_CHECKING:
     from .history import ChatMessage
     from .persona import PersonaConfig
+
+# Shared sandboxed environment for rendering persona-supplied templates.
+# ImmutableSandboxedEnvironment blocks the SSTI -> RCE surface of raw
+# ``jinja2.Template``; a blocked construct raises SecurityError at render time.
+_SANDBOX_ENV = ImmutableSandboxedEnvironment()
 
 
 class PromptGenerator:
@@ -37,7 +44,7 @@ Previous conversation context:
         """
         self.persona = persona
         template_str = persona.chat.system_prompt_template or self.DEFAULT_SYSTEM_TEMPLATE
-        self._system_template = Template(template_str)
+        self._system_template = _SANDBOX_ENV.from_string(template_str)
 
     def build_system_prompt(self, history_summary: str = "") -> str:
         """Build the system prompt with persona and history context.
@@ -48,10 +55,15 @@ Previous conversation context:
         Returns:
             System prompt string
         """
-        return self._system_template.render(
-            persona=self.persona,
-            history_summary=history_summary,
-        )
+        try:
+            return self._system_template.render(
+                persona=self.persona,
+                history_summary=history_summary,
+            )
+        except SecurityError as e:
+            # Fail closed: never render a blocked SSTI construct; surface loudly.
+            logger.warning(f"Blocked unsafe construct in persona prompt template: {e}")
+            raise
 
     def build_messages(
         self,
