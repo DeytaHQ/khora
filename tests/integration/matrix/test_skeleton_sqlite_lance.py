@@ -633,7 +633,7 @@ async def test_skeleton_recall_metadata_filter_python_fallback(
 #   * JSON1 absent   -> the metadata leaf splits to ``post_filtered_keys`` and
 #     pushed_down=False; the system-key leaf stays pushed.
 #   * no-filter / filter={} -> the canonical empty carrier with ONE named
-#     ``sqlite_lance`` channel entry, NOT channels={} (see docs/api-reference.md).
+#     ``sqlite_lance`` channel entry, NOT channels={} (see https://docs.deyta.ai/khora/api-reference).
 #
 # Every emitted report round-trips through ``FilterPushdownReport.model_validate``.
 # The JSON1 toggle uses the documented ``_has_json1`` test seam, mirroring

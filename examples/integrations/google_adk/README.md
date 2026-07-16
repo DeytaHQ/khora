@@ -19,7 +19,6 @@ uv run python example.py
 
 ## See also
 
-- `docs/integrations/google_adk.md` - quickstart byte-identical to this
-  directory's `example.py` (CI enforces drift via
-  `tools/check_examples_drift.py`).
+- https://docs.deyta.ai/khora/integrations/google-adk - the published
+  quickstart, mirroring this directory's `example.py`.
 - `src/khora/integrations/google_adk/` - adapter source.

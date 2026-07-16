@@ -179,7 +179,7 @@ class DocumentModel(Base):
 
     # Session attribution for agentic-framework adapters (#620).
     # Nullable — populated when the caller passes ``session_id`` to remember/submit_batch.
-    # Indexed via migration 031 (Postgres-only); see docs/migrations.md.
+    # Indexed via migration 031 (Postgres-only); see https://docs.deyta.ai/khora/migrations.
     session_id: Mapped[UUIDType | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
     # Relationships

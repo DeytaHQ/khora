@@ -1,8 +1,7 @@
 # Khora — Standard Configuration (PostgreSQL + pgvector + Neo4j)
 #
 # Production-grade stack: PostgreSQL for relational + pgvector for vectors +
-# Neo4j for graph traversal. Matches the v0.9.0 production-ready combination
-# (see docs/engines/engine-comparison.md). This is what `make dev` brings up.
+# Neo4j for graph traversal. This is what `make dev` brings up.
 #
 # Bring the stack up before running an example:
 #   make dev                              # docker compose: postgres + neo4j
@@ -83,7 +82,7 @@ pipelines:
   # KET-RAG selective extraction: top-K chunks get full LLM extraction;
   # the rest get lightweight co-occurrence edges. Set extraction_importance_ratio
   # to 1.0 for the legacy "extract everything" behavior (replaces the removed
-  # graphrag engine — see docs/engines/engine-comparison.md#replacing-graphrag).
+  # graphrag engine).
   selective_extraction: true
   extraction_importance_ratio: 0.7
   extraction_min_importance: 0.2

@@ -27,6 +27,6 @@ Namespaces in store: [('memories',)]
 
 ## See also
 
-- `docs/integrations/langgraph.md` - the quickstart byte-identical to
-  this directory's `example.py` (CI enforces drift).
+- https://docs.deyta.ai/khora/integrations/langgraph - the published
+  quickstart, mirroring this directory's `example.py`.
 - `src/khora/integrations/langgraph/` - adapter source.

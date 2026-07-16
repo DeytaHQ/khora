@@ -64,7 +64,7 @@ def _two_leaf_keys() -> frozenset[str]:
 
 
 # --------------------------------------------------------------------------- #
-# Empty / no-filter / constraint-free carriers (rules in docs/api-reference.md
+# Empty / no-filter / constraint-free carriers (rules in https://docs.deyta.ai/khora/api-reference
 # under engine_info["filter"]).
 # --------------------------------------------------------------------------- #
 
@@ -72,7 +72,7 @@ def _two_leaf_keys() -> frozenset[str]:
 def test_no_filter_carrier_is_canonical_empty_with_one_named_channel() -> None:
     """``filter_ast=None`` → all-False report with ONE named empty channel.
 
-    Per docs/api-reference.md, the canonical no-filter carrier is ``pushed_down=False``,
+    Per https://docs.deyta.ai/khora/api-reference, the canonical no-filter carrier is ``pushed_down=False``,
     ``post_filtered=False``, empty key lists, and ``channels`` carrying the
     single named channel the engine fed in (an empty :class:`ChannelPlan`) — NOT
     ``channels={}``. The builder never injects or drops a channel.
@@ -140,14 +140,14 @@ def test_builder_preserves_every_named_channel_with_no_filter() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# pushed_down derivation (docs/api-reference.md under engine_info["filter"]).
+# pushed_down derivation (https://docs.deyta.ai/khora/api-reference under engine_info["filter"]).
 # --------------------------------------------------------------------------- #
 
 
 def test_pushed_down_true_when_all_leaves_pushed_single_channel() -> None:
     """Every leaf pushed on the sole channel, nothing post-filtered → True.
 
-    Per docs/api-reference.md, ``pushed_down`` is ``True`` iff ``post_filtered_keys`` is empty
+    Per https://docs.deyta.ai/khora/api-reference, ``pushed_down`` is ``True`` iff ``post_filtered_keys`` is empty
     AND ``pushed_keys`` covers every constraint leaf. A single-channel skeleton
     gates every leaf, so when its plan pushes them all the report is fully
     pushed.
@@ -207,7 +207,7 @@ def test_pushed_down_false_when_all_leaves_post_filtered() -> None:
 def test_pushed_down_false_when_a_leaf_is_gated_by_no_channel() -> None:
     """A constraint leaf no channel gated → it lands in ``unenforced_keys`` → False.
 
-    Per docs/api-reference.md, ``metadata.tier`` appears in no channel's ``pushed_keys`` ∪
+    Per https://docs.deyta.ai/khora/api-reference, ``metadata.tier`` appears in no channel's ``pushed_keys`` ∪
     ``post_filtered_keys``, so it lands in ``unenforced_keys`` (nothing enforces
     it) — NOT silently dropped. The pushed set is then a strict subset of all
     leaves, so ``pushed_down`` is ``False`` — the builder does not silently treat
@@ -228,7 +228,7 @@ def test_pushed_down_false_when_a_leaf_is_gated_by_no_channel() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# NO-DEMOTE (docs/api-reference.md under engine_info["filter"]).
+# NO-DEMOTE (https://docs.deyta.ai/khora/api-reference under engine_info["filter"]).
 # --------------------------------------------------------------------------- #
 
 
@@ -254,14 +254,14 @@ def test_defensive_recheck_sets_post_filtered_but_does_not_demote() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Multi-channel intersection / partition semantics (docs/api-reference.md).
+# Multi-channel intersection / partition semantics (https://docs.deyta.ai/khora/api-reference).
 # --------------------------------------------------------------------------- #
 
 
 def test_multichannel_leaf_pushed_in_one_post_filtered_in_another() -> None:
     """Adversarial split: a leaf pushed on channel A, post-filtered on B → post.
 
-    Per docs/api-reference.md, a leaf re-checked in memory on ANY gating channel goes to the
+    Per https://docs.deyta.ai/khora/api-reference, a leaf re-checked in memory on ANY gating channel goes to the
     top-level ``post_filtered_keys`` (the honest worst case), even though another
     channel pushed it cleanly. The per-channel breakdown still records each
     channel's own disposition faithfully.

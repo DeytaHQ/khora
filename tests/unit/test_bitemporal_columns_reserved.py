@@ -16,7 +16,7 @@ contract is now "filter on read", not "never filter on read"), widened to cover
 the ``valid_to`` (relationship prune) and chronicle-side columns the original
 guard called out for the widen-then-retire handoff.
 
-See ``docs/architecture/storage-backends.md`` (bi-temporal section) and #970.
+See ``https://docs.deyta.ai/khora/storage-backends`` (bi-temporal section) and #970.
 """
 
 from __future__ import annotations

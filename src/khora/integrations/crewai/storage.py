@@ -166,7 +166,7 @@ class KhoraStorageBackend:
         crashing on a missing text would be a regression from the
         StorageBackend Protocol shape.
 
-        Caveats (documented in ``docs/integrations/crewai.md``):
+        Caveats (documented in ``https://docs.deyta.ai/khora/integrations/crewai``):
 
         * The pre-computed ``query_embedding`` is intentionally
           discarded. khora's embedding model is owned by its config,
