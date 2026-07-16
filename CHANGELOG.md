@@ -6,6 +6,10 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ## [Unreleased]
 
+### Security
+
+- **Prompt templates now render in a Jinja `ImmutableSandboxedEnvironment`**, closing an SSTI -> RCE vector: extraction/expertise prompts (`ExpertiseComposer.render_prompt`) and persona chat prompts (`PromptGenerator`) previously rendered through a raw, non-sandboxed `jinja2.Template`. Templates that attempt unsafe constructs now raise `jinja2.exceptions.SecurityError` instead of failing open and returning the raw template string. The LLM extractor prompt-render call sites fail closed on `SecurityError` (propagate rather than silently degrading to the default prompt), while genuine non-security render errors keep their existing fallback behavior.
+
 ## [0.22.2] - recall-quality correctness, HNSW index-backed search, durable reconcilers
 
 ### Added
