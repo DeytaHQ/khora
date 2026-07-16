@@ -6,6 +6,47 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ## [Unreleased]
 
+## [0.23.0] - recall-quality seeding/fusion pack, recall & ingest performance, namespace deletion
+
+### Added
+
+- **Namespace cascade-delete** (#1523, #1460): new public `Khora.delete_namespace(namespace)` deletes a namespace and reclaims its storage across all backends (documents, chunks, entities, relationships, graph nodes, vector rows). The relational cascade is gated on satellite-purge success, and the LanceDB namespace delete is always attempted even if `count_rows` fails. Previously the only lifecycle op below `create` was `deactivate_namespace`, which orphaned the data (unreadable and unremovable).
+- **Graph-channel seeding upgrades, default-OFF** (#1520, #1473): three independently-flagged upgrades to graph-channel seed quality - reverse-seeding graph entry entities from top vector chunks, per-mention diversified seeding, and an evidence-based graph channel gate - each with telemetry for downstream A/B validation. No defaults flipped.
+- **Typed/weighted graph expansion + query-aware chunk scoring** (#1519, #1474): `relationship.weight` is now stamped from per-pair co-mention frequency at ingest (always on, additive - a previously-inert column is populated); typed/confidence-weighted graph expansion and seed-relevance-weighted graph-chunk scoring land flag-gated.
+- **Score-calibrated convex fusion + gate/confidence calibration** (#1517, #1475): an opt-in magnitude-aware fusion alternative to rank-only weighted RRF (a lone strong-cosine hit is no longer buried below weak chunks that merely co-occur across channels), plus fixes to two latent mis-calibrations in the LLM-rerank gate and confidence formula.
+- **HippoRAG-2 recognition-filtered PPR seeding** (#1515, #1476): gated behind `enable_ppr_retrieval`, A/B-pending.
+- **Adaptive expansion depth from a cached degree histogram** (#1506, #1477): traversal depth is chosen against a BFS frontier *budget* predicted from a per-namespace degree histogram (epoch-invalidated cache, single-flighted build, config knobs), replacing the seed-count step function that went deeper exactly when hub seeds made the frontier explode.
+- **Policy-gated per-namespace partial HNSW promotion** (#1502, #1470): mechanism + promotion policy + tenant-count ceiling for promoting a hot namespace to its own partial HNSW index. Everything default-OFF; nothing auto-creates indexes on the write path.
+- **Opt-in recall result cache** (#1503, #1469): epoch-invalidated result cache at the engine boundary with a config fingerprint in the cache key. Default OFF.
+- **Golden-set retrieval rank-regression tests + shadow-scoring A/B harness** (#1504, #1479): a hermetic CI safety net (sqlite_lance + deterministic embeddings, zero network/LLM) guarding retrieval ranking, plus an observe-only shadow-scoring harness.
+
+### Changed
+
+- **Chunk bookkeeping relocated from `metadata` to `chunker_info`** (#1495, #1493, #1498, #1512): `chunk_index` / `start_char` / `end_char` / `token_count` are no longer written into chunk `metadata` - they live in `chunker_info` at all six persisting writer sites, round-trip through the weaviate and turbopuffer temporal stores (previously silently dropped), and data migration 053 backfills existing rows. The reader has **no metadata fallback** - run `alembic upgrade head` when upgrading.
+- **Recall-time metadata injections removed** (#1516, #1510, #1513): the engine-internal keys (`occurred_at`, `connected_entities`, `ppr_score`) are no longer injected into `Chunk.metadata` on any recall channel - `Chunk.metadata` now carries the caller's stored blob verbatim. Temporal ranking and the rerank date-prefix builders read the first-class `Chunk.occurred_at` / `source_timestamp` columns, which every recall-path constructor now populates from its authoritative source. Callers reading those injected metadata keys must switch to the first-class fields.
+- **Prompt templates render in a Jinja sandbox** (#1525): extraction/expertise and persona chat prompts render through an `ImmutableSandboxedEnvironment`, closing a server-side-template-injection → in-process-RCE path. Fail-closed behavior change: a blocked construct raises `jinja2.exceptions.SecurityError`.
+- **Shared recall projection seam + isolated scoring pipeline** (#1505, #1480): the entity/relationship/doc-stub projection duplicated between VectorCypher and Chronicle moved to `khora.core.recall_projection`, and scoring was extracted into `_score_and_rank` - behavior-parity refactor backed by a parity harness.
+- **pgvector upsert commit granularity is configurable** (#1514, #1471): default is per-batch (single transaction); per-sub-batch commit remains available for high-contention multi-writer namespaces.
+
+### Fixed
+
+- **Provenance-filtered graph recall** (#1481, #1487, #1496): under a caller filter, the VectorCypher graph path and Chronicle's entity channel no longer leak entities/relationships the chunk-side filter never touched - both enforce the same compiled predicate existentially over each entity's provenance chunks, and the provenance record view is document-key aware so filters on the seven denormalized document keys don't over-drop.
+- **Filter report `unenforced_keys` computed from result surfaces** (#1462): a non-empty result surface not covered by the filter's channels forces the filter's leaves into `unenforced_keys`, keeping the pushed/post-filtered/unenforced partition honest.
+- **MMR uses post-boost/rerank relevance, not raw cosine** (#1485, #1497, #1463): diversity selection no longer discards the cross-encoder/LLM rerankers and recency/coherence boosts; also fixes reranking being inert on the default recall path.
+- **Crash-abandoned half-ingested documents are re-ingested** (#1486, #1464): a document left `PENDING` with chunks committed but no entities/relationships no longer blocks re-ingest by checksum.
+- **Per-symbol khora-accel import** (#1483, #1465): one drifted/missing Rust symbol no longer silently disables the entire Rust acceleration layer.
+- **VectorCypher chunk counts read from the temporal store** (#1522, #1459): `Khora.stats(ns).chunks` / `count_chunks(ns)` no longer return 0 for a fully-recallable namespace.
+- **Neo4j `valid_until` stored as native ZONED DATETIME** (#1500, #1472): the bi-temporal recall traversals are now sargable, so the composite `entity_ns_valid_until` index does a range `IndexSeek` instead of a per-row `datetime()` cast filter; includes a hardened native-datetime backfill.
+- **Hermes namespace derived from stable identity, not session** (#1484, #1466): the adapter no longer mints a fresh namespace per session, restoring cross-session entity dedup and continuity.
+- **Session fan-out channel failures record an ADR-001 `Degradation`** (#1482, #1467) instead of being silently dropped from the merge.
+
+### Performance
+
+- **Recall front-matter overlap** (#1503, #1469): the query embedding launches at t0 (overlapping temporal-detect/route) and HyDE runs speculatively so its LLM call overlaps the baseline retrieve.
+- **PPR affordability pack** (#1515, #1476): top-k rank-stability early-stop for the power iteration (Rust + Python lockstep), CSR power-iteration kernel, and an epoch-keyed PPR graph-slice cache - all inert unless `enable_ppr_retrieval` is on.
+- **Batch write-path** (#1501, #1471): namespace advisory lock released between sub-batches (concurrent same-namespace ingests interleave), stage-6 hook dispatch gathered, window pipelining prefetches next-window embeddings, and chunk embeddings are released after persist.
+- **Recall's sequential Neo4j reads share one session** (#1499, #1468): the expand → version-filter → chunk-fetch chain uses `DualNodeManager.bind_session()` instead of 2-3 pool acquisitions per recall.
+
 ## [0.22.2] - recall-quality correctness, HNSW index-backed search, durable reconcilers
 
 ### Added
