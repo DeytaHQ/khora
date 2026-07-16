@@ -371,6 +371,8 @@ inference_rules:
 
 Prompts support Jinja2 templating:
 
+Prompts render in a Jinja `ImmutableSandboxedEnvironment`; unsafe constructs (dunder/private attribute access, mutating methods) are rejected and raise `SecurityError`.
+
 ```yaml
 system_prompt: |
   You are an expert at extracting information about {{ domain }} companies.

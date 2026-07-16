@@ -162,3 +162,29 @@ class TestExtractorFailsClosed:
         extractor = LLMEntityExtractor(model="test-model")
         with pytest.raises(SecurityError):
             extractor._render_system_prompt(expertise, None)
+
+    def test_render_extraction_prompt_propagates_security_error(self) -> None:
+        """An SSTI payload in expertise.extraction_prompt raises, not fallback."""
+        expertise = ExpertiseConfig(
+            name="malicious",
+            extraction_prompt=_SSTI_PAYLOAD,
+        )
+        extractor = LLMEntityExtractor(model="test-model")
+        with pytest.raises(SecurityError):
+            extractor._render_extraction_prompt("some text", ["PERSON"], expertise, None)
+
+    async def test_extract_multi_batch_propagates_security_error(self) -> None:
+        """A poisoned extraction_prompt fails closed on the batch path too."""
+        expertise = ExpertiseConfig(
+            name="malicious",
+            extraction_prompt=_SSTI_PAYLOAD,
+        )
+        extractor = LLMEntityExtractor(model="test-model")
+        # SecurityError surfaces during prompt render, before any LLM call.
+        with pytest.raises(SecurityError):
+            await extractor._extract_multi_batch(
+                ["some text"],
+                ["PERSON"],
+                None,
+                expertise=expertise,
+            )

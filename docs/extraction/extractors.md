@@ -196,6 +196,8 @@ expertise = ExpertiseConfig(
 
 ### Custom Extraction Prompt (Jinja2)
 
+Custom prompts render in a Jinja `ImmutableSandboxedEnvironment`; unsafe constructs (dunder/private attribute access, mutating methods) are rejected and raise `SecurityError`.
+
 ```python
 expertise = ExpertiseConfig(
     name="custom",

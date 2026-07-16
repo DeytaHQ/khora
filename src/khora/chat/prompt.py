@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from jinja2.exceptions import SecurityError
 from jinja2.sandbox import ImmutableSandboxedEnvironment
+from loguru import logger
 
 if TYPE_CHECKING:
     from .history import ChatMessage
@@ -53,10 +55,15 @@ Previous conversation context:
         Returns:
             System prompt string
         """
-        return self._system_template.render(
-            persona=self.persona,
-            history_summary=history_summary,
-        )
+        try:
+            return self._system_template.render(
+                persona=self.persona,
+                history_summary=history_summary,
+            )
+        except SecurityError as e:
+            # Fail closed: never render a blocked SSTI construct; surface loudly.
+            logger.warning(f"Blocked unsafe construct in persona prompt template: {e}")
+            raise
 
     def build_messages(
         self,
