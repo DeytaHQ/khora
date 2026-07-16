@@ -11,6 +11,8 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
+from khora.core.models.document import _strip_nul_bytes
+
 if TYPE_CHECKING:
     from khora.core.models.document import DocumentSource
 
@@ -70,6 +72,12 @@ class Entity:
             self.description = ""
         if self.source_tool is None:
             self.source_tool = ""
+        self.name = _strip_nul_bytes(self.name)
+        self.entity_type = _strip_nul_bytes(self.entity_type)
+        self.description = _strip_nul_bytes(self.description)
+        self.attributes = _strip_nul_bytes(self.attributes)
+        self.source_tool = _strip_nul_bytes(self.source_tool)
+        self.metadata = _strip_nul_bytes(self.metadata)
 
     def validate(self) -> None:
         """Validate and clean attributes using the registered schema for this entity type."""
@@ -148,6 +156,14 @@ class Relationship:
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    def __post_init__(self) -> None:
+        self.relationship_type = _strip_nul_bytes(self.relationship_type)
+        self.description = _strip_nul_bytes(self.description)
+        self.source_entity_name = _strip_nul_bytes(self.source_entity_name)
+        self.target_entity_name = _strip_nul_bytes(self.target_entity_name)
+        self.properties = _strip_nul_bytes(self.properties)
+        self.metadata = _strip_nul_bytes(self.metadata)
 
 
 @dataclass(slots=True)

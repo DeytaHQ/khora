@@ -13,6 +13,19 @@ from typing import Any
 from uuid import UUID, uuid4
 
 
+def _strip_nul_bytes(value: Any) -> Any:
+    """Remove PostgreSQL-incompatible NUL bytes from text and JSON-like values."""
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, dict):
+        return {_strip_nul_bytes(key): _strip_nul_bytes(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_strip_nul_bytes(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_strip_nul_bytes(item) for item in value)
+    return value
+
+
 class DocumentStatus(str, Enum):
     """Document processing status."""
 
@@ -114,6 +127,14 @@ class Document:
     orphan_prior_status: str | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        self.content = _strip_nul_bytes(self.content)
+        self.title = _strip_nul_bytes(self.title)
+        self.source = _strip_nul_bytes(self.source)
+        self.source_name = _strip_nul_bytes(self.source_name)
+        self.source_url = _strip_nul_bytes(self.source_url)
+        self.author = _strip_nul_bytes(self.author)
+        self.metadata = _strip_nul_bytes(self.metadata)
+        self.extraction_params = _strip_nul_bytes(self.extraction_params)
         if self.external_id is not None:
             if not self.external_id.strip():
                 raise ValueError("external_id must be None or a non-blank string")
@@ -194,6 +215,11 @@ class Chunk:
 
     # Populated by Khora when include_sources=True
     source_document: DocumentSource | None = None
+
+    def __post_init__(self) -> None:
+        self.content = _strip_nul_bytes(self.content)
+        self.metadata = _strip_nul_bytes(self.metadata)
+        self.chunker_info = _strip_nul_bytes(self.chunker_info)
 
     @property
     def has_embedding(self) -> bool:
