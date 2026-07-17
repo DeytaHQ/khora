@@ -25,6 +25,7 @@ from loguru import logger
 from khora.config import KhoraConfig, load_config
 from khora.core.diagnostics import SkipReason
 from khora.core.models import Chunk, CommunityNode, Document, Entity, MemoryNamespace
+from khora.core.text import strip_nul
 from khora.query import SearchMode
 from khora.telemetry import bounded_text_hash, trace_span
 from khora.telemetry.metrics import metric_counter
@@ -1654,6 +1655,9 @@ class Khora:
         _status = "success"
         try:
             namespace_id = await self._resolve_namespace(namespace)
+            # Strip NUL bytes (#1528) at the ingestion boundary so chunks
+            # inherit clean text and PostgreSQL text columns never see 0x00.
+            content = strip_nul(content)
             # Normalize a possibly-string source_timestamp before it reaches
             # the engine's Document(...) — upstream callers hand us ISO strings
             # despite the datetime-typed kwarg.
@@ -1814,6 +1818,10 @@ class Khora:
                 # truth. Per-doc dict values always win — only fill the kwarg
                 # default when the doc didn't supply its own.
                 for doc_data in documents:
+                    # Strip NUL bytes (#1528) so chunks inherit clean text and
+                    # PostgreSQL text columns never see 0x00.
+                    if "content" in doc_data:
+                        doc_data["content"] = strip_nul(doc_data["content"])
                     if "source_type" not in doc_data:
                         doc_data["source_type"] = source_type
                     if "source_name" not in doc_data:
@@ -2031,7 +2039,9 @@ class Khora:
         pre_failed_doc_ids: set[UUID] = set()
 
         for doc_data in documents:
-            content = doc_data.get("content", "")
+            # Strip NUL bytes (#1528) so chunks inherit clean text and
+            # PostgreSQL text columns never see 0x00.
+            content = strip_nul(doc_data.get("content", ""))
             checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
             external_id = doc_data.get("external_id")
 
