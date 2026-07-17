@@ -46,6 +46,20 @@ from khora.khora import Khora
 
 EMBED_DIM = 32  # sqlite_lance default
 
+
+def _assert_no_nul(value: Any) -> None:
+    """Recursively assert no string in ``value`` contains a NUL byte."""
+    if isinstance(value, str):
+        assert "\x00" not in value, f"NUL byte found in {value!r}"
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            _assert_no_nul(k)
+            _assert_no_nul(v)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _assert_no_nul(item)
+
+
 pytestmark = [
     pytest.mark.embedded,
     pytest.mark.integration,
@@ -138,22 +152,37 @@ async def test_remember_strips_nul_embedded(kb: Khora) -> None:
     rem = await kb.remember(
         content=content,
         namespace=stable,
+        title="Acme\x00 Annual Report",
+        source="scr\x00aper",
+        metadata={"au\x00thor": "Bo\x00b", "tags": ["fin\x00ance"], "nested": {"k\x00": "v\x00"}},
         entity_types=["ORG"],
         relationship_types=[],
     )
     assert rem.chunks_created >= 1
 
-    # Chunk content (derived from document content) must be NUL-free.
+    # Document must still be recallable.
     recalled = await kb.recall("Acme Corp widgets", namespace=stable, limit=10)
     assert recalled.chunks, "chunk must be recallable"
     for ch in recalled.chunks:
         assert "\x00" not in ch.content
 
-    # Stored document content must be NUL-free.
+    # Stored document content, title, source, and metadata (jsonb) must be NUL-free.
     resolved = await kb.storage.resolve_namespace(stable)
     doc = await kb.storage.get_document(rem.document_id, namespace_id=resolved)
     assert doc is not None
     assert "\x00" not in doc.content
+    assert "\x00" not in (doc.title or "")
+    assert "\x00" not in (doc.source or "")
+    _assert_no_nul(doc.metadata)
+
+    # Stored chunk content + metadata (metadata is a copy of the sanitized
+    # document metadata) must be NUL-free.
+    chunks = await kb.storage.get_chunks_by_document(rem.document_id, namespace_id=resolved)
+    assert chunks, "chunks must be stored"
+    for ch in chunks:
+        assert "\x00" not in ch.content
+        _assert_no_nul(ch.metadata)
+        _assert_no_nul(ch.chunker_info)
 
     # Extracted entity name/description/attributes must be NUL-free.
     entities = await kb.storage.list_entities(stable, limit=50)

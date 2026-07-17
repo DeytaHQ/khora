@@ -38,6 +38,20 @@ from khora.khora import Khora
 
 EMBED_DIM = 1536  # matches the khora_chunks.embedding Vector(1536) column
 
+
+def _assert_no_nul(value: Any) -> None:
+    """Recursively assert no string in ``value`` contains a NUL byte."""
+    if isinstance(value, str):
+        assert "\x00" not in value, f"NUL byte found in {value!r}"
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            _assert_no_nul(k)
+            _assert_no_nul(v)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _assert_no_nul(item)
+
+
 DATABASE_URL = os.environ.get(
     "KHORA_DATABASE_URL",
     "postgresql+asyncpg://khora:khora@localhost:5434/khora",
@@ -162,17 +176,26 @@ async def test_remember_survives_nul_on_pg_neo4j(kb_vc: Khora) -> None:
 
     content = "Ac\x00me Corp makes wid\x00gets in a fac\x00tory near the river."
     # Pre-fix this raised asyncpg.CharacterNotInRepertoireError during the
-    # entity INSERT; post-fix it succeeds.
+    # documents / entities INSERT; post-fix it succeeds. NUL in title (a
+    # String(512) column) and metadata (jsonb) are the gap #1529 surfaced.
     rem = await kb_vc.remember(
         content=content,
         namespace=stable,
+        title="Acme\x00 Annual Report",
+        source="scr\x00aper",
+        metadata={"au\x00thor": "Bo\x00b", "tags": ["fin\x00ance"], "nested": {"k\x00": "v\x00"}},
         entity_types=["ORG"],
         relationship_types=[],
     )
     assert rem.chunks_created >= 1
     assert rem.entities_extracted >= 1
 
-    # Stored document + chunk text is NUL-free and recallable.
+    # Document must still be recallable and its chunk text NUL-free. On the
+    # VectorCypher path chunks live in the temporal ``khora_chunks`` table (its
+    # content + metadata are jsonb/text columns), so a NUL in chunk metadata —
+    # which is a copy of the document metadata — would itself have raised
+    # CharacterNotInRepertoireError above; the successful remember() is the
+    # proof. The embedded leg asserts stored chunk metadata is NUL-free directly.
     recalled = await kb_vc.recall("Acme Corp widgets", namespace=stable, limit=10)
     assert recalled.chunks, "chunk must be recallable"
     for ch in recalled.chunks:
@@ -182,6 +205,9 @@ async def test_remember_survives_nul_on_pg_neo4j(kb_vc: Khora) -> None:
     doc = await kb_vc.storage.get_document(rem.document_id, namespace_id=resolved)
     assert doc is not None
     assert "\x00" not in doc.content
+    assert "\x00" not in (doc.title or "")
+    assert "\x00" not in (doc.source or "")
+    _assert_no_nul(doc.metadata)
 
     # Extracted entity name/description/attributes are NUL-free in storage.
     entities = await kb_vc.storage.list_entities(stable, limit=50)
