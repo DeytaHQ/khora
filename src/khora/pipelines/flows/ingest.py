@@ -327,6 +327,13 @@ async def stream_extract_and_embed_entities(
                 max_input_tokens=None,
             )
 
+            # Strip NUL bytes (#1528) from extracted text before it is staged
+            # into storage models — PostgreSQL text/jsonb columns reject 0x00.
+            from khora.extraction.extractors.base import sanitize_extraction_result
+
+            for _r in results:
+                sanitize_extraction_result(_r)
+
             # Process results and queue entities
             all_entities: dict[str, Entity] = {}
             chunk_entity_keys: dict[UUID, list[str]] = {}  # chunk_id -> entity keys

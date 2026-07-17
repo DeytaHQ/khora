@@ -81,6 +81,38 @@ class ExtractionResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+def sanitize_extraction_result(result: ExtractionResult) -> None:
+    """Strip NUL bytes (#1528) from every text field of ``result`` in place.
+
+    Extracted text originates from untrusted document content (PDFs, scraped
+    HTML, OCR output) and may carry ``0x00``, which PostgreSQL text/jsonb
+    columns reject. Mutating the result before it is staged into the storage
+    models ensures every backend receives clean data and that entity-name
+    matching (dedup keys, relationship endpoints) stays consistent.
+
+    ``strip_nul_json`` is used for every field because extractor output is
+    loosely typed: a text field may legitimately be ``None`` (not just the
+    ``""`` default), and the JSON-aware helper passes non-string values
+    through untouched instead of raising.
+    """
+    from khora.core.text import strip_nul_json
+
+    for entity in result.entities:
+        entity.name = strip_nul_json(entity.name)
+        entity.description = strip_nul_json(entity.description)
+        entity.attributes = strip_nul_json(entity.attributes)
+        entity.aliases = strip_nul_json(entity.aliases)
+    for rel in result.relationships:
+        rel.source_entity = strip_nul_json(rel.source_entity)
+        rel.target_entity = strip_nul_json(rel.target_entity)
+        rel.relationship_type = strip_nul_json(rel.relationship_type)
+        rel.description = strip_nul_json(rel.description)
+        rel.properties = strip_nul_json(rel.properties)
+    for event in result.events:
+        event.description = strip_nul_json(event.description)
+        event.participants = strip_nul_json(event.participants)
+
+
 class EntityExtractor(ABC):
     """Abstract base class for entity extractors."""
 

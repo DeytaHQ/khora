@@ -25,6 +25,7 @@ from loguru import logger
 from khora.config import KhoraConfig, load_config
 from khora.core.diagnostics import SkipReason
 from khora.core.models import Chunk, CommunityNode, Document, Entity, MemoryNamespace
+from khora.core.text import strip_nul, strip_nul_json
 from khora.query import SearchMode
 from khora.telemetry import bounded_text_hash, trace_span
 from khora.telemetry.metrics import metric_counter
@@ -1654,6 +1655,19 @@ class Khora:
         _status = "success"
         try:
             namespace_id = await self._resolve_namespace(namespace)
+            # Strip NUL bytes (#1528) from every caller-supplied text field at
+            # the ingestion boundary: PostgreSQL text/jsonb columns reject 0x00
+            # (title, source, source_url etc. are real text columns, metadata is
+            # jsonb). Chunks derive from content + metadata, so this also keeps
+            # chunk text clean. strip_nul_json is None-safe for the optional
+            # fields and recurses into the metadata dict.
+            content = strip_nul(content)
+            title = strip_nul_json(title)
+            source = strip_nul_json(source)
+            source_name = strip_nul_json(source_name)
+            source_url = strip_nul_json(source_url)
+            external_id = strip_nul_json(external_id)
+            metadata = strip_nul_json(metadata)
             # Normalize a possibly-string source_timestamp before it reaches
             # the engine's Document(...) — upstream callers hand us ISO strings
             # despite the datetime-typed kwarg.
@@ -1808,12 +1822,24 @@ class Khora:
             # Normalize a possibly-string default before it propagates to the
             # per-doc dicts and the engine — see remember() for the rationale.
             source_timestamp = coerce_source_timestamp(source_timestamp)
+            # Strip NUL bytes (#1528) from the batch-level provenance kwargs
+            # before they are stamped onto per-doc dicts below.
+            source_name = strip_nul_json(source_name)
+            source_url = strip_nul_json(source_url)
             with trace_span("khora.remember_batch", namespace_id=str(namespace_id), batch_size=len(documents)):
                 # Pre-stamp the top-level provenance kwargs onto each doc dict
                 # so engines (and the ingest pipeline) read a single source of
                 # truth. Per-doc dict values always win — only fill the kwarg
                 # default when the doc didn't supply its own.
                 for doc_data in documents:
+                    # Strip NUL bytes (#1528) from every caller-supplied text
+                    # field (content, title, metadata, ...) so chunks inherit
+                    # clean text and PostgreSQL text/jsonb columns never see
+                    # 0x00. Mutate values in place (keeping the caller's dict
+                    # identity); strip_nul_json recurses into nested metadata and
+                    # passes non-text scalars (datetimes, UUIDs) through.
+                    for _key in list(doc_data):
+                        doc_data[_key] = strip_nul_json(doc_data[_key])
                     if "source_type" not in doc_data:
                         doc_data["source_type"] = source_type
                     if "source_name" not in doc_data:
@@ -1965,6 +1991,12 @@ class Khora:
         # coerced at each Document(...) site below.
         source_timestamp = coerce_source_timestamp(source_timestamp)
 
+        # Strip NUL bytes (#1528) from the batch-level provenance kwargs used as
+        # per-doc fallbacks below — PostgreSQL text columns reject 0x00.
+        source_type = strip_nul_json(source_type)
+        source_name = strip_nul_json(source_name)
+        source_url = strip_nul_json(source_url)
+
         # Stamp the batch-level session_id into each doc's metadata so the
         # ingest pipeline's ``stage_document`` path picks it up as a
         # first-class ``Document.session_id`` (#620). A per-doc
@@ -2026,11 +2058,20 @@ class Khora:
             "chunk_strategy": chunk_strategy,
             "max_chunks_in_flight": max_chunks_in_flight,
         }
+        # Strip NUL bytes (#1528) — this payload is stored in the jsonb
+        # ``extraction_params`` column, which rejects 0x00.
+        extraction_params_payload = strip_nul_json(extraction_params_payload)
 
         seen_external_ids: set[str] = set()
         pre_failed_doc_ids: set[UUID] = set()
 
         for doc_data in documents:
+            # Strip NUL bytes (#1528) from every caller-supplied text field
+            # (content, title, metadata, ...) before use so chunks inherit clean
+            # text and PostgreSQL text/jsonb columns never see 0x00. Do this
+            # BEFORE the checksum so it hashes exactly the bytes we store.
+            for _key in list(doc_data):
+                doc_data[_key] = strip_nul_json(doc_data[_key])
             content = doc_data.get("content", "")
             checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
             external_id = doc_data.get("external_id")

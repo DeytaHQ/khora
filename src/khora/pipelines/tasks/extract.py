@@ -254,6 +254,13 @@ async def extract_entities(
     )
     _llm_extraction_ms = (_time.perf_counter() - _llm_t0) * 1000
 
+    # Strip NUL bytes (#1528) from extracted text before it is staged into
+    # storage models — PostgreSQL text/jsonb columns reject 0x00.
+    from khora.extraction.extractors.base import sanitize_extraction_result
+
+    for _r in results:
+        sanitize_extraction_result(_r)
+
     # Process results
     all_entities: dict[str, Entity] = {}  # name -> entity (for dedup)
     all_relationships: list[Relationship] = []
