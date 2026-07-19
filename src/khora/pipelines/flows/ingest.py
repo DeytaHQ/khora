@@ -493,6 +493,12 @@ async def stream_extract_and_embed_entities(
                     relationship_types=relationship_types,
                 )
                 if cross_rels_raw:
+                    # Strip NUL bytes (#1528) — these relationships are staged
+                    # into storage models below but bypass the extract_multi
+                    # sanitization pass above.
+                    from khora.extraction.extractors.base import ExtractionResult
+
+                    sanitize_extraction_result(ExtractionResult(relationships=cross_rels_raw))
                     logger.info(f"Cross-chunk extraction: found {len(cross_rels_raw)} candidate relationships")
                     added_cross = 0
                     for extracted_rel in cross_rels_raw:

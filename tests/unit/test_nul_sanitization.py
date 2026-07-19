@@ -32,6 +32,16 @@ def test_strip_nul_json_recurses_into_dicts_and_lists():
     }
 
 
+def test_strip_nul_json_key_collision_is_graceful_last_wins():
+    """A NUL-only key collision degrades to last-wins, never raises (#1528).
+
+    Stripping is meant to make ingestion survive NUL-bearing input; raising on
+    the pathological case where two keys collide only after stripping (one had a
+    NUL, one did not) would reintroduce the very crash we are removing.
+    """
+    assert strip_nul_json({"id": 1, "i\x00d": 2}) == {"id": 2}
+
+
 def test_strip_nul_json_passes_through_non_json_scalars():
     assert strip_nul_json(42) == 42
     assert strip_nul_json(None) is None
@@ -43,7 +53,7 @@ def test_sanitize_extraction_result_strips_all_text_fields():
         entities=[
             ExtractedEntity(
                 name="Ac\x00me",
-                entity_type="ORG",
+                entity_type="OR\x00G",
                 description="wid\x00get",
                 attributes={"a\x00": "b\x00", "n": 1},
                 aliases=["A\x00C"],
@@ -61,15 +71,19 @@ def test_sanitize_extraction_result_strips_all_text_fields():
         events=[
             ExtractedEvent(
                 description="foun\x00ded",
+                event_type="FOU\x00NDING",
+                occurred_at="2020-01-0\x001",
                 participants=["Ac\x00me", "Bo\x00b"],
             )
         ],
+        metadata={"err\x00or": "bo\x00om"},
     )
 
     sanitize_extraction_result(result)
 
     ent = result.entities[0]
     assert ent.name == "Acme"
+    assert ent.entity_type == "ORG"
     assert ent.description == "widget"
     assert ent.attributes == {"a": "b", "n": 1}
     assert ent.aliases == ["AC"]
@@ -83,7 +97,11 @@ def test_sanitize_extraction_result_strips_all_text_fields():
 
     evt = result.events[0]
     assert evt.description == "founded"
+    assert evt.event_type == "FOUNDING"
+    assert evt.occurred_at == "2020-01-01"
     assert evt.participants == ["Acme", "Bob"]
+
+    assert result.metadata == {"error": "boom"}
 
 
 def test_sanitize_extraction_result_tolerates_none_text_fields():

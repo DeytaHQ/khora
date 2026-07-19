@@ -1664,9 +1664,11 @@ class Khora:
             content = strip_nul(content)
             title = strip_nul_json(title)
             source = strip_nul_json(source)
+            source_type = strip_nul_json(source_type)
             source_name = strip_nul_json(source_name)
             source_url = strip_nul_json(source_url)
             external_id = strip_nul_json(external_id)
+            extraction_config_hash = strip_nul_json(extraction_config_hash)
             metadata = strip_nul_json(metadata)
             # Normalize a possibly-string source_timestamp before it reaches
             # the engine's Document(...) — upstream callers hand us ISO strings
@@ -1824,8 +1826,10 @@ class Khora:
             source_timestamp = coerce_source_timestamp(source_timestamp)
             # Strip NUL bytes (#1528) from the batch-level provenance kwargs
             # before they are stamped onto per-doc dicts below.
+            source_type = strip_nul_json(source_type)
             source_name = strip_nul_json(source_name)
             source_url = strip_nul_json(source_url)
+            extraction_config_hash = strip_nul_json(extraction_config_hash)
             with trace_span("khora.remember_batch", namespace_id=str(namespace_id), batch_size=len(documents)):
                 # Pre-stamp the top-level provenance kwargs onto each doc dict
                 # so engines (and the ingest pipeline) read a single source of
@@ -1991,11 +1995,19 @@ class Khora:
         # coerced at each Document(...) site below.
         source_timestamp = coerce_source_timestamp(source_timestamp)
 
-        # Strip NUL bytes (#1528) from the batch-level provenance kwargs used as
-        # per-doc fallbacks below — PostgreSQL text columns reject 0x00.
+        # Strip NUL bytes (#1528) from every caller-supplied text field so
+        # PostgreSQL text/jsonb columns never see 0x00. The batch-level
+        # provenance kwargs are used as per-doc fallbacks below; each doc_data
+        # dict is sanitized in place BEFORE the external-id lookup so the lookup
+        # keys match the (sanitized) values that get stored (a raw NUL in an
+        # external_id would otherwise miss the existing row or crash the query).
         source_type = strip_nul_json(source_type)
         source_name = strip_nul_json(source_name)
         source_url = strip_nul_json(source_url)
+        extraction_config_hash = strip_nul_json(extraction_config_hash)
+        for doc_data in documents:
+            for _key in list(doc_data):
+                doc_data[_key] = strip_nul_json(doc_data[_key])
 
         # Stamp the batch-level session_id into each doc's metadata so the
         # ingest pipeline's ``stage_document`` path picks it up as a
@@ -2066,12 +2078,8 @@ class Khora:
         pre_failed_doc_ids: set[UUID] = set()
 
         for doc_data in documents:
-            # Strip NUL bytes (#1528) from every caller-supplied text field
-            # (content, title, metadata, ...) before use so chunks inherit clean
-            # text and PostgreSQL text/jsonb columns never see 0x00. Do this
-            # BEFORE the checksum so it hashes exactly the bytes we store.
-            for _key in list(doc_data):
-                doc_data[_key] = strip_nul_json(doc_data[_key])
+            # doc_data was NUL-sanitized in place above (before the external-id
+            # lookup), so content here is already clean when hashed/stored.
             content = doc_data.get("content", "")
             checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
             external_id = doc_data.get("external_id")

@@ -137,10 +137,8 @@ async def kb(tmp_path: Path) -> AsyncIterator[Khora]:
     try:
         yield instance
     finally:
-        try:
-            await instance.disconnect()
-        except Exception:
-            pass
+        # A teardown failure is signal — do not swallow it (mirrors the pg fixture).
+        await instance.disconnect()
 
 
 async def test_remember_strips_nul_embedded(kb: Khora) -> None:

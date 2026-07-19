@@ -99,6 +99,7 @@ def sanitize_extraction_result(result: ExtractionResult) -> None:
 
     for entity in result.entities:
         entity.name = strip_nul_json(entity.name)
+        entity.entity_type = strip_nul_json(entity.entity_type)
         entity.description = strip_nul_json(entity.description)
         entity.attributes = strip_nul_json(entity.attributes)
         entity.aliases = strip_nul_json(entity.aliases)
@@ -110,7 +111,10 @@ def sanitize_extraction_result(result: ExtractionResult) -> None:
         rel.properties = strip_nul_json(rel.properties)
     for event in result.events:
         event.description = strip_nul_json(event.description)
+        event.event_type = strip_nul_json(event.event_type)
+        event.occurred_at = strip_nul_json(event.occurred_at)
         event.participants = strip_nul_json(event.participants)
+    result.metadata = strip_nul_json(result.metadata)
 
 
 class EntityExtractor(ABC):
