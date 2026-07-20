@@ -6,6 +6,16 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ## [Unreleased]
 
+## [0.23.1] - NUL-byte ingestion sanitization
+
+### Fixed
+
+- **NUL-byte ingestion crash** (#1528, PRs #1530 / #1533): documents whose text contains a NUL byte (`0x00`) - common in PDFs, scraped HTML, and OCR output - no longer crash ingestion on PostgreSQL with `asyncpg.CharacterNotInRepertoireError: invalid byte sequence for encoding "UTF8": 0x00`. NUL bytes are stripped at the ingestion boundary from document content, title, source / source_name / source_url, external_id, source_type, and metadata, and from extracted entity / relationship / event text (name, type, description, attributes, aliases) before the checksum is computed and before any backend write. Sanitizing once at the boundary (rather than in each model's `__post_init__`) keeps recall/hydration paths cost-free and every backend storing identical clean data.
+
+### Changed
+
+- Dependency bumps: `nltk` 3.9.4 → 3.10.0, `torch` 2.11.0 → 2.13.0.
+
 ## [0.23.0] - recall-quality seeding/fusion pack, recall & ingest performance, namespace deletion
 
 ### Added
