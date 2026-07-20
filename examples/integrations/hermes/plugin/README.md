@@ -15,7 +15,7 @@ exact-pins `requests==2.33.0`, which clashes with khora's
 `requests>=2.33.1` floor (CVE-2026-25645); the extra was dropped
 during Wave C. Install `hermes-agent` yourself and accept whichever
 `requests` version your resolver picks, or fork the upstream pin.
-See `docs/integrations/hermes.md` for the full posture.
+See https://docs.deyta.ai/khora/integrations/hermes for the full posture.
 
 Hermes scans `$HERMES_HOME/plugins/<name>/` on startup and calls
 `register(ctx)` from `__init__.py` once per plugin. No further wiring
@@ -31,7 +31,7 @@ The plugin reads one optional environment variable:
   `myapp.memory:build_kb`). When unset, the plugin calls
   `Khora.shared()`, which picks up the standard `KHORA_*` env vars
   (`KHORA_STORAGE__*`, `KHORA_LLM__*`, etc.) - see
-  `docs/configuration.md`.
+  https://docs.deyta.ai/khora/configuration.
 
 The process-wide `Khora.shared()` singleton is cached by config hash, so
 multiple Hermes sessions in the same process share one backend pool.
@@ -53,5 +53,5 @@ multiple Hermes sessions in the same process share one backend pool.
 
 ## See also
 
-- `docs/integrations/hermes.md` - full quickstart and reference.
+- https://docs.deyta.ai/khora/integrations/hermes - full quickstart and reference.
 - `src/khora/integrations/hermes/` - adapter source.

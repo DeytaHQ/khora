@@ -3,7 +3,7 @@
 This module defines the public shape connector authors should populate in
 ``metadata.custom`` so the ingestion pipeline can extract a meaningful
 source-system timestamp (used by temporal recency scoring and per-source
-decay). See ``docs/extraction/ingestion-pipeline.md`` §canonical-fields
+decay). See ``https://docs.deyta.ai/khora/pipeline/ingestion`` §canonical-fields
 for the per-source mapping.
 
 The TypedDict is ``total=False``: connectors may set whichever subset of
@@ -63,7 +63,7 @@ class ConnectorMetadata(TypedDict, total=False):
 
     All fields are optional, but at least one timestamp field SHOULD be
     set for any chunk that has a meaningful source-system time. See
-    ``docs/extraction/ingestion-pipeline.md`` §canonical-fields for the
+    ``https://docs.deyta.ai/khora/pipeline/ingestion`` §canonical-fields for the
     per-source mapping.
     """
 

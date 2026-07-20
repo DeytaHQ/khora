@@ -61,7 +61,7 @@ hermes = "khora.integrations.hermes:KhoraMemoryProvider"
 
 [project.urls]
 Homepage = "https://github.com/DeytaHQ/khora"
-Documentation = "https://github.com/DeytaHQ/khora/blob/main/docs/README.md"
+Documentation = "https://docs.deyta.ai/khora"
 Repository = "https://github.com/DeytaHQ/khora"
 Issues = "https://github.com/DeytaHQ/khora/issues"
 Changelog = "https://github.com/DeytaHQ/khora/blob/main/CHANGELOG.md"
@@ -163,29 +163,29 @@ sqlite = ["aiosqlite>=0.21.0"]
 lancedb = ["lancedb>=0.30.0", "pyarrow>=24.0.0"]
 # SQLite + LanceDB embedded backend (relational via aiosqlite + vector via LanceDB)
 sqlite-lance = ["lancedb>=0.30.0", "aiosqlite>=0.21.0", "pyarrow>=24.0.0"]
-# CrewAI memory adapter — see docs/integrations/crewai.md
+# CrewAI memory adapter — see https://docs.deyta.ai/khora/integrations/crewai
 crewai = ["crewai>=1.10,<2.0"]
 # LangGraph BaseStore adapter (semantic long-term memory).
-# See docs/integrations/langgraph.md and src/khora/integrations/langgraph/.
+# See https://docs.deyta.ai/khora/integrations/langgraph and src/khora/integrations/langgraph/.
 langgraph = ["langgraph>=1.0,<2.0"]
 # Google ADK BaseMemoryService adapter.
 # Upper bound excludes the 2.x beta — ADK 2.0 is still in pre-release.
 # Bump to <3.0 after the 2.x line GAs and adapter smoke passes against it.
-# See docs/integrations/google_adk.md.
+# See https://docs.deyta.ai/khora/integrations/google-adk.
 google-adk = ["google-adk>=1.32,<2.0"]
 # OpenAI Agents SDK adapter (KhoraSession + khora_recall_tool + KhoraMemoryHooks).
 # Pinned tight (single upstream minor): the SDK is pre-1.0 with 17 releases in
 # 7 months as of v0.17. Bump in a deliberate PR per upstream minor — see
-# docs/integrations/openai_agents.md.
+# https://docs.deyta.ai/khora/integrations/openai-agents.
 openai-agents = ["openai-agents>=0.17,<0.18"]
 # LlamaIndex adapter — BaseRetriever, BaseMemoryBlock, and a deprecated
-# BaseChatStore shim. See docs/integrations/llamaindex.md and
+# BaseChatStore shim. See https://docs.deyta.ai/khora/integrations/llamaindex and
 # src/khora/integrations/llamaindex/. The pin is intentionally narrow
 # (one minor) because LlamaIndex has shipped breaking changes on minor
 # bumps before (BaseMemoryBlock 0.11 → 0.12 → 0.14, BaseMemory.put →
 # aput). Quarterly maintenance reserved for the next minor bump.
 llamaindex = ["llama-index-core>=0.14,<0.15"]
-# Hermes memory provider — see docs/integrations/hermes.md.
+# Hermes memory provider — see https://docs.deyta.ai/khora/integrations/hermes.
 #
 # Intentionally NOT declared as a runtime extra: hermes-agent==0.13.0
 # exact-pins requests==2.33.0, which conflicts with khora's CVE-2026-25645
@@ -205,7 +205,7 @@ source = "vcs"
 raw-options.local_scheme = "no-local-version"
 
 # README rewriting for PyPI. README.md on disk uses relative links
-# (``docs/configuration.md``) which work on GitHub but break on PyPI,
+# (``CHANGELOG.md``) which work on GitHub but break on PyPI,
 # whose project page renders relative paths against
 # ``https://pypi.org/project/khora/``. The substitution rewrites them
 # to absolute GitHub URLs at build time so the published wheel/sdist
@@ -217,7 +217,7 @@ content-type = "text/markdown"
 path = "README.md"
 
 # Match Markdown links whose target is not already absolute (http/https)
-# nor an in-page anchor (#section). Captures docs/configuration.md,
+# nor an in-page anchor (#section). Captures CHANGELOG.md,
 # LICENSE, NOTICE, CHANGELOG.md, etc. Rewrites to blob/main/<path>.
 [[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
 pattern = '\]\((?!https?:|#|mailto:)([^)]+)\)'

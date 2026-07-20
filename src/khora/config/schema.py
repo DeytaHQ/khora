@@ -1219,7 +1219,7 @@ class StorageSettings(BaseSettings):
     # ``hnsw_partial_min_rows`` chunks, and fewer than
     # ``hnsw_partial_max_indexes`` partial indexes already exist. Beyond ~10M
     # rows, move to ``PARTITION BY LIST (namespace_id)`` instead (see
-    # docs/architecture/storage-backends.md).
+    # https://docs.deyta.ai/khora/storage-backends).
     hnsw_partial_enabled: bool = Field(
         default=False,
         description="Enable operator-driven promotion of hot namespaces to per-namespace partial HNSW indexes. "
@@ -1672,7 +1672,7 @@ class QuerySettings(BaseSettings):
             "When True, RECENCY/CHANGE queries that lack an explicit date "
             "and contain no anti-recency token ('ever', 'all', 'history', "
             "'over time', etc.) get a synthetic date floor from "
-            "RETRIEVAL_PARAMS.default_window_days. See docs/observability.md."
+            "RETRIEVAL_PARAMS.default_window_days. See https://docs.deyta.ai/khora/observability."
         ),
     )
     temporal_reference_wall_clock: bool = Field(

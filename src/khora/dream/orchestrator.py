@@ -1547,7 +1547,7 @@ def _assert_backend_supported(session: Any, op_type: Any) -> None:
         return
     raise DreamBackendUnsupported(
         f"dream apply op {op_type_str!r} requires postgresql; "
-        f"active session dialect is {dialect!r}. See docs/dream-phase.md."
+        f"active session dialect is {dialect!r}. See https://docs.deyta.ai/khora/dream-phase."
     )
 
 

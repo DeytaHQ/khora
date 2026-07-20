@@ -60,7 +60,7 @@ _DEADLOCK_MAX_RETRIES = 3
 #
 # ``valid_until`` is a temporal-validity window, so a future ``valid_until`` is
 # still live; ``valid_to`` / ``invalidated_at`` are pure tombstones (non-NULL =
-# dead). See ``docs/architecture/storage-backends.md`` and #888.
+# dead). See ``https://docs.deyta.ai/khora/storage-backends`` and #888.
 
 
 def _entity_live_filter() -> Any:
