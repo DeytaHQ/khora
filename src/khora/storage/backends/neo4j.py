@@ -1130,37 +1130,37 @@ class Neo4jBackend(GraphBackendBase):
                 "Entity.valid_from",
                 "MATCH (e:Entity) WHERE e.valid_from IS NOT NULL "
                 "AND valueType(e.valid_from) STARTS WITH 'STRING' "
-                "CALL { WITH e SET e.valid_from = datetime(e.valid_from) } IN TRANSACTIONS OF 1000 ROWS",
+                "CALL (e) { SET e.valid_from = datetime(e.valid_from) } IN TRANSACTIONS OF 1000 ROWS",
             ),
             (
                 "Entity.valid_until",
                 "MATCH (e:Entity) WHERE e.valid_until IS NOT NULL "
                 "AND valueType(e.valid_until) STARTS WITH 'STRING' "
-                "CALL { WITH e SET e.valid_until = datetime(e.valid_until) } IN TRANSACTIONS OF 1000 ROWS",
+                "CALL (e) { SET e.valid_until = datetime(e.valid_until) } IN TRANSACTIONS OF 1000 ROWS",
             ),
             (
                 "EntityVersion.valid_from",
                 "MATCH (ev:EntityVersion) WHERE ev.valid_from IS NOT NULL "
                 "AND valueType(ev.valid_from) STARTS WITH 'STRING' "
-                "CALL { WITH ev SET ev.valid_from = datetime(ev.valid_from) } IN TRANSACTIONS OF 1000 ROWS",
+                "CALL (ev) { SET ev.valid_from = datetime(ev.valid_from) } IN TRANSACTIONS OF 1000 ROWS",
             ),
             (
                 "EntityVersion.valid_until",
                 "MATCH (ev:EntityVersion) WHERE ev.valid_until IS NOT NULL "
                 "AND valueType(ev.valid_until) STARTS WITH 'STRING' "
-                "CALL { WITH ev SET ev.valid_until = datetime(ev.valid_until) } IN TRANSACTIONS OF 1000 ROWS",
+                "CALL (ev) { SET ev.valid_until = datetime(ev.valid_until) } IN TRANSACTIONS OF 1000 ROWS",
             ),
             (
                 "Relationship.valid_from",
                 "MATCH ()-[r]->() WHERE r.valid_from IS NOT NULL "
                 "AND valueType(r.valid_from) STARTS WITH 'STRING' "
-                "CALL { WITH r SET r.valid_from = datetime(r.valid_from) } IN TRANSACTIONS OF 1000 ROWS",
+                "CALL (r) { SET r.valid_from = datetime(r.valid_from) } IN TRANSACTIONS OF 1000 ROWS",
             ),
             (
                 "Relationship.valid_until",
                 "MATCH ()-[r]->() WHERE r.valid_until IS NOT NULL "
                 "AND valueType(r.valid_until) STARTS WITH 'STRING' "
-                "CALL { WITH r SET r.valid_until = datetime(r.valid_until) } IN TRANSACTIONS OF 1000 ROWS",
+                "CALL (r) { SET r.valid_until = datetime(r.valid_until) } IN TRANSACTIONS OF 1000 ROWS",
             ),
         ]
 
