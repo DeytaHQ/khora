@@ -275,7 +275,14 @@ Prefix: `KHORA_QUERY_`. See [query-engine/retrieval-tuning.md](query-engine/retr
 | `KHORA_QUERY_HYDE_NUM_HYPOTHETICALS` | `1` | Number of hypothetical documents to generate (1–5). |
 | `KHORA_QUERY_ENABLE_HYDE_CYPHER` | `false` | **Currently inert.** The `khora.query.hyde_cypher` module (LLM-picked parameterized Cypher templates) exists but is not yet wired into the retrieval pipeline - no code reads this flag, so setting it has no effect on `recall()`. |
 | `KHORA_QUERY_HYDE_CYPHER_LIMIT` | `20` | **Currently inert** - see `KHORA_QUERY_ENABLE_HYDE_CYPHER`. |
-| `KHORA_QUERY_ENABLE_RERANKING` | `true` | Cross-encoder reranking of top candidates. |
+| `KHORA_QUERY_ENABLE_RERANKING` | `true` | Cross-encoder reranking; **on by default**. With the defaults the first `recall()` loads `BAAI/bge-reranker-v2-m3` (~2.3 GB, GPU-preferred). Set `false` to disable. |
+| `KHORA_QUERY_RERANKING_MODEL` | `BAAI/bge-reranker-v2-m3` | Any model loadable by `CrossEncoder(name)`; e.g. `cross-encoder/ms-marco-MiniLM-L-6-v2` for a light CPU default. |
+| `KHORA_QUERY_RERANKING_TOP_N` | `50` | Candidates fed to the reranker. |
+| `KHORA_QUERY_RERANKING_BLEND_WEIGHT` | `0.7` | Reranker-score weight when blending with the original fused score (`0.7` = 70 % reranker / 30 % original). |
+| `KHORA_QUERY_ENABLE_LLM_RERANKING` | `false` | **Opt-in.** LLM listwise reranking after the cross-encoder stage (temporal queries). |
+| `KHORA_QUERY_LLM_RERANKING_MODEL` | `gpt-4o-mini` | Model for LLM listwise reranking. |
+| `KHORA_QUERY_LLM_RERANKING_TOP_N` | `10` | Top candidates sent to the LLM reranker. |
+| `KHORA_QUERY_LLM_RERANKING_CONFIDENCE_THRESHOLD` | `0.1` | Trigger LLM reranking only when the cross-encoder's rank-1-vs-rank-2 score gap is below this. |
 | `KHORA_QUERY_TEMPORAL_SQL_PUSHDOWN` | `true` | Push relative-date filters into SQL WHERE clauses. |
 | `KHORA_QUERY_METADATA_OVERFETCH_MULTIPLIER` | `3` | Over-fetch multiplier (2–10) for the VectorCypher graph chunk channel when a caller filter has a metadata predicate that can't push down to Cypher and must be post-filtered in memory. The graph fetch widens to `min(limit * multiplier, 200)` so fusion still has candidates after filtering; no effect for no-filter or system-key-only filters. |
 | `KHORA_QUERY_ENABLE_BM25_CHANNEL` | `false` | **Opt-in.** Add an independent BM25 lexical channel to fusion (alongside vector + graph), so exact keyword matches surface even when semantic similarity is weak. |
@@ -286,6 +293,8 @@ Prefix: `KHORA_QUERY_`. See [query-engine/retrieval-tuning.md](query-engine/retr
 | `KHORA_QUERY_SHADOW_SCORING_STRATEGY` | `score_sort` | Candidate ordering for the shadow harness: `score_sort` (re-order by descending `RecallChunk.score` - the #1433/#1463 divergence class) or `identity` (no-op self-check). Only consulted when `KHORA_QUERY_SHADOW_SCORING=true`. |
 
 > **Default-path fusion is vector + graph only.** On the default `kb.recall()` (VectorCypher) engine only the vector and graph channels fuse by default (weights 0.6 / 0.4). The lexical/BM25 channel is opt-in via `KHORA_QUERY_ENABLE_BM25_CHANNEL=true`; when enabled it fuses at `KHORA_QUERY_KEYWORD_WEIGHT` (0.3). The legacy 3-way HYBRID with an always-on keyword channel applies to the older `HybridQueryEngine`, not the default recall path.
+
+> **Reranking knobs apply to the default VectorCypher engine** (the engine reconciles the `query.reranking_*` family onto its config). `KHORA_QUERY_RERANKING_METHOD` and `KHORA_QUERY_RERANKING_FINAL_K` are the exception — they have no `VectorCypherConfig` equivalent and affect only the separate `HybridQueryEngine`. For per-engine overrides and model selection, see [retrieval-tuning.md](query-engine/retrieval-tuning.md#reranking).
 
 ### Abstention signals
 
