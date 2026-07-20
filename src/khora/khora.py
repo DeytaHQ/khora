@@ -341,7 +341,8 @@ class BatchResult:
     llm_usage: list[LLMUsage] = field(default_factory=list)
     # Per-document breakdown, one entry per submitted document (input order):
     # ``{"document_id": UUID | None, "source": str | None, "chunks": int,
-    # "entities": int, "skipped": bool}``. Checksum-skipped duplicates are
+    # "entities": int, "skipped": bool}``. Failed entries also carry the
+    # caller's ``external_id`` and an ``error`` string. Checksum-skipped duplicates are
     # included with the *existing* document's id (resolved via
     # ``get_documents_by_checksums``) so callers can map every input back to
     # a stored document — e.g. to record ingest cost per document or to

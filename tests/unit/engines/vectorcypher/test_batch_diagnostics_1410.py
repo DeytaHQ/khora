@@ -117,6 +117,25 @@ def _patch_extract_multi(monkeypatch, *, fail: bool) -> None:
 
 class TestStreamingBatchExtractionFailure:
     @pytest.mark.asyncio
+    async def test_document_creation_failure_identifies_input_and_error(self) -> None:
+        engine = _make_streaming_engine()
+        error = "value too long for type character varying(64)"
+        storage = engine._storage
+        assert storage is not None
+        storage.create_document = AsyncMock(side_effect=ValueError(error))
+
+        result = await engine.remember_batch(
+            [{"content": "document", "external_id": "corpus:two"}],
+            uuid4(),
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+
+        assert result.failed == 1
+        assert result.per_document[0]["external_id"] == "corpus:two"
+        assert result.per_document[0]["error"] == error
+
+    @pytest.mark.asyncio
     async def test_failed_extraction_surfaces_degradations(self, monkeypatch) -> None:
         engine = _make_streaming_engine()
         _patch_extract_multi(monkeypatch, fail=True)

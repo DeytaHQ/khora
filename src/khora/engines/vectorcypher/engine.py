@@ -3286,14 +3286,19 @@ class VectorCypherEngine:
             chunks: int = 0,
             entities: int = 0,
             skipped: bool = False,
+            error: str | None = None,
         ) -> None:
-            per_document[idx] = {
+            entry: dict[str, Any] = {
                 "document_id": document_id,
                 "source": documents[idx].get("source") or None,
                 "chunks": chunks,
                 "entities": entities,
                 "skipped": skipped,
             }
+            if error is not None:
+                entry["external_id"] = documents[idx].get("external_id")
+                entry["error"] = error
+            per_document[idx] = entry
 
         def _finalize_per_document() -> list[dict[str, Any]]:
             # Defensive: every index should have been recorded by now; a None
@@ -3382,7 +3387,7 @@ class VectorCypherEngine:
             except Exception as e:
                 logger.error(f"Failed to replace document external_id={ext_id!r}: {e}")
                 results["failed"] += 1
-                _record_doc(idx, document_id=None)
+                _record_doc(idx, document_id=None, error=str(e))
             external_id_handled.add(idx)
             _report_progress()
 
@@ -3503,6 +3508,7 @@ class VectorCypherEngine:
             embed_texts: list[str] = field(default_factory=list)
             occurred_at: datetime | None = None
             failed: bool = False
+            error: str | None = None
 
         doc_states: list[_DocState] = []
         sem = asyncio.Semaphore(max_concurrent)
@@ -3554,6 +3560,7 @@ class VectorCypherEngine:
             except Exception as e:
                 logger.error(f"Failed to create/chunk document {idx}: {e}")
                 state.failed = True
+                state.error = str(e)
             return state
 
         doc_states = await asyncio.gather(*[_create_and_chunk(idx) for idx in active_indices])
@@ -3564,7 +3571,7 @@ class VectorCypherEngine:
         for s in failed_states:
             if s.failed:
                 results["failed"] += 1
-                _record_doc(s.idx, document_id=s.document.id if s.document else None)
+                _record_doc(s.idx, document_id=s.document.id if s.document else None, error=s.error)
             elif not s.raw_chunks and s.document:
                 s.document.mark_completed(0, 0)
                 await storage.update_document(s.document)
