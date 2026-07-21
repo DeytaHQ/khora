@@ -1386,3 +1386,58 @@ class TestAttributesParsing:
             "email": "alice@example.com",
             "team": "platform",
         }
+
+    @pytest.mark.asyncio
+    async def test_extract_multi_round_trip_folds_pair_attributes(self) -> None:
+        """The batch (production) path also folds pair-form attributes into a dict.
+
+        Guards the extract_multi -> _extract_multi_batch path against a future
+        refactor that gives the batch path its own parse and silently drops
+        attributes in production.
+        """
+        extractor = LLMEntityExtractor(model="test-model", max_retries=1)
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = json.dumps(
+            {
+                "sections": [
+                    {
+                        "entities": [
+                            {
+                                "name": "Alice",
+                                "entity_type": "PERSON",
+                                "description": "A person",
+                                "attributes": [
+                                    {"key": "email", "value": "alice@example.com"},
+                                    {"key": "team", "value": "platform"},
+                                ],
+                            }
+                        ],
+                        "relationships": [],
+                        "events": [],
+                    }
+                ]
+            }
+        )
+        mock_response.choices[0].finish_reason = "stop"
+        mock_response.usage = MagicMock(prompt_tokens=100, completion_tokens=50, total_tokens=150)
+
+        with (
+            patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_response),
+            patch("khora.telemetry.get_collector") as mock_telem,
+        ):
+            mock_telem.return_value.record_llm_call = MagicMock()
+            results = await extractor.extract_multi(
+                ["Alice works at Acme Corp"],
+                batch_size=5,
+                entity_types=["PERSON", "ORGANIZATION"],
+                relationship_types=["WORKS_FOR"],
+                tiered_extraction=False,
+            )
+
+        assert len(results) == 1
+        assert results[0].entities[0].attributes == {
+            "email": "alice@example.com",
+            "team": "platform",
+        }

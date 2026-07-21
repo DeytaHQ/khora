@@ -190,7 +190,7 @@ Guidelines:
 - Use canonical entity names (e.g., "Jennifer Walsh" not "Jenny", "Acme Corporation" not "Acme Corp")
 - Include aliases for entities that have multiple names/abbreviations
 - Extract temporal information when dates, times, or relative time references appear
-- For STATE_CHANGE detection: when text indicates transitions ("switched from X to Y", "no longer X", "used to X", "previously X but now Y"), extract a STATE_CHANGE entity with these required attributes: {"entity_affected": "name of entity whose state changed", "previous_state": "old value", "new_state": "new value", "attribute_changed": "what changed (e.g. job_title, location, instrument)", "transition_date": "ISO date or null"}. Set valid_from to the transition date. Use INVOLVES to link it to the affected entity
+- For STATE_CHANGE detection: when text indicates transitions ("switched from X to Y", "no longer X", "used to X", "previously X but now Y"), extract a STATE_CHANGE entity whose attributes carry these keys as {"key", "value"} pairs: entity_affected (name of entity whose state changed), previous_state (old value), new_state (new value), attribute_changed (what changed, e.g. job_title, location, instrument), transition_date (ISO date or null). Set valid_from to the transition date. Use INVOLVES to link it to the affected entity
 - For EVENT detection: when text describes specific occurrences, extract the event with date, participants, and location when available
 - Use temporal relationships (PRECEDES, FOLLOWS, INVOLVES) to connect events and state changes to other entities
 - Ensure relationship source/target names match extracted entity names exactly
@@ -2361,7 +2361,8 @@ Return a JSON object with a "sections" array, one object per input section:
     {"entities": [...], "relationships": [...], "events": [...]},
     ...
 ]}
-Each section follows the entity/relationship format from the instructions above."""
+Each section follows the entity/relationship format from the instructions above.
+For each entity, emit "attributes" as an array of {"key": ..., "value": ...} string pairs drawn from its salient fields (identifiers, emails, state, urls, dates, etc.)."""
             )
 
             prompt_context = {
@@ -2403,6 +2404,7 @@ Return a JSON object with a "sections" array, one object per section:
 ]}}
 
 Each section follows the same entity/relationship/event format.
+For each entity, emit "attributes" as an array of {{"key": ..., "value": ...}} string pairs drawn from its salient fields (identifiers, emails, state, urls, dates, etc.).
 Return ONLY valid JSON, no other text."""
 
         try:
