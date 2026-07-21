@@ -1054,7 +1054,7 @@ class PgVectorBackend(AsyncSessionMixin):
         Acquires a namespace-scoped advisory lock to prevent deadlocks
         when concurrent coroutines upsert entities in the same namespace.
         """
-        from sqlalchemy.dialects.postgresql import insert
+        from sqlalchemy.dialects.postgresql import JSONB, insert
 
         async with self._get_session() as session:
             # Advisory lock prevents deadlocks with concurrent upserts
@@ -1087,7 +1087,19 @@ class PgVectorBackend(AsyncSessionMixin):
                 constraint="uq_entities_namespace_name_type",
                 set_={
                     "description": stmt.excluded.description,
-                    "attributes": stmt.excluded.attributes,
+                    # An incoming empty ({}) or NULL attributes must not clobber a
+                    # stored populated attributes; keep the existing value in that
+                    # case, otherwise overwrite with the incoming value.
+                    "attributes": sa.case(
+                        (
+                            sa.or_(
+                                stmt.excluded.attributes.is_(None),
+                                stmt.excluded.attributes == sa.cast("{}", JSONB),
+                            ),
+                            EntityModel.attributes,
+                        ),
+                        else_=stmt.excluded.attributes,
+                    ),
                     "source_document_ids": _accumulate_source_ids_sql("source_document_ids"),
                     "source_chunk_ids": _accumulate_source_ids_sql("source_chunk_ids"),
                     "mention_count": stmt.excluded.mention_count,

@@ -1781,7 +1781,7 @@ class Neo4jBackend(GraphBackendBase):
             MATCH (e:Entity {id: $id, namespace_id: $namespace_id})
             SET e.name = $name,
                 e.description = $description,
-                e.attributes = $attributes,
+                e.attributes = CASE WHEN $attributes IS NULL OR $attributes = '{}' OR $attributes = '' THEN e.attributes ELSE $attributes END,
                 e.source_document_ids = $source_document_ids,
                 e.source_chunk_ids = $source_chunk_ids,
                 e.mention_count = $mention_count,
@@ -1941,7 +1941,7 @@ class Neo4jBackend(GraphBackendBase):
                 e.confidence = CASE WHEN row.confidence > e.confidence THEN row.confidence ELSE e.confidence END,
                 e.updated_at = row.updated_at,
                 e.version_valid_from = coalesce(e.version_valid_from, row.version_valid_from),
-                e.attributes = row.attributes
+                e.attributes = CASE WHEN row.attributes IS NULL OR row.attributes = '{}' OR row.attributes = '' THEN e.attributes ELSE row.attributes END
             RETURN e.id AS id, e.name AS name, row.id AS input_id,
                    CASE WHEN e.id = row.id THEN true ELSE false END AS is_new
         """
