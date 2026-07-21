@@ -75,8 +75,8 @@ class Entity:
         """Validate and clean attributes using the registered schema for this entity type.
 
         Note: intentionally NOT called on the ingest path. ``validate_attributes``
-        is additive-safe (it never drops ontology attribute keys), so calling this
-        is optional cleanup rather than a required write-path step.
+        is additive-safe (it never drops non-None ontology attribute keys), so
+        calling this is optional cleanup rather than a required write-path step.
         """
         from khora.core.models.schemas import validate_attributes
 

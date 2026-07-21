@@ -84,6 +84,11 @@ class TestValidateAttributes:
         result = validate_attributes("PERSON", attrs)
         assert result == {"name": "X", "slack_user_id": "U1"}
 
+    def test_none_unknown_key_dropped_on_validated_path(self):
+        """A None-valued unknown key is excluded on the validated path (base-dict filter)."""
+        result = validate_attributes("PERSON", {"name": "X", "foo": None})
+        assert result == {"name": "X"}
+
     def test_unregistered_type_returned_unchanged(self):
         """An unregistered entity type is returned unchanged."""
         attrs = {"identifier": "ENG-123", "title": "Fix bug", "state": "open"}
