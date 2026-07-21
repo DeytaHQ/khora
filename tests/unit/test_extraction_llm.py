@@ -417,6 +417,212 @@ class TestRenderPrompts:
         assert len(prompt) < 20000
 
 
+class TestAttributeSchemaBlock:
+    """Tests for the ontology-driven ATTRIBUTE SCHEMA block (per-type keys)."""
+
+    _HEADER = "ATTRIBUTE SCHEMA (emit these keys in attributes when present):"
+
+    @staticmethod
+    def _expertise():
+        from khora.extraction.skills.base import EntityTypeConfig, ExpertiseConfig
+
+        return ExpertiseConfig(
+            name="support",
+            entity_types=[
+                EntityTypeConfig(
+                    name="PERSON",
+                    attributes={"required": ["email"], "optional": ["title", "department"]},
+                ),
+                # optional side omitted → must render as optional=[]
+                EntityTypeConfig(name="TICKET", attributes={"required": ["identifier", "status"]}),
+                # required side omitted → must render as required=[]
+                EntityTypeConfig(name="ORGANIZATION", attributes={"optional": ["industry"]}),
+                # declares no attributes at all → excluded entirely
+                EntityTypeConfig(name="CONCEPT"),
+            ],
+        )
+
+    def test_block_lists_declaring_types(self) -> None:
+        """Header plus one line per declaring type, using the ontology key names."""
+        extractor = LLMEntityExtractor(model="test")
+        block = extractor._build_attribute_schema_block(
+            self._expertise(), ["PERSON", "TICKET", "ORGANIZATION", "CONCEPT"]
+        )
+        assert block.startswith(self._HEADER)
+        assert "PERSON: required=[email]; optional=[title, department]" in block
+        assert "TICKET: required=[identifier, status]; optional=[]" in block
+        assert "ORGANIZATION: required=[]; optional=[industry]" in block
+        # CONCEPT declares no attributes → no line
+        assert "CONCEPT" not in block
+
+    def test_only_resolved_types_included(self) -> None:
+        """A declared type absent from the resolved entity_types list is excluded."""
+        extractor = LLMEntityExtractor(model="test")
+        block = extractor._build_attribute_schema_block(self._expertise(), ["TICKET"])
+        assert "TICKET: required=[identifier, status]; optional=[]" in block
+        assert "PERSON" not in block
+        assert "ORGANIZATION" not in block
+
+    def test_empty_when_no_expertise(self) -> None:
+        extractor = LLMEntityExtractor(model="test")
+        assert extractor._build_attribute_schema_block(None, ["PERSON"]) == ""
+
+    def test_empty_when_no_declaring_types(self) -> None:
+        from khora.extraction.skills.base import EntityTypeConfig, ExpertiseConfig
+
+        extractor = LLMEntityExtractor(model="test")
+        expertise = ExpertiseConfig(name="x", entity_types=[EntityTypeConfig(name="CONCEPT")])
+        assert extractor._build_attribute_schema_block(expertise, ["CONCEPT"]) == ""
+
+    def test_empty_when_no_entity_types(self) -> None:
+        extractor = LLMEntityExtractor(model="test")
+        expertise = self._expertise()
+        assert extractor._build_attribute_schema_block(expertise, None) == ""
+        assert extractor._build_attribute_schema_block(expertise, []) == ""
+
+    def test_block_in_single_prompt_structured_ungated(self) -> None:
+        """Block appears in the single-doc structured prompt with context=None.
+
+        context=None proves the block is NOT gated on source_tool / tool_schemas.
+        """
+        extractor = LLMEntityExtractor(model="gpt-4o")  # structured-output path
+        prompt = extractor._render_extraction_prompt(
+            "Alice emailed the team.",
+            ["PERSON", "TICKET"],
+            self._expertise(),
+            None,
+            relationship_types=["KNOWS"],
+        )
+        assert self._HEADER in prompt
+        assert "PERSON: required=[email]; optional=[title, department]" in prompt
+        assert "TICKET: required=[identifier, status]; optional=[]" in prompt
+
+    def test_block_in_single_prompt_custom(self) -> None:
+        """A custom extraction_prompt receives attribute_schema via prompt_context."""
+        from khora.extraction.skills.base import EntityTypeConfig, ExpertiseConfig
+
+        extractor = LLMEntityExtractor(model="gpt-4o")
+        expertise = ExpertiseConfig(
+            name="custom",
+            extraction_prompt="Extract from: {{ text }}\n{{ attribute_schema }}",
+            entity_types=[
+                EntityTypeConfig(name="PERSON", attributes={"required": ["email"], "optional": ["title"]}),
+            ],
+        )
+        prompt = extractor._render_extraction_prompt("Alice", ["PERSON"], expertise, None, relationship_types=["KNOWS"])
+        assert self._HEADER in prompt
+        assert "PERSON: required=[email]; optional=[title]" in prompt
+
+    def test_block_absent_single_prompt_no_expertise(self) -> None:
+        extractor = LLMEntityExtractor(model="gpt-4o")
+        prompt = extractor._render_extraction_prompt("Alice", ["PERSON"], None, None, relationship_types=["KNOWS"])
+        assert "ATTRIBUTE SCHEMA" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_block_in_batch_prompt_ungated(self) -> None:
+        """Block appears in the batch (fallback) prompt with context=None.
+
+        Captures the user message sent to litellm to assert on the assembled
+        prompt without a live LLM.
+        """
+        import litellm
+
+        extractor = LLMEntityExtractor(model="gpt-4o", max_retries=1)
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = json.dumps({"sections": [{"entities": [], "relationships": []}]})
+        mock_response.choices[0].finish_reason = "stop"
+        mock_response.usage = MagicMock(prompt_tokens=10, completion_tokens=5, total_tokens=15)
+
+        captured: dict[str, object] = {}
+
+        async def fake_acompletion(*args, **kwargs):
+            captured["messages"] = kwargs["messages"]
+            return mock_response
+
+        with (
+            patch("litellm.acompletion", new_callable=AsyncMock, side_effect=fake_acompletion),
+            patch("khora.telemetry.get_collector") as mock_telem,
+        ):
+            mock_telem.return_value.record_llm_call = MagicMock()
+            await extractor._extract_multi_batch(
+                ["Alice emailed the team."],
+                ["PERSON", "TICKET"],
+                litellm,
+                expertise=self._expertise(),
+                context=None,
+                relationship_types=["KNOWS"],
+            )
+
+        user_msg = captured["messages"][1]["content"]
+        assert self._HEADER in user_msg
+        assert "PERSON: required=[email]; optional=[title, department]" in user_msg
+        assert "TICKET: required=[identifier, status]; optional=[]" in user_msg
+
+    @pytest.mark.asyncio
+    async def test_block_in_batch_prompt_custom_multi_section(self) -> None:
+        """Block appears in the batch custom multi-section path (expertise.extraction_prompt).
+
+        The fallback batch path is covered above; this exercises the other batch
+        injection site. Delivery is symmetric with the single custom path: the
+        schema arrives as the {{ attribute_schema }} template variable (mirroring
+        tool_context), so the custom template references it explicitly.
+        context=None keeps it ungated.
+        """
+        import litellm
+
+        from khora.extraction.skills.base import EntityTypeConfig, ExpertiseConfig
+
+        expertise = ExpertiseConfig(
+            name="support",
+            extraction_prompt="Extract entities from the sections:\n{{ text }}\n{{ attribute_schema }}",
+            entity_types=[
+                EntityTypeConfig(
+                    name="PERSON",
+                    attributes={"required": ["email"], "optional": ["title", "department"]},
+                ),
+                EntityTypeConfig(name="TICKET", attributes={"required": ["identifier", "status"]}),
+            ],
+        )
+
+        extractor = LLMEntityExtractor(model="gpt-4o", max_retries=1)
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = json.dumps({"sections": [{"entities": [], "relationships": []}]})
+        mock_response.choices[0].finish_reason = "stop"
+        mock_response.usage = MagicMock(prompt_tokens=10, completion_tokens=5, total_tokens=15)
+
+        captured: dict[str, object] = {}
+
+        async def fake_acompletion(*args, **kwargs):
+            captured["messages"] = kwargs["messages"]
+            return mock_response
+
+        with (
+            patch("litellm.acompletion", new_callable=AsyncMock, side_effect=fake_acompletion),
+            patch("khora.telemetry.get_collector") as mock_telem,
+        ):
+            mock_telem.return_value.record_llm_call = MagicMock()
+            await extractor._extract_multi_batch(
+                ["Alice emailed the team."],
+                ["PERSON", "TICKET"],
+                litellm,
+                expertise=expertise,
+                context=None,
+                relationship_types=["KNOWS"],
+            )
+
+        user_msg = captured["messages"][1]["content"]
+        # The custom template literal proves the custom branch rendered rather than
+        # silently falling through to the hardcoded fallback (which also emits the block).
+        assert "Extract entities from the sections:" in user_msg
+        assert self._HEADER in user_msg
+        assert "PERSON: required=[email]; optional=[title, department]" in user_msg
+        assert "TICKET: required=[identifier, status]; optional=[]" in user_msg
+
+
 class TestExtract:
     """Tests for the extract method."""
 
