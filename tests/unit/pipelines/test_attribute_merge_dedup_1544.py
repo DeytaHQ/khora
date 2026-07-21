@@ -41,27 +41,33 @@ def _make_chunk(
     )
 
 
-# Attribute sets shared by both call sites — chunk1 wins on the shared "role"
-# key, "title" is filled from chunk2, and the empty/None values are skipped.
-_CHUNK1_ATTRS = {"email": "a@example.com", "role": "existing"}
+# Attribute sets shared by both call sites: chunk1's non-empty "role" wins,
+# "title" is filled as a missing key, chunk1's empty "phone"/"fax" are upgraded
+# from chunk2's non-empty values, and chunk2's own empty/None values are skipped.
+_CHUNK1_ATTRS = {"email": "a@example.com", "role": "existing", "phone": "", "fax": None}
 _CHUNK2_ATTRS = {
     "title": "Engineer",
     "role": "incoming",
     "blank": "",
     "none_val": None,
     "count": 0,
+    "phone": "555-0100",
+    "fax": "555-0199",
 }
 
 
 def _assert_union(attrs: dict[str, Any]) -> None:
     assert attrs["email"] == "a@example.com"  # kept from chunk1
     assert attrs["title"] == "Engineer"  # added from chunk2 (missing key)
-    assert attrs["role"] == "existing"  # existing (chunk1) wins on shared key
-    assert "blank" not in attrs  # empty string skipped
-    assert "none_val" not in attrs  # None skipped
+    assert attrs["role"] == "existing"  # existing (chunk1) non-empty wins on shared key
+    assert "blank" not in attrs  # empty string incoming skipped
+    assert "none_val" not in attrs  # None incoming skipped
     # A legit falsy value must survive: the skip guard is `in (None, "")`, not
     # `if not _v`, so 0/0.0/False are added, not dropped. Guards a future refactor.
     assert attrs["count"] == 0
+    # An existing EMPTY value is upgraded by a later chunk's non-empty value (#1544).
+    assert attrs["phone"] == "555-0100"  # chunk1 "" -> chunk2 non-empty
+    assert attrs["fax"] == "555-0199"  # chunk1 None -> chunk2 non-empty
 
 
 # ---------------------------------------------------------------------------
