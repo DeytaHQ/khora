@@ -326,6 +326,16 @@ async def extract_entities(
                     merge_valid_from = chunk.source_timestamp
                 if existing.valid_from and merge_valid_from is not None and merge_valid_from < existing.valid_from:
                     existing.valid_from = merge_valid_from
+                # Union attributes across chunks: prefer existing non-empty, fill
+                # missing or empty from later chunks, skip None/empty incoming (#1544)
+                existing_attrs = existing.attributes if isinstance(existing.attributes, dict) else {}
+                incoming_attrs = extracted.attributes if isinstance(extracted.attributes, dict) else {}
+                for _k, _v in incoming_attrs.items():
+                    if _v in (None, ""):
+                        continue
+                    if existing_attrs.get(_k) in (None, ""):
+                        existing_attrs[_k] = _v
+                existing.attributes = existing_attrs
             else:
                 # Create new entity — preserve original type string from LLM
                 entity_type = extracted.entity_type or "CONCEPT"

@@ -375,6 +375,16 @@ async def stream_extract_and_embed_entities(
                         _vu = _parse_temporal_date(_t.valid_until) if _t else None
                         if _vu and (not existing.valid_until or _vu > existing.valid_until):
                             existing.valid_until = _vu
+                        # Union attributes across chunks: prefer existing non-empty, fill
+                        # missing or empty from later chunks, skip None/empty incoming (#1544)
+                        existing_attrs = existing.attributes if isinstance(existing.attributes, dict) else {}
+                        incoming_attrs = extracted.attributes if isinstance(extracted.attributes, dict) else {}
+                        for _k, _v in incoming_attrs.items():
+                            if _v in (None, ""):
+                                continue
+                            if existing_attrs.get(_k) in (None, ""):
+                                existing_attrs[_k] = _v
+                        existing.attributes = existing_attrs
                     else:
                         entity_type = extracted.entity_type or "CONCEPT"
 
