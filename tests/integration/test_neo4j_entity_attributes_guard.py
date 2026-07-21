@@ -49,6 +49,7 @@ Connection parameters are read from env vars with defaults matching the
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import AsyncIterator
 from uuid import uuid4
@@ -97,6 +98,24 @@ def _entity(ns_id, name: str, attributes, entity_type: str = "PERSON") -> Entity
         name=name,
         entity_type=entity_type,
         attributes=attributes,
+    )
+
+
+def _entity_with_stamp(ns_id, name: str, attributes, occurred_at: str, entity_type: str = "PERSON") -> Entity:
+    """Like ``_entity`` but pins ``version_valid_from`` deterministically.
+
+    ``_derive_version_valid_from`` resolves ``metadata["occurred_at"]`` first, so
+    stamping it lets the version-chain tests assert an exact
+    ``version_valid_from`` value instead of a clock-derived ``created_at`` that
+    would make an "advances" assertion timing-flaky.
+    """
+    return Entity(
+        id=uuid4(),
+        namespace_id=ns_id,
+        name=name,
+        entity_type=entity_type,
+        attributes=attributes,
+        metadata={"occurred_at": occurred_at},
     )
 
 
@@ -183,6 +202,176 @@ async def _count_versions(backend: Neo4jBackend, ns_id, name: str, entity_type: 
 
     async with backend._session() as session:
         return await session.execute_read(_query)
+
+
+async def _current_version_valid_from(backend: Neo4jBackend, ns_id, name: str, entity_type: str) -> str | None:
+    """Read ``version_valid_from`` off the current ``:Entity`` node.
+
+    ``ON MATCH SET`` preserves the stamp via ``coalesce`` and only the Phase-2
+    ``_VERSION_CYPHER`` advances it (``SET current.version_valid_from = ...``),
+    so this is the property the version tests assert stays put (no-op re-upsert)
+    or moves forward (genuine change).
+    """
+
+    async def _query(tx) -> str | None:
+        result = await tx.run(
+            "MATCH (e:Entity {namespace_id: $ns, name: $name, entity_type: $etype}) RETURN e.version_valid_from AS v",
+            ns=str(ns_id),
+            name=name,
+            etype=entity_type,
+        )
+        record = await result.single()
+        return record["v"] if record else None
+
+    async with backend._session() as session:
+        return await session.execute_read(_query)
+
+
+@pytest.mark.asyncio
+async def test_key_order_reupsert_creates_no_new_version(backend: Neo4jBackend) -> None:
+    """Re-upserting the SAME attribute set in a DIFFERENT key order snapshots no version.
+
+    ``attributes`` persist as a JSON *string* (``serialize_dict`` -> ``json.dumps``
+    with no ``sort_keys``), so ``{"a": 1, "b": 2}`` and ``{"b": 2, "a": 1}``
+    serialize to *different strings* but are equal as dicts. The Phase-2
+    change-detector parses both sides to dicts before comparing, so the reorder
+    is correctly seen as "no change": zero ``:EntityVersion`` nodes, zero
+    ``[:SUPERSEDES]`` edges, and an unchanged ``version_valid_from``. A raw
+    serialized-string compare (the pre-fix behavior) would treat the reorder as
+    a change and append a phantom version."""
+    ns = uuid4()
+    name = f"order-noversion-{uuid4().hex[:8]}"
+
+    seeded = {"a": 1, "b": 2}
+    reordered = {"b": 2, "a": 1}
+    # Precondition: same dict, different serialized string — otherwise this test
+    # would not exercise the order-insensitive comparison at all.
+    assert seeded == reordered
+    assert json.dumps(seeded) != json.dumps(reordered)
+
+    seed_results = await backend.upsert_entities_batch(ns, [_entity(ns, name, seeded)])
+    seed_id = seed_results[0][0].id
+    seeded_vvf = await _current_version_valid_from(backend, ns, name, "PERSON")
+
+    # The re-upsert MUST land on the MATCH (existing-entity) path: the Phase-2
+    # change-detector is skipped entirely for is_new nodes, so a re-upsert that
+    # created a fresh node would make the zero-version assertion vacuous.
+    reupsert_results = await backend.upsert_entities_batch(ns, [_entity(ns, name, reordered)])
+    reupsert_entity, reupsert_is_new = reupsert_results[0]
+    assert reupsert_is_new is False, "re-upsert must MATCH the seeded node (else the version assertion is vacuous)"
+    assert reupsert_entity.id == seed_id, "re-upsert must resolve to the seeded entity id"
+
+    ev_count, supersedes_count = await _count_versions(backend, ns, name, "PERSON")
+    assert ev_count == 0, f"key-order-only re-upsert must not snapshot a version, got {ev_count}"
+    assert supersedes_count == 0, f"key-order-only re-upsert must not create a SUPERSEDES edge, got {supersedes_count}"
+
+    after_vvf = await _current_version_valid_from(backend, ns, name, "PERSON")
+    assert after_vvf == seeded_vvf, (
+        f"version_valid_from must not advance on a key-order-only re-upsert: {seeded_vvf!r} -> {after_vvf!r}"
+    )
+
+    # The stored attributes remain the same logical set.
+    got = await backend.get_entity_by_name(ns, name, "PERSON")
+    assert got is not None
+    assert got.attributes == {"a": 1, "b": 2}
+
+
+@pytest.mark.asyncio
+async def test_genuine_change_advances_version_valid_from(backend: Neo4jBackend) -> None:
+    """Positive control: a genuine change snapshots one version AND advances ``version_valid_from``.
+
+    Seeding ``{"a": 1}`` at one stamp then upserting ``{"a": 2}`` at a later
+    stamp is a real change, so Phase-2 creates exactly one ``:EntityVersion`` +
+    one ``[:SUPERSEDES]`` edge and moves the current node's
+    ``version_valid_from`` forward to the new stamp — proving the
+    order-insensitive detector suppresses only the reorder/empty phantom cases,
+    not legitimate versioning. The stamps are pinned via ``occurred_at`` so the
+    advance is deterministic, not clock-derived."""
+    ns = uuid4()
+    name = f"order-change-{uuid4().hex[:8]}"
+
+    seeded_ts = "2026-01-01T00:00:00+00:00"
+    changed_ts = "2026-02-01T00:00:00+00:00"
+
+    seed_results = await backend.upsert_entities_batch(ns, [_entity_with_stamp(ns, name, {"a": 1}, seeded_ts)])
+    seed_id = seed_results[0][0].id
+    assert await _current_version_valid_from(backend, ns, name, "PERSON") == seeded_ts
+
+    # The change must land on the MATCH path — otherwise Phase-2 never runs and
+    # the one-version assertion would pass vacuously for the wrong reason.
+    change_results = await backend.upsert_entities_batch(ns, [_entity_with_stamp(ns, name, {"a": 2}, changed_ts)])
+    change_entity, change_is_new = change_results[0]
+    assert change_is_new is False, "changed re-upsert must MATCH the seeded node"
+    assert change_entity.id == seed_id, "changed re-upsert must resolve to the seeded entity id"
+
+    ev_count, supersedes_count = await _count_versions(backend, ns, name, "PERSON")
+    assert ev_count == 1, f"genuine change must snapshot exactly one version, got {ev_count}"
+    assert supersedes_count == 1, f"genuine change must create exactly one SUPERSEDES edge, got {supersedes_count}"
+
+    after_vvf = await _current_version_valid_from(backend, ns, name, "PERSON")
+    assert after_vvf == changed_ts, f"version_valid_from must advance to the new stamp, got {after_vvf!r}"
+
+    got = await backend.get_entity_by_name(ns, name, "PERSON")
+    assert got is not None
+    assert got.attributes == {"a": 2}
+
+
+@pytest.mark.asyncio
+async def test_int_float_value_reupsert_creates_no_new_version(backend: Neo4jBackend) -> None:
+    """Documents intended semantics: an int/float-equivalent value is NOT a change.
+
+    ``attributes`` round-trip through ``json.loads``, so a stored ``{"n": 1}`` and
+    an incoming ``{"n": 1.0}`` parse to dicts that compare equal (``1 == 1.0``).
+    The change-detector therefore snapshots no version — a deliberate, desirable
+    normalization, locked here so a future switch to a type-strict compare can't
+    silently reintroduce phantom versions."""
+    ns = uuid4()
+    name = f"order-intfloat-{uuid4().hex[:8]}"
+
+    # Same dicts, different serialized string — an int vs float encoding.
+    assert {"n": 1} == {"n": 1.0}
+    assert json.dumps({"n": 1}) != json.dumps({"n": 1.0})
+
+    seed_results = await backend.upsert_entities_batch(ns, [_entity(ns, name, {"n": 1})])
+    seed_id = seed_results[0][0].id
+
+    reupsert_results = await backend.upsert_entities_batch(ns, [_entity(ns, name, {"n": 1.0})])
+    reupsert_entity, reupsert_is_new = reupsert_results[0]
+    assert reupsert_is_new is False, "re-upsert must MATCH the seeded node"
+    assert reupsert_entity.id == seed_id, "re-upsert must resolve to the seeded entity id"
+
+    ev_count, supersedes_count = await _count_versions(backend, ns, name, "PERSON")
+    assert ev_count == 0, f"int/float-equivalent value must not snapshot a version, got {ev_count}"
+    assert supersedes_count == 0, (
+        f"int/float-equivalent value must not create a SUPERSEDES edge, got {supersedes_count}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_value_reorder_reupsert_creates_a_version(backend: Neo4jBackend) -> None:
+    """Documents the boundary of the fix: LIST element order is still significant.
+
+    The order-insensitive fix normalizes MAPPING (dict-key) order only. A stored
+    ``{"aliases": ["a", "b"]}`` vs an incoming ``{"aliases": ["b", "a"]}`` parse
+    to unequal dicts (``["a", "b"] != ["b", "a"]``), so a genuine version IS
+    snapshotted. This is intended/current behavior, not a bug — asserted here to
+    pin the fix's scope."""
+    ns = uuid4()
+    name = f"order-listreorder-{uuid4().hex[:8]}"
+
+    assert {"aliases": ["a", "b"]} != {"aliases": ["b", "a"]}
+
+    seed_results = await backend.upsert_entities_batch(ns, [_entity(ns, name, {"aliases": ["a", "b"]})])
+    seed_id = seed_results[0][0].id
+
+    reupsert_results = await backend.upsert_entities_batch(ns, [_entity(ns, name, {"aliases": ["b", "a"]})])
+    reupsert_entity, reupsert_is_new = reupsert_results[0]
+    assert reupsert_is_new is False, "re-upsert must MATCH the seeded node"
+    assert reupsert_entity.id == seed_id, "re-upsert must resolve to the seeded entity id"
+
+    ev_count, supersedes_count = await _count_versions(backend, ns, name, "PERSON")
+    assert ev_count == 1, f"list element reorder is still a change, expected one version, got {ev_count}"
+    assert supersedes_count == 1, f"list element reorder must create one SUPERSEDES edge, got {supersedes_count}"
 
 
 @pytest.mark.asyncio
