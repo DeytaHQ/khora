@@ -198,6 +198,8 @@ expertise = ExpertiseConfig(
 
 Custom prompts render in a Jinja `ImmutableSandboxedEnvironment`; unsafe constructs (dunder/private attribute access, mutating methods) are rejected and raise `SecurityError`.
 
+Available variables include any keys you pass via `context` plus `{{ tool_context }}` and `{{ attribute_schema }}`. Interpolate `{{ attribute_schema }}` to include the per-type attribute-key hints (each entity type's `required`/`optional` keys); the built-in prompts add it automatically, but a custom template must reference it explicitly.
+
 ```python
 expertise = ExpertiseConfig(
     name="custom",
