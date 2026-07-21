@@ -1302,6 +1302,49 @@ class TestAttributesParsing:
         assert by_name["Absent"].attributes == {}
         assert by_name["Scalar"].attributes == {}
 
+    def test_pair_value_coercion_and_malformed_items(self) -> None:
+        """Pair values are string-coerced; missing/None values and malformed items are handled."""
+        extractor = self._make_extractor()
+        data = {
+            "entities": [
+                # Non-string value is coerced to str; missing and None values -> "".
+                {
+                    "name": "Coerce",
+                    "entity_type": "CONCEPT",
+                    "attributes": [
+                        {"key": "age", "value": 30},
+                        {"key": "no_value"},
+                        {"key": "null_value", "value": None},
+                    ],
+                },
+                # Duplicate keys: last value wins.
+                {
+                    "name": "Dup",
+                    "entity_type": "CONCEPT",
+                    "attributes": [
+                        {"key": "state", "value": "old"},
+                        {"key": "state", "value": "new"},
+                    ],
+                },
+                # Malformed items (non-dict item, non-string key) are skipped; valid pair kept.
+                {
+                    "name": "Malformed",
+                    "entity_type": "CONCEPT",
+                    "attributes": [
+                        "not-a-dict",
+                        {"key": 123, "value": "dropped"},
+                        {"key": "ok", "value": "kept"},
+                    ],
+                },
+            ],
+            "relationships": [],
+        }
+        result = extractor._parse_response(json.dumps(data))
+        by_name = {e.name: e for e in result.entities}
+        assert by_name["Coerce"].attributes == {"age": "30", "no_value": "", "null_value": ""}
+        assert by_name["Dup"].attributes == {"state": "new"}
+        assert by_name["Malformed"].attributes == {"ok": "kept"}
+
     @pytest.mark.asyncio
     async def test_extract_round_trip_folds_pair_attributes(self) -> None:
         """A mocked LLM returning pair-form attributes yields a populated dict."""
