@@ -209,6 +209,7 @@ Extract entities, relationships, and temporal information from the following tex
 {document_context}
 Entity types to extract: {entity_types}
 Relationship types to use: {relationship_types}
+For each entity, emit "attributes" as an array of {{"key": ..., "value": ...}} string pairs drawn from its salient fields (identifiers, emails, state, urls, dates, etc.).
 
 Text:
 {text}"""
@@ -745,8 +746,27 @@ class LLMEntityExtractor(EntityExtractor):
                                                 {"type": "null"},
                                             ],
                                         },
+                                        "attributes": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "key": {"type": "string"},
+                                                    "value": {"type": "string"},
+                                                },
+                                                "required": ["key", "value"],
+                                                "additionalProperties": False,
+                                            },
+                                        },
                                     },
-                                    "required": ["name", "entity_type", "description", "aliases", "temporal"],
+                                    "required": [
+                                        "name",
+                                        "entity_type",
+                                        "description",
+                                        "aliases",
+                                        "temporal",
+                                        "attributes",
+                                    ],
                                     "additionalProperties": False,
                                 },
                             },
@@ -843,8 +863,20 @@ class LLMEntityExtractor(EntityExtractor):
                                         {"type": "null"},
                                     ],
                                 },
+                                "attributes": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "key": {"type": "string"},
+                                            "value": {"type": "string"},
+                                        },
+                                        "required": ["key", "value"],
+                                        "additionalProperties": False,
+                                    },
+                                },
                             },
-                            "required": ["name", "entity_type", "description", "aliases", "temporal"],
+                            "required": ["name", "entity_type", "description", "aliases", "temporal", "attributes"],
                             "additionalProperties": False,
                         },
                     },
@@ -2770,9 +2802,23 @@ Return ONLY valid JSON, no other text."""
                             valid_until=t.get("valid_until"),
                         )
 
-                # Ensure attributes is a dict (LLM sometimes returns a list)
-                attrs = e.get("attributes", {})
-                if not isinstance(attrs, dict):
+                # Normalize attributes to a dict. The strict schema emits a list
+                # of {"key": ..., "value": ...} pairs; other paths may return a
+                # dict directly. Anything else collapses to an empty dict.
+                raw_attrs = e.get("attributes", {})
+                if isinstance(raw_attrs, dict):
+                    attrs = raw_attrs
+                elif isinstance(raw_attrs, list):
+                    attrs = {}
+                    for pair in raw_attrs:
+                        if not isinstance(pair, dict):
+                            continue
+                        key = pair.get("key")
+                        if not isinstance(key, str):
+                            continue
+                        value = pair.get("value")
+                        attrs[key] = str(value) if value is not None else ""
+                else:
                     attrs = {}
 
                 # QUALITY FIX: Use heuristic confidence instead of hardcoded 0.9

@@ -1182,3 +1182,164 @@ class TestBisectionOnTruncation:
 
         assert results == []
         mock_multi.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Entity attributes: strict-schema emission and pair-form parsing
+# ---------------------------------------------------------------------------
+
+# Strict structured output cannot express an open-ended {string: string} map
+# (additionalProperties must be False), so attributes are emitted as an array of
+# {"key": ..., "value": ...} pairs. This is the expected schema for each pair.
+_ATTRIBUTES_PAIR_ITEM = {
+    "type": "object",
+    "properties": {
+        "key": {"type": "string"},
+        "value": {"type": "string"},
+    },
+    "required": ["key", "value"],
+    "additionalProperties": False,
+}
+
+
+class TestAttributesSchema:
+    """The strict json_schema entity item carries an `attributes` pairs array."""
+
+    def _make_extractor(self) -> LLMEntityExtractor:
+        # gpt-4o-mini is on MODELS_REQUIRING_JSON_SCHEMA, so the strict
+        # json_schema branch (not the loose json_object fallback) is exercised.
+        return LLMEntityExtractor(model="gpt-4o-mini")
+
+    @staticmethod
+    def _assert_entity_item_strict(item: dict) -> None:
+        """The entity item stays strict-valid with attributes present."""
+        # attributes is a pairs array on the item.
+        assert "attributes" in item["properties"]
+        assert item["properties"]["attributes"]["type"] == "array"
+        assert item["properties"]["attributes"]["items"] == _ATTRIBUTES_PAIR_ITEM
+        # attributes is required.
+        assert "attributes" in item["required"]
+        # Strict-valid: every property is required and the item is closed.
+        assert set(item["required"]) == set(item["properties"])
+        assert item["additionalProperties"] is False
+
+    def test_response_format_entity_item(self) -> None:
+        """_get_response_format: entity item includes the attributes pairs array."""
+        fmt = self._make_extractor()._get_response_format()
+        assert fmt["json_schema"]["strict"] is True
+        item = fmt["json_schema"]["schema"]["properties"]["entities"]["items"]
+        self._assert_entity_item_strict(item)
+
+    def test_multi_response_format_entity_item(self) -> None:
+        """_get_multi_response_format: section entity item includes the pairs array."""
+        fmt = self._make_extractor()._get_multi_response_format()
+        assert fmt["json_schema"]["strict"] is True
+        item = fmt["json_schema"]["schema"]["properties"]["sections"]["items"]["properties"]["entities"]["items"]
+        self._assert_entity_item_strict(item)
+
+
+class TestAttributesParsing:
+    """_parse_response folds pair-form attributes into a dict."""
+
+    def _make_extractor(self) -> LLMEntityExtractor:
+        return LLMEntityExtractor(model="test-model")
+
+    def test_pairs_fold_to_dict(self) -> None:
+        """A list of {key, value} pairs folds into a {key: value} dict."""
+        extractor = self._make_extractor()
+        data = {
+            "entities": [
+                {
+                    "name": "Alice",
+                    "entity_type": "PERSON",
+                    "attributes": [
+                        {"key": "email", "value": "alice@example.com"},
+                        {"key": "role", "value": "engineer"},
+                    ],
+                }
+            ],
+            "relationships": [],
+        }
+        result = extractor._parse_response(json.dumps(data))
+        assert result.entities[0].attributes == {
+            "email": "alice@example.com",
+            "role": "engineer",
+        }
+
+    def test_dict_passes_through(self) -> None:
+        """An already-dict attributes value passes through unchanged."""
+        extractor = self._make_extractor()
+        data = {
+            "entities": [
+                {
+                    "name": "Alice",
+                    "entity_type": "PERSON",
+                    "attributes": {"email": "alice@example.com", "role": "engineer"},
+                }
+            ],
+            "relationships": [],
+        }
+        result = extractor._parse_response(json.dumps(data))
+        assert result.entities[0].attributes == {
+            "email": "alice@example.com",
+            "role": "engineer",
+        }
+
+    def test_empty_absent_or_scalar_yield_empty_dict(self) -> None:
+        """Empty list, absent attributes, and a scalar value all collapse to {}."""
+        extractor = self._make_extractor()
+        data = {
+            "entities": [
+                {"name": "EmptyList", "entity_type": "CONCEPT", "attributes": []},
+                {"name": "Absent", "entity_type": "CONCEPT"},
+                {"name": "Scalar", "entity_type": "CONCEPT", "attributes": "not-a-mapping"},
+            ],
+            "relationships": [],
+        }
+        result = extractor._parse_response(json.dumps(data))
+        by_name = {e.name: e for e in result.entities}
+        assert by_name["EmptyList"].attributes == {}
+        assert by_name["Absent"].attributes == {}
+        assert by_name["Scalar"].attributes == {}
+
+    @pytest.mark.asyncio
+    async def test_extract_round_trip_folds_pair_attributes(self) -> None:
+        """A mocked LLM returning pair-form attributes yields a populated dict."""
+        extractor = LLMEntityExtractor(model="test-model", max_retries=1)
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = json.dumps(
+            {
+                "entities": [
+                    {
+                        "name": "Alice",
+                        "entity_type": "PERSON",
+                        "description": "A person",
+                        "attributes": [
+                            {"key": "email", "value": "alice@example.com"},
+                            {"key": "team", "value": "platform"},
+                        ],
+                    }
+                ],
+                "relationships": [],
+            }
+        )
+        mock_response.usage = MagicMock(prompt_tokens=100, completion_tokens=50, total_tokens=150)
+
+        with (
+            patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_response),
+            patch("khora.telemetry.get_collector") as mock_telem,
+        ):
+            mock_telem.return_value.record_llm_call = MagicMock()
+            result = await extractor.extract(
+                "Alice works at Acme Corp",
+                entity_types=["PERSON", "ORGANIZATION"],
+                relationship_types=["WORKS_FOR"],
+            )
+
+        assert len(result.entities) == 1
+        assert result.entities[0].attributes == {
+            "email": "alice@example.com",
+            "team": "platform",
+        }
