@@ -190,7 +190,7 @@ Guidelines:
 - Use canonical entity names (e.g., "Jennifer Walsh" not "Jenny", "Acme Corporation" not "Acme Corp")
 - Include aliases for entities that have multiple names/abbreviations
 - Extract temporal information when dates, times, or relative time references appear
-- For STATE_CHANGE detection: when text indicates transitions ("switched from X to Y", "no longer X", "used to X", "previously X but now Y"), extract a STATE_CHANGE entity with these required attributes: {"entity_affected": "name of entity whose state changed", "previous_state": "old value", "new_state": "new value", "attribute_changed": "what changed (e.g. job_title, location, instrument)", "transition_date": "ISO date or null"}. Set valid_from to the transition date. Use INVOLVES to link it to the affected entity
+- For STATE_CHANGE detection: when text indicates transitions ("switched from X to Y", "no longer X", "used to X", "previously X but now Y"), extract a STATE_CHANGE entity whose attributes carry these keys as {"key", "value"} pairs: entity_affected (name of entity whose state changed), previous_state (old value), new_state (new value), attribute_changed (what changed, e.g. job_title, location, instrument), transition_date (ISO date or null). Set valid_from to the transition date. Use INVOLVES to link it to the affected entity
 - For EVENT detection: when text describes specific occurrences, extract the event with date, participants, and location when available
 - Use temporal relationships (PRECEDES, FOLLOWS, INVOLVES) to connect events and state changes to other entities
 - Ensure relationship source/target names match extracted entity names exactly
@@ -209,6 +209,7 @@ Extract entities, relationships, and temporal information from the following tex
 {document_context}
 Entity types to extract: {entity_types}
 Relationship types to use: {relationship_types}
+For each entity, emit "attributes" as an array of {{"key": ..., "value": ...}} string pairs drawn from its salient fields (identifiers, emails, state, urls, dates, etc.).
 
 Text:
 {text}"""
@@ -745,8 +746,27 @@ class LLMEntityExtractor(EntityExtractor):
                                                 {"type": "null"},
                                             ],
                                         },
+                                        "attributes": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "key": {"type": "string"},
+                                                    "value": {"type": "string"},
+                                                },
+                                                "required": ["key", "value"],
+                                                "additionalProperties": False,
+                                            },
+                                        },
                                     },
-                                    "required": ["name", "entity_type", "description", "aliases", "temporal"],
+                                    "required": [
+                                        "name",
+                                        "entity_type",
+                                        "description",
+                                        "aliases",
+                                        "temporal",
+                                        "attributes",
+                                    ],
                                     "additionalProperties": False,
                                 },
                             },
@@ -843,8 +863,20 @@ class LLMEntityExtractor(EntityExtractor):
                                         {"type": "null"},
                                     ],
                                 },
+                                "attributes": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "key": {"type": "string"},
+                                            "value": {"type": "string"},
+                                        },
+                                        "required": ["key", "value"],
+                                        "additionalProperties": False,
+                                    },
+                                },
                             },
-                            "required": ["name", "entity_type", "description", "aliases", "temporal"],
+                            "required": ["name", "entity_type", "description", "aliases", "temporal", "attributes"],
                             "additionalProperties": False,
                         },
                     },
@@ -2329,7 +2361,8 @@ Return a JSON object with a "sections" array, one object per input section:
     {"entities": [...], "relationships": [...], "events": [...]},
     ...
 ]}
-Each section follows the entity/relationship format from the instructions above."""
+Each section follows the entity/relationship format from the instructions above.
+For each entity, emit "attributes" as an array of {"key": ..., "value": ...} string pairs drawn from its salient fields (identifiers, emails, state, urls, dates, etc.)."""
             )
 
             prompt_context = {
@@ -2371,6 +2404,7 @@ Return a JSON object with a "sections" array, one object per section:
 ]}}
 
 Each section follows the same entity/relationship/event format.
+For each entity, emit "attributes" as an array of {{"key": ..., "value": ...}} string pairs drawn from its salient fields (identifiers, emails, state, urls, dates, etc.).
 Return ONLY valid JSON, no other text."""
 
         try:
@@ -2770,9 +2804,23 @@ Return ONLY valid JSON, no other text."""
                             valid_until=t.get("valid_until"),
                         )
 
-                # Ensure attributes is a dict (LLM sometimes returns a list)
-                attrs = e.get("attributes", {})
-                if not isinstance(attrs, dict):
+                # Normalize attributes to a dict. The strict schema emits a list
+                # of {"key": ..., "value": ...} pairs; other paths may return a
+                # dict directly. Anything else collapses to an empty dict.
+                raw_attrs = e.get("attributes", {})
+                if isinstance(raw_attrs, dict):
+                    attrs = raw_attrs
+                elif isinstance(raw_attrs, list):
+                    attrs = {}
+                    for pair in raw_attrs:
+                        if not isinstance(pair, dict):
+                            continue
+                        key = pair.get("key")
+                        if not isinstance(key, str):
+                            continue
+                        value = pair.get("value")
+                        attrs[key] = str(value) if value is not None else ""
+                else:
                     attrs = {}
 
                 # QUALITY FIX: Use heuristic confidence instead of hardcoded 0.9
