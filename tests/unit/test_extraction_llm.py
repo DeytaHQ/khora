@@ -480,6 +480,37 @@ class TestAttributeSchemaBlock:
         assert extractor._build_attribute_schema_block(expertise, None) == ""
         assert extractor._build_attribute_schema_block(expertise, []) == ""
 
+    def test_present_but_none_attribute_side_coerced(self) -> None:
+        """An empty YAML scalar ("optional:") parses to None; must not crash.
+
+        Built through ExpertiseConfig.from_dict (the real YAML load path), which
+        passes attributes straight through, so either side can be present-but-None.
+        The block coerces None -> [] rather than raising TypeError in the ", ".join.
+        """
+        from khora.extraction.skills.base import ExpertiseConfig
+
+        extractor = LLMEntityExtractor(model="test")
+        # Shape mirrors `yaml.safe_load` output: an empty scalar becomes None.
+        expertise = ExpertiseConfig.from_dict(
+            {
+                "name": "yaml_edge",
+                "entity_types": [
+                    # optional side present-but-None, required a real list
+                    {"name": "NAME", "attributes": {"required": ["name"], "optional": None}},
+                    # required side present-but-None, optional a real list
+                    {"name": "FOO", "attributes": {"required": None, "optional": ["x"]}},
+                    # both sides present-but-None → declares nothing → omitted
+                    {"name": "BAZ", "attributes": {"required": None, "optional": None}},
+                ],
+            }
+        )
+        # Must not raise, and each None side renders as [].
+        block = extractor._build_attribute_schema_block(expertise, ["NAME", "FOO", "BAZ"])
+        assert "NAME: required=[name]; optional=[]" in block
+        assert "FOO: required=[]; optional=[x]" in block
+        # BAZ declares no usable attributes → no line
+        assert "BAZ" not in block
+
     def test_block_in_single_prompt_structured_ungated(self) -> None:
         """Block appears in the single-doc structured prompt with context=None.
 

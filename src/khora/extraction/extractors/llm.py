@@ -1840,8 +1840,10 @@ class LLMEntityExtractor(EntityExtractor):
             et = by_name.get(type_name)
             if et is None:
                 continue
-            required = et.attributes.get("required", [])
-            optional = et.attributes.get("optional", [])
+            # Coerce present-but-None sides: an empty YAML scalar ("required:")
+            # parses to None, which would blow up the ", ".join below.
+            required = et.attributes.get("required") or []
+            optional = et.attributes.get("optional") or []
             if not required and not optional:
                 continue
             lines.append(f"{et.name}: required=[{', '.join(required)}]; optional=[{', '.join(optional)}]")
