@@ -1054,7 +1054,7 @@ class PgVectorBackend(AsyncSessionMixin):
         Acquires a namespace-scoped advisory lock to prevent deadlocks
         when concurrent coroutines upsert entities in the same namespace.
         """
-        from sqlalchemy.dialects.postgresql import insert
+        from sqlalchemy.dialects.postgresql import JSONB, insert
 
         async with self._get_session() as session:
             # Advisory lock prevents deadlocks with concurrent upserts
@@ -1087,7 +1087,26 @@ class PgVectorBackend(AsyncSessionMixin):
                 constraint="uq_entities_namespace_name_type",
                 set_={
                     "description": stmt.excluded.description,
-                    "attributes": stmt.excluded.attributes,
+                    # An incoming empty ({}), SQL NULL, or json ``null`` attributes
+                    # must not clobber a stored populated attributes; keep the
+                    # existing value in that case, otherwise overwrite with the
+                    # incoming value. JSONB has ``none_as_null=False``, so a Python
+                    # None binds as ``'null'::jsonb`` (not SQL NULL) — the
+                    # jsonb_typeof check catches that path. The empty-object check
+                    # uses ``type_coerce({}, JSONB)`` (binds the dict -> ``'{}'``)
+                    # rather than ``cast("{}", JSONB)``, which would JSON-encode the
+                    # string to ``'"{}"'`` and never match a real empty object.
+                    "attributes": sa.case(
+                        (
+                            sa.or_(
+                                stmt.excluded.attributes.is_(None),
+                                sa.func.jsonb_typeof(stmt.excluded.attributes) == "null",
+                                stmt.excluded.attributes == sa.type_coerce({}, JSONB),
+                            ),
+                            EntityModel.attributes,
+                        ),
+                        else_=stmt.excluded.attributes,
+                    ),
                     "source_document_ids": _accumulate_source_ids_sql("source_document_ids"),
                     "source_chunk_ids": _accumulate_source_ids_sql("source_chunk_ids"),
                     "mention_count": stmt.excluded.mention_count,
@@ -1298,7 +1317,7 @@ class PgVectorBackend(AsyncSessionMixin):
             return []
 
         async def _do_upsert():
-            from sqlalchemy.dialects.postgresql import insert
+            from sqlalchemy.dialects.postgresql import JSONB, insert
 
             # Sort by (namespace_id, name, entity_type) to ensure consistent lock ordering
             sorted_entities = sorted(entities, key=lambda e: (str(e.namespace_id), e.name, str(e.entity_type)))
@@ -1346,7 +1365,27 @@ class PgVectorBackend(AsyncSessionMixin):
                     constraint="uq_entities_namespace_name_type",
                     set_={
                         "description": stmt.excluded.description,
-                        "attributes": stmt.excluded.attributes,
+                        # An incoming empty ({}), SQL NULL, or json ``null`` attributes
+                        # must not clobber a stored populated attributes; keep the
+                        # existing value in that case, otherwise overwrite with the
+                        # incoming value. JSONB has ``none_as_null=False``, so a Python
+                        # None binds as ``'null'::jsonb`` (not SQL NULL) — the
+                        # jsonb_typeof check catches that path. The empty-object check
+                        # uses ``type_coerce({}, JSONB)`` (binds the dict -> ``'{}'``)
+                        # rather than ``cast("{}", JSONB)``, which would JSON-encode the
+                        # string to ``'"{}"'`` and never match a real empty object.
+                        # Mirrors the single-entity guard in ``_upsert_entity``.
+                        "attributes": sa.case(
+                            (
+                                sa.or_(
+                                    stmt.excluded.attributes.is_(None),
+                                    sa.func.jsonb_typeof(stmt.excluded.attributes) == "null",
+                                    stmt.excluded.attributes == sa.type_coerce({}, JSONB),
+                                ),
+                                EntityModel.attributes,
+                            ),
+                            else_=stmt.excluded.attributes,
+                        ),
                         "source_document_ids": _accumulate_source_ids_sql("source_document_ids"),
                         "source_chunk_ids": _accumulate_source_ids_sql("source_chunk_ids"),
                         "mention_count": stmt.excluded.mention_count,
