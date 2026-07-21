@@ -20,6 +20,10 @@ one. ``upsert_entities_batch`` only snapshots when attributes actually change,
 and the Phase-2 change-detector mirrors the ON MATCH SET guard by treating an
 empty/NULL incoming value as "no change".
 
+The single-entity ``update_entity`` query carries a twin of the guard; the
+``test_update_entity_*`` cases below exercise that direct-update path (used by
+the expansion/coordinator route), which the batch tests do not touch.
+
 Why this is gated by ``NEO4J_INTEGRATION_TEST=1``:
 
     The integration job in ``.github/workflows/ci.yml`` provisions a Neo4j
@@ -228,3 +232,70 @@ async def test_genuine_change_creates_single_version(backend: Neo4jBackend) -> N
     got = await backend.get_entity_by_name(ns, name, "PERSON")
     assert got is not None
     assert got.attributes == {"b": 2}
+
+
+@pytest.mark.asyncio
+async def test_update_entity_empty_attributes_does_not_overwrite_populated(backend: Neo4jBackend) -> None:
+    """Single-entity path (``update_entity``): seed ``{"a": 1}`` then update the
+    same node with ``{}`` — stored attributes must stay ``{"a": 1}``.
+
+    ``update_entity`` is the direct single-node write (the expansion/coordinator
+    update route) and carries its own guard, separate from ``_UPSERT_CYPHER``'s
+    ``ON MATCH SET`` — so it needs coverage the batch tests don't provide."""
+    ns = uuid4()
+    name = f"guard-update-empty-{uuid4().hex[:8]}"
+
+    seed = _entity(ns, name, {"a": 1})
+    await backend.upsert_entities_batch(ns, [seed])
+
+    # update_entity MATCHes by id, so target the stored node.
+    update = _entity(ns, name, {})
+    update.id = seed.id
+    await backend.update_entity(update, namespace_id=ns)
+
+    got = await backend.get_entity_by_name(ns, name, "PERSON")
+    assert got is not None
+    assert got.attributes == {"a": 1}
+
+
+@pytest.mark.asyncio
+async def test_update_entity_null_attributes_does_not_overwrite_populated(backend: Neo4jBackend) -> None:
+    """Single-entity path: seed ``{"a": 1}`` then ``update_entity`` with NULL
+    (``None``) attributes — stored attributes must stay ``{"a": 1}`` (hits the
+    ``$attributes IS NULL`` branch)."""
+    ns = uuid4()
+    name = f"guard-update-null-{uuid4().hex[:8]}"
+
+    seed = _entity(ns, name, {"a": 1})
+    await backend.upsert_entities_batch(ns, [seed])
+
+    update = _entity(ns, name, None)
+    update.id = seed.id
+    await backend.update_entity(update, namespace_id=ns)
+
+    got = await backend.get_entity_by_name(ns, name, "PERSON")
+    assert got is not None
+    assert got.attributes == {"a": 1}
+
+
+@pytest.mark.asyncio
+async def test_update_entity_nonempty_attributes_overwrites_without_key_union(backend: Neo4jBackend) -> None:
+    """Single-entity path: seed ``{"a": 1}`` then ``update_entity`` with
+    ``{"b": 2}`` — stored attributes must become EXACTLY ``{"b": 2}``.
+
+    A non-empty incoming value overwrites wholesale; key-union merge
+    (``{"a": 1, "b": 2}``) is intentionally OUT OF SCOPE."""
+    ns = uuid4()
+    name = f"guard-update-overwrite-{uuid4().hex[:8]}"
+
+    seed = _entity(ns, name, {"a": 1})
+    await backend.upsert_entities_batch(ns, [seed])
+
+    update = _entity(ns, name, {"b": 2})
+    update.id = seed.id
+    await backend.update_entity(update, namespace_id=ns)
+
+    got = await backend.get_entity_by_name(ns, name, "PERSON")
+    assert got is not None
+    assert got.attributes == {"b": 2}
+    assert "a" not in got.attributes
