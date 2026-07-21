@@ -149,25 +149,31 @@ def register_attribute_schema(
 
 
 def validate_attributes(entity_type: str, attributes: dict[str, Any]) -> dict[str, Any]:
-    """Validate and coerce attributes using the registered schema.
+    """Validate and coerce attributes using the registered schema (additive-safe).
 
-    Falls back to passthrough if no schema is registered for the entity type
-    or if validation fails (graceful degradation).
+    Coerces the fields the registered schema knows about while preserving any
+    unknown keys with non-None values (e.g. ontology-specific attributes)
+    rather than dropping them. Falls back to passthrough if no schema is
+    registered for the entity type or if validation fails (graceful
+    degradation).
 
     Args:
         entity_type: The entity type name (e.g. "PERSON", "TICKET")
         attributes: Raw attributes dict to validate
 
     Returns:
-        Cleaned attributes dict with None values excluded
+        On the validated path: schema-known fields coerced and all non-None
+        unknown keys preserved, with None-valued keys excluded (unchanged from
+        prior behavior). On the degraded paths (unregistered type or
+        ValidationError) the original attributes are returned unchanged.
     """
     schema = ATTRIBUTE_SCHEMAS.get(entity_type.upper())
     if not schema:
         return attributes
 
     try:
-        validated = schema.model_validate(attributes)
-        return validated.model_dump(exclude_none=True)
+        validated = schema.model_validate(attributes).model_dump(exclude_none=True)
+        return {**{k: v for k, v in attributes.items() if v is not None}, **validated}
     except ValidationError:
         # Graceful degradation: return original attributes if validation fails
         return attributes
