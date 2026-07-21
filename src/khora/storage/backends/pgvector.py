@@ -1087,13 +1087,17 @@ class PgVectorBackend(AsyncSessionMixin):
                 constraint="uq_entities_namespace_name_type",
                 set_={
                     "description": stmt.excluded.description,
-                    # An incoming empty ({}) or NULL attributes must not clobber a
-                    # stored populated attributes; keep the existing value in that
-                    # case, otherwise overwrite with the incoming value.
+                    # An incoming empty ({}), SQL NULL, or json ``null`` attributes
+                    # must not clobber a stored populated attributes; keep the
+                    # existing value in that case, otherwise overwrite with the
+                    # incoming value. JSONB has ``none_as_null=False``, so a Python
+                    # None binds as ``'null'::jsonb`` (not SQL NULL) — the
+                    # jsonb_typeof check catches that path.
                     "attributes": sa.case(
                         (
                             sa.or_(
                                 stmt.excluded.attributes.is_(None),
+                                sa.func.jsonb_typeof(stmt.excluded.attributes) == "null",
                                 stmt.excluded.attributes == sa.cast("{}", JSONB),
                             ),
                             EntityModel.attributes,

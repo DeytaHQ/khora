@@ -13,12 +13,21 @@ overwrites the stored dict wholesale (no key-union merge). The guard lives in
 serializes to ``'{}'`` and ``None`` serializes to a Cypher NULL — the two
 branches the guard fences.
 
+This module also pins the version-chain side of the guard: a guard-preserved
+(empty/NULL) re-upsert must NOT append a phantom ``:EntityVersion`` snapshot or
+``[:SUPERSEDES]`` edge, while a genuine attribute change still creates exactly
+one. ``upsert_entities_batch`` only snapshots when attributes actually change,
+and the Phase-2 change-detector mirrors the ON MATCH SET guard by treating an
+empty/NULL incoming value as "no change".
+
 Why this is gated by ``NEO4J_INTEGRATION_TEST=1``:
 
-    Khora's CI does NOT provision a Neo4j instance, so real-Neo4j coverage
-    lives behind an opt-in env var (matching the sibling
-    ``test_neo4j_get_entity_relationships_integration.py``). Local developers
-    running ``make dev`` can exercise it.
+    The integration job in ``.github/workflows/ci.yml`` provisions a Neo4j
+    service and sets ``NEO4J_INTEGRATION_TEST=1``, so these tests run for real
+    in CI. The env-var gate keeps them opt-in everywhere else: a local box
+    without ``make dev`` (or any run that has not started Neo4j) skips them
+    cleanly instead of erroring on an unreachable bolt port. It matches the
+    sibling ``test_neo4j_get_entity_relationships_integration.py``.
 
 How to run locally::
 
@@ -138,3 +147,84 @@ async def test_nonempty_attributes_overwrites_without_key_union(backend: Neo4jBa
     assert got is not None
     assert got.attributes == {"b": 2}
     assert "a" not in got.attributes
+
+
+async def _count_versions(backend: Neo4jBackend, ns_id, name: str, entity_type: str) -> tuple[int, int]:
+    """Count ``:EntityVersion`` snapshots and ``[:SUPERSEDES]`` edges for one
+    entity identity.
+
+    The namespace is unique per test (fresh ``uuid4``), so matching on
+    (namespace_id, name, entity_type) uniquely identifies this entity's version
+    chain without needing the canonical node id. ``upsert_entities_batch``
+    stamps those three properties onto every snapshot node it creates.
+    """
+
+    async def _query(tx) -> tuple[int, int]:
+        ev_result = await tx.run(
+            "MATCH (ev:EntityVersion {namespace_id: $ns, name: $name, entity_type: $etype}) RETURN count(ev) AS c",
+            ns=str(ns_id),
+            name=name,
+            etype=entity_type,
+        )
+        ev_record = await ev_result.single()
+        edge_result = await tx.run(
+            "MATCH (:Entity {namespace_id: $ns, name: $name, entity_type: $etype})"
+            "-[s:SUPERSEDES]->(:EntityVersion) RETURN count(s) AS c",
+            ns=str(ns_id),
+            name=name,
+            etype=entity_type,
+        )
+        edge_record = await edge_result.single()
+        return ev_record["c"], edge_record["c"]
+
+    async with backend._session() as session:
+        return await session.execute_read(_query)
+
+
+@pytest.mark.asyncio
+async def test_empty_reupsert_creates_no_phantom_version(backend: Neo4jBackend) -> None:
+    """Guard-preserved re-upsert must not append a phantom version snapshot.
+
+    Seeding ``{"a": 1}`` then re-upserting the same key with ``{}`` and ``None``
+    leaves the stored attributes unchanged (the ON MATCH SET guard), so the
+    Phase-2 change-detector must treat it as "no change" and create NO
+    ``:EntityVersion`` node and NO ``[:SUPERSEDES]`` edge (H2 regression)."""
+    ns = uuid4()
+    name = f"guard-noversion-{uuid4().hex[:8]}"
+
+    await backend.upsert_entities_batch(ns, [_entity(ns, name, {"a": 1})])
+    await backend.upsert_entities_batch(ns, [_entity(ns, name, {})])
+    await backend.upsert_entities_batch(ns, [_entity(ns, name, None)])
+
+    ev_count, supersedes_count = await _count_versions(backend, ns, name, "PERSON")
+    assert ev_count == 0, f"empty/NULL re-upsert must not snapshot a version, got {ev_count}"
+    assert supersedes_count == 0, f"empty/NULL re-upsert must not create a SUPERSEDES edge, got {supersedes_count}"
+
+    # The current node still carries the seeded attributes (guard held).
+    got = await backend.get_entity_by_name(ns, name, "PERSON")
+    assert got is not None
+    assert got.attributes == {"a": 1}
+
+
+@pytest.mark.asyncio
+async def test_genuine_change_creates_single_version(backend: Neo4jBackend) -> None:
+    """Positive control: a real attribute change still snapshots exactly one
+    version.
+
+    Seeding ``{"a": 1}`` then upserting ``{"b": 2}`` is a genuine change, so
+    Phase-2 must create exactly one ``:EntityVersion`` node and one
+    ``[:SUPERSEDES]`` edge — proving the H2 fix suppresses only the phantom
+    (empty/NULL) case, not legitimate versioning."""
+    ns = uuid4()
+    name = f"guard-oneversion-{uuid4().hex[:8]}"
+
+    await backend.upsert_entities_batch(ns, [_entity(ns, name, {"a": 1})])
+    await backend.upsert_entities_batch(ns, [_entity(ns, name, {"b": 2})])
+
+    ev_count, supersedes_count = await _count_versions(backend, ns, name, "PERSON")
+    assert ev_count == 1, f"genuine change must snapshot exactly one version, got {ev_count}"
+    assert supersedes_count == 1, f"genuine change must create exactly one SUPERSEDES edge, got {supersedes_count}"
+
+    got = await backend.get_entity_by_name(ns, name, "PERSON")
+    assert got is not None
+    assert got.attributes == {"b": 2}
