@@ -1092,13 +1092,16 @@ class PgVectorBackend(AsyncSessionMixin):
                     # existing value in that case, otherwise overwrite with the
                     # incoming value. JSONB has ``none_as_null=False``, so a Python
                     # None binds as ``'null'::jsonb`` (not SQL NULL) — the
-                    # jsonb_typeof check catches that path.
+                    # jsonb_typeof check catches that path. The empty-object check
+                    # uses ``type_coerce({}, JSONB)`` (binds the dict -> ``'{}'``)
+                    # rather than ``cast("{}", JSONB)``, which would JSON-encode the
+                    # string to ``'"{}"'`` and never match a real empty object.
                     "attributes": sa.case(
                         (
                             sa.or_(
                                 stmt.excluded.attributes.is_(None),
                                 sa.func.jsonb_typeof(stmt.excluded.attributes) == "null",
-                                stmt.excluded.attributes == sa.cast("{}", JSONB),
+                                stmt.excluded.attributes == sa.type_coerce({}, JSONB),
                             ),
                             EntityModel.attributes,
                         ),
