@@ -98,9 +98,10 @@ def _entity(ns_id: UUID, entity_id: UUID, name: str, attributes, entity_type: st
     same logical entity read back deterministically by id.
 
     ``attributes`` is passed verbatim (including ``None``): the Entity
-    dataclass does not coerce ``None`` -> ``{}`` in ``__post_init__``, so a
-    ``None`` here reaches the backend as a genuine SQL NULL and exercises the
-    ``excluded.attributes IS NULL`` branch of the guard.
+    dataclass does not coerce ``None`` -> ``{}`` in ``__post_init__``. The ORM
+    column is ``JSONB`` with ``none_as_null=False``, so a ``None`` binds as
+    ``'null'::jsonb`` (not a SQL NULL) and is caught by the guard's
+    ``jsonb_typeof(excluded.attributes) = 'null'`` branch.
     """
     return Entity(
         id=entity_id,
@@ -132,9 +133,9 @@ async def test_null_attributes_does_not_overwrite_populated(backend: PgVectorBac
     """Upsert ``{"a": 1}`` then the same key with NULL (``None``) attributes —
     the stored attributes must stay ``{"a": 1}``.
 
-    Distinct from the empty-dict case: ``None`` reaches the guard's
-    ``excluded.attributes.is_(None)`` branch rather than the ``== '{}'``
-    branch."""
+    Distinct from the empty-dict case: ``None`` binds as ``'null'::jsonb``
+    (JSONB ``none_as_null=False``), so it is caught by the guard's
+    ``jsonb_typeof(...) = 'null'`` branch rather than the ``== '{}'`` branch."""
     eid = uuid4()
     name = f"guard-null-{uuid4()}"
 
