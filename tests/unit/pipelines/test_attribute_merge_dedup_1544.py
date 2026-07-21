@@ -44,7 +44,13 @@ def _make_chunk(
 # Attribute sets shared by both call sites — chunk1 wins on the shared "role"
 # key, "title" is filled from chunk2, and the empty/None values are skipped.
 _CHUNK1_ATTRS = {"email": "a@example.com", "role": "existing"}
-_CHUNK2_ATTRS = {"title": "Engineer", "role": "incoming", "blank": "", "none_val": None}
+_CHUNK2_ATTRS = {
+    "title": "Engineer",
+    "role": "incoming",
+    "blank": "",
+    "none_val": None,
+    "count": 0,
+}
 
 
 def _assert_union(attrs: dict[str, Any]) -> None:
@@ -53,6 +59,9 @@ def _assert_union(attrs: dict[str, Any]) -> None:
     assert attrs["role"] == "existing"  # existing (chunk1) wins on shared key
     assert "blank" not in attrs  # empty string skipped
     assert "none_val" not in attrs  # None skipped
+    # A legit falsy value must survive: the skip guard is `in (None, "")`, not
+    # `if not _v`, so 0/0.0/False are added, not dropped. Guards a future refactor.
+    assert attrs["count"] == 0
 
 
 # ---------------------------------------------------------------------------
