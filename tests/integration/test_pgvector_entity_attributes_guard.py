@@ -165,3 +165,65 @@ async def test_nonempty_attributes_overwrites_without_key_union(backend: PgVecto
     assert got is not None
     assert got.attributes == {"b": 2}
     assert "a" not in got.attributes
+
+
+@pytest.mark.asyncio
+async def test_batch_empty_attributes_does_not_overwrite_populated(
+    backend: PgVectorBackend, namespace_id: UUID
+) -> None:
+    """Batch path (``upsert_entities_batch``): upsert ``{"a": 1}`` then the
+    same key with ``{}`` — the stored attributes must stay ``{"a": 1}``.
+
+    The batch multi-row ``INSERT ... ON CONFLICT DO UPDATE`` carries the same
+    ``CASE`` guard as the single ``create_entity`` path; this exercises it via
+    ``upsert_entities_batch`` rather than ``_upsert_entity``."""
+    eid = uuid4()
+    name = f"guard-batch-empty-{uuid4()}"
+
+    await backend.upsert_entities_batch(namespace_id, [_entity(namespace_id, eid, name, {"a": 1})])
+    await backend.upsert_entities_batch(namespace_id, [_entity(namespace_id, eid, name, {})])
+
+    got = await backend.get_entity(eid, namespace_id=namespace_id)
+    assert got is not None
+    assert got.attributes == {"a": 1}
+
+
+@pytest.mark.asyncio
+async def test_batch_null_attributes_does_not_overwrite_populated(backend: PgVectorBackend, namespace_id: UUID) -> None:
+    """Batch path: upsert ``{"a": 1}`` then the same key with NULL (``None``)
+    attributes — the stored attributes must stay ``{"a": 1}``.
+
+    Distinct from the empty-dict case: ``None`` binds as ``'null'::jsonb``
+    (JSONB ``none_as_null=False``), so it is caught by the guard's
+    ``jsonb_typeof(...) = 'null'`` branch rather than the ``== '{}'`` branch."""
+    eid = uuid4()
+    name = f"guard-batch-null-{uuid4()}"
+
+    await backend.upsert_entities_batch(namespace_id, [_entity(namespace_id, eid, name, {"a": 1})])
+    await backend.upsert_entities_batch(namespace_id, [_entity(namespace_id, eid, name, None)])
+
+    got = await backend.get_entity(eid, namespace_id=namespace_id)
+    assert got is not None
+    assert got.attributes == {"a": 1}
+
+
+@pytest.mark.asyncio
+async def test_batch_nonempty_attributes_overwrites_without_key_union(
+    backend: PgVectorBackend, namespace_id: UUID
+) -> None:
+    """Batch path: upsert ``{"a": 1}`` then the same key with ``{"b": 2}`` —
+    the stored attributes must become EXACTLY ``{"b": 2}``.
+
+    The guard only protects against empty/NULL incoming values; a non-empty
+    incoming dict replaces the stored one wholesale. Key-union merge
+    (``{"a": 1, "b": 2}``) is intentionally OUT OF SCOPE."""
+    eid = uuid4()
+    name = f"guard-batch-overwrite-{uuid4()}"
+
+    await backend.upsert_entities_batch(namespace_id, [_entity(namespace_id, eid, name, {"a": 1})])
+    await backend.upsert_entities_batch(namespace_id, [_entity(namespace_id, eid, name, {"b": 2})])
+
+    got = await backend.get_entity(eid, namespace_id=namespace_id)
+    assert got is not None
+    assert got.attributes == {"b": 2}
+    assert "a" not in got.attributes
