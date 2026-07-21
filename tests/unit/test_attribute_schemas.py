@@ -62,13 +62,51 @@ class TestValidateAttributes:
         result = validate_attributes("UNKNOWN_TYPE", attrs)
         assert result == attrs
 
-    def test_extra_fields_ignored(self):
-        """Extra fields not in schema are silently dropped."""
+    def test_extra_fields_preserved(self):
+        """Extra fields not in the schema are preserved (additive-safe)."""
         attrs = {"name": "Alice", "unknown_field": "value"}
         result = validate_attributes("PERSON", attrs)
-        assert "name" in result
-        # Pydantic by default ignores extra fields
-        assert "unknown_field" not in result
+        assert result["name"] == "Alice"
+        # Unknown/ontology keys survive validation rather than being dropped.
+        assert result["unknown_field"] == "value"
+
+    def test_unknown_keys_preserved_additive(self):
+        """Unknown ontology keys survive alongside known coerced fields."""
+        attrs = {"name": "X", "slack_user_id": "U1", "timezone": "CET"}
+        result = validate_attributes("PERSON", attrs)
+        assert result["name"] == "X"
+        assert result["slack_user_id"] == "U1"
+        assert result["timezone"] == "CET"
+
+    def test_none_known_field_stripped_while_unknown_key_preserved(self):
+        """Known None fields are stripped even as unknown ontology keys survive."""
+        attrs = {"name": "X", "title": None, "slack_user_id": "U1"}
+        result = validate_attributes("PERSON", attrs)
+        assert result == {"name": "X", "slack_user_id": "U1"}
+
+    def test_none_unknown_key_dropped_on_validated_path(self):
+        """A None-valued unknown key is excluded on the validated path (base-dict filter)."""
+        result = validate_attributes("PERSON", {"name": "X", "foo": None})
+        assert result == {"name": "X"}
+
+    def test_unregistered_type_returned_unchanged(self):
+        """An unregistered entity type is returned unchanged."""
+        attrs = {"identifier": "ENG-123", "title": "Fix bug", "state": "open"}
+        result = validate_attributes("LINEAR_ISSUE", attrs)
+        assert result == attrs
+
+    def test_known_fields_coerced_for_registered_type(self):
+        """Registered-schema fields are still coerced (coercion wins over raw input)."""
+        attrs = {"name": "AI", "related_concepts": ("ML", "DL")}
+        result = validate_attributes("CONCEPT", attrs)
+        assert isinstance(result["related_concepts"], list)
+        assert result["related_concepts"] == ["ML", "DL"]
+
+    def test_validation_error_returns_original_attributes(self):
+        """A ValidationError degrades gracefully, returning original attributes unchanged."""
+        attrs = {"title": "Engineer", "slack_user_id": "U1"}  # missing required name
+        result = validate_attributes("PERSON", attrs)
+        assert result == attrs
 
     def test_case_insensitive_type_lookup(self):
         """Entity type lookup should be case-insensitive."""
