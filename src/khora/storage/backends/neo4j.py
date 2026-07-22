@@ -2145,13 +2145,16 @@ class Neo4jBackend(GraphBackendBase):
                     if not pre:
                         continue
 
-                    # Compare serialized attributes to detect real changes.
+                    # Compare parsed attributes order-insensitively to detect real
+                    # changes. Serialization is insertion-order, so the same attribute
+                    # set in a different key order would compare unequal as raw strings;
+                    # parse both sides to dicts before comparing.
                     # An empty/NULL incoming attributes is treated as no change,
                     # mirroring the ON MATCH SET guard above so an empty re-upsert
                     # of a populated entity does not append a phantom version_row.
                     incoming_attrs = input_row["attributes"]
                     incoming_is_empty = incoming_attrs is None or incoming_attrs == "{}" or incoming_attrs == ""
-                    if incoming_is_empty or pre["attributes"] == incoming_attrs:
+                    if incoming_is_empty or _deserialize_dict(pre["attributes"]) == _deserialize_dict(incoming_attrs):
                         continue
 
                     version_rows.append(
