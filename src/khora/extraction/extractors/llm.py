@@ -1808,21 +1808,50 @@ class LLMEntityExtractor(EntityExtractor):
                 if key != "fields" and isinstance(values, list):
                     lines.append(f"  {key}: {', '.join(str(v) for v in values)}")
 
-        # Add attribute schema hints from entity types
-        if expertise.entity_types:
-            lines.append("\nEXPECTED ENTITY ATTRIBUTES:")
-            for et in expertise.entity_types:
-                required = et.attributes.get("required", [])
-                optional = et.attributes.get("optional", [])
-                if required or optional:
-                    parts = []
-                    if required:
-                        parts.append(f"required: {', '.join(required)}")
-                    if optional:
-                        parts.append(f"optional: {', '.join(optional)}")
-                    lines.append(f"  {et.name}: {'; '.join(parts)}")
-
         return "\n".join(lines)
+
+    def _build_attribute_schema_block(
+        self,
+        expertise: ExpertiseConfig | None,
+        entity_types: list[str] | None,
+    ) -> str:
+        """Build the per-type ATTRIBUTE SCHEMA hint block from the ontology.
+
+        For each extracted entity type that declares attributes in the
+        ExpertiseConfig, list its required/optional attribute key names so the
+        model knows which keys to populate. The keys are hints only — the model
+        prefers them but is not constrained to them, and emission still rides the
+        general ``attributes`` {"key", "value"}-pair channel.
+
+        Args:
+            expertise: Optional ExpertiseConfig carrying per-type attribute schemas.
+            entity_types: Resolved entity-type names being extracted.
+
+        Returns:
+            The schema block, or "" when there is no expertise or when no
+            extracted type declares any attributes.
+        """
+        if expertise is None or not entity_types:
+            return ""
+
+        by_name = {et.name: et for et in expertise.entity_types}
+        lines: list[str] = []
+        for type_name in entity_types:
+            et = by_name.get(type_name)
+            if et is None:
+                continue
+            # Coerce present-but-None sides: an empty YAML scalar ("required:")
+            # parses to None, which would blow up the ", ".join below.
+            required = et.attributes.get("required") or []
+            optional = et.attributes.get("optional") or []
+            if not required and not optional:
+                continue
+            lines.append(f"{et.name}: required=[{', '.join(required)}]; optional=[{', '.join(optional)}]")
+
+        if not lines:
+            return ""
+
+        return "ATTRIBUTE SCHEMA (emit these keys in attributes when present):\n" + "\n".join(lines)
 
     @staticmethod
     def _build_document_context(context: dict[str, Any] | None) -> str:
@@ -1906,6 +1935,7 @@ class LLMEntityExtractor(EntityExtractor):
                     "entity_types": entity_types,
                     "relationship_types": relationship_types,
                     "tool_context": tool_context,
+                    "attribute_schema": self._build_attribute_schema_block(expertise, entity_types),
                 }
                 return composer.render_prompt(
                     expertise.extraction_prompt,
@@ -1937,6 +1967,12 @@ class LLMEntityExtractor(EntityExtractor):
             text=text[:8000],  # Truncate very long texts
             document_context=document_context,
         )
+        # Per-type attribute keys: names which keys to emit on top of the
+        # general attributes nudge baked into the template. Prepended alongside
+        # tool_context so both lead the prompt rather than trail the text.
+        attribute_schema = self._build_attribute_schema_block(expertise, entity_types)
+        if attribute_schema:
+            prompt = attribute_schema + "\n\n" + prompt
         if tool_context:
             prompt = tool_context + "\n\n" + prompt
         return prompt
@@ -2345,6 +2381,12 @@ class LLMEntityExtractor(EntityExtractor):
 
         sections = "\n".join(f"=== SECTION {i + 1} ===\n{text[:4000]}" for i, text in enumerate(texts))
 
+        # Per-type attribute keys: computed once from the original expertise.
+        # Delivered to the custom multi-section builder as the {{ attribute_schema }}
+        # template variable (mirroring tool_context), and placed adjacent to the
+        # general attributes nudge in the hardcoded fallback builder.
+        attribute_schema = self._build_attribute_schema_block(expertise, entity_types)
+
         # If expertise has custom extraction prompt, use it with multi-section adaptation
         if expertise and expertise.extraction_prompt:
             from khora.extraction.skills.composer import ExpertiseComposer
@@ -2371,6 +2413,7 @@ For each entity, emit "attributes" as an array of {"key": ..., "value": ...} str
                 "entity_types": entity_types,
                 "relationship_types": relationship_types,
                 "tool_context": tool_context or "",
+                "attribute_schema": attribute_schema,
             }
             try:
                 prompt = composer.render_prompt(
@@ -2390,6 +2433,7 @@ For each entity, emit "attributes" as an array of {"key": ..., "value": ...} str
         # Fallback to hardcoded prompt (existing behavior)
         if not expertise or not expertise.extraction_prompt:
             tool_prefix = f"{tool_context}\n\n" if tool_context else ""
+            attr_schema_section = f"\n\n{attribute_schema}" if attribute_schema else ""
             prompt = f"""{tool_prefix}Extract entities, relationships, and events from each text section below.
 
 Entity types to find: {", ".join(entity_types)}
@@ -2404,7 +2448,7 @@ Return a JSON object with a "sections" array, one object per section:
 ]}}
 
 Each section follows the same entity/relationship/event format.
-For each entity, emit "attributes" as an array of {{"key": ..., "value": ...}} string pairs drawn from its salient fields (identifiers, emails, state, urls, dates, etc.).
+For each entity, emit "attributes" as an array of {{"key": ..., "value": ...}} string pairs drawn from its salient fields (identifiers, emails, state, urls, dates, etc.).{attr_schema_section}
 Return ONLY valid JSON, no other text."""
 
         try:

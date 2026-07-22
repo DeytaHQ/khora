@@ -247,7 +247,9 @@ class TestBuildContexts:
         assert "author" in out
         assert "labels" in out
 
-    def test_tool_context_with_entity_attribute_hints(self) -> None:
+    def test_tool_context_omits_entity_attribute_hints(self) -> None:
+        """Per-type attribute keys no longer live in tool context (moved to the
+        ungated ATTRIBUTE SCHEMA block); tool fields still render."""
         ex = LLMEntityExtractor()
         et = MagicMock()
         et.name = "PERSON"
@@ -258,8 +260,10 @@ class TestBuildContexts:
         expertise.entity_types = [et]
 
         out = ex._build_tool_context(expertise, {"source_tool": "slack"})
-        assert "PERSON" in out
-        assert "required: name" in out
+        assert "EXPECTED ENTITY ATTRIBUTES" not in out
+        assert "required: name" not in out
+        # SOURCE CONTEXT tool-field output stays intact.
+        assert "author" in out
 
     def test_document_context_empty(self) -> None:
         assert LLMEntityExtractor._build_document_context(None) == ""
