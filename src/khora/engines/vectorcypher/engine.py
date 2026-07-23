@@ -287,6 +287,35 @@ def _build_remember_metadata(extraction_diagnostics: dict[str, Any] | None) -> d
     return metadata
 
 
+def _build_batch_metadata(
+    extraction_diagnostics: dict[str, Any] | None,
+    per_document: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Batch-level ``BatchResult.metadata``: extraction diagnostics + document failures (#1538).
+
+    #1410 aggregated *extraction* failures onto the batch metadata so a batch
+    with silently-dropped entities does not look successful. A document-creation
+    or replacement rejection (e.g. a caller value exceeding a ``documents``
+    column limit) is the same class of silent loss: counted in ``failed`` but,
+    before this, invisible at batch granularity. A caller whose retry/resume
+    works per batch reads ``metadata``, not ``per_document`` - so the failures
+    are surfaced here too. ``document_errors`` is the count; ``failed_documents``
+    lists each ``{index, external_id, error}`` (the same diagnostic already on
+    the per-document slot). Empty when no document failed, so the happy path
+    leaves ``metadata`` unchanged.
+    """
+    metadata = _build_remember_metadata(extraction_diagnostics)
+    failed_documents = [
+        {"index": i, "external_id": pd.get("external_id"), "error": pd["error"]}
+        for i, pd in enumerate(per_document)
+        if pd and pd.get("error") is not None
+    ]
+    if failed_documents:
+        metadata["document_errors"] = len(failed_documents)
+        metadata["failed_documents"] = failed_documents
+    return metadata
+
+
 def _merge_extraction_diagnostics(target: dict[str, Any], part: dict[str, Any] | None) -> None:
     """Fold one diagnostics dict into a batch-level aggregate (#1410).
 
@@ -3457,11 +3486,12 @@ class VectorCypherEngine:
 
         if not active_indices:
             _resolve_intra_batch_dups()
+            _pd = _finalize_per_document()
             return BatchResult(
                 total=total,
                 **results,
-                metadata=_build_remember_metadata(extraction_diagnostics),
-                per_document=_finalize_per_document(),
+                metadata=_build_batch_metadata(extraction_diagnostics, _pd),
+                per_document=_pd,
             )
 
         # ── Conversation mode detection ─────────────────────────────────
@@ -3584,11 +3614,12 @@ class VectorCypherEngine:
 
         if not ok_states:
             _resolve_intra_batch_dups()
+            _pd = _finalize_per_document()
             return BatchResult(
                 total=total,
                 **results,
-                metadata=_build_remember_metadata(extraction_diagnostics),
-                per_document=_finalize_per_document(),
+                metadata=_build_batch_metadata(extraction_diagnostics, _pd),
+                per_document=_pd,
             )
 
         # ── Build processing windows ─────────────────────────────────────
@@ -4204,6 +4235,7 @@ class VectorCypherEngine:
         )
 
         _resolve_intra_batch_dups()
+        _pd = _finalize_per_document()
         return BatchResult(
             total=total,
             processed=results["processed"],
@@ -4212,8 +4244,8 @@ class VectorCypherEngine:
             chunks=results["chunks"],
             entities=results["entities"],
             relationships=results["relationships"],
-            metadata=_build_remember_metadata(extraction_diagnostics),
-            per_document=_finalize_per_document(),
+            metadata=_build_batch_metadata(extraction_diagnostics, _pd),
+            per_document=_pd,
         )
 
     async def _remember_batch_legacy(
@@ -4383,7 +4415,7 @@ class VectorCypherEngine:
         return BatchResult(
             total=total,
             **results,
-            metadata=_build_remember_metadata(extraction_diagnostics),
+            metadata=_build_batch_metadata(extraction_diagnostics, per_document),
             per_document=per_document,
         )
 

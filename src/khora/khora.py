@@ -1764,6 +1764,12 @@ class Khora:
                 - source_timestamp: datetime (optional) — overrides top-level kwarg per doc
                 - metadata: dict (optional)
                 - external_id: str (optional) — caller-supplied external identifier
+                Caller-supplied string fields are length-bounded by the
+                ``documents`` columns; over-long values are rejected at insert.
+                The tighter ones are surprising: ``source_name`` and
+                ``source_type`` (64), ``language`` (10), ``content_type`` (128),
+                ``author`` (255) — vs ``title`` (512) and ``source`` (1024). A
+                rejected document is reported (see Returns), not silently dropped.
             namespace: Namespace UUID (as UUID or string)
             skill_name: Extraction skill to use
             source_type: Default provenance category for docs that don't supply one.
@@ -1803,7 +1809,13 @@ class Khora:
             BatchResult with aggregated statistics. ``per_document`` carries a
             per-input breakdown (document_id, source, chunks, entities,
             skipped) including checksum-skipped duplicates, whose entry holds
-            the already-stored document's id.
+            the already-stored document's id. A document that failed to store
+            (e.g. a value exceeding a column limit above) additionally carries
+            its ``external_id`` and an ``error`` string, and is aggregated onto
+            ``BatchResult.metadata`` as ``document_errors`` (count) +
+            ``failed_documents`` (``{index, external_id, error}`` list) — so a
+            caller doing batch-granular retry sees the failure without walking
+            ``per_document`` (#1538).
         """
         import time as _time
 
