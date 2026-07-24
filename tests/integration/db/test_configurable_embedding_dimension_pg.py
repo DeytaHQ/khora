@@ -29,8 +29,6 @@ from uuid import uuid4
 
 import asyncpg
 import pytest
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
 
 from khora.db.session import run_migrations
 
@@ -117,37 +115,32 @@ async def isolated_db() -> AsyncIterator[Callable[[], Awaitable[str]]]:
 
 
 async def _column_type(url: str, table: str, column: str) -> str | None:
-    """Return the fully-qualified column type (e.g. ``vector(3072)``) or None."""
-    eng = create_async_engine(url)
+    """Return the fully-qualified column type (e.g. ``vector(3072)``) or None.
+
+    Uses asyncpg directly — this project ships only the asyncpg driver, so a
+    SQLAlchemy engine built from a bare ``postgresql://`` URL would resolve to
+    the (absent) psycopg2 dialect.
+    """
+    conn = await _asyncpg_connect(url)
     try:
-        async with eng.connect() as conn:
-            return (
-                await conn.execute(
-                    text(
-                        "SELECT format_type(a.atttypid, a.atttypmod) "
-                        "FROM pg_attribute a JOIN pg_class c ON a.attrelid = c.oid "
-                        "JOIN pg_namespace n ON c.relnamespace = n.oid "
-                        "WHERE n.nspname = 'public' AND c.relname = :t AND a.attname = :col"
-                    ),
-                    {"t": table, "col": column},
-                )
-            ).scalar()
+        return await conn.fetchval(
+            "SELECT format_type(a.atttypid, a.atttypmod) "
+            "FROM pg_attribute a JOIN pg_class c ON a.attrelid = c.oid "
+            "JOIN pg_namespace n ON c.relnamespace = n.oid "
+            "WHERE n.nspname = 'public' AND c.relname = $1 AND a.attname = $2",
+            table,
+            column,
+        )
     finally:
-        await eng.dispose()
+        await conn.close()
 
 
 async def _index_def(url: str, index_name: str) -> str | None:
-    eng = create_async_engine(url)
+    conn = await _asyncpg_connect(url)
     try:
-        async with eng.connect() as conn:
-            return (
-                await conn.execute(
-                    text("SELECT indexdef FROM pg_indexes WHERE indexname = :n"),
-                    {"n": index_name},
-                )
-            ).scalar()
+        return await conn.fetchval("SELECT indexdef FROM pg_indexes WHERE indexname = $1", index_name)
     finally:
-        await eng.dispose()
+        await conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -314,29 +307,22 @@ async def test_remember_stores_3072_vector_end_to_end(
         # engine writes chunks to khora_chunks and entities to the ORM
         # ``entities`` table — both bind through pgvector types that enforce the
         # dimension, so this exercises repro (b) on both write paths.
-        eng = create_async_engine(url)
+        conn = await _asyncpg_connect(url)
         try:
-            async with eng.connect() as conn:
-                chunk_dims = (
-                    (
-                        await conn.execute(
-                            text("SELECT vector_dims(embedding) FROM khora_chunks WHERE embedding IS NOT NULL")
-                        )
-                    )
-                    .scalars()
-                    .all()
+            chunk_dims = [
+                r["d"]
+                for r in await conn.fetch(
+                    "SELECT vector_dims(embedding) AS d FROM khora_chunks WHERE embedding IS NOT NULL"
                 )
-                entity_dims = (
-                    (
-                        await conn.execute(
-                            text("SELECT vector_dims(embedding) FROM entities WHERE embedding IS NOT NULL")
-                        )
-                    )
-                    .scalars()
-                    .all()
+            ]
+            entity_dims = [
+                r["d"]
+                for r in await conn.fetch(
+                    "SELECT vector_dims(embedding) AS d FROM entities WHERE embedding IS NOT NULL"
                 )
+            ]
         finally:
-            await eng.dispose()
+            await conn.close()
         assert chunk_dims, "no chunk embedding was stored"
         assert all(d == EMBED_DIM_3072 for d in chunk_dims), chunk_dims
         assert entity_dims, "no entity embedding was stored"
