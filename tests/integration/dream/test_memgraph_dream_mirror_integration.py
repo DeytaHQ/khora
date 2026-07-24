@@ -71,7 +71,11 @@ pytestmark = [
     ),
 ]
 
-EMBED_DIM = 4
+# Must match the shared integration DB's 1536-dim pgvector columns. Since #1260
+# the column follows llm.embedding_dimension at migration time, so a non-1536
+# value here would resize the shared DB and break other tests. These tests seed
+# NULL-embedding entities and never embed, so the exact value is irrelevant.
+EMBED_DIM = 1536
 
 
 @pytest.fixture

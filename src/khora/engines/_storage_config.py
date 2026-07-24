@@ -69,7 +69,12 @@ def build_storage_config(config: KhoraConfig, *, skip_graph: bool = False) -> St
         "postgresql_max_overflow": config.storage.postgresql_max_overflow,
         "postgresql_pool_pre_ping": getattr(config.storage, "postgresql_pool_pre_ping", False),
         "postgresql_upsert_commit_interval": getattr(config.storage, "postgresql_upsert_commit_interval", 0),
-        "pgvector_embedding_dimension": config.storage.embedding_dimension,
+        # Follow the authoritative embedder-facing dimension so the runtime
+        # backend casts to the same width the columns/indexes were sized to by
+        # migration (#1260). The legacy path reads this; the new-style path
+        # reads vector_config.embedding_dimension, which get_vector_config()
+        # stamps from the same source.
+        "pgvector_embedding_dimension": config.get_effective_embedding_dimension(),
         "pgvector_use_halfvec": config.storage.use_halfvec,
         # Query-time HNSW accuracy (KHORA_STORAGE_HNSW_EF_SEARCH). Wired
         # end-to-end so PgVectorBackend honors it, matching the temporal

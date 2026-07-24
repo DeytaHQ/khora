@@ -15,6 +15,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
+from khora.db.migrations._schema_config import full_precision_hnsw_supported
+
 # revision identifiers, used by Alembic.
 revision: str = "005_index_improvements"
 down_revision: str | Sequence[str] | None = "004_add_temporal_tables"
@@ -45,23 +47,26 @@ def upgrade() -> None:
 
         # Rebuild HNSW index with higher ef_construction for better recall.
         # ef_construction=128 (up from default 64) improves recall at build time
-        # with negligible query-time cost.
+        # with negligible query-time cost. Full-precision vector HNSW caps at
+        # 2000 dims; skip the rebuild above that (#1260).
         op.execute("DROP INDEX IF EXISTS ix_khora_chunks_embedding_hnsw")
-        op.execute(
-            "CREATE INDEX ix_khora_chunks_embedding_hnsw "
-            "ON khora_chunks USING hnsw (embedding vector_cosine_ops) "
-            "WITH (m = 16, ef_construction = 128)"
-        )
+        if full_precision_hnsw_supported():
+            op.execute(
+                "CREATE INDEX ix_khora_chunks_embedding_hnsw "
+                "ON khora_chunks USING hnsw (embedding vector_cosine_ops) "
+                "WITH (m = 16, ef_construction = 128)"
+            )
 
 
 def downgrade() -> None:
     if op.get_bind().dialect.name != "postgresql":
         return
     op.execute("DROP INDEX IF EXISTS ix_khora_chunks_embedding_hnsw")
-    op.execute(
-        "CREATE INDEX ix_khora_chunks_embedding_hnsw "
-        "ON khora_chunks USING hnsw (embedding vector_cosine_ops) "
-        "WITH (m = 16, ef_construction = 64)"
-    )
+    if full_precision_hnsw_supported():
+        op.execute(
+            "CREATE INDEX ix_khora_chunks_embedding_hnsw "
+            "ON khora_chunks USING hnsw (embedding vector_cosine_ops) "
+            "WITH (m = 16, ef_construction = 64)"
+        )
     op.execute("DROP INDEX IF EXISTS ix_khora_chunks_ns_occurred")
     op.execute("DROP INDEX IF EXISTS ix_khora_chunks_tags_gin")
