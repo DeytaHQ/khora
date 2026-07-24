@@ -287,6 +287,35 @@ def _build_remember_metadata(extraction_diagnostics: dict[str, Any] | None) -> d
     return metadata
 
 
+def _build_batch_metadata(
+    extraction_diagnostics: dict[str, Any] | None,
+    per_document: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Batch-level ``BatchResult.metadata``: extraction diagnostics + document failures (#1538).
+
+    #1410 aggregated *extraction* failures onto the batch metadata so a batch
+    with silently-dropped entities does not look successful. A document-creation
+    or replacement rejection (e.g. a caller value exceeding a ``documents``
+    column limit) is the same class of silent loss: counted in ``failed`` but,
+    before this, invisible at batch granularity. A caller whose retry/resume
+    works per batch reads ``metadata``, not ``per_document`` - so the failures
+    are surfaced here too. ``document_errors`` is the count; ``failed_documents``
+    lists each ``{index, external_id, error}`` (the same diagnostic already on
+    the per-document slot). Empty when no document failed, so the happy path
+    leaves ``metadata`` unchanged.
+    """
+    metadata = _build_remember_metadata(extraction_diagnostics)
+    failed_documents = [
+        {"index": i, "external_id": pd.get("external_id"), "error": pd["error"]}
+        for i, pd in enumerate(per_document)
+        if pd and pd.get("error") is not None
+    ]
+    if failed_documents:
+        metadata["document_errors"] = len(failed_documents)
+        metadata["failed_documents"] = failed_documents
+    return metadata
+
+
 def _merge_extraction_diagnostics(target: dict[str, Any], part: dict[str, Any] | None) -> None:
     """Fold one diagnostics dict into a batch-level aggregate (#1410).
 
@@ -3296,14 +3325,19 @@ class VectorCypherEngine:
             chunks: int = 0,
             entities: int = 0,
             skipped: bool = False,
+            error: str | None = None,
         ) -> None:
-            per_document[idx] = {
+            entry: dict[str, Any] = {
                 "document_id": document_id,
                 "source": documents[idx].get("source") or None,
                 "chunks": chunks,
                 "entities": entities,
                 "skipped": skipped,
             }
+            if error is not None:
+                entry["external_id"] = documents[idx].get("external_id")
+                entry["error"] = error
+            per_document[idx] = entry
 
         def _finalize_per_document() -> list[dict[str, Any]]:
             # Defensive: every index should have been recorded by now; a None
@@ -3392,7 +3426,7 @@ class VectorCypherEngine:
             except Exception as e:
                 logger.error(f"Failed to replace document external_id={ext_id!r}: {e}")
                 results["failed"] += 1
-                _record_doc(idx, document_id=None)
+                _record_doc(idx, document_id=None, error=str(e))
             external_id_handled.add(idx)
             _report_progress()
 
@@ -3462,11 +3496,12 @@ class VectorCypherEngine:
 
         if not active_indices:
             _resolve_intra_batch_dups()
+            _pd = _finalize_per_document()
             return BatchResult(
                 total=total,
                 **results,
-                metadata=_build_remember_metadata(extraction_diagnostics),
-                per_document=_finalize_per_document(),
+                metadata=_build_batch_metadata(extraction_diagnostics, _pd),
+                per_document=_pd,
             )
 
         # ── Conversation mode detection ─────────────────────────────────
@@ -3513,6 +3548,7 @@ class VectorCypherEngine:
             embed_texts: list[str] = field(default_factory=list)
             occurred_at: datetime | None = None
             failed: bool = False
+            error: str | None = None
 
         doc_states: list[_DocState] = []
         sem = asyncio.Semaphore(max_concurrent)
@@ -3564,6 +3600,7 @@ class VectorCypherEngine:
             except Exception as e:
                 logger.error(f"Failed to create/chunk document {idx}: {e}")
                 state.failed = True
+                state.error = str(e)
             return state
 
         doc_states = await asyncio.gather(*[_create_and_chunk(idx) for idx in active_indices])
@@ -3574,7 +3611,7 @@ class VectorCypherEngine:
         for s in failed_states:
             if s.failed:
                 results["failed"] += 1
-                _record_doc(s.idx, document_id=s.document.id if s.document else None)
+                _record_doc(s.idx, document_id=s.document.id if s.document else None, error=s.error)
             elif not s.raw_chunks and s.document:
                 s.document.mark_completed(0, 0)
                 await storage.update_document(s.document)
@@ -3587,11 +3624,12 @@ class VectorCypherEngine:
 
         if not ok_states:
             _resolve_intra_batch_dups()
+            _pd = _finalize_per_document()
             return BatchResult(
                 total=total,
                 **results,
-                metadata=_build_remember_metadata(extraction_diagnostics),
-                per_document=_finalize_per_document(),
+                metadata=_build_batch_metadata(extraction_diagnostics, _pd),
+                per_document=_pd,
             )
 
         # ── Build processing windows ─────────────────────────────────────
@@ -4207,6 +4245,7 @@ class VectorCypherEngine:
         )
 
         _resolve_intra_batch_dups()
+        _pd = _finalize_per_document()
         return BatchResult(
             total=total,
             processed=results["processed"],
@@ -4215,8 +4254,8 @@ class VectorCypherEngine:
             chunks=results["chunks"],
             entities=results["entities"],
             relationships=results["relationships"],
-            metadata=_build_remember_metadata(extraction_diagnostics),
-            per_document=_finalize_per_document(),
+            metadata=_build_batch_metadata(extraction_diagnostics, _pd),
+            per_document=_pd,
         )
 
     async def _remember_batch_legacy(
@@ -4386,7 +4425,7 @@ class VectorCypherEngine:
         return BatchResult(
             total=total,
             **results,
-            metadata=_build_remember_metadata(extraction_diagnostics),
+            metadata=_build_batch_metadata(extraction_diagnostics, per_document),
             per_document=per_document,
         )
 
