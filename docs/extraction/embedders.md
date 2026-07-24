@@ -245,20 +245,32 @@ results = batch_dot_product(query_embedding, candidate_embeddings, threshold=0.3
 
 ## Important: Dimension Matching
 
-Your database must match your embedding dimension:
+On Postgres the embedding column and its HNSW index are sized from
+`llm.embedding_dimension` when a **fresh** database is migrated. The default
+stays `1536`; other models work too — including `text-embedding-3-large` at its
+full `3072` width, which previously failed on Postgres:
 
-```sql
--- For text-embedding-3-small (1536 dimensions)
-CREATE TABLE chunks (
-    id UUID PRIMARY KEY,
-    embedding vector(1536),  -- Must match!
-    ...
-);
+```python
+KhoraConfig(
+    storage={"backend": "postgres"},  # use_halfvec defaults to True
+    llm={"embedding_model": "text-embedding-3-large", "embedding_dimension": 3072},
+)
 ```
 
-If you change embedding models, you need to:
-1. Re-embed all content
-2. Update (or recreate) the database schema
+Constraints (enforced at config time by a Postgres-only guardrail):
+
+- Dimensions above **2000** require **halfvec** (`storage.use_halfvec`, on by
+  default), which raises the HNSW-indexable ceiling to **4000**. With halfvec
+  disabled the ceiling is **2000**.
+- Above 4000 (or above 2000 with halfvec off), request a shortened dimension via
+  the model's `dimensions` parameter (e.g. `text-embedding-3-large` supports
+  256–3072).
+
+The dimension is **fixed at fresh-DB creation** — an existing, populated
+database cannot be resized in place. To change embedding dimension:
+
+1. Migrate a **fresh** database at the new dimension (or drop and re-create), and
+2. Re-embed all content.
 
 This is why choosing a model upfront matters.
 

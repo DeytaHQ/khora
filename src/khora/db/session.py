@@ -7,6 +7,7 @@ import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from functools import partial
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -188,11 +189,21 @@ async def close_db() -> None:
     await get_default_manager().close_db()
 
 
-def _run_migrations_sync(database_url: str | None = None) -> MigrationResult:
+def _run_migrations_sync(
+    database_url: str | None = None,
+    *,
+    embedding_dimension: int | None = None,
+    use_halfvec: bool | None = None,
+) -> MigrationResult:
     """Run Alembic migrations synchronously.
 
     Args:
         database_url: PostgreSQL URL. Falls back to KHORA_DATABASE_URL env var.
+        embedding_dimension: Effective embedding dimension to size fresh pgvector
+            columns / HNSW indexes from. ``None`` leaves the historical 1536
+            default in place (env.py reads it via ``config.attributes``).
+        use_halfvec: Whether halfvec HNSW indexes should be created on fresh
+            databases. ``None`` leaves the default (True) in place.
 
     Returns:
         MigrationResult with outcome details.
@@ -223,6 +234,13 @@ def _run_migrations_sync(database_url: str | None = None) -> MigrationResult:
     alembic_cfg.set_main_option("script_location", migrations_dir)
     alembic_cfg.set_main_option("sqlalchemy.url", "")  # unused, env.py reads attributes
     alembic_cfg.attributes["database_url"] = url
+    # Flow the effective embedding dimension (and halfvec flag) into the schema
+    # so fresh pgvector columns / HNSW indexes are sized from config. Only set
+    # when provided so CLI/standalone `alembic` runs keep the 1536 default.
+    if embedding_dimension is not None:
+        alembic_cfg.attributes["embedding_dimension"] = embedding_dimension
+    if use_halfvec is not None:
+        alembic_cfg.attributes["use_halfvec"] = use_halfvec
 
     try:
         script = ScriptDirectory.from_config(alembic_cfg)
@@ -269,16 +287,33 @@ def _run_migrations_sync(database_url: str | None = None) -> MigrationResult:
         )
 
 
-async def run_migrations(database_url: str | None = None) -> MigrationResult:
+async def run_migrations(
+    database_url: str | None = None,
+    *,
+    embedding_dimension: int | None = None,
+    use_halfvec: bool | None = None,
+) -> MigrationResult:
     """Run database migrations using Alembic.
 
     Runs in a thread pool to avoid blocking the event loop.
 
     Args:
         database_url: PostgreSQL URL. Falls back to KHORA_DATABASE_URL env var.
+        embedding_dimension: Effective embedding dimension for fresh pgvector
+            columns / HNSW indexes. ``None`` keeps the historical 1536 default.
+        use_halfvec: Whether to create halfvec HNSW indexes on fresh databases.
+            ``None`` keeps the default (True).
 
     Returns:
         MigrationResult with outcome details.
     """
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _run_migrations_sync, database_url)
+    return await loop.run_in_executor(
+        None,
+        partial(
+            _run_migrations_sync,
+            database_url,
+            embedding_dimension=embedding_dimension,
+            use_halfvec=use_halfvec,
+        ),
+    )

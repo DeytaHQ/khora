@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 from loguru import logger
-from pgvector.sqlalchemy import Vector
+from pgvector.sqlalchemy import HALFVEC, Vector
 from sqlalchemy import (
     Column,
     DateTime,
@@ -53,6 +53,10 @@ if TYPE_CHECKING:
 # Table definition for khora_chunks (separate from existing chunks table)
 metadata = MetaData()
 
+# pgvector's ``vector`` HNSW opclass caps at 2000 dims; above that the store
+# switches to a ``halfvec`` cast (cap 4000), mirroring the migration path.
+_VECTOR_HNSW_MAX_DIM = 2000
+
 khora_chunks_table = Table(
     "khora_chunks",
     metadata,
@@ -60,6 +64,10 @@ khora_chunks_table = Table(
     Column("namespace_id", PG_UUID(as_uuid=True), nullable=False, index=True),
     Column("document_id", PG_UUID(as_uuid=True), nullable=False, index=True),
     Column("content", Text, nullable=False),
+    # Dimension is a placeholder (1536); PgVectorTemporalStore.connect() resizes
+    # this column type to the configured embedding dimension before DDL / insert
+    # (#1260). Single dimension per deployment — multi-space routing is a future
+    # phase.
     Column("embedding", Vector(1536), nullable=True),
     # Temporal fields
     Column("occurred_at", DateTime(timezone=True), nullable=True),
@@ -128,6 +136,9 @@ class PgVectorTemporalStore(TemporalVectorStore):
         self._shared_engine = engine is not None
         self._connected = False
         self._embedding_dimension = config.llm.embedding_dimension or 1536
+        # Above the full-precision vector HNSW limit, index/search via a halfvec
+        # cast (#1260). The config guard requires use_halfvec for these dims.
+        self._use_halfvec_index = self._embedding_dimension > _VECTOR_HNSW_MAX_DIM
         self._hnsw_m: int = config.storage.hnsw_m
         self._hnsw_ef_construction: int = config.storage.hnsw_ef_construction
         self._hnsw_ef_search: int = config.storage.hnsw_ef_search
@@ -166,6 +177,13 @@ class PgVectorTemporalStore(TemporalVectorStore):
                 },
             )
 
+        # Size the embedding column from the configured dimension before DDL /
+        # inserts (#1260). Replace the type object (not mutate .dim) so
+        # SQLAlchemy's statement cache keys on it. connect() always precedes any
+        # write, and a deployment uses a single dimension, so this is safe.
+        if getattr(khora_chunks_table.c.embedding.type, "dim", None) != self._embedding_dimension:
+            khora_chunks_table.c.embedding.type = Vector(self._embedding_dimension)
+
         # Create tables if they don't exist
         async with self._engine.begin() as conn:
             await conn.run_sync(metadata.create_all)
@@ -189,11 +207,17 @@ class PgVectorTemporalStore(TemporalVectorStore):
                 """)
             )
 
-            # Create HNSW index on embedding
+            # Create HNSW index on embedding. Full-precision vector HNSW caps at
+            # 2000 dims; above that use a halfvec expression index (cap 4000),
+            # matching the halfvec cast in _vector_search (#1260).
+            if self._use_halfvec_index:
+                index_target = f"(embedding::halfvec({self._embedding_dimension})) halfvec_cosine_ops"
+            else:
+                index_target = "embedding vector_cosine_ops"
             await conn.execute(
                 text(f"""
                 CREATE INDEX IF NOT EXISTS ix_khora_chunks_embedding_hnsw
-                ON khora_chunks USING hnsw (embedding vector_cosine_ops)
+                ON khora_chunks USING hnsw ({index_target})
                 WITH (m = {self._hnsw_m}, ef_construction = {self._hnsw_ef_construction})
                 """)
             )
@@ -629,8 +653,15 @@ class PgVectorTemporalStore(TemporalVectorStore):
 
         # ORDER BY the raw distance operator ascending - the only form the
         # HNSW index can serve (#1407). Similarity (1 - distance) is computed
-        # in the projection only.
-        distance = khora_chunks_table.c.embedding.cosine_distance(query_embedding)
+        # in the projection only. Above the vector HNSW limit, cast both sides
+        # to halfvec so the expression matches the halfvec index (#1260).
+        if self._use_halfvec_index:
+            dim = self._embedding_dimension
+            distance = cast(khora_chunks_table.c.embedding, HALFVEC(dim)).cosine_distance(
+                cast(query_embedding, HALFVEC(dim))
+            )
+        else:
+            distance = khora_chunks_table.c.embedding.cosine_distance(query_embedding)
         similarity = (1 - distance).label("similarity")
 
         # Exclude embedding column — retrieval doesn't need the 1536-float vector

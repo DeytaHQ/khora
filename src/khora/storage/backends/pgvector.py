@@ -260,6 +260,20 @@ class PgVectorBackend(AsyncSessionMixin):
             return
 
         logger.info("Connecting to pgvector...")
+
+        # Size the ORM embedding columns from the configured dimension before
+        # any bind (#1260). This pgvector build enforces the declared dimension
+        # in the bind processor, so the module-level ``Vector(1536)`` on
+        # ChunkModel / EntityModel would reject a non-1536 vector on write. The
+        # actual column width is owned by Alembic; this only aligns the bind
+        # processor. Single dimension per deployment; connect() precedes writes.
+        from pgvector.sqlalchemy import Vector as _Vector
+
+        for _model in (ChunkModel, EntityModel):
+            _col = _model.__table__.c.embedding
+            if getattr(_col.type, "dim", None) != self._embedding_dimension:
+                _col.type = _Vector(self._embedding_dimension)
+
         if self._engine is None:
             self._engine = create_async_engine(
                 self._database_url,

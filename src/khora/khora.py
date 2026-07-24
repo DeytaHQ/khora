@@ -828,7 +828,15 @@ class Khora:
                     db_url = (
                         self._config.database_url.get_secret_value() if self._config.database_url is not None else None
                     )
-                result = await _run_migrations(db_url)
+                # Size fresh pgvector columns / HNSW indexes from the effective
+                # (embedder-facing) dimension so a non-1536 model works on
+                # Postgres end-to-end (#1260). llm.embedding_dimension is the
+                # single source of truth; storage follows it.
+                result = await _run_migrations(
+                    db_url,
+                    embedding_dimension=self._config.get_effective_embedding_dimension(),
+                    use_halfvec=self._config.storage.use_halfvec,
+                )
                 if not result.success:
                     raise RuntimeError(f"Database migration failed: {result.error}")
 

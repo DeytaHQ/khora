@@ -24,6 +24,8 @@ from alembic import op
 from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 
+from khora.db.migrations._schema_config import configured_embedding_dimension, full_precision_hnsw_supported
+
 revision: str = "024_chronicle_events_and_facts"
 down_revision: str | Sequence[str] | None = "023_add_document_relationship_count"
 branch_labels: str | Sequence[str] | None = None
@@ -68,8 +70,9 @@ def upgrade() -> None:
     ]
     if is_postgres:
         # pgvector column lives only on Postgres; sqlite_lance keeps vectors
-        # in LanceDB (Chronicle #7).
-        chronicle_columns.insert(-1, sa.Column("embedding", Vector(1536), nullable=True))
+        # in LanceDB (Chronicle #7). Sized from the configured dimension
+        # (#1260); safe to edit — only fresh creates change.
+        chronicle_columns.insert(-1, sa.Column("embedding", Vector(configured_embedding_dimension()), nullable=True))
     op.create_table("chronicle_events", *chronicle_columns)
 
     op.create_index(
@@ -82,7 +85,9 @@ def upgrade() -> None:
         "chronicle_events",
         ["namespace_id", "subject"],
     )
-    if is_postgres:
+    if is_postgres and full_precision_hnsw_supported():
+        # Full-precision vector HNSW caps at 2000 dims; above that the column
+        # stores the embedding without this index (#1260).
         op.execute(
             "CREATE INDEX ix_chronicle_events_embedding_hnsw "
             "ON chronicle_events USING hnsw (embedding vector_cosine_ops) "

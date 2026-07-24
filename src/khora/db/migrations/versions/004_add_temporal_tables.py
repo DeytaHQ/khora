@@ -23,6 +23,8 @@ from alembic import op
 from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 
+from khora.db.migrations._schema_config import configured_embedding_dimension
+
 # revision identifiers, used by Alembic.
 revision: str = "004_add_temporal_tables"
 down_revision: str | Sequence[str] | None = "003_flexible_type_columns"
@@ -72,7 +74,11 @@ def upgrade() -> None:
         ),
     ]
     if is_postgres:
-        time_node_columns.insert(8, sa.Column("summary_embedding", Vector(1536), nullable=True))
+        # Size from the configured dimension (#1260); safe to edit — Alembic
+        # tracks revision IDs, not body content, so only fresh creates change.
+        time_node_columns.insert(
+            8, sa.Column("summary_embedding", Vector(configured_embedding_dimension()), nullable=True)
+        )
     op.create_table("time_nodes", *time_node_columns)
 
     # Create index for range queries on time_nodes

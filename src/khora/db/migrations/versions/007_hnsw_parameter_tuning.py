@@ -29,6 +29,8 @@ from collections.abc import Sequence
 from alembic import op
 from sqlalchemy import text
 
+from khora.db.migrations._schema_config import full_precision_hnsw_supported
+
 revision: str = "007_hnsw_parameter_tuning"
 down_revision: str | Sequence[str] | None = "006_uuid_as_uuid"
 branch_labels: str | Sequence[str] | None = None
@@ -38,6 +40,13 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     # Postgres-only: pgvector HNSW index tuning. No SQLite equivalent.
     if op.get_bind().dialect.name != "postgresql":
+        return
+    # Every rebuild here targets a full-precision ``vector`` HNSW index, which
+    # pgvector caps at 2000 dims. Above that the index was never created
+    # (migrations 002/005 skip it) and the halfvec expression index (018) is
+    # used instead, so there is nothing to tune (#1260). Safe to edit — only
+    # fresh creates at a non-1536 dimension reach this.
+    if not full_precision_hnsw_supported():
         return
     # Each index rebuild uses CREATE CONCURRENTLY (new name) then DROP CONCURRENTLY (old name).
     # CONCURRENTLY cannot run inside a transaction, so we use autocommit blocks.
@@ -96,6 +105,10 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     if op.get_bind().dialect.name != "postgresql":
+        return
+    # Mirror upgrade(): nothing to rebuild when full-precision vector HNSW is
+    # not indexable at the configured dimension (#1260).
+    if not full_precision_hnsw_supported():
         return
     # --- chunks HNSW index ---
     with op.get_context().autocommit_block():
