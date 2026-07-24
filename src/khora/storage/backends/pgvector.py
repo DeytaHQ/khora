@@ -48,6 +48,29 @@ except ImportError:
 _DEADLOCK_MAX_RETRIES = 3
 
 
+# Process-wide single-embedding-dimension guard (#1260). ChunkModel / EntityModel
+# carry a module-level ``embedding`` column type resized at connect() from
+# config; binding two different dimensions in one process would silently corrupt
+# writes (this pgvector build enforces the declared dimension in the bind
+# processor). A single embedding dimension per deployment is the supported model
+# (multi-dimension is a future phase), so a conflicting concurrent bind fails
+# loudly here. Best-effort: released on disconnect so sequential reconnection at
+# a new dimension (a redeploy, or the test suite) is allowed.
+_bound_embedding_dim: int | None = None
+
+
+def _bind_process_embedding_dim(dim: int) -> None:
+    global _bound_embedding_dim
+    if _bound_embedding_dim is not None and _bound_embedding_dim != dim:
+        raise RuntimeError(
+            f"pgvector embedding dimension is already bound to {_bound_embedding_dim} "
+            f"in this process; cannot also bind {dim}. A single embedding dimension per "
+            f"process is supported (multi-dimension is a future phase) — run separate "
+            f"processes for different embedding dimensions."
+        )
+    _bound_embedding_dim = dim
+
+
 # Bi-temporal soft-delete read filters (#888 / #970 / #1272). Now that dream
 # apply mirrors its PG tombstones to the graph backend (Neo4j), the read path
 # filters on the soft-delete columns so pruned / merged rows are hidden in
@@ -266,9 +289,12 @@ class PgVectorBackend(AsyncSessionMixin):
         # in the bind processor, so the module-level ``Vector(1536)`` on
         # ChunkModel / EntityModel would reject a non-1536 vector on write. The
         # actual column width is owned by Alembic; this only aligns the bind
-        # processor. Single dimension per deployment; connect() precedes writes.
+        # processor. The guard rejects a conflicting concurrent dimension loudly
+        # instead of silently corrupting a co-resident instance's writes; the
+        # slot is released on disconnect so a redeploy / test can rebind.
         from pgvector.sqlalchemy import Vector as _Vector
 
+        _bind_process_embedding_dim(self._embedding_dimension)
         for _model in (ChunkModel, EntityModel):
             _col = _model.__table__.c.embedding
             if getattr(_col.type, "dim", None) != self._embedding_dimension:
@@ -328,6 +354,10 @@ class PgVectorBackend(AsyncSessionMixin):
                 await self._engine.dispose()
             self._engine = None
             self._session_factory = None
+            # Release the process-wide dimension slot so a redeploy / test can
+            # rebind at a different dimension (#1260).
+            global _bound_embedding_dim
+            _bound_embedding_dim = None
             logger.info("Disconnected from pgvector")
 
     async def is_healthy(self) -> bool:

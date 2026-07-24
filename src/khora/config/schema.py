@@ -9,6 +9,7 @@ from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
 import yaml
+from loguru import logger
 from pydantic import AliasChoices, BaseModel, Discriminator, Field, SecretStr, Tag, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -19,6 +20,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Issue #576 Phase 1 Item 4.
 from khora.config._secrets import AllowSecretTyping
 from khora.config.llm import DEFAULT_API_KEY_ENV, derive_api_key_env
+
+# pgvector HNSW opclass dimension ceilings live in the migration-side module so
+# the config-time guard and the migration-time index sizing share one source of
+# truth and cannot drift apart (#1260). ``_schema_config`` is a leaf (only reads
+# the Alembic context), so this import adds no heavy dependency or cycle.
+from khora.db.migrations._schema_config import (
+    HALFVEC_HNSW_MAX_DIM as _PGVECTOR_HALFVEC_MAX_DIM,
+)
+from khora.db.migrations._schema_config import (
+    VECTOR_HNSW_MAX_DIM as _PGVECTOR_VECTOR_MAX_DIM,
+)
 from khora.dream.config import DreamConfig
 from khora.hooks.models import SemanticHooksConfig as _SemanticHooksConfig
 
@@ -829,13 +841,6 @@ GraphConfig = Annotated[
 # ---------------------------------------------------------------------------
 # Vector backend configs (discriminated union on "backend" field)
 # ---------------------------------------------------------------------------
-
-
-# pgvector HNSW opclass dimension ceilings. ``vector`` (float32) indexes cap at
-# 2000 dims; ``halfvec`` (float16) at 4000. The Postgres embedding-dimension
-# guard (`KhoraConfig._guard_postgres_embedding_dimension`) enforces these.
-_PGVECTOR_VECTOR_MAX_DIM = 2000
-_PGVECTOR_HALFVEC_MAX_DIM = 4000
 
 
 class PgVectorConfig(BaseModel):
@@ -2734,9 +2739,20 @@ class KhoraConfig(BaseSettings):
             # pgvector/PostgreSQL URL. Both are SecretStr; unwrap so Pydantic
             # re-wraps consistently.
             url = _secret_value(vector.url) or _secret_value(self.storage.pgvector_url) or self.get_postgresql_url()
+            effective_dim = self.get_effective_embedding_dimension()
+            if vector.embedding_dimension != effective_dim:
+                # Storage follows llm (the embedder-facing dimension); an
+                # explicit storage-side value that disagrees is intentionally
+                # ignored, but surface it so it isn't silently mystifying.
+                logger.debug(
+                    "storage.vector.embedding_dimension={} ignored on pgvector; using "
+                    "llm.embedding_dimension={} (the embedder-facing source of truth).",
+                    vector.embedding_dimension,
+                    effective_dim,
+                )
             return PgVectorConfig(
                 url=url,
-                embedding_dimension=self.get_effective_embedding_dimension(),
+                embedding_dimension=effective_dim,
             )
         return vector
 

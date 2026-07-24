@@ -41,6 +41,7 @@ from khora.core.temporal import (
     TemporalSearchResult,
     temporal_chunk_to_chunk,
 )
+from khora.db.migrations._schema_config import VECTOR_HNSW_MAX_DIM
 from khora.filter.model import Op
 from khora.filter.report import ChannelPlan
 from khora.storage.temporal import TemporalVectorStore
@@ -53,9 +54,28 @@ if TYPE_CHECKING:
 # Table definition for khora_chunks (separate from existing chunks table)
 metadata = MetaData()
 
-# pgvector's ``vector`` HNSW opclass caps at 2000 dims; above that the store
-# switches to a ``halfvec`` cast (cap 4000), mirroring the migration path.
-_VECTOR_HNSW_MAX_DIM = 2000
+# Process-wide single-embedding-dimension guard (#1260). ``khora_chunks_table``
+# is a module-level object whose ``embedding`` column type is resized at
+# connect() from config; binding two different dimensions in one process would
+# silently corrupt writes. A single embedding dimension per deployment is the
+# supported model (simultaneous multiple dimensions is a future phase), so a
+# conflicting concurrent bind fails loudly here instead. Best-effort: the slot
+# is cleared on disconnect, so sequential reconnection at a new dimension (a
+# redeploy, or the test suite) is allowed.
+_bound_embedding_dim: int | None = None
+
+
+def _bind_process_embedding_dim(dim: int) -> None:
+    global _bound_embedding_dim
+    if _bound_embedding_dim is not None and _bound_embedding_dim != dim:
+        raise RuntimeError(
+            f"khora_chunks embedding dimension is already bound to {_bound_embedding_dim} "
+            f"in this process; cannot also bind {dim}. A single embedding dimension per "
+            f"process is supported (multi-dimension is a future phase) — run separate "
+            f"processes for different embedding dimensions."
+        )
+    _bound_embedding_dim = dim
+
 
 khora_chunks_table = Table(
     "khora_chunks",
@@ -138,7 +158,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
         self._embedding_dimension = config.llm.embedding_dimension or 1536
         # Above the full-precision vector HNSW limit, index/search via a halfvec
         # cast (#1260). The config guard requires use_halfvec for these dims.
-        self._use_halfvec_index = self._embedding_dimension > _VECTOR_HNSW_MAX_DIM
+        self._use_halfvec_index = self._embedding_dimension > VECTOR_HNSW_MAX_DIM
         self._hnsw_m: int = config.storage.hnsw_m
         self._hnsw_ef_construction: int = config.storage.hnsw_ef_construction
         self._hnsw_ef_search: int = config.storage.hnsw_ef_search
@@ -180,7 +200,9 @@ class PgVectorTemporalStore(TemporalVectorStore):
         # Size the embedding column from the configured dimension before DDL /
         # inserts (#1260). Replace the type object (not mutate .dim) so
         # SQLAlchemy's statement cache keys on it. connect() always precedes any
-        # write, and a deployment uses a single dimension, so this is safe.
+        # write. The guard rejects a conflicting concurrent dimension loudly
+        # instead of silently corrupting a co-resident instance's writes.
+        _bind_process_embedding_dim(self._embedding_dimension)
         if getattr(khora_chunks_table.c.embedding.type, "dim", None) != self._embedding_dimension:
             khora_chunks_table.c.embedding.type = Vector(self._embedding_dimension)
 
@@ -296,6 +318,10 @@ class PgVectorTemporalStore(TemporalVectorStore):
             await self._engine.dispose()
             self._engine = None
         self._connected = False
+        # Release the process-wide dimension slot so a redeploy / test can
+        # rebind at a different dimension (#1260).
+        global _bound_embedding_dim
+        _bound_embedding_dim = None
         logger.info("PgVectorTemporalStore disconnected")
 
     async def _probe_iterative_scan_supported(self, session: AsyncSession) -> bool:

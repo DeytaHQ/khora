@@ -23,25 +23,43 @@ from alembic import context
 # injected, non-default dimension.
 DEFAULT_EMBEDDING_DIMENSION = 1536
 
-# pgvector index dimension ceilings. The ``vector`` HNSW opclass caps at 2000
-# dims; the ``halfvec`` opclass caps at 4000. Above 2000 only the halfvec
-# expression index (migration 018) can be built, so the full-precision
-# ``vector`` HNSW indexes (migrations 002 / 005 / 007) are skipped there.
+# pgvector index dimension ceilings — the single source of truth for these
+# external-library limits, imported by the config-time guard
+# (``config.schema``) and the runtime cast decision (``storage.temporal.
+# pgvector``) so validation and sizing cannot drift apart. The ``vector`` HNSW
+# opclass caps at 2000 dims; the ``halfvec`` opclass caps at 4000. Above 2000
+# only the halfvec expression index (migration 018) can be built, so the
+# full-precision ``vector`` HNSW indexes (migrations 002 / 005 / 007) are
+# skipped there.
 VECTOR_HNSW_MAX_DIM = 2000
 HALFVEC_HNSW_MAX_DIM = 4000
 
 
 def _attr(name: str, default: object) -> object:
-    """Read an injected Alembic attribute, defaulting when absent/unavailable."""
+    """Read an injected Alembic attribute, defaulting when absent/unavailable.
+
+    Only the "context not configured yet" failure mode is expected here
+    (``context.config`` raises ``AttributeError`` before the environment is
+    set up), so the catch is narrow — a genuine bug (e.g. a mistyped attribute)
+    is not masked behind the default.
+    """
     try:
         value = context.config.attributes.get(name)
-    except Exception:
+    except (AttributeError, LookupError):
         return default
     return default if value is None else value
 
 
 def configured_embedding_dimension() -> int:
-    """Effective embedding dimension for schema DDL (default ``1536``)."""
+    """Effective embedding dimension for schema DDL (default ``1536``).
+
+    The value is whatever ``run_migrations`` injected; the normal entry point
+    (``Khora.connect()``) validates it against the pgvector ceilings via the
+    ``KhoraConfig`` guard first. Callers invoking ``run_migrations(
+    embedding_dimension=...)`` directly should pre-validate — an out-of-range
+    dimension otherwise fails loudly at ``CREATE INDEX`` (pgvector rejects a
+    halfvec/vector index above its opclass limit), never silently.
+    """
     return int(_attr("embedding_dimension", DEFAULT_EMBEDDING_DIMENSION))  # type: ignore[arg-type]
 
 
