@@ -417,6 +417,243 @@ class TestRenderPrompts:
         assert len(prompt) < 20000
 
 
+class TestAttributeSchemaBlock:
+    """Tests for the ontology-driven ATTRIBUTE SCHEMA block (per-type keys)."""
+
+    _HEADER = "ATTRIBUTE SCHEMA (emit these keys in attributes when present):"
+
+    @staticmethod
+    def _expertise():
+        from khora.extraction.skills.base import EntityTypeConfig, ExpertiseConfig
+
+        return ExpertiseConfig(
+            name="support",
+            entity_types=[
+                EntityTypeConfig(
+                    name="PERSON",
+                    attributes={"required": ["email"], "optional": ["title", "department"]},
+                ),
+                # optional side omitted → must render as optional=[]
+                EntityTypeConfig(name="TICKET", attributes={"required": ["identifier", "status"]}),
+                # required side omitted → must render as required=[]
+                EntityTypeConfig(name="ORGANIZATION", attributes={"optional": ["industry"]}),
+                # declares no attributes at all → excluded entirely
+                EntityTypeConfig(name="CONCEPT"),
+            ],
+        )
+
+    def test_block_lists_declaring_types(self) -> None:
+        """Header plus one line per declaring type, using the ontology key names."""
+        extractor = LLMEntityExtractor(model="test")
+        block = extractor._build_attribute_schema_block(
+            self._expertise(), ["PERSON", "TICKET", "ORGANIZATION", "CONCEPT"]
+        )
+        assert block.startswith(self._HEADER)
+        assert "PERSON: required=[email]; optional=[title, department]" in block
+        assert "TICKET: required=[identifier, status]; optional=[]" in block
+        assert "ORGANIZATION: required=[]; optional=[industry]" in block
+        # CONCEPT declares no attributes → no line
+        assert "CONCEPT" not in block
+
+    def test_only_resolved_types_included(self) -> None:
+        """A declared type absent from the resolved entity_types list is excluded."""
+        extractor = LLMEntityExtractor(model="test")
+        block = extractor._build_attribute_schema_block(self._expertise(), ["TICKET"])
+        assert "TICKET: required=[identifier, status]; optional=[]" in block
+        assert "PERSON" not in block
+        assert "ORGANIZATION" not in block
+
+    def test_empty_when_no_expertise(self) -> None:
+        extractor = LLMEntityExtractor(model="test")
+        assert extractor._build_attribute_schema_block(None, ["PERSON"]) == ""
+
+    def test_empty_when_no_declaring_types(self) -> None:
+        from khora.extraction.skills.base import EntityTypeConfig, ExpertiseConfig
+
+        extractor = LLMEntityExtractor(model="test")
+        expertise = ExpertiseConfig(name="x", entity_types=[EntityTypeConfig(name="CONCEPT")])
+        assert extractor._build_attribute_schema_block(expertise, ["CONCEPT"]) == ""
+
+    def test_empty_when_no_entity_types(self) -> None:
+        extractor = LLMEntityExtractor(model="test")
+        expertise = self._expertise()
+        assert extractor._build_attribute_schema_block(expertise, None) == ""
+        assert extractor._build_attribute_schema_block(expertise, []) == ""
+
+    def test_present_but_none_attribute_side_coerced(self) -> None:
+        """An empty YAML scalar ("optional:") parses to None; must not crash.
+
+        Built through ExpertiseConfig.from_dict (the real YAML load path), which
+        passes attributes straight through, so either side can be present-but-None.
+        The block coerces None -> [] rather than raising TypeError in the ", ".join.
+        """
+        from khora.extraction.skills.base import ExpertiseConfig
+
+        extractor = LLMEntityExtractor(model="test")
+        # Shape mirrors `yaml.safe_load` output: an empty scalar becomes None.
+        expertise = ExpertiseConfig.from_dict(
+            {
+                "name": "yaml_edge",
+                "entity_types": [
+                    # optional side present-but-None, required a real list
+                    {"name": "NAME", "attributes": {"required": ["name"], "optional": None}},
+                    # required side present-but-None, optional a real list
+                    {"name": "FOO", "attributes": {"required": None, "optional": ["x"]}},
+                    # both sides present-but-None → declares nothing → omitted
+                    {"name": "BAZ", "attributes": {"required": None, "optional": None}},
+                ],
+            }
+        )
+        # Must not raise, and each None side renders as [].
+        block = extractor._build_attribute_schema_block(expertise, ["NAME", "FOO", "BAZ"])
+        assert "NAME: required=[name]; optional=[]" in block
+        assert "FOO: required=[]; optional=[x]" in block
+        # BAZ declares no usable attributes → no line
+        assert "BAZ" not in block
+
+    def test_block_in_single_prompt_structured_ungated(self) -> None:
+        """Block appears in the single-doc structured prompt with context=None.
+
+        context=None proves the block is NOT gated on source_tool / tool_schemas.
+        """
+        extractor = LLMEntityExtractor(model="gpt-4o")  # structured-output path
+        prompt = extractor._render_extraction_prompt(
+            "Alice emailed the team.",
+            ["PERSON", "TICKET"],
+            self._expertise(),
+            None,
+            relationship_types=["KNOWS"],
+        )
+        assert self._HEADER in prompt
+        assert "PERSON: required=[email]; optional=[title, department]" in prompt
+        assert "TICKET: required=[identifier, status]; optional=[]" in prompt
+
+    def test_block_in_single_prompt_custom(self) -> None:
+        """A custom extraction_prompt receives attribute_schema via prompt_context."""
+        from khora.extraction.skills.base import EntityTypeConfig, ExpertiseConfig
+
+        extractor = LLMEntityExtractor(model="gpt-4o")
+        expertise = ExpertiseConfig(
+            name="custom",
+            extraction_prompt="Extract from: {{ text }}\n{{ attribute_schema }}",
+            entity_types=[
+                EntityTypeConfig(name="PERSON", attributes={"required": ["email"], "optional": ["title"]}),
+            ],
+        )
+        prompt = extractor._render_extraction_prompt("Alice", ["PERSON"], expertise, None, relationship_types=["KNOWS"])
+        assert self._HEADER in prompt
+        assert "PERSON: required=[email]; optional=[title]" in prompt
+
+    def test_block_absent_single_prompt_no_expertise(self) -> None:
+        extractor = LLMEntityExtractor(model="gpt-4o")
+        prompt = extractor._render_extraction_prompt("Alice", ["PERSON"], None, None, relationship_types=["KNOWS"])
+        assert "ATTRIBUTE SCHEMA" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_block_in_batch_prompt_ungated(self) -> None:
+        """Block appears in the batch (fallback) prompt with context=None.
+
+        Captures the user message sent to litellm to assert on the assembled
+        prompt without a live LLM.
+        """
+        import litellm
+
+        extractor = LLMEntityExtractor(model="gpt-4o", max_retries=1)
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = json.dumps({"sections": [{"entities": [], "relationships": []}]})
+        mock_response.choices[0].finish_reason = "stop"
+        mock_response.usage = MagicMock(prompt_tokens=10, completion_tokens=5, total_tokens=15)
+
+        captured: dict[str, object] = {}
+
+        async def fake_acompletion(*args, **kwargs):
+            captured["messages"] = kwargs["messages"]
+            return mock_response
+
+        with (
+            patch("litellm.acompletion", new_callable=AsyncMock, side_effect=fake_acompletion),
+            patch("khora.telemetry.get_collector") as mock_telem,
+        ):
+            mock_telem.return_value.record_llm_call = MagicMock()
+            await extractor._extract_multi_batch(
+                ["Alice emailed the team."],
+                ["PERSON", "TICKET"],
+                litellm,
+                expertise=self._expertise(),
+                context=None,
+                relationship_types=["KNOWS"],
+            )
+
+        user_msg = captured["messages"][1]["content"]
+        assert self._HEADER in user_msg
+        assert "PERSON: required=[email]; optional=[title, department]" in user_msg
+        assert "TICKET: required=[identifier, status]; optional=[]" in user_msg
+
+    @pytest.mark.asyncio
+    async def test_block_in_batch_prompt_custom_multi_section(self) -> None:
+        """Block appears in the batch custom multi-section path (expertise.extraction_prompt).
+
+        The fallback batch path is covered above; this exercises the other batch
+        injection site. Delivery is symmetric with the single custom path: the
+        schema arrives as the {{ attribute_schema }} template variable (mirroring
+        tool_context), so the custom template references it explicitly.
+        context=None keeps it ungated.
+        """
+        import litellm
+
+        from khora.extraction.skills.base import EntityTypeConfig, ExpertiseConfig
+
+        expertise = ExpertiseConfig(
+            name="support",
+            extraction_prompt="Extract entities from the sections:\n{{ text }}\n{{ attribute_schema }}",
+            entity_types=[
+                EntityTypeConfig(
+                    name="PERSON",
+                    attributes={"required": ["email"], "optional": ["title", "department"]},
+                ),
+                EntityTypeConfig(name="TICKET", attributes={"required": ["identifier", "status"]}),
+            ],
+        )
+
+        extractor = LLMEntityExtractor(model="gpt-4o", max_retries=1)
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = json.dumps({"sections": [{"entities": [], "relationships": []}]})
+        mock_response.choices[0].finish_reason = "stop"
+        mock_response.usage = MagicMock(prompt_tokens=10, completion_tokens=5, total_tokens=15)
+
+        captured: dict[str, object] = {}
+
+        async def fake_acompletion(*args, **kwargs):
+            captured["messages"] = kwargs["messages"]
+            return mock_response
+
+        with (
+            patch("litellm.acompletion", new_callable=AsyncMock, side_effect=fake_acompletion),
+            patch("khora.telemetry.get_collector") as mock_telem,
+        ):
+            mock_telem.return_value.record_llm_call = MagicMock()
+            await extractor._extract_multi_batch(
+                ["Alice emailed the team."],
+                ["PERSON", "TICKET"],
+                litellm,
+                expertise=expertise,
+                context=None,
+                relationship_types=["KNOWS"],
+            )
+
+        user_msg = captured["messages"][1]["content"]
+        # The custom template literal proves the custom branch rendered rather than
+        # silently falling through to the hardcoded fallback (which also emits the block).
+        assert "Extract entities from the sections:" in user_msg
+        assert self._HEADER in user_msg
+        assert "PERSON: required=[email]; optional=[title, department]" in user_msg
+        assert "TICKET: required=[identifier, status]; optional=[]" in user_msg
+
+
 class TestExtract:
     """Tests for the extract method."""
 
@@ -1182,3 +1419,262 @@ class TestBisectionOnTruncation:
 
         assert results == []
         mock_multi.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Entity attributes: strict-schema emission and pair-form parsing
+# ---------------------------------------------------------------------------
+
+# Strict structured output cannot express an open-ended {string: string} map
+# (additionalProperties must be False), so attributes are emitted as an array of
+# {"key": ..., "value": ...} pairs. This is the expected schema for each pair.
+_ATTRIBUTES_PAIR_ITEM = {
+    "type": "object",
+    "properties": {
+        "key": {"type": "string"},
+        "value": {"type": "string"},
+    },
+    "required": ["key", "value"],
+    "additionalProperties": False,
+}
+
+
+class TestAttributesSchema:
+    """The strict json_schema entity item carries an `attributes` pairs array."""
+
+    def _make_extractor(self) -> LLMEntityExtractor:
+        # gpt-4o-mini is on MODELS_REQUIRING_JSON_SCHEMA, so the strict
+        # json_schema branch (not the loose json_object fallback) is exercised.
+        return LLMEntityExtractor(model="gpt-4o-mini")
+
+    @staticmethod
+    def _assert_entity_item_strict(item: dict) -> None:
+        """The entity item stays strict-valid with attributes present."""
+        # attributes is a pairs array on the item.
+        assert "attributes" in item["properties"]
+        assert item["properties"]["attributes"]["type"] == "array"
+        assert item["properties"]["attributes"]["items"] == _ATTRIBUTES_PAIR_ITEM
+        # attributes is required.
+        assert "attributes" in item["required"]
+        # Strict-valid: every property is required and the item is closed.
+        assert set(item["required"]) == set(item["properties"])
+        assert item["additionalProperties"] is False
+
+    def test_response_format_entity_item(self) -> None:
+        """_get_response_format: entity item includes the attributes pairs array."""
+        fmt = self._make_extractor()._get_response_format()
+        assert fmt["json_schema"]["strict"] is True
+        item = fmt["json_schema"]["schema"]["properties"]["entities"]["items"]
+        self._assert_entity_item_strict(item)
+
+    def test_multi_response_format_entity_item(self) -> None:
+        """_get_multi_response_format: section entity item includes the pairs array."""
+        fmt = self._make_extractor()._get_multi_response_format()
+        assert fmt["json_schema"]["strict"] is True
+        item = fmt["json_schema"]["schema"]["properties"]["sections"]["items"]["properties"]["entities"]["items"]
+        self._assert_entity_item_strict(item)
+
+
+class TestAttributesParsing:
+    """_parse_response folds pair-form attributes into a dict."""
+
+    def _make_extractor(self) -> LLMEntityExtractor:
+        return LLMEntityExtractor(model="test-model")
+
+    def test_pairs_fold_to_dict(self) -> None:
+        """A list of {key, value} pairs folds into a {key: value} dict."""
+        extractor = self._make_extractor()
+        data = {
+            "entities": [
+                {
+                    "name": "Alice",
+                    "entity_type": "PERSON",
+                    "attributes": [
+                        {"key": "email", "value": "alice@example.com"},
+                        {"key": "role", "value": "engineer"},
+                    ],
+                }
+            ],
+            "relationships": [],
+        }
+        result = extractor._parse_response(json.dumps(data))
+        assert result.entities[0].attributes == {
+            "email": "alice@example.com",
+            "role": "engineer",
+        }
+
+    def test_dict_passes_through(self) -> None:
+        """An already-dict attributes value passes through unchanged."""
+        extractor = self._make_extractor()
+        data = {
+            "entities": [
+                {
+                    "name": "Alice",
+                    "entity_type": "PERSON",
+                    "attributes": {"email": "alice@example.com", "role": "engineer"},
+                }
+            ],
+            "relationships": [],
+        }
+        result = extractor._parse_response(json.dumps(data))
+        assert result.entities[0].attributes == {
+            "email": "alice@example.com",
+            "role": "engineer",
+        }
+
+    def test_empty_absent_or_scalar_yield_empty_dict(self) -> None:
+        """Empty list, absent attributes, and a scalar value all collapse to {}."""
+        extractor = self._make_extractor()
+        data = {
+            "entities": [
+                {"name": "EmptyList", "entity_type": "CONCEPT", "attributes": []},
+                {"name": "Absent", "entity_type": "CONCEPT"},
+                {"name": "Scalar", "entity_type": "CONCEPT", "attributes": "not-a-mapping"},
+            ],
+            "relationships": [],
+        }
+        result = extractor._parse_response(json.dumps(data))
+        by_name = {e.name: e for e in result.entities}
+        assert by_name["EmptyList"].attributes == {}
+        assert by_name["Absent"].attributes == {}
+        assert by_name["Scalar"].attributes == {}
+
+    def test_pair_value_coercion_and_malformed_items(self) -> None:
+        """Pair values are string-coerced; missing/None values and malformed items are handled."""
+        extractor = self._make_extractor()
+        data = {
+            "entities": [
+                # Non-string value is coerced to str; missing and None values -> "".
+                {
+                    "name": "Coerce",
+                    "entity_type": "CONCEPT",
+                    "attributes": [
+                        {"key": "age", "value": 30},
+                        {"key": "no_value"},
+                        {"key": "null_value", "value": None},
+                    ],
+                },
+                # Duplicate keys: last value wins.
+                {
+                    "name": "Dup",
+                    "entity_type": "CONCEPT",
+                    "attributes": [
+                        {"key": "state", "value": "old"},
+                        {"key": "state", "value": "new"},
+                    ],
+                },
+                # Malformed items (non-dict item, non-string key) are skipped; valid pair kept.
+                {
+                    "name": "Malformed",
+                    "entity_type": "CONCEPT",
+                    "attributes": [
+                        "not-a-dict",
+                        {"key": 123, "value": "dropped"},
+                        {"key": "ok", "value": "kept"},
+                    ],
+                },
+            ],
+            "relationships": [],
+        }
+        result = extractor._parse_response(json.dumps(data))
+        by_name = {e.name: e for e in result.entities}
+        assert by_name["Coerce"].attributes == {"age": "30", "no_value": "", "null_value": ""}
+        assert by_name["Dup"].attributes == {"state": "new"}
+        assert by_name["Malformed"].attributes == {"ok": "kept"}
+
+    @pytest.mark.asyncio
+    async def test_extract_round_trip_folds_pair_attributes(self) -> None:
+        """A mocked LLM returning pair-form attributes yields a populated dict."""
+        extractor = LLMEntityExtractor(model="test-model", max_retries=1)
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = json.dumps(
+            {
+                "entities": [
+                    {
+                        "name": "Alice",
+                        "entity_type": "PERSON",
+                        "description": "A person",
+                        "attributes": [
+                            {"key": "email", "value": "alice@example.com"},
+                            {"key": "team", "value": "platform"},
+                        ],
+                    }
+                ],
+                "relationships": [],
+            }
+        )
+        mock_response.usage = MagicMock(prompt_tokens=100, completion_tokens=50, total_tokens=150)
+
+        with (
+            patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_response),
+            patch("khora.telemetry.get_collector") as mock_telem,
+        ):
+            mock_telem.return_value.record_llm_call = MagicMock()
+            result = await extractor.extract(
+                "Alice works at Acme Corp",
+                entity_types=["PERSON", "ORGANIZATION"],
+                relationship_types=["WORKS_FOR"],
+            )
+
+        assert len(result.entities) == 1
+        assert result.entities[0].attributes == {
+            "email": "alice@example.com",
+            "team": "platform",
+        }
+
+    @pytest.mark.asyncio
+    async def test_extract_multi_round_trip_folds_pair_attributes(self) -> None:
+        """The batch (production) path also folds pair-form attributes into a dict.
+
+        Guards the extract_multi -> _extract_multi_batch path against a future
+        refactor that gives the batch path its own parse and silently drops
+        attributes in production.
+        """
+        extractor = LLMEntityExtractor(model="test-model", max_retries=1)
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = json.dumps(
+            {
+                "sections": [
+                    {
+                        "entities": [
+                            {
+                                "name": "Alice",
+                                "entity_type": "PERSON",
+                                "description": "A person",
+                                "attributes": [
+                                    {"key": "email", "value": "alice@example.com"},
+                                    {"key": "team", "value": "platform"},
+                                ],
+                            }
+                        ],
+                        "relationships": [],
+                        "events": [],
+                    }
+                ]
+            }
+        )
+        mock_response.choices[0].finish_reason = "stop"
+        mock_response.usage = MagicMock(prompt_tokens=100, completion_tokens=50, total_tokens=150)
+
+        with (
+            patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_response),
+            patch("khora.telemetry.get_collector") as mock_telem,
+        ):
+            mock_telem.return_value.record_llm_call = MagicMock()
+            results = await extractor.extract_multi(
+                ["Alice works at Acme Corp"],
+                batch_size=5,
+                entity_types=["PERSON", "ORGANIZATION"],
+                relationship_types=["WORKS_FOR"],
+                tiered_extraction=False,
+            )
+
+        assert len(results) == 1
+        assert results[0].entities[0].attributes == {
+            "email": "alice@example.com",
+            "team": "platform",
+        }

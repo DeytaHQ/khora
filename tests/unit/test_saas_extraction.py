@@ -56,8 +56,13 @@ class TestToolSchemaContext:
         result = extractor._build_tool_context(expertise, None)
         assert result == ""
 
-    def test_build_tool_context_includes_attribute_hints(self):
-        """_build_tool_context includes attribute schema hints from entity types."""
+    def test_build_tool_context_omits_attribute_hints(self):
+        """_build_tool_context no longer emits the EXPECTED ENTITY ATTRIBUTES block.
+
+        Per-type attribute keys moved to _build_attribute_schema_block (ungated,
+        injected directly into the prompt) so they are no longer double-listed
+        here. The SOURCE CONTEXT tool-field output must stay intact.
+        """
         from khora.extraction.skills.base import EntityTypeConfig
 
         extractor = LLMEntityExtractor(model="test")
@@ -69,14 +74,17 @@ class TestToolSchemaContext:
                     attributes={"required": ["identifier", "title", "status"], "optional": ["priority"]},
                 )
             ],
-            tool_schemas={"linear": {"issue": {"fields": ["identifier"]}}},
+            tool_schemas={"linear": {"issue": {"fields": ["identifier", "title"]}}},
         )
         context = {"source_tool": "linear"}
 
         result = extractor._build_tool_context(expertise, context)
-        assert "EXPECTED ENTITY ATTRIBUTES" in result
-        assert "TICKET" in result
-        assert "identifier" in result
+        # The attribute-schema block is gone from tool context.
+        assert "EXPECTED ENTITY ATTRIBUTES" not in result
+        # SOURCE CONTEXT tool-field output is unchanged.
+        assert "SOURCE CONTEXT" in result
+        assert "linear" in result
+        assert "issue fields: identifier, title" in result
 
 
 class TestExtractedEntitySourceTool:

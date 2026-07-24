@@ -502,6 +502,14 @@ class VectorCypherConfig:
     fusion_simple_graph_weight: float = 0.2
     fusion_complex_vector_weight: float = 0.4
     fusion_complex_graph_weight: float = 0.6
+    # Temporal-branch fusion weights. Always live in RetrieverConfig (the
+    # temporally-detected branch of _fuse_results swaps to them) but until now
+    # config-unreachable: no VectorCypherConfig field and no assemble mapping,
+    # so every deployment ran the hardcoded 0.3/0.7 defaults (surfaced by the
+    # khora-benchmarks deyta_multisource fusion review). Defaults unchanged -
+    # plumbing only.
+    fusion_temporal_vector_weight: float = 0.3
+    fusion_temporal_graph_weight: float = 0.7
 
     # Temporal. Defaults canonicalized to QuerySettings' values in #1406 - the
     # old 0.2 here silently shadowed the documented ``query.recency_weight`` /
@@ -938,6 +946,8 @@ class VectorCypherEngine:
             simple_graph_weight=self._vc_config.fusion_simple_graph_weight,
             complex_vector_weight=self._vc_config.fusion_complex_vector_weight,
             complex_graph_weight=self._vc_config.fusion_complex_graph_weight,
+            temporal_vector_weight=self._vc_config.fusion_temporal_vector_weight,
+            temporal_graph_weight=self._vc_config.fusion_temporal_graph_weight,
             recency_weight=self._vc_config.temporal_recency_weight,
             recency_decay_days=self._vc_config.temporal_recency_decay_days,
             recency_decay_type=self._vc_config.recency_decay_type,

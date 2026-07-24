@@ -190,7 +190,7 @@ Guidelines:
 - Use canonical entity names (e.g., "Jennifer Walsh" not "Jenny", "Acme Corporation" not "Acme Corp")
 - Include aliases for entities that have multiple names/abbreviations
 - Extract temporal information when dates, times, or relative time references appear
-- For STATE_CHANGE detection: when text indicates transitions ("switched from X to Y", "no longer X", "used to X", "previously X but now Y"), extract a STATE_CHANGE entity with these required attributes: {"entity_affected": "name of entity whose state changed", "previous_state": "old value", "new_state": "new value", "attribute_changed": "what changed (e.g. job_title, location, instrument)", "transition_date": "ISO date or null"}. Set valid_from to the transition date. Use INVOLVES to link it to the affected entity
+- For STATE_CHANGE detection: when text indicates transitions ("switched from X to Y", "no longer X", "used to X", "previously X but now Y"), extract a STATE_CHANGE entity whose attributes carry these keys as {"key", "value"} pairs: entity_affected (name of entity whose state changed), previous_state (old value), new_state (new value), attribute_changed (what changed, e.g. job_title, location, instrument), transition_date (ISO date or null). Set valid_from to the transition date. Use INVOLVES to link it to the affected entity
 - For EVENT detection: when text describes specific occurrences, extract the event with date, participants, and location when available
 - Use temporal relationships (PRECEDES, FOLLOWS, INVOLVES) to connect events and state changes to other entities
 - Ensure relationship source/target names match extracted entity names exactly
@@ -209,6 +209,7 @@ Extract entities, relationships, and temporal information from the following tex
 {document_context}
 Entity types to extract: {entity_types}
 Relationship types to use: {relationship_types}
+For each entity, emit "attributes" as an array of {{"key": ..., "value": ...}} string pairs drawn from its salient fields (identifiers, emails, state, urls, dates, etc.).
 
 Text:
 {text}"""
@@ -745,8 +746,27 @@ class LLMEntityExtractor(EntityExtractor):
                                                 {"type": "null"},
                                             ],
                                         },
+                                        "attributes": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "key": {"type": "string"},
+                                                    "value": {"type": "string"},
+                                                },
+                                                "required": ["key", "value"],
+                                                "additionalProperties": False,
+                                            },
+                                        },
                                     },
-                                    "required": ["name", "entity_type", "description", "aliases", "temporal"],
+                                    "required": [
+                                        "name",
+                                        "entity_type",
+                                        "description",
+                                        "aliases",
+                                        "temporal",
+                                        "attributes",
+                                    ],
                                     "additionalProperties": False,
                                 },
                             },
@@ -843,8 +863,20 @@ class LLMEntityExtractor(EntityExtractor):
                                         {"type": "null"},
                                     ],
                                 },
+                                "attributes": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "key": {"type": "string"},
+                                            "value": {"type": "string"},
+                                        },
+                                        "required": ["key", "value"],
+                                        "additionalProperties": False,
+                                    },
+                                },
                             },
-                            "required": ["name", "entity_type", "description", "aliases", "temporal"],
+                            "required": ["name", "entity_type", "description", "aliases", "temporal", "attributes"],
                             "additionalProperties": False,
                         },
                     },
@@ -1776,21 +1808,50 @@ class LLMEntityExtractor(EntityExtractor):
                 if key != "fields" and isinstance(values, list):
                     lines.append(f"  {key}: {', '.join(str(v) for v in values)}")
 
-        # Add attribute schema hints from entity types
-        if expertise.entity_types:
-            lines.append("\nEXPECTED ENTITY ATTRIBUTES:")
-            for et in expertise.entity_types:
-                required = et.attributes.get("required", [])
-                optional = et.attributes.get("optional", [])
-                if required or optional:
-                    parts = []
-                    if required:
-                        parts.append(f"required: {', '.join(required)}")
-                    if optional:
-                        parts.append(f"optional: {', '.join(optional)}")
-                    lines.append(f"  {et.name}: {'; '.join(parts)}")
-
         return "\n".join(lines)
+
+    def _build_attribute_schema_block(
+        self,
+        expertise: ExpertiseConfig | None,
+        entity_types: list[str] | None,
+    ) -> str:
+        """Build the per-type ATTRIBUTE SCHEMA hint block from the ontology.
+
+        For each extracted entity type that declares attributes in the
+        ExpertiseConfig, list its required/optional attribute key names so the
+        model knows which keys to populate. The keys are hints only — the model
+        prefers them but is not constrained to them, and emission still rides the
+        general ``attributes`` {"key", "value"}-pair channel.
+
+        Args:
+            expertise: Optional ExpertiseConfig carrying per-type attribute schemas.
+            entity_types: Resolved entity-type names being extracted.
+
+        Returns:
+            The schema block, or "" when there is no expertise or when no
+            extracted type declares any attributes.
+        """
+        if expertise is None or not entity_types:
+            return ""
+
+        by_name = {et.name: et for et in expertise.entity_types}
+        lines: list[str] = []
+        for type_name in entity_types:
+            et = by_name.get(type_name)
+            if et is None:
+                continue
+            # Coerce present-but-None sides: an empty YAML scalar ("required:")
+            # parses to None, which would blow up the ", ".join below.
+            required = et.attributes.get("required") or []
+            optional = et.attributes.get("optional") or []
+            if not required and not optional:
+                continue
+            lines.append(f"{et.name}: required=[{', '.join(required)}]; optional=[{', '.join(optional)}]")
+
+        if not lines:
+            return ""
+
+        return "ATTRIBUTE SCHEMA (emit these keys in attributes when present):\n" + "\n".join(lines)
 
     @staticmethod
     def _build_document_context(context: dict[str, Any] | None) -> str:
@@ -1874,6 +1935,7 @@ class LLMEntityExtractor(EntityExtractor):
                     "entity_types": entity_types,
                     "relationship_types": relationship_types,
                     "tool_context": tool_context,
+                    "attribute_schema": self._build_attribute_schema_block(expertise, entity_types),
                 }
                 return composer.render_prompt(
                     expertise.extraction_prompt,
@@ -1905,6 +1967,12 @@ class LLMEntityExtractor(EntityExtractor):
             text=text[:8000],  # Truncate very long texts
             document_context=document_context,
         )
+        # Per-type attribute keys: names which keys to emit on top of the
+        # general attributes nudge baked into the template. Prepended alongside
+        # tool_context so both lead the prompt rather than trail the text.
+        attribute_schema = self._build_attribute_schema_block(expertise, entity_types)
+        if attribute_schema:
+            prompt = attribute_schema + "\n\n" + prompt
         if tool_context:
             prompt = tool_context + "\n\n" + prompt
         return prompt
@@ -2313,6 +2381,12 @@ class LLMEntityExtractor(EntityExtractor):
 
         sections = "\n".join(f"=== SECTION {i + 1} ===\n{text[:4000]}" for i, text in enumerate(texts))
 
+        # Per-type attribute keys: computed once from the original expertise.
+        # Delivered to the custom multi-section builder as the {{ attribute_schema }}
+        # template variable (mirroring tool_context), and placed adjacent to the
+        # general attributes nudge in the hardcoded fallback builder.
+        attribute_schema = self._build_attribute_schema_block(expertise, entity_types)
+
         # If expertise has custom extraction prompt, use it with multi-section adaptation
         if expertise and expertise.extraction_prompt:
             from khora.extraction.skills.composer import ExpertiseComposer
@@ -2329,7 +2403,8 @@ Return a JSON object with a "sections" array, one object per input section:
     {"entities": [...], "relationships": [...], "events": [...]},
     ...
 ]}
-Each section follows the entity/relationship format from the instructions above."""
+Each section follows the entity/relationship format from the instructions above.
+For each entity, emit "attributes" as an array of {"key": ..., "value": ...} string pairs drawn from its salient fields (identifiers, emails, state, urls, dates, etc.)."""
             )
 
             prompt_context = {
@@ -2338,6 +2413,7 @@ Each section follows the entity/relationship format from the instructions above.
                 "entity_types": entity_types,
                 "relationship_types": relationship_types,
                 "tool_context": tool_context or "",
+                "attribute_schema": attribute_schema,
             }
             try:
                 prompt = composer.render_prompt(
@@ -2357,6 +2433,7 @@ Each section follows the entity/relationship format from the instructions above.
         # Fallback to hardcoded prompt (existing behavior)
         if not expertise or not expertise.extraction_prompt:
             tool_prefix = f"{tool_context}\n\n" if tool_context else ""
+            attr_schema_section = f"\n\n{attribute_schema}" if attribute_schema else ""
             prompt = f"""{tool_prefix}Extract entities, relationships, and events from each text section below.
 
 Entity types to find: {", ".join(entity_types)}
@@ -2371,6 +2448,7 @@ Return a JSON object with a "sections" array, one object per section:
 ]}}
 
 Each section follows the same entity/relationship/event format.
+For each entity, emit "attributes" as an array of {{"key": ..., "value": ...}} string pairs drawn from its salient fields (identifiers, emails, state, urls, dates, etc.).{attr_schema_section}
 Return ONLY valid JSON, no other text."""
 
         try:
@@ -2770,9 +2848,23 @@ Return ONLY valid JSON, no other text."""
                             valid_until=t.get("valid_until"),
                         )
 
-                # Ensure attributes is a dict (LLM sometimes returns a list)
-                attrs = e.get("attributes", {})
-                if not isinstance(attrs, dict):
+                # Normalize attributes to a dict. The strict schema emits a list
+                # of {"key": ..., "value": ...} pairs; other paths may return a
+                # dict directly. Anything else collapses to an empty dict.
+                raw_attrs = e.get("attributes", {})
+                if isinstance(raw_attrs, dict):
+                    attrs = raw_attrs
+                elif isinstance(raw_attrs, list):
+                    attrs = {}
+                    for pair in raw_attrs:
+                        if not isinstance(pair, dict):
+                            continue
+                        key = pair.get("key")
+                        if not isinstance(key, str):
+                            continue
+                        value = pair.get("value")
+                        attrs[key] = str(value) if value is not None else ""
+                else:
                     attrs = {}
 
                 # QUALITY FIX: Use heuristic confidence instead of hardcoded 0.9

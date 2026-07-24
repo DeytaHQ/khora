@@ -373,6 +373,8 @@ Prompts support Jinja2 templating:
 
 Prompts render in a Jinja `ImmutableSandboxedEnvironment`; unsafe constructs (dunder/private attribute access, mutating methods) are rejected and raise `SecurityError`.
 
+Besides any keys you pass via `context`, templates can reference `{{ tool_context }}` and `{{ attribute_schema }}`. `{{ attribute_schema }}` renders the per-type attribute-key hints — each entity type's `required`/`optional` keys. The built-in prompts inject it automatically; a custom `extraction_prompt` must interpolate `{{ attribute_schema }}` explicitly to include those per-type keys.
+
 ```yaml
 system_prompt: |
   You are an expert at extracting information about {{ domain }} companies.
