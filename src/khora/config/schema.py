@@ -843,6 +843,31 @@ GraphConfig = Annotated[
 # ---------------------------------------------------------------------------
 
 
+def _validate_pg_embedding_dimension(dim: int, use_halfvec: bool) -> None:
+    """Raise ``ValueError`` if ``dim`` is not HNSW-indexable on pgvector.
+
+    ``vector`` (float32) caps at 2000 dims, ``halfvec`` (float16, the default via
+    ``use_halfvec``) at 4000. Shared by the construction-time guard and the
+    point-of-use accessor so both paths (and in-place mutations) are covered.
+    """
+    if dim <= 0:
+        raise ValueError(f"embedding_dimension must be positive, got {dim}.")
+    max_dim = _PGVECTOR_HALFVEC_MAX_DIM if use_halfvec else _PGVECTOR_VECTOR_MAX_DIM
+    if dim > max_dim:
+        precision = "halfvec" if use_halfvec else "vector"
+        raise ValueError(
+            f"Postgres backend cannot HNSW-index embedding_dimension={dim}: pgvector's "
+            f"{precision} opclass caps at {max_dim} dims. "
+            + (
+                "Request a shortened dimension via the embedding model's `dimensions` parameter "
+                "(e.g. text-embedding-3-large supports 256-3072)."
+                if use_halfvec
+                else "Enable halfvec (storage.use_halfvec=True, the default) to index up to 4000 dims, "
+                "or request a shortened dimension via the model's `dimensions` parameter."
+            )
+        )
+
+
 class PgVectorConfig(BaseModel):
     """pgvector vector backend configuration."""
 
@@ -2540,26 +2565,14 @@ class KhoraConfig(BaseSettings):
         (half precision, the default via ``use_halfvec``). sqlite_lance and
         surrealdb size their vector columns from config and support arbitrary
         dimensions, so this guard is Postgres-only.
+
+        Enforced at construction here AND at point-of-use in
+        ``get_effective_embedding_dimension()`` (the single value the column,
+        index, migration, and runtime cast derive from), so an in-place
+        mutation such as ``config.llm.embedding_dimension = 4001`` after
+        construction is still caught before it reaches migrations.
         """
-        if self.storage.backend != "postgres":
-            return self
-        dim = self.get_effective_embedding_dimension()
-        if dim <= 0:
-            raise ValueError(f"embedding_dimension must be positive, got {dim}.")
-        max_dim = _PGVECTOR_HALFVEC_MAX_DIM if self.storage.use_halfvec else _PGVECTOR_VECTOR_MAX_DIM
-        if dim > max_dim:
-            precision = "halfvec" if self.storage.use_halfvec else "vector"
-            raise ValueError(
-                f"Postgres backend cannot HNSW-index embedding_dimension={dim}: pgvector's "
-                f"{precision} opclass caps at {max_dim} dims. "
-                + (
-                    "Request a shortened dimension via the embedding model's `dimensions` parameter "
-                    "(e.g. text-embedding-3-large supports 256-3072)."
-                    if self.storage.use_halfvec
-                    else "Enable halfvec (storage.use_halfvec=True, the default) to index up to 4000 dims, "
-                    "or request a shortened dimension via the model's `dimensions` parameter."
-                )
-            )
+        self.get_effective_embedding_dimension()  # raises on an unindexable dim
         return self
 
     @classmethod
@@ -2763,5 +2776,13 @@ class KhoraConfig(BaseSettings):
         storage column, HNSW index, migrations, runtime backend cast, and the
         Postgres guardrail all derive from this one value so they cannot
         silently diverge from the vectors the embedder produces (#1260).
+
+        On the Postgres backend the value is validated against pgvector's HNSW
+        index limits here, at point-of-use, so an out-of-range dimension is
+        rejected even when set by in-place mutation (which bypasses the
+        construction-time validator).
         """
-        return self.llm.embedding_dimension
+        dim = self.llm.embedding_dimension
+        if self.storage.backend == "postgres":
+            _validate_pg_embedding_dimension(dim, self.storage.use_halfvec)
+        return dim
