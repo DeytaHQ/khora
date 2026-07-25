@@ -226,6 +226,18 @@ Configuration resolves:
 1. Namespace overrides (highest priority)
 2. Global config (lowest priority)
 
+!!! note "Embedding dimension is deployment-wide on Postgres"
+    `text-embedding-3-large` / `embedding_dimension=3072` now works on Postgres
+    (dimensions above 2000 require `use_halfvec`, on by default; the ceiling is
+    4000). But on Postgres the embedding column and HNSW index are sized from
+    `llm.embedding_dimension` **once, when a fresh database is migrated**, and
+    that dimension is shared by every namespace in the database — a per-namespace
+    `embedding_dimension` override does **not** give different namespaces
+    different vector widths on a shared Postgres backend. Simultaneous multiple
+    dimensions per deployment is a separate, future capability. To change the
+    dimension, migrate a fresh database at the new value and re-embed; an
+    existing populated database cannot be resized in place.
+
 ## Sync Checkpoints
 
 Namespaces track where they are in syncing from external sources:

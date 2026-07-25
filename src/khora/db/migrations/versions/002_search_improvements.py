@@ -12,6 +12,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
+from khora.db.migrations._schema_config import full_precision_hnsw_supported
+
 # revision identifiers, used by Alembic.
 revision: str = "002_search_improvements"
 down_revision: str | Sequence[str] | None = "001_namespace_versioning"
@@ -63,16 +65,22 @@ def upgrade() -> None:
     op.drop_index("ix_entities_embedding", table_name="entities", if_exists=True)
 
     # --- Create HNSW indexes ---
-    op.execute("""
-        CREATE INDEX ix_chunks_embedding_hnsw
-        ON chunks USING hnsw (embedding vector_cosine_ops)
-        WITH (m = 16, ef_construction = 64)
-        """)
-    op.execute("""
-        CREATE INDEX ix_entities_embedding_hnsw
-        ON entities USING hnsw (embedding vector_cosine_ops)
-        WITH (m = 16, ef_construction = 64)
-        """)
+    # Full-precision ``vector`` HNSW caps at 2000 dims; skip above that (a
+    # higher-dimension model relies on the halfvec expression index from
+    # migration 018 instead). Editing this historical migration is safe:
+    # Alembic tracks revision IDs, not body content — only fresh creates at a
+    # non-1536 dimension see this branch (#1260).
+    if full_precision_hnsw_supported():
+        op.execute("""
+            CREATE INDEX ix_chunks_embedding_hnsw
+            ON chunks USING hnsw (embedding vector_cosine_ops)
+            WITH (m = 16, ef_construction = 64)
+            """)
+        op.execute("""
+            CREATE INDEX ix_entities_embedding_hnsw
+            ON entities USING hnsw (embedding vector_cosine_ops)
+            WITH (m = 16, ef_construction = 64)
+            """)
 
     # --- Add tsvector column for full-text search ---
     op.execute("""
@@ -103,13 +111,16 @@ def downgrade() -> None:
     op.drop_index("ix_entities_embedding_hnsw", table_name="entities", if_exists=True)
 
     # --- Recreate IVFFlat indexes ---
-    op.execute("""
-        CREATE INDEX ix_chunks_embedding
-        ON chunks USING ivfflat (embedding vector_cosine_ops)
-        WITH (lists = 100)
-        """)
-    op.execute("""
-        CREATE INDEX ix_entities_embedding
-        ON entities USING ivfflat (embedding vector_cosine_ops)
-        WITH (lists = 100)
-        """)
+    # ivfflat, like the vector HNSW opclass, caps at 2000 dims; only recreate
+    # when the configured dimension is indexable (symmetry with upgrade()).
+    if full_precision_hnsw_supported():
+        op.execute("""
+            CREATE INDEX ix_chunks_embedding
+            ON chunks USING ivfflat (embedding vector_cosine_ops)
+            WITH (lists = 100)
+            """)
+        op.execute("""
+            CREATE INDEX ix_entities_embedding
+            ON entities USING ivfflat (embedding vector_cosine_ops)
+            WITH (lists = 100)
+            """)

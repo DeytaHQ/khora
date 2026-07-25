@@ -21,6 +21,8 @@ from alembic import op
 from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects import postgresql
 
+from khora.db.migrations._schema_config import configured_embedding_dimension
+
 # revision identifiers, used by Alembic.
 revision: str = "000_initial_schema"
 down_revision: str | Sequence[str] | None = None
@@ -86,6 +88,11 @@ def _enum_col(*values: str, name: str, default: str | None = None):
 def upgrade() -> None:
     """Create initial schema."""
     is_postgres = _is_postgres()
+    # Size the pgvector embedding columns from the configured dimension (#1260).
+    # Editing this historical migration is safe: Alembic tracks revision IDs,
+    # not body content, so databases that already applied it never re-run it —
+    # only FRESH creates pick up a non-1536 dimension.
+    embedding_dim = configured_embedding_dimension()
 
     # Create enum types (Postgres only — SQLite uses VARCHAR)
     if is_postgres:
@@ -273,7 +280,7 @@ def upgrade() -> None:
     ]
     if is_postgres:
         # Insert embedding column in its original position for Postgres schema parity.
-        chunk_columns.insert(-2, sa.Column("embedding", Vector(1536), nullable=True))
+        chunk_columns.insert(-2, sa.Column("embedding", Vector(embedding_dim), nullable=True))
     op.create_table("chunks", *chunk_columns)
 
     op.create_index("ix_chunks_document_index", "chunks", ["document_id", "chunk_index"])
@@ -324,7 +331,7 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
     ]
     if is_postgres:
-        entity_columns.insert(-5, sa.Column("embedding", Vector(1536), nullable=True))
+        entity_columns.insert(-5, sa.Column("embedding", Vector(embedding_dim), nullable=True))
     op.create_table("entities", *entity_columns)
 
     op.create_index("ix_entities_namespace_name_type", "entities", ["namespace_id", "name", "entity_type"])
@@ -423,7 +430,7 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
     ]
     if is_postgres:
-        episode_columns.insert(-3, sa.Column("embedding", Vector(1536), nullable=True))
+        episode_columns.insert(-3, sa.Column("embedding", Vector(embedding_dim), nullable=True))
     op.create_table("episodes", *episode_columns)
 
     event_type_col, event_type_kwargs = _enum_col(

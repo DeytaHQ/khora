@@ -18,6 +18,11 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from khora.config._secrets import redact_dsn
+from khora.db.migrations._schema_config import (  # noqa: F401  (re-exported for callers importing via env.py)
+    configured_embedding_dimension,
+    configured_use_halfvec,
+    full_precision_hnsw_supported,
+)
 from khora.db.models import Base
 from khora.db.session import _DatabaseAheadError
 
