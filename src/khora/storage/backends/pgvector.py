@@ -332,7 +332,15 @@ class PgVectorBackend(AsyncSessionMixin):
             )
             from khora.exceptions import ConfigurationError
 
-            _dim_rows = [(r[0], r[1], r[2]) for r in (await conn.execute(text(COLUMN_DIMS_SQL))).all()]
+            # Best-effort, like the pre-migration check: if the catalog cannot be
+            # read the guard skips rather than failing the connection it exists to
+            # protect. A genuine width conflict still surfaces on the first write.
+            try:
+                _dim_rows = [(r[0], r[1], r[2]) for r in (await conn.execute(text(COLUMN_DIMS_SQL))).all()]
+            except Exception as _exc:  # noqa: BLE001 - diagnostic guard, never fatal
+                logger.debug("Embedding-dimension check skipped: {}", type(_exc).__name__)
+                _dim_rows = []
+
             _mismatch = describe_dimension_mismatch(_dim_rows, self._embedding_dimension)
             if _mismatch:
                 raise ConfigurationError(_mismatch)
