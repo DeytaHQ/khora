@@ -523,6 +523,16 @@ class VectorCypherConfig:
     # Extraction concurrency (aligned with ingest pipeline's default of 20)
     max_concurrent_extractions: int = 20
 
+    # Batch-level concurrency WITHIN one document's extract_entities call on
+    # the per-document conversation path. Default 1 preserves the historical
+    # strictly-sequential-per-document behavior; raising it lets a large
+    # document's batches run in parallel so heterogeneous batches stop
+    # serializing behind the biggest document in each window. Total in-flight
+    # LLM calls remain capped by the extractor's process-wide slot semaphore
+    # (LLMSettings.max_concurrent_llm_calls, #1113), so
+    # max_concurrent_extractions x this value cannot exceed the global limit.
+    per_document_extraction_concurrency: int = 1
+
     # Maximum texts per LLM extraction batch. Lower values reduce output token
     # requirements and avoid timeouts with strict JSON schema constrained decoding.
     extraction_batch_size: int = 5
@@ -3914,7 +3924,7 @@ class VectorCypherEngine:
                                     skill_name=skill_name,
                                     expertise=expertise,
                                     model=model,
-                                    max_concurrent=1,
+                                    max_concurrent=self._vc_config.per_document_extraction_concurrency,
                                     wave_size=self._config.llm.extraction_wave_size,
                                     context=ctx,
                                     timeout=self._config.llm.timeout,
