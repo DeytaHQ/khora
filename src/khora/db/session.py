@@ -307,6 +307,16 @@ async def run_migrations(
     Returns:
         MigrationResult with outcome details.
     """
+    mismatch = await _check_embedding_dimension_matches_db(database_url, embedding_dimension)
+    if mismatch:
+        return MigrationResult(
+            success=False,
+            target_revision=None,
+            current_revision=None,
+            elapsed_seconds=0.0,
+            error=mismatch,
+        )
+
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None,
@@ -316,4 +326,51 @@ async def run_migrations(
             embedding_dimension=embedding_dimension,
             use_halfvec=use_halfvec,
         ),
+    )
+
+
+async def _check_embedding_dimension_matches_db(
+    database_url: str | None,
+    embedding_dimension: int | None,
+) -> str | None:
+    """Return an error message when the DB's pgvector widths disagree with config.
+
+    Runs BEFORE any DDL so a mismatch cannot produce a mixed-width schema: on a
+    partially-migrated database (or when a future migration adds an embedding
+    column) the remaining migrations would size the new columns from config while
+    the already-applied ones keep the original width (#1260).
+
+    Best-effort by design: connects with asyncpg directly (the only Postgres
+    driver khora ships) and returns ``None`` if the check itself cannot run, so a
+    transient connection problem is reported by the migration path proper rather
+    than misattributed to a dimension mismatch. Non-Postgres URLs are skipped -
+    the migration chain also runs on SQLite, which has no pgvector columns.
+    """
+    from loguru import logger
+
+    url = database_url or os.getenv("KHORA_DATABASE_URL", "")
+    if not url or not url.startswith(("postgresql", "postgres://")):
+        return None
+
+    from khora.db.embedding_dim_check import COLUMN_DIMS_SQL, describe_dimension_mismatch
+    from khora.db.migrations._schema_config import DEFAULT_EMBEDDING_DIMENSION
+
+    configured = embedding_dimension if embedding_dimension is not None else DEFAULT_EMBEDDING_DIMENSION
+    dsn = url.replace("postgresql+asyncpg://", "postgresql://").replace("postgres://", "postgresql://", 1)
+
+    try:
+        import asyncpg
+
+        conn = await asyncpg.connect(dsn)
+        try:
+            rows = await conn.fetch(COLUMN_DIMS_SQL)
+        finally:
+            await conn.close()
+    except Exception as exc:  # noqa: BLE001 - the migration path reports real connection errors
+        logger.debug("Embedding-dimension pre-check skipped: {}", type(exc).__name__)
+        return None
+
+    return describe_dimension_mismatch(
+        [(r["table_name"], r["column_name"], r["column_type"]) for r in rows],
+        configured,
     )

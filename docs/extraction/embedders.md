@@ -274,6 +274,11 @@ database cannot be resized in place. To change embedding dimension:
 
 This is why choosing a model upfront matters.
 
+Pointing a process at a database whose columns were created at a *different*
+dimension is rejected up front — both before migrations run and when the
+pgvector backend connects — naming the offending columns and both widths,
+rather than surfacing an opaque bind error on the first write.
+
 ## Error Handling
 
 The embedder handles transient failures automatically:

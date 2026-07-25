@@ -319,6 +319,24 @@ class PgVectorBackend(AsyncSessionMixin):
         async with self._engine.begin() as conn:
             await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
 
+            # Fail fast when this process is configured for a different embedding
+            # dimension than the one the database's columns were created with
+            # (#1260). Alembic never re-runs an applied migration and a populated
+            # pgvector column cannot be resized in place, so the widths would stay
+            # divergent and every write/recall would fail with an opaque bind
+            # error. Empty on a fresh database, where migrations are about to
+            # create the columns at the configured dimension.
+            from khora.db.embedding_dim_check import (
+                COLUMN_DIMS_SQL,
+                describe_dimension_mismatch,
+            )
+            from khora.exceptions import ConfigurationError
+
+            _dim_rows = [(r[0], r[1], r[2]) for r in (await conn.execute(text(COLUMN_DIMS_SQL))).all()]
+            _mismatch = describe_dimension_mismatch(_dim_rows, self._embedding_dimension)
+            if _mismatch:
+                raise ConfigurationError(_mismatch)
+
         # Detect halfvec support (pgvector >= 0.7.0) and verify HNSW indexes
         if self._use_halfvec:
             halfvec_supported = await self._detect_halfvec_support()
