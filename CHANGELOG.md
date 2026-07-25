@@ -6,6 +6,27 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ## [Unreleased]
 
+## [0.24.0] - configurable embedding dimensions, entity-attribute fidelity, batch diagnostics
+
+### Added
+
+- **Configurable embedding dimensions on the Postgres backend** (#1556, #1260): a non-1536 embedding model - notably `text-embedding-3-large` at 3072, or a shortened width via the model's `dimensions` parameter - now works end to end. The embedding columns and the halfvec HNSW index are sized from the configured dimension when a **fresh** database is migrated, and the config guard validates against pgvector's real index ceilings (2000 for `vector`, 4000 for `halfvec`) instead of requiring exactly 1536. `run_migrations()` accepts `embedding_dimension` / `use_halfvec` (both keyword-only, defaulting to the historical 1536 / True), and `KhoraConfig.get_effective_embedding_dimension()` is the single source of truth the column, index, migration, and runtime cast all derive from. A dimension-mismatch guard rejects a configuration that disagrees with an existing database's column widths - before any DDL runs, and again when the pgvector backend connects - naming the offending columns and both widths instead of surfacing an opaque bind error on the first write. **The default remains 1536 and existing databases are unaffected**: Alembic tracks revision ids, so already-applied migrations never re-run, and a populated pgvector column cannot be resized in place (change dimension by migrating a fresh database and re-embedding).
+- **Configurable per-document extraction concurrency** for VectorCypher (#1560).
+- **Temporal fusion weights** are plumbed through `VectorCypherConfig` (#1550).
+- **Per-type attribute-schema hints** in extraction prompts, ungated (#1552).
+
+### Fixed
+
+- **Batch document-creation failures are explained, not just counted** (#1539, #1538): when `remember_batch` cannot create a document row, the matching `per_document` entry now carries the caller's `external_id` and the error text, and the failures aggregate onto `BatchResult.metadata` as `document_errors` (count) plus `failed_documents` (`{index, external_id, error}`). Previously the failure incremented `BatchResult.failed` while the per-document slot was anonymous (`document_id=None`, no `external_id`, no error) and `metadata` stayed empty, so a caller could not tell which document was lost or why. The `remember_batch` docstring now also documents the tight `documents` column limits (`source_name` / `source_type` 64, `language` 10, `content_type` 128, `author` 255) that trip this path.
+- **Entity attribute fidelity**: attribute validation is additive-safe (#1547); attributes merge across chunks during pipeline dedup (#1548); attributes are emitted on the strict structured-output path (#1549); entity upsert no longer lets an empty attribute dict overwrite populated attributes (#1551); the Neo4j entity-version change-detector compares parsed attribute dicts rather than raw strings (#1555).
+- **Neo4j deprecation noise**: the `valid_*` backfill uses the `CALL (var)` scope-clause syntax (#1537).
+- The `google_adk` integration example resolves again: `google-adk` now requires a pre-release of `opentelemetry-resourcedetector-gcp`, which uv rejects by default, so the example's fresh unlocked `uv sync` in `examples-smoke` failed to resolve.
+
+### Changed
+
+- The effective embedding dimension the pgvector backend casts to now follows `llm.embedding_dimension` (the embedder-facing value) rather than `storage.embedding_dimension`, so the runtime cast can no longer diverge from the vectors the embedder produces. Every previously-valid Postgres configuration is unaffected, because the old guard required `storage.embedding_dimension == 1536` and `llm.embedding_dimension` defaults to 1536. A configuration that set `llm.embedding_dimension` to a value pgvector cannot index now raises at construction (and at point of use) instead of failing later at write time.
+- Dependency bumps: `pillow` 12.2.0 → 12.3.0 (#1540), `pyasn1` 0.6.3 → 0.6.4 (#1557), `setuptools` 81.0.0 → 83.0.0 (#1558), `httplib2` 0.31.2 → 0.32.0 (#1559).
+
 ## [0.23.1] - NUL-byte ingestion sanitization
 
 ### Fixed
