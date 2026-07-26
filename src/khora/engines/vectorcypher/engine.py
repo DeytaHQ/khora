@@ -169,6 +169,30 @@ _CHUNK_MIRROR_DEGRADED_COUNTER = metric_counter(
 )
 
 
+# #1564 extraction progress counters. Free when no MeterProvider is installed
+# (the OTel API returns no-op instruments). NO namespace_id label - cardinality
+# rule. chunk_outcome_total is shared with the extractor's identically-declared
+# instrument (llm.py); this module only emits the ``skipped_short`` outcome at
+# the min_extraction_tokens gate, where chunks never reach the LLM.
+_EXTRACTION_CHUNKS_PROCESSED_COUNTER = metric_counter(
+    "khora.extraction.chunks_processed_total",
+    unit="1",
+    description=(
+        "Chunks that flowed through a remember_batch window's extraction stage, "
+        "incremented per window by the window's stored-chunk count. Denominator "
+        "for call-amplification gate checks. NO namespace_id label - cardinality rule."
+    ),
+)
+_EXTRACTION_CHUNK_OUTCOME_COUNTER = metric_counter(
+    "khora.extraction.chunk_outcome_total",
+    unit="1",
+    description=(
+        "Per-chunk terminal extraction outcome. Label: outcome "
+        "(extracted/skipped_short/lost_truncated/lost_parse/lost_error)."
+    ),
+)
+
+
 async def _mirror_chunks_or_degrade(
     dual_nodes: DualNodeManager | None,
     chunks: list[TemporalChunk],
@@ -3674,6 +3698,10 @@ class VectorCypherEngine:
                 f"Windowed processing: {len(ok_states)} docs → {len(windows)} windows (max_chunks_in_flight={max_cif})"
             )
 
+        # #1564: total chunks to process across all windows, for per-window
+        # progress (done/total, rate, ETA). Reuses _stage0_t0 as the batch t0.
+        _chunks_total = sum(len(s.raw_chunks) for s in ok_states)
+
         # Accumulated timing across windows
         _stage2_ms = 0.0
         _stage3_ms = 0.0
@@ -3849,6 +3877,13 @@ class VectorCypherEngine:
                     if not is_conversation_mode:
                         min_tokens = self._vc_config.min_extraction_tokens
                         if min_tokens > 0 and all(len(c.content.split()) <= min_tokens for c in doc_chunks):
+                            # #1564: this bare-continue silently dropped every
+                            # chunk of a below-threshold document from the LLM
+                            # extraction path. Count them so short-doc skips are
+                            # distinguishable from genuine extraction loss.
+                            _EXTRACTION_CHUNK_OUTCOME_COUNTER.add(
+                                len(doc_chunks), attributes={"outcome": "skipped_short"}
+                            )
                             continue
 
                     # #1408: config.pipeline.selective_extraction gates the
@@ -4225,6 +4260,45 @@ class VectorCypherEngine:
                     new_entity_count += 1
             results["entities"] += new_entity_count
             results["relationships"] += len(all_relationships)
+
+            # #1564: unconditional per-window progress. The "Streaming pipeline
+            # batch store" INFO above sits inside `if all_entities:` and goes
+            # silent for exactly the windows where extraction produced nothing -
+            # the failure shape operators most need to see. This line always
+            # fires; the span mirrors the batch-level span so window progress
+            # reaches the trace backend (free when telemetry is disabled).
+            _window_chunks = len(all_temporal_chunks)
+            _EXTRACTION_CHUNKS_PROCESSED_COUNTER.add(_window_chunks)
+            _window_elapsed_s = max(_time.perf_counter() - _stage0_t0, 1e-9)
+            _chunks_done = results["chunks"]
+            _extraction_errors = int(extraction_diagnostics.get("extraction_errors", 0))
+            _chunks_rate = _chunks_done / _window_elapsed_s
+            _chunks_eta_s = (_chunks_total - _chunks_done) / _chunks_rate if _chunks_rate > 0 else 0.0
+            logger.info(
+                "extraction window {}/{}: chunks {}/{}, docs {}, extraction_errors={}, "
+                "{:.0f}s elapsed, {:.1f} chunks/s, ETA {:.0f}s",
+                _wi + 1,
+                len(windows),
+                _chunks_done,
+                _chunks_total,
+                results["processed"],
+                _extraction_errors,
+                _window_elapsed_s,
+                _chunks_rate,
+                _chunks_eta_s,
+            )
+            with trace_span(
+                "khora.vectorcypher.remember_batch.window",
+                window_index=_wi + 1,
+                window_count=len(windows),
+                window_chunks=_window_chunks,
+                chunks_done=_chunks_done,
+                chunks_total=_chunks_total,
+                docs_processed=results["processed"],
+                extraction_errors=_extraction_errors,
+                elapsed_ms=round(_window_elapsed_s * 1000, 2),
+            ):
+                pass
             # end of window loop
 
         _stage6_total_ms = _stage6_upsert_ms + _stage6_rels_ms + _stage6_links_ms

@@ -26,6 +26,7 @@ from khora.extraction.embedders._request_telemetry import (
     set_connector_attributes,
     set_rate_limit_attributes,
 )
+from khora.telemetry.metrics import metric_counter
 
 from .base import (
     EntityExtractor,
@@ -421,6 +422,44 @@ _THINKING_MODEL_MIN_MAX_TOKENS = 32768
 
 def _is_truncation_finish_reason(finish_reason: str) -> bool:
     return str(finish_reason).lower() in _TRUNCATION_FINISH_REASONS
+
+
+# #1564 progress telemetry. With the default max_chunks_in_flight=None the
+# whole batch is a single window, so one extract_multi() call can run hundreds
+# of waves and stay silent until it returns - exactly the run shape that
+# stalled blind in production. Emit a per-wave INFO every _WAVE_LOG_EVERY waves
+# or once _WAVE_LOG_INTERVAL_S has elapsed since the last line (whichever comes
+# first); the final wave always logs so short runs still surface one line.
+_WAVE_LOG_EVERY = 10
+_WAVE_LOG_INTERVAL_S = 30.0
+
+# #1564 extraction outcome + amplification counters. Free when no MeterProvider
+# is installed (the OTel API returns no-op instruments). NO namespace_id label
+# on any of these - cardinality rule.
+_EXTRACTION_CHUNK_OUTCOME_COUNTER = metric_counter(
+    "khora.extraction.chunk_outcome_total",
+    unit="1",
+    description=(
+        "Per-chunk terminal extraction outcome. Label: outcome "
+        "(extracted/skipped_short/lost_truncated/lost_parse/lost_error)."
+    ),
+)
+_EXTRACTION_PARSE_RESCUED_COUNTER = metric_counter(
+    "khora.extraction.parse_rescued_total",
+    unit="1",
+    description=(
+        "Extractions rescued by _extract_json_from_text's raw re-parse after "
+        "structured JSON parsing failed. Had no metric footprint before #1564."
+    ),
+)
+_EXTRACTION_BISECTION_FLOOR_COUNTER = metric_counter(
+    "khora.extraction.bisection_floor_total",
+    unit="1",
+    description=(
+        "Bisection reached the single-text floor while resolving output "
+        "truncation - the worst-case LLM-call-amplification signal."
+    ),
+)
 
 
 def _is_thinking_model(model: str) -> bool:
@@ -2154,6 +2193,8 @@ class LLMEntityExtractor(EntityExtractor):
         except ImportError:
             raise RuntimeError("litellm package not installed. Run: pip install litellm")
 
+        import time as _time
+
         # Calculate max_input_tokens from model if not provided
         if max_input_tokens is None:
             multiplier = self._get_input_multiplier()
@@ -2197,6 +2238,7 @@ class LLMEntityExtractor(EntityExtractor):
 
             if len(batch) == 1:
                 # Floor: can't split further — use single-doc extraction
+                _EXTRACTION_BISECTION_FLOOR_COUNTER.add(1)
                 logger.debug("Bisection floor: extracting single text individually")
                 result = await self.extract(
                     batch[0],
@@ -2362,20 +2404,71 @@ class LLMEntityExtractor(EntityExtractor):
         # next wave launches.  Worst-case waste: (wave_size - 1) extra doomed
         # API calls in the wave where the first failure occurs.
         wave_size = self._wave_size
+        n_waves = (len(batches) + wave_size - 1) // wave_size
+        texts_total = len(texts)
+        _wave_t0 = _time.perf_counter()
+        _last_wave_log_t = _wave_t0
+
+        def _log_wave_progress(wave_no: int, batches_done: int) -> None:
+            # #1564: intra-call progress so a single long window (default
+            # max_chunks_in_flight=None) is not silent until it returns.
+            elapsed = max(_time.perf_counter() - _wave_t0, 1e-9)
+            texts_done = sum(len(b) for b in batches[:batches_done])
+            errors = sum(1 for r in all_results if r.metadata.get("error"))
+            rate = texts_done / elapsed
+            eta = (texts_total - texts_done) / rate if rate > 0 else 0.0
+            logger.info(
+                "extraction wave {}/{}: batches {}/{}, texts {}/{}, errors={}, {:.1f} texts/s, ETA {:.0f}s",
+                wave_no,
+                n_waves,
+                batches_done,
+                len(batches),
+                texts_done,
+                texts_total,
+                errors,
+                rate,
+                eta,
+            )
+
         for wave_start in range(0, len(batches), wave_size):
+            wave_no = wave_start // wave_size + 1
             if self._consecutive_batch_failures >= self._BATCH_FAILURE_THRESHOLD:
                 # Circuit breaker tripped between waves — remaining batches
                 # go through single-doc extraction via _run_batch's own check.
                 for batch in batches[wave_start:]:
                     results = await _run_batch(batch)
                     all_results.extend(results)
+                _log_wave_progress(wave_no, len(batches))
                 break
             wave = batches[wave_start : wave_start + wave_size]
             wave_results = await asyncio.gather(*[_run_batch(b) for b in wave])
             for results in wave_results:
                 all_results.extend(results)
 
+            batches_done = wave_start + len(wave)
+            _now = _time.perf_counter()
+            if (
+                wave_no % _WAVE_LOG_EVERY == 0
+                or (_now - _last_wave_log_t) >= _WAVE_LOG_INTERVAL_S
+                or batches_done >= len(batches)
+            ):
+                _log_wave_progress(wave_no, batches_done)
+                _last_wave_log_t = _now
+
         error_count = sum(1 for r in all_results if r.metadata.get("error"))
+        # #1564: per-chunk terminal-outcome taxonomy. One outcome per result;
+        # skipped_short is emitted separately by the engine's min-token gate.
+        for r in all_results:
+            _err = r.metadata.get("error")
+            if not _err:
+                _outcome = "extracted"
+            elif _err == "truncated_response":
+                _outcome = "lost_truncated"
+            elif _err == "unparseable_response":
+                _outcome = "lost_parse"
+            else:
+                _outcome = "lost_error"
+            _EXTRACTION_CHUNK_OUTCOME_COUNTER.add(1, attributes={"outcome": _outcome})
         # Fail loud: surface failed/timed-out documents at WARNING so a degraded
         # run is visible (and countable) rather than silently producing empty
         # extraction — see #1113 (behaviour: mark + log + count, continue).
@@ -2583,8 +2676,17 @@ Return ONLY valid JSON, no other text."""
                     # content with a truncation finish_reason, which must drive
                     # bisection rather than be mislabelled as an empty response.
                     if _is_truncation_finish_reason(finish_reason):
+                        # #1564: name the truncation class so genuine output-cap
+                        # events (finish_reason=length) are greppable apart from
+                        # other provider truncation reasons (e.g. Gemini/Vertex
+                        # MAX_TOKENS). The pre-#1563 message tagged mislabelled
+                        # parse failures as "truncated" and misdirected the
+                        # investigation - keep the two distinguishable in logs.
+                        _trunc_kind = (
+                            "output-cap truncation" if str(finish_reason).lower() == "length" else "provider truncation"
+                        )
                         logger.warning(
-                            f"LLM response truncated (finish_reason={finish_reason}) in batch extraction. "
+                            f"LLM response {_trunc_kind} (finish_reason={finish_reason}) in batch extraction. "
                             f"Model: {model_used}, batch_size: {len(texts)}. "
                             f"Consider increasing max_tokens or reducing batch size."
                         )
@@ -3005,6 +3107,9 @@ Return ONLY valid JSON, no other text."""
         if json_match:
             try:
                 data = json.loads(json_match.group())
+                # #1564: count the rescue - these raw re-parses recovered
+                # thousands of chunks with zero metric footprint before now.
+                _EXTRACTION_PARSE_RESCUED_COUNTER.add(1)
                 # Pass dict directly — _parse_response accepts dicts and skips
                 # the parse step. (Historically this rescue also dodged the
                 # pre-#1563 repair-before-parse corruption; kept as a last-ditch
