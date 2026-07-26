@@ -59,8 +59,12 @@ class TestJsonHelpers:
         assert _repair_json('{"a": 1,}') == '{"a": 1}'
         assert _repair_json("[1, 2, 3,]") == "[1, 2, 3]"
 
-    def test_repair_json_strips_line_comments(self) -> None:
-        assert _repair_json('{"a": 1} // comment') == '{"a": 1} '
+    def test_repair_json_leaves_comments_alone(self) -> None:
+        # #1563: the string-blind //-strip is deliberately gone - it amputated
+        # URL-bearing strings in VALID output (the extraction-storm regression).
+        # Comment-bearing responses now fail parse loudly instead.
+        assert _repair_json('{"a": 1} // comment') == '{"a": 1} // comment'
+        assert _repair_json('{"u": "https://x.example/y"}') == '{"u": "https://x.example/y"}'
 
 
 # ---------------------------------------------------------------------------

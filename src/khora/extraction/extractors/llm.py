@@ -50,18 +50,41 @@ _CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*\n(.*?)```\s*$", re.DOTALL)
 
 
 def _strip_json_fences(content: str) -> str:
-    """Strip markdown code fences and repair common JSON issues from LLM output.
+    """Strip markdown code fences from LLM output.
 
-    Models like Claude wrap JSON in ```json ... ``` fences even when
-    asked for raw JSON, and sometimes produce malformed JSON (trailing
-    commas, unquoted values, etc.).  This strips fences and applies
-    lightweight repairs so json.loads() succeeds.
+    Models like Claude wrap JSON in ```json ... ``` fences even when asked
+    for raw JSON. Pure fence-stripping - repairs moved to the parse fallback
+    in ``_parse_llm_json`` (#1563).
     """
     content = content.strip()
     m = _CODE_FENCE_RE.match(content)
     if m:
         content = m.group(1).strip()
-    return _repair_json(content)
+    return content
+
+
+def _parse_llm_json(content: str) -> Any:
+    """Parse LLM JSON output: parse first, repair only on failure (#1563).
+
+    Repairs used to run unconditionally BEFORE parsing, which corrupted
+    valid output: the string-blind ``//``-comment strip amputated any string
+    containing a URL, turning schema-constrained (guaranteed-valid) JSON
+    into "Unterminated string" parse failures that were then misclassified
+    as truncation and bisected - ~2.2x LLM-call amplification on URL-rich
+    corpora. Order now: fence-strip -> parse -> repairs as fallback.
+
+    ``strict=False`` admits literal control characters inside strings (some
+    json_object-mode models emit raw newlines/tabs). NUL is stripped first:
+    never meaningful in model output, and asyncpg rejects it at storage
+    time, where the failure would take out a whole write window.
+    """
+    stripped = _strip_json_fences(content)
+    if "\x00" in stripped:
+        stripped = stripped.replace("\x00", "")
+    try:
+        return json.loads(stripped, strict=False)
+    except json.JSONDecodeError:
+        return json.loads(_repair_json(stripped), strict=False)
 
 
 # Trailing comma before closing brace/bracket: ,\s*} or ,\s*]
@@ -69,18 +92,19 @@ _TRAILING_COMMA_RE = re.compile(r",\s*([}\]])")
 
 
 def _repair_json(content: str) -> str:
-    """Repair common JSON malformations from LLM output.
+    """Repair common JSON malformations from LLM output (fallback only).
+
+    Applied ONLY after a plain parse fails (#1563) - running repairs on valid
+    output corrupted it. The single-line ``//``-comment strip is deliberately
+    gone: it was string-blind (amputated URL-bearing strings), allowlisted
+    constrained-decoding models cannot emit comments, and for the rest a
+    comment-bearing response now fails loudly instead of being silently and
+    sometimes wrongly rewritten.
 
     Handles:
     - Trailing commas before } or ] (most common Claude issue)
-    - Single-line // comments
-    - Unquoted NaN/Infinity values
     """
-    # Remove single-line comments (// ...)
-    content = re.sub(r"//[^\n]*", "", content)
-    # Fix trailing commas: [1, 2,] -> [1, 2]  or {"a": 1,} -> {"a": 1}
-    content = _TRAILING_COMMA_RE.sub(r"\1", content)
-    return content
+    return _TRAILING_COMMA_RE.sub(r"\1", content)
 
 
 # Deterministic auth/authz exception types. LiteLLM normalizes provider auth
@@ -1449,7 +1473,7 @@ class LLMEntityExtractor(EntityExtractor):
             if not content:
                 return []
 
-            data = json.loads(_strip_json_fences(content))
+            data = _parse_llm_json(content)
             if not isinstance(data, dict):
                 return []
 
@@ -1653,7 +1677,7 @@ class LLMEntityExtractor(EntityExtractor):
             if not content:
                 return empty
 
-            data = json.loads(_strip_json_fences(content))
+            data = _parse_llm_json(content)
             if not isinstance(data, dict):
                 return empty
 
@@ -2582,27 +2606,21 @@ Return ONLY valid JSON, no other text."""
                             for _ in texts
                         ]
 
-                    # Parse JSON with error handling - don't retry on parse errors
+                    # Parse JSON with error handling.
+                    #
+                    # The old "Unterminated string" -> truncated_response branch is
+                    # deliberately GONE (#1563): genuine truncation already returned
+                    # above on finish_reason, so a parse failure here means corrupted
+                    # NON-truncated output - bisecting it re-ran identical calls on
+                    # smaller batches for nothing (the 2.2x amplification storm, now
+                    # also fixed at the source by parse-before-repair). Log and raise
+                    # so tenacity retries the call. Accepted cost: a rare provider
+                    # stream-cutoff reporting finish_reason "stop" burns the retry
+                    # budget before surfacing as an error result instead of
+                    # bisecting; call counts are comparable and the failure is loud.
                     try:
-                        data = json.loads(_strip_json_fences(content))
+                        data = _parse_llm_json(content)
                     except json.JSONDecodeError as json_err:
-                        # "Unterminated string" = output token limit hit mid-JSON (deterministic).
-                        # Retrying will produce the same result — return truncation error so the
-                        # caller can bisect the batch instead.
-                        if "Unterminated string" in str(json_err):
-                            logger.warning(
-                                f"LLM response truncated (Unterminated string, "
-                                f"finish_reason={finish_reason}) in batch extraction. "
-                                f"Model: {model_used}, batch_size: {len(texts)}. "
-                                f"Bisection will handle this."
-                            )
-                            return [
-                                ExtractionResult(
-                                    metadata={"error": "truncated_response", "finish_reason": finish_reason}
-                                )
-                                for _ in texts
-                            ]
-                        # Other JSON errors — log and retry (model may produce valid JSON next attempt)
                         logger.warning(
                             f"JSON parse error in batch extraction (finish_reason={finish_reason}): {json_err}. "
                             f"Model: {model_used}, content_length: {len(content)}, "
@@ -2805,7 +2823,7 @@ Return ONLY valid JSON, no other text."""
                 return ExtractionResult(metadata={"error": "empty_response"})
 
             # Accept pre-parsed dict directly (from extract_multi_batch)
-            data = content if isinstance(content, dict) else json.loads(_strip_json_fences(content))
+            data = content if isinstance(content, dict) else _parse_llm_json(content)
 
             # Ensure data is actually a dict (not a string that parsed as string)
             if not isinstance(data, dict):
@@ -2988,12 +3006,17 @@ Return ONLY valid JSON, no other text."""
             try:
                 data = json.loads(json_match.group())
                 # Pass dict directly — _parse_response accepts dicts and skips
-                # json.loads. Re-serializing with json.dumps would re-enter
-                # _parse_response as a string, risking mutual recursion if
-                # _strip_json_fences mangles the output back into invalid JSON.
+                # the parse step. (Historically this rescue also dodged the
+                # pre-#1563 repair-before-parse corruption; kept as a last-ditch
+                # extractor for JSON embedded in prose.)
                 return self._parse_response(data)
             except json.JSONDecodeError:
                 pass
 
         logger.warning("Could not extract valid JSON from response")
-        return ExtractionResult(metadata={"raw_response": text[:500]})
+        # #1563: carry an error key so this terminal outcome trips the #889
+        # extraction_errors accounting and the all_failed breaker instead of
+        # masquerading as a successful empty extraction. Behavior change is
+        # deliberate: a persistently unparseable model now fails loudly
+        # (single-doc fallback / breaker) rather than silently losing chunks.
+        return ExtractionResult(metadata={"error": "unparseable_response", "raw_response": text[:500]})
