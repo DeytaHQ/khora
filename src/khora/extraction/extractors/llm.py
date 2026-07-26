@@ -226,15 +226,34 @@ Guidelines:
 
 Return ONLY valid JSON, no other text."""
 
+# #1562 - attribute prompt surfaces gated behind extraction_attribute_prompts.
+# Four #1549/#1552 surfaces sit on top of the v0.23.1 baseline:
+#   1. DEFAULT_SYSTEM_PROMPT STATE_CHANGE guideline (rewritten by #1549) -
+#      deliberately NOT gated. It keeps its current {"key","value"}-pair wording
+#      so the strict-schema pair channel stays coherent; the flag-off system
+#      prompt is byte-identical to v0.23.1 EXCEPT this one line (scoped caveat).
+#   2. EXTRACTION_PROMPT_STRUCTURED "emit attributes" nudge (single-doc path, below).
+#   3. _extract_multi_batch custom-expertise multi_text nudge (batch path).
+#   4. _extract_multi_batch hardcoded-fallback nudge + the #1552 per-type
+#      ATTRIBUTE SCHEMA hint block (_build_attribute_schema_block).
+# Surfaces 2-4 render only when self._attribute_prompts is True. At the default
+# they are suppressed and the rendered prompt matches v0.23.1 byte-for-byte. The
+# strict-schema attributes pair channel and its parser are unconditional either way.
+ATTRIBUTE_NUDGE_LINE = (
+    'For each entity, emit "attributes" as an array of {"key": ..., "value": ...} '
+    "string pairs drawn from its salient fields (identifiers, emails, state, urls, dates, etc.)."
+)
+
 # Extraction prompt template — dynamic content only (guidelines moved to system prompt).
 # Structured-output models already enforce the JSON schema via response_format,
 # so we skip the JSON example to save ~400-500 tokens per call.
+# {attribute_nudge} is "" (flag off) or "\n" + ATTRIBUTE_NUDGE_LINE (flag on); the
+# leading newline rides in the value so the flag-off template equals v0.23.1 exactly.
 EXTRACTION_PROMPT_STRUCTURED = """\
 Extract entities, relationships, and temporal information from the following text.
 {document_context}
 Entity types to extract: {entity_types}
-Relationship types to use: {relationship_types}
-For each entity, emit "attributes" as an array of {{"key": ..., "value": ...}} string pairs drawn from its salient fields (identifiers, emails, state, urls, dates, etc.).
+Relationship types to use: {relationship_types}{attribute_nudge}
 
 Text:
 {text}"""
@@ -581,6 +600,7 @@ class LLMEntityExtractor(EntityExtractor):
         wave_size: int = 20,
         retry_wait: float = 1.0,
         second_pass: bool = False,
+        attribute_prompts: bool = False,
     ) -> None:
         """Initialize the LLM entity extractor.
 
@@ -601,6 +621,15 @@ class LLMEntityExtractor(EntityExtractor):
                 batch is an explicit cost/quality opt-in
                 (pipeline.extraction_second_pass /
                 KHORA_PIPELINES_EXTRACTION_SECOND_PASS).
+            attribute_prompts: Gate the attribute-prompt surfaces (#1562). Default
+                False keeps the flag-off prompt byte-identical to v0.23.1: the
+                #1549 "emit attributes" nudge lines and the #1552 per-type
+                ATTRIBUTE SCHEMA hint block are suppressed. When True the nudge
+                renders on every call and the hint block renders when an expertise
+                config declares per-type attributes. The strict-schema attributes
+                pair channel and its parser are unconditional either way
+                (pipeline.extraction_attribute_prompts /
+                KHORA_PIPELINES_EXTRACTION_ATTRIBUTE_PROMPTS).
         """
         self._model = model
         self._temperature = temperature
@@ -611,6 +640,7 @@ class LLMEntityExtractor(EntityExtractor):
         self._max_concurrent = max_concurrent
         self._wave_size = wave_size
         self._second_pass = second_pass
+        self._attribute_prompts = attribute_prompts
         self._semaphore = asyncio.Semaphore(max_concurrent)
         # Persists across extract_batch calls so the circuit breaker can actually trip
         self._consecutive_batch_failures = 0
@@ -1934,10 +1964,15 @@ class LLMEntityExtractor(EntityExtractor):
             entity_types: Resolved entity-type names being extracted.
 
         Returns:
-            The schema block, or "" when there is no expertise or when no
-            extracted type declares any attributes.
+            The schema block, or "" when the attribute-prompt flag is off, when
+            there is no expertise, or when no extracted type declares any
+            attributes.
         """
-        if expertise is None or not entity_types:
+        # #1562: the per-type hint block is one of the four #1549/#1552 attribute
+        # prompt surfaces gated behind extraction_attribute_prompts (default off).
+        # Guarding here covers all injection sites since each already renders the
+        # block only when it is truthy.
+        if not self._attribute_prompts or expertise is None or not entity_types:
             return ""
 
         by_name = {et.name: et for et in expertise.entity_types}
@@ -2072,6 +2107,10 @@ class LLMEntityExtractor(EntityExtractor):
             relationship_types=", ".join(relationship_types or []),
             text=text[:8000],  # Truncate very long texts
             document_context=document_context,
+            # #1562 surface 2: nudge only when the flag is on; EXTRACTION_PROMPT
+            # (non-structured) has no {attribute_nudge} placeholder so the extra
+            # kwarg is a harmless no-op there.
+            attribute_nudge=(f"\n{ATTRIBUTE_NUDGE_LINE}" if self._attribute_prompts else ""),
         )
         # Per-type attribute keys: names which keys to emit on top of the
         # general attributes nudge baked into the template. Prepended alongside
@@ -2547,6 +2586,11 @@ class LLMEntityExtractor(EntityExtractor):
         # general attributes nudge in the hardcoded fallback builder.
         attribute_schema = self._build_attribute_schema_block(expertise, entity_types)
 
+        # #1562 surfaces 3 and 4: the general "emit attributes" nudge for the batch
+        # path. "" when the flag is off (byte-identical to v0.23.1); the leading
+        # newline rides in the value so removing it leaves no blank-line residue.
+        attribute_nudge = f"\n{ATTRIBUTE_NUDGE_LINE}" if self._attribute_prompts else ""
+
         # If expertise has custom extraction prompt, use it with multi-section adaptation
         if expertise and expertise.extraction_prompt:
             from khora.extraction.skills.composer import ExpertiseComposer
@@ -2563,8 +2607,8 @@ Return a JSON object with a "sections" array, one object per input section:
     {"entities": [...], "relationships": [...], "events": [...]},
     ...
 ]}
-Each section follows the entity/relationship format from the instructions above.
-For each entity, emit "attributes" as an array of {"key": ..., "value": ...} string pairs drawn from its salient fields (identifiers, emails, state, urls, dates, etc.)."""
+Each section follows the entity/relationship format from the instructions above."""
+                + attribute_nudge
             )
 
             prompt_context = {
@@ -2607,8 +2651,7 @@ Return a JSON object with a "sections" array, one object per section:
     ...
 ]}}
 
-Each section follows the same entity/relationship/event format.
-For each entity, emit "attributes" as an array of {{"key": ..., "value": ...}} string pairs drawn from its salient fields (identifiers, emails, state, urls, dates, etc.).{attr_schema_section}
+Each section follows the same entity/relationship/event format.{attribute_nudge}{attr_schema_section}
 Return ONLY valid JSON, no other text."""
 
         try:

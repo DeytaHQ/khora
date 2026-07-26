@@ -1477,6 +1477,26 @@ class PipelineSettings(BaseSettings):
         "profile flat; enable via KHORA_PIPELINES_EXTRACTION_SECOND_PASS=true for "
         "denser graphs.",
     )
+    extraction_attribute_prompts: bool = Field(
+        default=False,
+        description="Opt-in attribute-prompt surfaces for entity extraction (#1562). When "
+        "True, the extraction prompts carry the general 'emit attributes' nudge lines "
+        "(#1549) AND, for expertise-driven runs, the per-type ATTRIBUTE SCHEMA hint block "
+        "(#1552). Default False: the nudge lines and hint block are suppressed and the "
+        "flag-off prompt is byte-identical to v0.23.1 (the required 'attributes' pair "
+        "channel in the strict schema and its parser stay unconditional either way, so "
+        "STATE_CHANGE / temporal machinery keeps working). "
+        "IMPORTANT (#1541 disposition): at the default the generic attribute-fill goal is "
+        "opt-in. The sanctioned route to attribute fill is flag-on AND an expertise "
+        "config that declares per-type attributes - the per-type hint block only renders "
+        "when both hold. Expertise users at the default therefore get ZERO attribute "
+        "prompting (less than v0.23.1's tool-context listing, which was removed in "
+        "a799b8c6 and is not restored); they must set "
+        "KHORA_PIPELINES_EXTRACTION_ATTRIBUTE_PROMPTS=true to re-enable it. This is a "
+        "deliberate default-wontfix for generic attribute fill - the prompt nudges "
+        "measurably suppressed entity yield and, before #1563, interacted with a JSON "
+        "repair bug to stall ingestion.",
+    )
 
     # Entity embedding skip rules — skip embedding generation for low-value entity types
     skip_embedding_entity_types: list[str] = Field(

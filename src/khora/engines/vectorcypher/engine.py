@@ -1748,6 +1748,7 @@ class VectorCypherEngine:
                 # of the already-selected core set.
                 selective_extraction=False,
                 extraction_second_pass=self._config.pipeline.extraction_second_pass,
+                extraction_attribute_prompts=self._config.pipeline.extraction_attribute_prompts,
                 out_diagnostics=out_diagnostics,
             )
 
@@ -1992,6 +1993,7 @@ class VectorCypherEngine:
             # re-select inside extract_entities.
             selective_extraction=False,
             extraction_second_pass=self._config.pipeline.extraction_second_pass,
+            extraction_attribute_prompts=self._config.pipeline.extraction_attribute_prompts,
         )
 
         if not entities:
@@ -2185,6 +2187,7 @@ class VectorCypherEngine:
                     # never re-select inside extract_entities.
                     selective_extraction=False,
                     extraction_second_pass=self._config.pipeline.extraction_second_pass,
+                    extraction_attribute_prompts=self._config.pipeline.extraction_attribute_prompts,
                 )
 
                 if extracted_entities:
@@ -3974,6 +3977,7 @@ class VectorCypherEngine:
                                     # extract_entities.
                                     selective_extraction=False,
                                     extraction_second_pass=self._config.pipeline.extraction_second_pass,
+                                    extraction_attribute_prompts=self._config.pipeline.extraction_attribute_prompts,
                                     out_diagnostics=doc_diagnostics,
                                 )
                             return ents, rels, doc_diagnostics
@@ -4019,6 +4023,7 @@ class VectorCypherEngine:
                             # signal meaningless for inner documents.
                             selective_extraction=False,
                             extraction_second_pass=self._config.pipeline.extraction_second_pass,
+                            extraction_attribute_prompts=self._config.pipeline.extraction_attribute_prompts,
                             out_diagnostics=window_diagnostics,
                         )
                         _merge_extraction_diagnostics(extraction_diagnostics, window_diagnostics)
