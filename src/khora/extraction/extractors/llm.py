@@ -428,6 +428,36 @@ def _is_thinking_model(model: str) -> bool:
     return any(lowered.startswith(p) for p in _THINKING_MODEL_PREFIXES)
 
 
+# Completion-token caps for models litellm cannot resolve. Keyed by prefix
+# match on the lowered model name; extend as families are deployed.
+_MODEL_OUTPUT_CAP_FALLBACK: dict[str, int] = {
+    "gpt-4o-mini": 16_384,
+    "gpt-4o": 16_384,
+}
+
+
+def _model_output_cap(model: str) -> int | None:
+    """Best-effort completion-token cap for retry-budget clamping (#1563).
+
+    litellm first, prefix table second, None for unknown models - callers
+    must preserve today's behavior (no clamp) when None.
+    """
+    try:
+        import litellm as _litellm
+
+        info = _litellm.get_model_info(model)
+        cap = info.get("max_output_tokens") or info.get("max_tokens")
+        if isinstance(cap, int) and cap > 0:
+            return cap
+    except Exception:  # noqa: S110 - unknown model, fall through to table
+        pass
+    lowered = model.lower()
+    for prefix, cap in _MODEL_OUTPUT_CAP_FALLBACK.items():
+        if lowered.startswith(prefix):
+            return cap
+    return None
+
+
 class LLMEntityExtractor(EntityExtractor):
     """LLM-based entity extractor using LiteLLM.
 
@@ -1279,20 +1309,30 @@ class LLMEntityExtractor(EntityExtractor):
                         # giving up — corpus-/model-agnostic recovery for outputs
                         # that just needed more room than the configured cap.
                         if _is_truncation_finish_reason(finish_reason):
-                            retry_budget = first_budget * 2
-                            logger.warning(
-                                "LLM response truncated (finish_reason={}) in extraction. "
-                                "Model: {}. Retrying once with max_tokens={}.",
-                                finish_reason,
-                                getattr(response, "model", self._model),
-                                retry_budget,
-                            )
-                            content, finish_reason, response = await self._run_extraction_completion(
-                                litellm,
-                                system_prompt=system_prompt,
-                                extraction_prompt=extraction_prompt,
-                                max_tokens=retry_budget,
-                            )
+                            # #1563: clamp the doubled budget to the model's
+                            # completion cap. Unclamped, 12288*2 exceeded
+                            # gpt-4o-mini's 16,384 -> OpenAI 400 -> retryable ->
+                            # every tenacity attempt re-ran BOTH calls and burned
+                            # the whole budget on a deterministic failure.
+                            _cap = _model_output_cap(self._model)
+                            retry_budget = first_budget * 2 if _cap is None else min(first_budget * 2, _cap)
+                            if retry_budget > first_budget:
+                                logger.warning(
+                                    "LLM response truncated (finish_reason={}) in extraction. "
+                                    "Model: {}. Retrying once with max_tokens={}.",
+                                    finish_reason,
+                                    getattr(response, "model", self._model),
+                                    retry_budget,
+                                )
+                                content, finish_reason, response = await self._run_extraction_completion(
+                                    litellm,
+                                    system_prompt=system_prompt,
+                                    extraction_prompt=extraction_prompt,
+                                    max_tokens=retry_budget,
+                                )
+                            # else: already at the cap - a same-budget retry is a
+                            # deterministic repeat; fall through to the loud
+                            # persistent-truncation handling below.
 
                     # Persistent truncation after the doubled-budget retry: this is
                     # not a silent zero-entity success — surface it loudly (ERROR +
