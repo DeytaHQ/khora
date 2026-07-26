@@ -103,7 +103,7 @@ def _response(content: str) -> MagicMock:
     return response
 
 
-async def _capture_single(monkeypatch, extractor, text, entity_types, relationship_types):
+async def _capture_single(monkeypatch, extractor, text, entity_types, relationship_types, expertise=None):
     captured: dict[str, object] = {}
 
     async def fake_acompletion(*args, **kwargs):
@@ -112,7 +112,7 @@ async def _capture_single(monkeypatch, extractor, text, entity_types, relationsh
         return _response('{"entities": [], "relationships": []}')
 
     monkeypatch.setattr("litellm.acompletion", fake_acompletion)
-    await extractor.extract(text, entity_types=entity_types, relationship_types=relationship_types)
+    await extractor.extract(text, entity_types=entity_types, relationship_types=relationship_types, expertise=expertise)
     return captured
 
 
@@ -217,11 +217,14 @@ async def test_batch_prompt_flag_off_byte_identical_to_v023(monkeypatch) -> None
 async def test_flag_off_expertise_suppresses_header_and_nudge_single(monkeypatch) -> None:
     extractor = LLMEntityExtractor(model=MODEL, max_retries=1)  # flag off
     captured = await _capture_single(
-        monkeypatch, extractor, "Alice emailed the team about TICKET-42.", ["PERSON", "TICKET"], ["KNOWS"]
+        monkeypatch,
+        extractor,
+        "Alice emailed the team about TICKET-42.",
+        ["PERSON", "TICKET"],
+        ["KNOWS"],
+        expertise=_expertise_with_attributes(),
     )
     user_msg = captured["messages"][1]["content"]
-    # The extractor is called with expertise via extract_multi below; single path
-    # here uses expertise=None, so this asserts the nudge is gone regardless.
     assert SCHEMA_HEADER not in user_msg
     assert NUDGE_FRAGMENT not in user_msg
 
