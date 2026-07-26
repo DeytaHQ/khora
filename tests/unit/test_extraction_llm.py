@@ -1370,13 +1370,18 @@ class TestBisectionOnTruncation:
             assert mock_multi.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_extract_multi_batch_detects_truncation_via_json_decode_error(self) -> None:
-        """_extract_multi_batch returns truncated_response when JSON is cut off mid-string."""
+    async def test_extract_multi_batch_parse_failure_is_not_misclassified_as_truncation(self) -> None:
+        """#1563: cut-off JSON with finish_reason=stop is a PARSE failure, not truncation.
+
+        The old behavior string-matched "Unterminated string" and fabricated
+        truncated_response, driving pointless bisection storms (genuine
+        truncation already returns earlier on finish_reason). Now the parse
+        error raises, tenacity retries the call, and the exhausted-retries
+        outcome is an error result - never a truncation label.
+        """
         extractor = self._make_extractor()
         texts = ["text one", "text two"]
 
-        # Simulate a response whose JSON is truncated mid-string (as happens when the
-        # LLM hits its max_tokens limit without finishing output).
         truncated_json = '{"sections": [{"entities": [{"name": "incomplet'
 
         mock_response = MagicMock()
@@ -1405,9 +1410,13 @@ class TestBisectionOnTruncation:
                 relationship_types=None,
             )
 
+        # Retries exhausted -> loud error results carrying the parse error,
+        # NEVER a fabricated truncated_response (which would trigger bisection).
         assert len(results) == 2
         for r in results:
-            assert r.metadata.get("error") == "truncated_response"
+            error = r.metadata.get("error")
+            assert error and error != "truncated_response"
+            assert "Unterminated string" in error
 
     @pytest.mark.asyncio
     async def test_bisect_and_extract_empty_batch_returns_empty_list(self) -> None:
