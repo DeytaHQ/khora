@@ -30,6 +30,9 @@ def test_model_output_cap_fallback_table() -> None:
     with patch("litellm.get_model_info", side_effect=Exception("unknown")):
         assert _model_output_cap("gpt-4o-mini-2024-07-18") == 16_384
         assert _model_output_cap("gpt-4o") == 16_384
+        # Provider-qualified forms must hit the table too (CodeRabbit, #1567)
+        assert _model_output_cap("openai/gpt-4o-mini") == 16_384
+        assert _model_output_cap("azure/gpt-4o-2024-08-06") == 16_384
         assert _model_output_cap("some-exotic-model") is None
 
 

@@ -451,7 +451,10 @@ def _model_output_cap(model: str) -> int | None:
             return cap
     except Exception:  # noqa: S110 - unknown model, fall through to table
         pass
-    lowered = model.lower()
+    # Match on the terminal segment so provider-qualified names
+    # ("openai/gpt-4o-mini", "azure/gpt-4o") hit the table when the litellm
+    # lookup fails (CodeRabbit finding on #1567).
+    lowered = model.lower().rsplit("/", 1)[-1]
     for prefix, cap in _MODEL_OUTPUT_CAP_FALLBACK.items():
         if lowered.startswith(prefix):
             return cap
