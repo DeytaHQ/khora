@@ -444,7 +444,7 @@ class TestAttributeSchemaBlock:
 
     def test_block_lists_declaring_types(self) -> None:
         """Header plus one line per declaring type, using the ontology key names."""
-        extractor = LLMEntityExtractor(model="test")
+        extractor = LLMEntityExtractor(model="test", attribute_prompts=True)
         block = extractor._build_attribute_schema_block(
             self._expertise(), ["PERSON", "TICKET", "ORGANIZATION", "CONCEPT"]
         )
@@ -457,25 +457,25 @@ class TestAttributeSchemaBlock:
 
     def test_only_resolved_types_included(self) -> None:
         """A declared type absent from the resolved entity_types list is excluded."""
-        extractor = LLMEntityExtractor(model="test")
+        extractor = LLMEntityExtractor(model="test", attribute_prompts=True)
         block = extractor._build_attribute_schema_block(self._expertise(), ["TICKET"])
         assert "TICKET: required=[identifier, status]; optional=[]" in block
         assert "PERSON" not in block
         assert "ORGANIZATION" not in block
 
     def test_empty_when_no_expertise(self) -> None:
-        extractor = LLMEntityExtractor(model="test")
+        extractor = LLMEntityExtractor(model="test", attribute_prompts=True)
         assert extractor._build_attribute_schema_block(None, ["PERSON"]) == ""
 
     def test_empty_when_no_declaring_types(self) -> None:
         from khora.extraction.skills.base import EntityTypeConfig, ExpertiseConfig
 
-        extractor = LLMEntityExtractor(model="test")
+        extractor = LLMEntityExtractor(model="test", attribute_prompts=True)
         expertise = ExpertiseConfig(name="x", entity_types=[EntityTypeConfig(name="CONCEPT")])
         assert extractor._build_attribute_schema_block(expertise, ["CONCEPT"]) == ""
 
     def test_empty_when_no_entity_types(self) -> None:
-        extractor = LLMEntityExtractor(model="test")
+        extractor = LLMEntityExtractor(model="test", attribute_prompts=True)
         expertise = self._expertise()
         assert extractor._build_attribute_schema_block(expertise, None) == ""
         assert extractor._build_attribute_schema_block(expertise, []) == ""
@@ -489,7 +489,7 @@ class TestAttributeSchemaBlock:
         """
         from khora.extraction.skills.base import ExpertiseConfig
 
-        extractor = LLMEntityExtractor(model="test")
+        extractor = LLMEntityExtractor(model="test", attribute_prompts=True)
         # Shape mirrors `yaml.safe_load` output: an empty scalar becomes None.
         expertise = ExpertiseConfig.from_dict(
             {
@@ -516,7 +516,7 @@ class TestAttributeSchemaBlock:
 
         context=None proves the block is NOT gated on source_tool / tool_schemas.
         """
-        extractor = LLMEntityExtractor(model="gpt-4o")  # structured-output path
+        extractor = LLMEntityExtractor(model="gpt-4o", attribute_prompts=True)  # structured-output path
         prompt = extractor._render_extraction_prompt(
             "Alice emailed the team.",
             ["PERSON", "TICKET"],
@@ -532,7 +532,7 @@ class TestAttributeSchemaBlock:
         """A custom extraction_prompt receives attribute_schema via prompt_context."""
         from khora.extraction.skills.base import EntityTypeConfig, ExpertiseConfig
 
-        extractor = LLMEntityExtractor(model="gpt-4o")
+        extractor = LLMEntityExtractor(model="gpt-4o", attribute_prompts=True)
         expertise = ExpertiseConfig(
             name="custom",
             extraction_prompt="Extract from: {{ text }}\n{{ attribute_schema }}",
@@ -545,7 +545,7 @@ class TestAttributeSchemaBlock:
         assert "PERSON: required=[email]; optional=[title]" in prompt
 
     def test_block_absent_single_prompt_no_expertise(self) -> None:
-        extractor = LLMEntityExtractor(model="gpt-4o")
+        extractor = LLMEntityExtractor(model="gpt-4o", attribute_prompts=True)
         prompt = extractor._render_extraction_prompt("Alice", ["PERSON"], None, None, relationship_types=["KNOWS"])
         assert "ATTRIBUTE SCHEMA" not in prompt
 
@@ -558,7 +558,7 @@ class TestAttributeSchemaBlock:
         """
         import litellm
 
-        extractor = LLMEntityExtractor(model="gpt-4o", max_retries=1)
+        extractor = LLMEntityExtractor(model="gpt-4o", attribute_prompts=True, max_retries=1)
 
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
@@ -617,7 +617,7 @@ class TestAttributeSchemaBlock:
             ],
         )
 
-        extractor = LLMEntityExtractor(model="gpt-4o", max_retries=1)
+        extractor = LLMEntityExtractor(model="gpt-4o", attribute_prompts=True, max_retries=1)
 
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]

@@ -74,6 +74,7 @@ async def extract_entities(
     extraction_min_importance: float = 0.2,
     ketrag_skeleton_channel: bool = False,
     extraction_second_pass: bool = False,
+    extraction_attribute_prompts: bool = False,
     shared_extractor: Any | None = None,
     out_diagnostics: dict[str, Any] | None = None,
 ) -> tuple[list[Entity], list[Relationship]]:
@@ -115,6 +116,10 @@ async def extract_entities(
             (#1420) - extra LLM cost, explicit opt-in. Ignored when
             ``shared_extractor`` is provided (the shared extractor carries its
             own flag).
+        extraction_attribute_prompts: Gate the attribute-prompt surfaces (#1562).
+            Default False keeps the flag-off prompt byte-identical to v0.23.1.
+            Ignored when ``shared_extractor`` is provided (the shared extractor
+            carries its own flag).
         shared_extractor: Optional pre-initialized LLMEntityExtractor to reuse
             across documents (shares semaphore for cross-document concurrency control)
         out_diagnostics: Optional dict the function populates with ADR-001
@@ -230,6 +235,7 @@ async def extract_entities(
             max_retries=max_retries,
             retry_wait=retry_wait,
             second_pass=extraction_second_pass,
+            attribute_prompts=extraction_attribute_prompts,
         )
         if max_tokens is not None:
             extractor_kwargs["max_tokens"] = max_tokens
