@@ -341,7 +341,8 @@ class BatchResult:
     llm_usage: list[LLMUsage] = field(default_factory=list)
     # Per-document breakdown, one entry per submitted document (input order):
     # ``{"document_id": UUID | None, "source": str | None, "chunks": int,
-    # "entities": int, "skipped": bool}``. Checksum-skipped duplicates are
+    # "entities": int, "skipped": bool}``. Failed entries also carry the
+    # caller's ``external_id`` and an ``error`` string. Checksum-skipped duplicates are
     # included with the *existing* document's id (resolved via
     # ``get_documents_by_checksums``) so callers can map every input back to
     # a stored document — e.g. to record ingest cost per document or to
@@ -827,7 +828,15 @@ class Khora:
                     db_url = (
                         self._config.database_url.get_secret_value() if self._config.database_url is not None else None
                     )
-                result = await _run_migrations(db_url)
+                # Size fresh pgvector columns / HNSW indexes from the effective
+                # (embedder-facing) dimension so a non-1536 model works on
+                # Postgres end-to-end (#1260). llm.embedding_dimension is the
+                # single source of truth; storage follows it.
+                result = await _run_migrations(
+                    db_url,
+                    embedding_dimension=self._config.get_effective_embedding_dimension(),
+                    use_halfvec=self._config.storage.use_halfvec,
+                )
                 if not result.success:
                     raise RuntimeError(f"Database migration failed: {result.error}")
 
@@ -1763,6 +1772,12 @@ class Khora:
                 - source_timestamp: datetime (optional) — overrides top-level kwarg per doc
                 - metadata: dict (optional)
                 - external_id: str (optional) — caller-supplied external identifier
+                Caller-supplied string fields are length-bounded by the
+                ``documents`` columns; over-long values are rejected at insert.
+                The tighter ones are surprising: ``source_name`` and
+                ``source_type`` (64), ``language`` (10), ``content_type`` (128),
+                ``author`` (255) — vs ``title`` (512) and ``source`` (1024). A
+                rejected document is reported (see Returns), not silently dropped.
             namespace: Namespace UUID (as UUID or string)
             skill_name: Extraction skill to use
             source_type: Default provenance category for docs that don't supply one.
@@ -1802,7 +1817,13 @@ class Khora:
             BatchResult with aggregated statistics. ``per_document`` carries a
             per-input breakdown (document_id, source, chunks, entities,
             skipped) including checksum-skipped duplicates, whose entry holds
-            the already-stored document's id.
+            the already-stored document's id. A document that failed to store
+            (e.g. a value exceeding a column limit above) additionally carries
+            its ``external_id`` and an ``error`` string, and is aggregated onto
+            ``BatchResult.metadata`` as ``document_errors`` (count) +
+            ``failed_documents`` (``{index, external_id, error}`` list) — so a
+            caller doing batch-granular retry sees the failure without walking
+            ``per_document`` (#1538).
         """
         import time as _time
 

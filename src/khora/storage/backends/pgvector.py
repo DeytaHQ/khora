@@ -48,6 +48,29 @@ except ImportError:
 _DEADLOCK_MAX_RETRIES = 3
 
 
+# Process-wide single-embedding-dimension guard (#1260). ChunkModel / EntityModel
+# carry a module-level ``embedding`` column type resized at connect() from
+# config; binding two different dimensions in one process would silently corrupt
+# writes (this pgvector build enforces the declared dimension in the bind
+# processor). A single embedding dimension per deployment is the supported model
+# (multi-dimension is a future phase), so a conflicting concurrent bind fails
+# loudly here. Best-effort: released on disconnect so sequential reconnection at
+# a new dimension (a redeploy, or the test suite) is allowed.
+_bound_embedding_dim: int | None = None
+
+
+def _bind_process_embedding_dim(dim: int) -> None:
+    global _bound_embedding_dim
+    if _bound_embedding_dim is not None and _bound_embedding_dim != dim:
+        raise RuntimeError(
+            f"pgvector embedding dimension is already bound to {_bound_embedding_dim} "
+            f"in this process; cannot also bind {dim}. A single embedding dimension per "
+            f"process is supported (multi-dimension is a future phase) — run separate "
+            f"processes for different embedding dimensions."
+        )
+    _bound_embedding_dim = dim
+
+
 # Bi-temporal soft-delete read filters (#888 / #970 / #1272). Now that dream
 # apply mirrors its PG tombstones to the graph backend (Neo4j), the read path
 # filters on the soft-delete columns so pruned / merged rows are hidden in
@@ -260,6 +283,23 @@ class PgVectorBackend(AsyncSessionMixin):
             return
 
         logger.info("Connecting to pgvector...")
+
+        # Size the ORM embedding columns from the configured dimension before
+        # any bind (#1260). This pgvector build enforces the declared dimension
+        # in the bind processor, so the module-level ``Vector(1536)`` on
+        # ChunkModel / EntityModel would reject a non-1536 vector on write. The
+        # actual column width is owned by Alembic; this only aligns the bind
+        # processor. The guard rejects a conflicting concurrent dimension loudly
+        # instead of silently corrupting a co-resident instance's writes; the
+        # slot is released on disconnect so a redeploy / test can rebind.
+        from pgvector.sqlalchemy import Vector as _Vector
+
+        _bind_process_embedding_dim(self._embedding_dimension)
+        for _model in (ChunkModel, EntityModel):
+            _col = _model.__table__.c.embedding
+            if getattr(_col.type, "dim", None) != self._embedding_dimension:
+                _col.type = _Vector(self._embedding_dimension)
+
         if self._engine is None:
             self._engine = create_async_engine(
                 self._database_url,
@@ -278,6 +318,32 @@ class PgVectorBackend(AsyncSessionMixin):
         # Ensure pgvector extension is enabled
         async with self._engine.begin() as conn:
             await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+
+            # Fail fast when this process is configured for a different embedding
+            # dimension than the one the database's columns were created with
+            # (#1260). Alembic never re-runs an applied migration and a populated
+            # pgvector column cannot be resized in place, so the widths would stay
+            # divergent and every write/recall would fail with an opaque bind
+            # error. Empty on a fresh database, where migrations are about to
+            # create the columns at the configured dimension.
+            from khora.db.embedding_dim_check import (
+                COLUMN_DIMS_SQL,
+                describe_dimension_mismatch,
+            )
+            from khora.exceptions import ConfigurationError
+
+            # Best-effort, like the pre-migration check: if the catalog cannot be
+            # read the guard skips rather than failing the connection it exists to
+            # protect. A genuine width conflict still surfaces on the first write.
+            try:
+                _dim_rows = [(r[0], r[1], r[2]) for r in (await conn.execute(text(COLUMN_DIMS_SQL))).all()]
+            except Exception as _exc:  # noqa: BLE001 - diagnostic guard, never fatal
+                logger.debug("Embedding-dimension check skipped: {}", type(_exc).__name__)
+                _dim_rows = []
+
+            _mismatch = describe_dimension_mismatch(_dim_rows, self._embedding_dimension)
+            if _mismatch:
+                raise ConfigurationError(_mismatch)
 
         # Detect halfvec support (pgvector >= 0.7.0) and verify HNSW indexes
         if self._use_halfvec:
@@ -314,6 +380,10 @@ class PgVectorBackend(AsyncSessionMixin):
                 await self._engine.dispose()
             self._engine = None
             self._session_factory = None
+            # Release the process-wide dimension slot so a redeploy / test can
+            # rebind at a different dimension (#1260).
+            global _bound_embedding_dim
+            _bound_embedding_dim = None
             logger.info("Disconnected from pgvector")
 
     async def is_healthy(self) -> bool:
@@ -1054,7 +1124,7 @@ class PgVectorBackend(AsyncSessionMixin):
         Acquires a namespace-scoped advisory lock to prevent deadlocks
         when concurrent coroutines upsert entities in the same namespace.
         """
-        from sqlalchemy.dialects.postgresql import insert
+        from sqlalchemy.dialects.postgresql import JSONB, insert
 
         async with self._get_session() as session:
             # Advisory lock prevents deadlocks with concurrent upserts
@@ -1087,7 +1157,26 @@ class PgVectorBackend(AsyncSessionMixin):
                 constraint="uq_entities_namespace_name_type",
                 set_={
                     "description": stmt.excluded.description,
-                    "attributes": stmt.excluded.attributes,
+                    # An incoming empty ({}), SQL NULL, or json ``null`` attributes
+                    # must not clobber a stored populated attributes; keep the
+                    # existing value in that case, otherwise overwrite with the
+                    # incoming value. JSONB has ``none_as_null=False``, so a Python
+                    # None binds as ``'null'::jsonb`` (not SQL NULL) — the
+                    # jsonb_typeof check catches that path. The empty-object check
+                    # uses ``type_coerce({}, JSONB)`` (binds the dict -> ``'{}'``)
+                    # rather than ``cast("{}", JSONB)``, which would JSON-encode the
+                    # string to ``'"{}"'`` and never match a real empty object.
+                    "attributes": sa.case(
+                        (
+                            sa.or_(
+                                stmt.excluded.attributes.is_(None),
+                                sa.func.jsonb_typeof(stmt.excluded.attributes) == "null",
+                                stmt.excluded.attributes == sa.type_coerce({}, JSONB),
+                            ),
+                            EntityModel.attributes,
+                        ),
+                        else_=stmt.excluded.attributes,
+                    ),
                     "source_document_ids": _accumulate_source_ids_sql("source_document_ids"),
                     "source_chunk_ids": _accumulate_source_ids_sql("source_chunk_ids"),
                     "mention_count": stmt.excluded.mention_count,
@@ -1298,7 +1387,7 @@ class PgVectorBackend(AsyncSessionMixin):
             return []
 
         async def _do_upsert():
-            from sqlalchemy.dialects.postgresql import insert
+            from sqlalchemy.dialects.postgresql import JSONB, insert
 
             # Sort by (namespace_id, name, entity_type) to ensure consistent lock ordering
             sorted_entities = sorted(entities, key=lambda e: (str(e.namespace_id), e.name, str(e.entity_type)))
@@ -1346,7 +1435,27 @@ class PgVectorBackend(AsyncSessionMixin):
                     constraint="uq_entities_namespace_name_type",
                     set_={
                         "description": stmt.excluded.description,
-                        "attributes": stmt.excluded.attributes,
+                        # An incoming empty ({}), SQL NULL, or json ``null`` attributes
+                        # must not clobber a stored populated attributes; keep the
+                        # existing value in that case, otherwise overwrite with the
+                        # incoming value. JSONB has ``none_as_null=False``, so a Python
+                        # None binds as ``'null'::jsonb`` (not SQL NULL) — the
+                        # jsonb_typeof check catches that path. The empty-object check
+                        # uses ``type_coerce({}, JSONB)`` (binds the dict -> ``'{}'``)
+                        # rather than ``cast("{}", JSONB)``, which would JSON-encode the
+                        # string to ``'"{}"'`` and never match a real empty object.
+                        # Mirrors the single-entity guard in ``_upsert_entity``.
+                        "attributes": sa.case(
+                            (
+                                sa.or_(
+                                    stmt.excluded.attributes.is_(None),
+                                    sa.func.jsonb_typeof(stmt.excluded.attributes) == "null",
+                                    stmt.excluded.attributes == sa.type_coerce({}, JSONB),
+                                ),
+                                EntityModel.attributes,
+                            ),
+                            else_=stmt.excluded.attributes,
+                        ),
                         "source_document_ids": _accumulate_source_ids_sql("source_document_ids"),
                         "source_chunk_ids": _accumulate_source_ids_sql("source_chunk_ids"),
                         "mention_count": stmt.excluded.mention_count,

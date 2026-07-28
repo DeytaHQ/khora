@@ -248,7 +248,7 @@ class TestRunMigrationsAsync:
         ) as mock_sync:
             result = await run_migrations("postgresql://localhost/testdb")
 
-        mock_sync.assert_called_once_with("postgresql://localhost/testdb")
+        mock_sync.assert_called_once_with("postgresql://localhost/testdb", embedding_dimension=None, use_halfvec=None)
         assert result is expected
 
     @pytest.mark.unit
@@ -267,7 +267,7 @@ class TestRunMigrationsAsync:
         ) as mock_sync:
             result = await run_migrations()
 
-        mock_sync.assert_called_once_with(None)
+        mock_sync.assert_called_once_with(None, embedding_dimension=None, use_halfvec=None)
         assert result.success is False
 
 
@@ -316,7 +316,7 @@ class TestKhoraConnectMigrations:
 
         call_order = []
 
-        async def fake_run_migrations(url):
+        async def fake_run_migrations(url, **kwargs):
             call_order.append("migrations")
             return migration_result
 

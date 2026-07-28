@@ -249,8 +249,8 @@ def stub_llm(monkeypatch: Any, dim: int = EMBED_DIM) -> None:
 
     ``dim`` sizes the deterministic vectors. The embedded LanceDB suites use the
     default (small) ``EMBED_DIM``; the live-DB suites pass ``dim=1536`` because
-    the Postgres pgvector column is fixed at 1536 (see ``KhoraConfig`` validation:
-    "Postgres backend currently supports only embedding_dimension=1536").
+    the shared dev Postgres DB is migrated at 1536 (the pgvector column size is
+    fixed at fresh-DB creation from ``llm.embedding_dimension``; #1260).
     """
     _EXTRACTION_REGISTRY.clear()
 

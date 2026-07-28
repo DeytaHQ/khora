@@ -169,6 +169,30 @@ _CHUNK_MIRROR_DEGRADED_COUNTER = metric_counter(
 )
 
 
+# #1564 extraction progress counters. Free when no MeterProvider is installed
+# (the OTel API returns no-op instruments). NO namespace_id label - cardinality
+# rule. chunk_outcome_total is shared with the extractor's identically-declared
+# instrument (llm.py); this module only emits the ``skipped_short`` outcome at
+# the min_extraction_tokens gate, where chunks never reach the LLM.
+_EXTRACTION_CHUNKS_PROCESSED_COUNTER = metric_counter(
+    "khora.extraction.chunks_processed_total",
+    unit="1",
+    description=(
+        "Chunks that flowed through a remember_batch window's extraction stage, "
+        "incremented per window by the window's stored-chunk count. Denominator "
+        "for call-amplification gate checks. NO namespace_id label - cardinality rule."
+    ),
+)
+_EXTRACTION_CHUNK_OUTCOME_COUNTER = metric_counter(
+    "khora.extraction.chunk_outcome_total",
+    unit="1",
+    description=(
+        "Per-chunk terminal extraction outcome. Label: outcome "
+        "(extracted/skipped_short/lost_truncated/lost_parse/lost_error)."
+    ),
+)
+
+
 async def _mirror_chunks_or_degrade(
     dual_nodes: DualNodeManager | None,
     chunks: list[TemporalChunk],
@@ -284,6 +308,35 @@ def _build_remember_metadata(extraction_diagnostics: dict[str, Any] | None) -> d
         metadata["extraction_errors"] = int(errors)
     if degradations:
         metadata["degradations"] = list(degradations)
+    return metadata
+
+
+def _build_batch_metadata(
+    extraction_diagnostics: dict[str, Any] | None,
+    per_document: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Batch-level ``BatchResult.metadata``: extraction diagnostics + document failures (#1538).
+
+    #1410 aggregated *extraction* failures onto the batch metadata so a batch
+    with silently-dropped entities does not look successful. A document-creation
+    or replacement rejection (e.g. a caller value exceeding a ``documents``
+    column limit) is the same class of silent loss: counted in ``failed`` but,
+    before this, invisible at batch granularity. A caller whose retry/resume
+    works per batch reads ``metadata``, not ``per_document`` - so the failures
+    are surfaced here too. ``document_errors`` is the count; ``failed_documents``
+    lists each ``{index, external_id, error}`` (the same diagnostic already on
+    the per-document slot). Empty when no document failed, so the happy path
+    leaves ``metadata`` unchanged.
+    """
+    metadata = _build_remember_metadata(extraction_diagnostics)
+    failed_documents = [
+        {"index": i, "external_id": pd.get("external_id"), "error": pd["error"]}
+        for i, pd in enumerate(per_document)
+        if pd and pd.get("error") is not None
+    ]
+    if failed_documents:
+        metadata["document_errors"] = len(failed_documents)
+        metadata["failed_documents"] = failed_documents
     return metadata
 
 
@@ -473,6 +526,14 @@ class VectorCypherConfig:
     fusion_simple_graph_weight: float = 0.2
     fusion_complex_vector_weight: float = 0.4
     fusion_complex_graph_weight: float = 0.6
+    # Temporal-branch fusion weights. Always live in RetrieverConfig (the
+    # temporally-detected branch of _fuse_results swaps to them) but until now
+    # config-unreachable: no VectorCypherConfig field and no assemble mapping,
+    # so every deployment ran the hardcoded 0.3/0.7 defaults (surfaced by the
+    # khora-benchmarks deyta_multisource fusion review). Defaults unchanged -
+    # plumbing only.
+    fusion_temporal_vector_weight: float = 0.3
+    fusion_temporal_graph_weight: float = 0.7
 
     # Temporal. Defaults canonicalized to QuerySettings' values in #1406 - the
     # old 0.2 here silently shadowed the documented ``query.recency_weight`` /
@@ -485,6 +546,16 @@ class VectorCypherConfig:
 
     # Extraction concurrency (aligned with ingest pipeline's default of 20)
     max_concurrent_extractions: int = 20
+
+    # Batch-level concurrency WITHIN one document's extract_entities call on
+    # the per-document conversation path. Default 1 preserves the historical
+    # strictly-sequential-per-document behavior; raising it lets a large
+    # document's batches run in parallel so heterogeneous batches stop
+    # serializing behind the biggest document in each window. Total in-flight
+    # LLM calls remain capped by the extractor's process-wide slot semaphore
+    # (LLMSettings.max_concurrent_llm_calls, #1113), so
+    # max_concurrent_extractions x this value cannot exceed the global limit.
+    per_document_extraction_concurrency: int = 1
 
     # Maximum texts per LLM extraction batch. Lower values reduce output token
     # requirements and avoid timeouts with strict JSON schema constrained decoding.
@@ -909,6 +980,8 @@ class VectorCypherEngine:
             simple_graph_weight=self._vc_config.fusion_simple_graph_weight,
             complex_vector_weight=self._vc_config.fusion_complex_vector_weight,
             complex_graph_weight=self._vc_config.fusion_complex_graph_weight,
+            temporal_vector_weight=self._vc_config.fusion_temporal_vector_weight,
+            temporal_graph_weight=self._vc_config.fusion_temporal_graph_weight,
             recency_weight=self._vc_config.temporal_recency_weight,
             recency_decay_days=self._vc_config.temporal_recency_decay_days,
             recency_decay_type=self._vc_config.recency_decay_type,
@@ -1675,6 +1748,7 @@ class VectorCypherEngine:
                 # of the already-selected core set.
                 selective_extraction=False,
                 extraction_second_pass=self._config.pipeline.extraction_second_pass,
+                extraction_attribute_prompts=self._config.pipeline.extraction_attribute_prompts,
                 out_diagnostics=out_diagnostics,
             )
 
@@ -1919,6 +1993,7 @@ class VectorCypherEngine:
             # re-select inside extract_entities.
             selective_extraction=False,
             extraction_second_pass=self._config.pipeline.extraction_second_pass,
+            extraction_attribute_prompts=self._config.pipeline.extraction_attribute_prompts,
         )
 
         if not entities:
@@ -2112,6 +2187,7 @@ class VectorCypherEngine:
                     # never re-select inside extract_entities.
                     selective_extraction=False,
                     extraction_second_pass=self._config.pipeline.extraction_second_pass,
+                    extraction_attribute_prompts=self._config.pipeline.extraction_attribute_prompts,
                 )
 
                 if extracted_entities:
@@ -3286,14 +3362,19 @@ class VectorCypherEngine:
             chunks: int = 0,
             entities: int = 0,
             skipped: bool = False,
+            error: str | None = None,
         ) -> None:
-            per_document[idx] = {
+            entry: dict[str, Any] = {
                 "document_id": document_id,
                 "source": documents[idx].get("source") or None,
                 "chunks": chunks,
                 "entities": entities,
                 "skipped": skipped,
             }
+            if error is not None:
+                entry["external_id"] = documents[idx].get("external_id")
+                entry["error"] = error
+            per_document[idx] = entry
 
         def _finalize_per_document() -> list[dict[str, Any]]:
             # Defensive: every index should have been recorded by now; a None
@@ -3382,7 +3463,7 @@ class VectorCypherEngine:
             except Exception as e:
                 logger.error(f"Failed to replace document external_id={ext_id!r}: {e}")
                 results["failed"] += 1
-                _record_doc(idx, document_id=None)
+                _record_doc(idx, document_id=None, error=str(e))
             external_id_handled.add(idx)
             _report_progress()
 
@@ -3452,11 +3533,12 @@ class VectorCypherEngine:
 
         if not active_indices:
             _resolve_intra_batch_dups()
+            _pd = _finalize_per_document()
             return BatchResult(
                 total=total,
                 **results,
-                metadata=_build_remember_metadata(extraction_diagnostics),
-                per_document=_finalize_per_document(),
+                metadata=_build_batch_metadata(extraction_diagnostics, _pd),
+                per_document=_pd,
             )
 
         # ── Conversation mode detection ─────────────────────────────────
@@ -3503,6 +3585,7 @@ class VectorCypherEngine:
             embed_texts: list[str] = field(default_factory=list)
             occurred_at: datetime | None = None
             failed: bool = False
+            error: str | None = None
 
         doc_states: list[_DocState] = []
         sem = asyncio.Semaphore(max_concurrent)
@@ -3554,6 +3637,7 @@ class VectorCypherEngine:
             except Exception as e:
                 logger.error(f"Failed to create/chunk document {idx}: {e}")
                 state.failed = True
+                state.error = str(e)
             return state
 
         doc_states = await asyncio.gather(*[_create_and_chunk(idx) for idx in active_indices])
@@ -3564,7 +3648,7 @@ class VectorCypherEngine:
         for s in failed_states:
             if s.failed:
                 results["failed"] += 1
-                _record_doc(s.idx, document_id=s.document.id if s.document else None)
+                _record_doc(s.idx, document_id=s.document.id if s.document else None, error=s.error)
             elif not s.raw_chunks and s.document:
                 s.document.mark_completed(0, 0)
                 await storage.update_document(s.document)
@@ -3577,11 +3661,12 @@ class VectorCypherEngine:
 
         if not ok_states:
             _resolve_intra_batch_dups()
+            _pd = _finalize_per_document()
             return BatchResult(
                 total=total,
                 **results,
-                metadata=_build_remember_metadata(extraction_diagnostics),
-                per_document=_finalize_per_document(),
+                metadata=_build_batch_metadata(extraction_diagnostics, _pd),
+                per_document=_pd,
             )
 
         # ── Build processing windows ─────────────────────────────────────
@@ -3615,6 +3700,10 @@ class VectorCypherEngine:
             logger.debug(
                 f"Windowed processing: {len(ok_states)} docs → {len(windows)} windows (max_chunks_in_flight={max_cif})"
             )
+
+        # #1564: total chunks to process across all windows, for per-window
+        # progress (done/total, rate, ETA). Reuses _stage0_t0 as the batch t0.
+        _chunks_total = sum(len(s.raw_chunks) for s in ok_states)
 
         # Accumulated timing across windows
         _stage2_ms = 0.0
@@ -3791,6 +3880,13 @@ class VectorCypherEngine:
                     if not is_conversation_mode:
                         min_tokens = self._vc_config.min_extraction_tokens
                         if min_tokens > 0 and all(len(c.content.split()) <= min_tokens for c in doc_chunks):
+                            # #1564: this bare-continue silently dropped every
+                            # chunk of a below-threshold document from the LLM
+                            # extraction path. Count them so short-doc skips are
+                            # distinguishable from genuine extraction loss.
+                            _EXTRACTION_CHUNK_OUTCOME_COUNTER.add(
+                                len(doc_chunks), attributes={"outcome": "skipped_short"}
+                            )
                             continue
 
                     # #1408: config.pipeline.selective_extraction gates the
@@ -3866,7 +3962,7 @@ class VectorCypherEngine:
                                     skill_name=skill_name,
                                     expertise=expertise,
                                     model=model,
-                                    max_concurrent=1,
+                                    max_concurrent=self._vc_config.per_document_extraction_concurrency,
                                     wave_size=self._config.llm.extraction_wave_size,
                                     context=ctx,
                                     timeout=self._config.llm.timeout,
@@ -3881,6 +3977,7 @@ class VectorCypherEngine:
                                     # extract_entities.
                                     selective_extraction=False,
                                     extraction_second_pass=self._config.pipeline.extraction_second_pass,
+                                    extraction_attribute_prompts=self._config.pipeline.extraction_attribute_prompts,
                                     out_diagnostics=doc_diagnostics,
                                 )
                             return ents, rels, doc_diagnostics
@@ -3926,6 +4023,7 @@ class VectorCypherEngine:
                             # signal meaningless for inner documents.
                             selective_extraction=False,
                             extraction_second_pass=self._config.pipeline.extraction_second_pass,
+                            extraction_attribute_prompts=self._config.pipeline.extraction_attribute_prompts,
                             out_diagnostics=window_diagnostics,
                         )
                         _merge_extraction_diagnostics(extraction_diagnostics, window_diagnostics)
@@ -4167,6 +4265,45 @@ class VectorCypherEngine:
                     new_entity_count += 1
             results["entities"] += new_entity_count
             results["relationships"] += len(all_relationships)
+
+            # #1564: unconditional per-window progress. The "Streaming pipeline
+            # batch store" INFO above sits inside `if all_entities:` and goes
+            # silent for exactly the windows where extraction produced nothing -
+            # the failure shape operators most need to see. This line always
+            # fires; the span mirrors the batch-level span so window progress
+            # reaches the trace backend (free when telemetry is disabled).
+            _window_chunks = len(all_temporal_chunks)
+            _EXTRACTION_CHUNKS_PROCESSED_COUNTER.add(_window_chunks)
+            _window_elapsed_s = max(_time.perf_counter() - _stage0_t0, 1e-9)
+            _chunks_done = results["chunks"]
+            _extraction_errors = int(extraction_diagnostics.get("extraction_errors", 0))
+            _chunks_rate = _chunks_done / _window_elapsed_s
+            _chunks_eta_s = (_chunks_total - _chunks_done) / _chunks_rate if _chunks_rate > 0 else 0.0
+            logger.info(
+                "extraction window {}/{}: chunks {}/{}, docs {}, extraction_errors={}, "
+                "{:.0f}s elapsed, {:.1f} chunks/s, ETA {:.0f}s",
+                _wi + 1,
+                len(windows),
+                _chunks_done,
+                _chunks_total,
+                results["processed"],
+                _extraction_errors,
+                _window_elapsed_s,
+                _chunks_rate,
+                _chunks_eta_s,
+            )
+            with trace_span(
+                "khora.vectorcypher.remember_batch.window",
+                window_index=_wi + 1,
+                window_count=len(windows),
+                window_chunks=_window_chunks,
+                chunks_done=_chunks_done,
+                chunks_total=_chunks_total,
+                docs_processed=results["processed"],
+                extraction_errors=_extraction_errors,
+                elapsed_ms=round(_window_elapsed_s * 1000, 2),
+            ):
+                pass
             # end of window loop
 
         _stage6_total_ms = _stage6_upsert_ms + _stage6_rels_ms + _stage6_links_ms
@@ -4197,6 +4334,7 @@ class VectorCypherEngine:
         )
 
         _resolve_intra_batch_dups()
+        _pd = _finalize_per_document()
         return BatchResult(
             total=total,
             processed=results["processed"],
@@ -4205,8 +4343,8 @@ class VectorCypherEngine:
             chunks=results["chunks"],
             entities=results["entities"],
             relationships=results["relationships"],
-            metadata=_build_remember_metadata(extraction_diagnostics),
-            per_document=_finalize_per_document(),
+            metadata=_build_batch_metadata(extraction_diagnostics, _pd),
+            per_document=_pd,
         )
 
     async def _remember_batch_legacy(
@@ -4376,7 +4514,7 @@ class VectorCypherEngine:
         return BatchResult(
             total=total,
             **results,
-            metadata=_build_remember_metadata(extraction_diagnostics),
+            metadata=_build_batch_metadata(extraction_diagnostics, per_document),
             per_document=per_document,
         )
 

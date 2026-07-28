@@ -26,6 +26,7 @@ from khora.extraction.embedders._request_telemetry import (
     set_connector_attributes,
     set_rate_limit_attributes,
 )
+from khora.telemetry.metrics import metric_counter
 
 from .base import (
     EntityExtractor,
@@ -50,18 +51,41 @@ _CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*\n(.*?)```\s*$", re.DOTALL)
 
 
 def _strip_json_fences(content: str) -> str:
-    """Strip markdown code fences and repair common JSON issues from LLM output.
+    """Strip markdown code fences from LLM output.
 
-    Models like Claude wrap JSON in ```json ... ``` fences even when
-    asked for raw JSON, and sometimes produce malformed JSON (trailing
-    commas, unquoted values, etc.).  This strips fences and applies
-    lightweight repairs so json.loads() succeeds.
+    Models like Claude wrap JSON in ```json ... ``` fences even when asked
+    for raw JSON. Pure fence-stripping - repairs moved to the parse fallback
+    in ``_parse_llm_json`` (#1563).
     """
     content = content.strip()
     m = _CODE_FENCE_RE.match(content)
     if m:
         content = m.group(1).strip()
-    return _repair_json(content)
+    return content
+
+
+def _parse_llm_json(content: str) -> Any:
+    """Parse LLM JSON output: parse first, repair only on failure (#1563).
+
+    Repairs used to run unconditionally BEFORE parsing, which corrupted
+    valid output: the string-blind ``//``-comment strip amputated any string
+    containing a URL, turning schema-constrained (guaranteed-valid) JSON
+    into "Unterminated string" parse failures that were then misclassified
+    as truncation and bisected - ~2.2x LLM-call amplification on URL-rich
+    corpora. Order now: fence-strip -> parse -> repairs as fallback.
+
+    ``strict=False`` admits literal control characters inside strings (some
+    json_object-mode models emit raw newlines/tabs). NUL is stripped first:
+    never meaningful in model output, and asyncpg rejects it at storage
+    time, where the failure would take out a whole write window.
+    """
+    stripped = _strip_json_fences(content)
+    if "\x00" in stripped:
+        stripped = stripped.replace("\x00", "")
+    try:
+        return json.loads(stripped, strict=False)
+    except json.JSONDecodeError:
+        return json.loads(_repair_json(stripped), strict=False)
 
 
 # Trailing comma before closing brace/bracket: ,\s*} or ,\s*]
@@ -69,18 +93,19 @@ _TRAILING_COMMA_RE = re.compile(r",\s*([}\]])")
 
 
 def _repair_json(content: str) -> str:
-    """Repair common JSON malformations from LLM output.
+    """Repair common JSON malformations from LLM output (fallback only).
+
+    Applied ONLY after a plain parse fails (#1563) - running repairs on valid
+    output corrupted it. The single-line ``//``-comment strip is deliberately
+    gone: it was string-blind (amputated URL-bearing strings), allowlisted
+    constrained-decoding models cannot emit comments, and for the rest a
+    comment-bearing response now fails loudly instead of being silently and
+    sometimes wrongly rewritten.
 
     Handles:
     - Trailing commas before } or ] (most common Claude issue)
-    - Single-line // comments
-    - Unquoted NaN/Infinity values
     """
-    # Remove single-line comments (// ...)
-    content = re.sub(r"//[^\n]*", "", content)
-    # Fix trailing commas: [1, 2,] -> [1, 2]  or {"a": 1,} -> {"a": 1}
-    content = _TRAILING_COMMA_RE.sub(r"\1", content)
-    return content
+    return _TRAILING_COMMA_RE.sub(r"\1", content)
 
 
 # Deterministic auth/authz exception types. LiteLLM normalizes provider auth
@@ -190,7 +215,7 @@ Guidelines:
 - Use canonical entity names (e.g., "Jennifer Walsh" not "Jenny", "Acme Corporation" not "Acme Corp")
 - Include aliases for entities that have multiple names/abbreviations
 - Extract temporal information when dates, times, or relative time references appear
-- For STATE_CHANGE detection: when text indicates transitions ("switched from X to Y", "no longer X", "used to X", "previously X but now Y"), extract a STATE_CHANGE entity with these required attributes: {"entity_affected": "name of entity whose state changed", "previous_state": "old value", "new_state": "new value", "attribute_changed": "what changed (e.g. job_title, location, instrument)", "transition_date": "ISO date or null"}. Set valid_from to the transition date. Use INVOLVES to link it to the affected entity
+- For STATE_CHANGE detection: when text indicates transitions ("switched from X to Y", "no longer X", "used to X", "previously X but now Y"), extract a STATE_CHANGE entity whose attributes carry these keys as {"key", "value"} pairs: entity_affected (name of entity whose state changed), previous_state (old value), new_state (new value), attribute_changed (what changed, e.g. job_title, location, instrument), transition_date (ISO date or null). Set valid_from to the transition date. Use INVOLVES to link it to the affected entity
 - For EVENT detection: when text describes specific occurrences, extract the event with date, participants, and location when available
 - Use temporal relationships (PRECEDES, FOLLOWS, INVOLVES) to connect events and state changes to other entities
 - Ensure relationship source/target names match extracted entity names exactly
@@ -201,14 +226,34 @@ Guidelines:
 
 Return ONLY valid JSON, no other text."""
 
+# #1562 - attribute prompt surfaces gated behind extraction_attribute_prompts.
+# Four #1549/#1552 surfaces sit on top of the v0.23.1 baseline:
+#   1. DEFAULT_SYSTEM_PROMPT STATE_CHANGE guideline (rewritten by #1549) -
+#      deliberately NOT gated. It keeps its current {"key","value"}-pair wording
+#      so the strict-schema pair channel stays coherent; the flag-off system
+#      prompt is byte-identical to v0.23.1 EXCEPT this one line (scoped caveat).
+#   2. EXTRACTION_PROMPT_STRUCTURED "emit attributes" nudge (single-doc path, below).
+#   3. _extract_multi_batch custom-expertise multi_text nudge (batch path).
+#   4. _extract_multi_batch hardcoded-fallback nudge + the #1552 per-type
+#      ATTRIBUTE SCHEMA hint block (_build_attribute_schema_block).
+# Surfaces 2-4 render only when self._attribute_prompts is True. At the default
+# they are suppressed and the rendered prompt matches v0.23.1 byte-for-byte. The
+# strict-schema attributes pair channel and its parser are unconditional either way.
+ATTRIBUTE_NUDGE_LINE = (
+    'For each entity, emit "attributes" as an array of {"key": ..., "value": ...} '
+    "string pairs drawn from its salient fields (identifiers, emails, state, urls, dates, etc.)."
+)
+
 # Extraction prompt template — dynamic content only (guidelines moved to system prompt).
 # Structured-output models already enforce the JSON schema via response_format,
 # so we skip the JSON example to save ~400-500 tokens per call.
+# {attribute_nudge} is "" (flag off) or "\n" + ATTRIBUTE_NUDGE_LINE (flag on); the
+# leading newline rides in the value so the flag-off template equals v0.23.1 exactly.
 EXTRACTION_PROMPT_STRUCTURED = """\
 Extract entities, relationships, and temporal information from the following text.
 {document_context}
 Entity types to extract: {entity_types}
-Relationship types to use: {relationship_types}
+Relationship types to use: {relationship_types}{attribute_nudge}
 
 Text:
 {text}"""
@@ -398,9 +443,80 @@ def _is_truncation_finish_reason(finish_reason: str) -> bool:
     return str(finish_reason).lower() in _TRUNCATION_FINISH_REASONS
 
 
+# #1564 progress telemetry. With the default max_chunks_in_flight=None the
+# whole batch is a single window, so one extract_multi() call can run hundreds
+# of waves and stay silent until it returns - exactly the run shape that
+# stalled blind in production. Emit a per-wave INFO every _WAVE_LOG_EVERY waves
+# or once _WAVE_LOG_INTERVAL_S has elapsed since the last line (whichever comes
+# first); the final wave always logs so short runs still surface one line.
+_WAVE_LOG_EVERY = 10
+_WAVE_LOG_INTERVAL_S = 30.0
+
+# #1564 extraction outcome + amplification counters. Free when no MeterProvider
+# is installed (the OTel API returns no-op instruments). NO namespace_id label
+# on any of these - cardinality rule.
+_EXTRACTION_CHUNK_OUTCOME_COUNTER = metric_counter(
+    "khora.extraction.chunk_outcome_total",
+    unit="1",
+    description=(
+        "Per-chunk terminal extraction outcome. Label: outcome "
+        "(extracted/skipped_short/lost_truncated/lost_parse/lost_error)."
+    ),
+)
+_EXTRACTION_PARSE_RESCUED_COUNTER = metric_counter(
+    "khora.extraction.parse_rescued_total",
+    unit="1",
+    description=(
+        "Extractions rescued by _extract_json_from_text's raw re-parse after "
+        "structured JSON parsing failed. Had no metric footprint before #1564."
+    ),
+)
+_EXTRACTION_BISECTION_FLOOR_COUNTER = metric_counter(
+    "khora.extraction.bisection_floor_total",
+    unit="1",
+    description=(
+        "Bisection reached the single-text floor while resolving output "
+        "truncation - the worst-case LLM-call-amplification signal."
+    ),
+)
+
+
 def _is_thinking_model(model: str) -> bool:
     lowered = model.lower()
     return any(lowered.startswith(p) for p in _THINKING_MODEL_PREFIXES)
+
+
+# Completion-token caps for models litellm cannot resolve. Keyed by prefix
+# match on the lowered model name; extend as families are deployed.
+_MODEL_OUTPUT_CAP_FALLBACK: dict[str, int] = {
+    "gpt-4o-mini": 16_384,
+    "gpt-4o": 16_384,
+}
+
+
+def _model_output_cap(model: str) -> int | None:
+    """Best-effort completion-token cap for retry-budget clamping (#1563).
+
+    litellm first, prefix table second, None for unknown models - callers
+    must preserve today's behavior (no clamp) when None.
+    """
+    try:
+        import litellm as _litellm
+
+        info = _litellm.get_model_info(model)
+        cap = info.get("max_output_tokens") or info.get("max_tokens")
+        if isinstance(cap, int) and cap > 0:
+            return cap
+    except Exception:  # noqa: S110 - unknown model, fall through to table
+        pass
+    # Match on the terminal segment so provider-qualified names
+    # ("openai/gpt-4o-mini", "azure/gpt-4o") hit the table when the litellm
+    # lookup fails (CodeRabbit finding on #1567).
+    lowered = model.lower().rsplit("/", 1)[-1]
+    for prefix, cap in _MODEL_OUTPUT_CAP_FALLBACK.items():
+        if lowered.startswith(prefix):
+            return cap
+    return None
 
 
 class LLMEntityExtractor(EntityExtractor):
@@ -484,6 +600,7 @@ class LLMEntityExtractor(EntityExtractor):
         wave_size: int = 20,
         retry_wait: float = 1.0,
         second_pass: bool = False,
+        attribute_prompts: bool = False,
     ) -> None:
         """Initialize the LLM entity extractor.
 
@@ -504,6 +621,15 @@ class LLMEntityExtractor(EntityExtractor):
                 batch is an explicit cost/quality opt-in
                 (pipeline.extraction_second_pass /
                 KHORA_PIPELINES_EXTRACTION_SECOND_PASS).
+            attribute_prompts: Gate the attribute-prompt surfaces (#1562). Default
+                False keeps the flag-off prompt byte-identical to v0.23.1: the
+                #1549 "emit attributes" nudge lines and the #1552 per-type
+                ATTRIBUTE SCHEMA hint block are suppressed. When True the nudge
+                renders on every call and the hint block renders when an expertise
+                config declares per-type attributes. The strict-schema attributes
+                pair channel and its parser are unconditional either way
+                (pipeline.extraction_attribute_prompts /
+                KHORA_PIPELINES_EXTRACTION_ATTRIBUTE_PROMPTS).
         """
         self._model = model
         self._temperature = temperature
@@ -514,6 +640,7 @@ class LLMEntityExtractor(EntityExtractor):
         self._max_concurrent = max_concurrent
         self._wave_size = wave_size
         self._second_pass = second_pass
+        self._attribute_prompts = attribute_prompts
         self._semaphore = asyncio.Semaphore(max_concurrent)
         # Persists across extract_batch calls so the circuit breaker can actually trip
         self._consecutive_batch_failures = 0
@@ -745,8 +872,27 @@ class LLMEntityExtractor(EntityExtractor):
                                                 {"type": "null"},
                                             ],
                                         },
+                                        "attributes": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "key": {"type": "string"},
+                                                    "value": {"type": "string"},
+                                                },
+                                                "required": ["key", "value"],
+                                                "additionalProperties": False,
+                                            },
+                                        },
                                     },
-                                    "required": ["name", "entity_type", "description", "aliases", "temporal"],
+                                    "required": [
+                                        "name",
+                                        "entity_type",
+                                        "description",
+                                        "aliases",
+                                        "temporal",
+                                        "attributes",
+                                    ],
                                     "additionalProperties": False,
                                 },
                             },
@@ -843,8 +989,20 @@ class LLMEntityExtractor(EntityExtractor):
                                         {"type": "null"},
                                     ],
                                 },
+                                "attributes": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "key": {"type": "string"},
+                                            "value": {"type": "string"},
+                                        },
+                                        "required": ["key", "value"],
+                                        "additionalProperties": False,
+                                    },
+                                },
                             },
-                            "required": ["name", "entity_type", "description", "aliases", "temporal"],
+                            "required": ["name", "entity_type", "description", "aliases", "temporal", "attributes"],
                             "additionalProperties": False,
                         },
                     },
@@ -1223,20 +1381,30 @@ class LLMEntityExtractor(EntityExtractor):
                         # giving up — corpus-/model-agnostic recovery for outputs
                         # that just needed more room than the configured cap.
                         if _is_truncation_finish_reason(finish_reason):
-                            retry_budget = first_budget * 2
-                            logger.warning(
-                                "LLM response truncated (finish_reason={}) in extraction. "
-                                "Model: {}. Retrying once with max_tokens={}.",
-                                finish_reason,
-                                getattr(response, "model", self._model),
-                                retry_budget,
-                            )
-                            content, finish_reason, response = await self._run_extraction_completion(
-                                litellm,
-                                system_prompt=system_prompt,
-                                extraction_prompt=extraction_prompt,
-                                max_tokens=retry_budget,
-                            )
+                            # #1563: clamp the doubled budget to the model's
+                            # completion cap. Unclamped, 12288*2 exceeded
+                            # gpt-4o-mini's 16,384 -> OpenAI 400 -> retryable ->
+                            # every tenacity attempt re-ran BOTH calls and burned
+                            # the whole budget on a deterministic failure.
+                            _cap = _model_output_cap(self._model)
+                            retry_budget = first_budget * 2 if _cap is None else min(first_budget * 2, _cap)
+                            if retry_budget > first_budget:
+                                logger.warning(
+                                    "LLM response truncated (finish_reason={}) in extraction. "
+                                    "Model: {}. Retrying once with max_tokens={}.",
+                                    finish_reason,
+                                    getattr(response, "model", self._model),
+                                    retry_budget,
+                                )
+                                content, finish_reason, response = await self._run_extraction_completion(
+                                    litellm,
+                                    system_prompt=system_prompt,
+                                    extraction_prompt=extraction_prompt,
+                                    max_tokens=retry_budget,
+                                )
+                            # else: already at the cap - a same-budget retry is a
+                            # deterministic repeat; fall through to the loud
+                            # persistent-truncation handling below.
 
                     # Persistent truncation after the doubled-budget retry: this is
                     # not a silent zero-entity success — surface it loudly (ERROR +
@@ -1417,7 +1585,7 @@ class LLMEntityExtractor(EntityExtractor):
             if not content:
                 return []
 
-            data = json.loads(_strip_json_fences(content))
+            data = _parse_llm_json(content)
             if not isinstance(data, dict):
                 return []
 
@@ -1621,7 +1789,7 @@ class LLMEntityExtractor(EntityExtractor):
             if not content:
                 return empty
 
-            data = json.loads(_strip_json_fences(content))
+            data = _parse_llm_json(content)
             if not isinstance(data, dict):
                 return empty
 
@@ -1776,21 +1944,55 @@ class LLMEntityExtractor(EntityExtractor):
                 if key != "fields" and isinstance(values, list):
                     lines.append(f"  {key}: {', '.join(str(v) for v in values)}")
 
-        # Add attribute schema hints from entity types
-        if expertise.entity_types:
-            lines.append("\nEXPECTED ENTITY ATTRIBUTES:")
-            for et in expertise.entity_types:
-                required = et.attributes.get("required", [])
-                optional = et.attributes.get("optional", [])
-                if required or optional:
-                    parts = []
-                    if required:
-                        parts.append(f"required: {', '.join(required)}")
-                    if optional:
-                        parts.append(f"optional: {', '.join(optional)}")
-                    lines.append(f"  {et.name}: {'; '.join(parts)}")
-
         return "\n".join(lines)
+
+    def _build_attribute_schema_block(
+        self,
+        expertise: ExpertiseConfig | None,
+        entity_types: list[str] | None,
+    ) -> str:
+        """Build the per-type ATTRIBUTE SCHEMA hint block from the ontology.
+
+        For each extracted entity type that declares attributes in the
+        ExpertiseConfig, list its required/optional attribute key names so the
+        model knows which keys to populate. The keys are hints only — the model
+        prefers them but is not constrained to them, and emission still rides the
+        general ``attributes`` {"key", "value"}-pair channel.
+
+        Args:
+            expertise: Optional ExpertiseConfig carrying per-type attribute schemas.
+            entity_types: Resolved entity-type names being extracted.
+
+        Returns:
+            The schema block, or "" when the attribute-prompt flag is off, when
+            there is no expertise, or when no extracted type declares any
+            attributes.
+        """
+        # #1562: the per-type hint block is one of the four #1549/#1552 attribute
+        # prompt surfaces gated behind extraction_attribute_prompts (default off).
+        # Guarding here covers all injection sites since each already renders the
+        # block only when it is truthy.
+        if not self._attribute_prompts or expertise is None or not entity_types:
+            return ""
+
+        by_name = {et.name: et for et in expertise.entity_types}
+        lines: list[str] = []
+        for type_name in entity_types:
+            et = by_name.get(type_name)
+            if et is None:
+                continue
+            # Coerce present-but-None sides: an empty YAML scalar ("required:")
+            # parses to None, which would blow up the ", ".join below.
+            required = et.attributes.get("required") or []
+            optional = et.attributes.get("optional") or []
+            if not required and not optional:
+                continue
+            lines.append(f"{et.name}: required=[{', '.join(required)}]; optional=[{', '.join(optional)}]")
+
+        if not lines:
+            return ""
+
+        return "ATTRIBUTE SCHEMA (emit these keys in attributes when present):\n" + "\n".join(lines)
 
     @staticmethod
     def _build_document_context(context: dict[str, Any] | None) -> str:
@@ -1874,6 +2076,7 @@ class LLMEntityExtractor(EntityExtractor):
                     "entity_types": entity_types,
                     "relationship_types": relationship_types,
                     "tool_context": tool_context,
+                    "attribute_schema": self._build_attribute_schema_block(expertise, entity_types),
                 }
                 return composer.render_prompt(
                     expertise.extraction_prompt,
@@ -1904,7 +2107,17 @@ class LLMEntityExtractor(EntityExtractor):
             relationship_types=", ".join(relationship_types or []),
             text=text[:8000],  # Truncate very long texts
             document_context=document_context,
+            # #1562 surface 2: nudge only when the flag is on; EXTRACTION_PROMPT
+            # (non-structured) has no {attribute_nudge} placeholder so the extra
+            # kwarg is a harmless no-op there.
+            attribute_nudge=(f"\n{ATTRIBUTE_NUDGE_LINE}" if self._attribute_prompts else ""),
         )
+        # Per-type attribute keys: names which keys to emit on top of the
+        # general attributes nudge baked into the template. Prepended alongside
+        # tool_context so both lead the prompt rather than trail the text.
+        attribute_schema = self._build_attribute_schema_block(expertise, entity_types)
+        if attribute_schema:
+            prompt = attribute_schema + "\n\n" + prompt
         if tool_context:
             prompt = tool_context + "\n\n" + prompt
         return prompt
@@ -2062,6 +2275,8 @@ class LLMEntityExtractor(EntityExtractor):
         except ImportError:
             raise RuntimeError("litellm package not installed. Run: pip install litellm")
 
+        import time as _time
+
         # Calculate max_input_tokens from model if not provided
         if max_input_tokens is None:
             multiplier = self._get_input_multiplier()
@@ -2105,6 +2320,7 @@ class LLMEntityExtractor(EntityExtractor):
 
             if len(batch) == 1:
                 # Floor: can't split further — use single-doc extraction
+                _EXTRACTION_BISECTION_FLOOR_COUNTER.add(1)
                 logger.debug("Bisection floor: extracting single text individually")
                 result = await self.extract(
                     batch[0],
@@ -2270,20 +2486,71 @@ class LLMEntityExtractor(EntityExtractor):
         # next wave launches.  Worst-case waste: (wave_size - 1) extra doomed
         # API calls in the wave where the first failure occurs.
         wave_size = self._wave_size
+        n_waves = (len(batches) + wave_size - 1) // wave_size
+        texts_total = len(texts)
+        _wave_t0 = _time.perf_counter()
+        _last_wave_log_t = _wave_t0
+
+        def _log_wave_progress(wave_no: int, batches_done: int) -> None:
+            # #1564: intra-call progress so a single long window (default
+            # max_chunks_in_flight=None) is not silent until it returns.
+            elapsed = max(_time.perf_counter() - _wave_t0, 1e-9)
+            texts_done = sum(len(b) for b in batches[:batches_done])
+            errors = sum(1 for r in all_results if r.metadata.get("error"))
+            rate = texts_done / elapsed
+            eta = (texts_total - texts_done) / rate if rate > 0 else 0.0
+            logger.info(
+                "extraction wave {}/{}: batches {}/{}, texts {}/{}, errors={}, {:.1f} texts/s, ETA {:.0f}s",
+                wave_no,
+                n_waves,
+                batches_done,
+                len(batches),
+                texts_done,
+                texts_total,
+                errors,
+                rate,
+                eta,
+            )
+
         for wave_start in range(0, len(batches), wave_size):
+            wave_no = wave_start // wave_size + 1
             if self._consecutive_batch_failures >= self._BATCH_FAILURE_THRESHOLD:
                 # Circuit breaker tripped between waves — remaining batches
                 # go through single-doc extraction via _run_batch's own check.
                 for batch in batches[wave_start:]:
                     results = await _run_batch(batch)
                     all_results.extend(results)
+                _log_wave_progress(wave_no, len(batches))
                 break
             wave = batches[wave_start : wave_start + wave_size]
             wave_results = await asyncio.gather(*[_run_batch(b) for b in wave])
             for results in wave_results:
                 all_results.extend(results)
 
+            batches_done = wave_start + len(wave)
+            _now = _time.perf_counter()
+            if (
+                wave_no % _WAVE_LOG_EVERY == 0
+                or (_now - _last_wave_log_t) >= _WAVE_LOG_INTERVAL_S
+                or batches_done >= len(batches)
+            ):
+                _log_wave_progress(wave_no, batches_done)
+                _last_wave_log_t = _now
+
         error_count = sum(1 for r in all_results if r.metadata.get("error"))
+        # #1564: per-chunk terminal-outcome taxonomy. One outcome per result;
+        # skipped_short is emitted separately by the engine's min-token gate.
+        for r in all_results:
+            _err = r.metadata.get("error")
+            if not _err:
+                _outcome = "extracted"
+            elif _err == "truncated_response":
+                _outcome = "lost_truncated"
+            elif _err == "unparseable_response":
+                _outcome = "lost_parse"
+            else:
+                _outcome = "lost_error"
+            _EXTRACTION_CHUNK_OUTCOME_COUNTER.add(1, attributes={"outcome": _outcome})
         # Fail loud: surface failed/timed-out documents at WARNING so a degraded
         # run is visible (and countable) rather than silently producing empty
         # extraction — see #1113 (behaviour: mark + log + count, continue).
@@ -2313,6 +2580,17 @@ class LLMEntityExtractor(EntityExtractor):
 
         sections = "\n".join(f"=== SECTION {i + 1} ===\n{text[:4000]}" for i, text in enumerate(texts))
 
+        # Per-type attribute keys: computed once from the original expertise.
+        # Delivered to the custom multi-section builder as the {{ attribute_schema }}
+        # template variable (mirroring tool_context), and placed adjacent to the
+        # general attributes nudge in the hardcoded fallback builder.
+        attribute_schema = self._build_attribute_schema_block(expertise, entity_types)
+
+        # #1562 surfaces 3 and 4: the general "emit attributes" nudge for the batch
+        # path. "" when the flag is off (byte-identical to v0.23.1); the leading
+        # newline rides in the value so removing it leaves no blank-line residue.
+        attribute_nudge = f"\n{ATTRIBUTE_NUDGE_LINE}" if self._attribute_prompts else ""
+
         # If expertise has custom extraction prompt, use it with multi-section adaptation
         if expertise and expertise.extraction_prompt:
             from khora.extraction.skills.composer import ExpertiseComposer
@@ -2330,6 +2608,7 @@ Return a JSON object with a "sections" array, one object per input section:
     ...
 ]}
 Each section follows the entity/relationship format from the instructions above."""
+                + attribute_nudge
             )
 
             prompt_context = {
@@ -2338,6 +2617,7 @@ Each section follows the entity/relationship format from the instructions above.
                 "entity_types": entity_types,
                 "relationship_types": relationship_types,
                 "tool_context": tool_context or "",
+                "attribute_schema": attribute_schema,
             }
             try:
                 prompt = composer.render_prompt(
@@ -2357,6 +2637,7 @@ Each section follows the entity/relationship format from the instructions above.
         # Fallback to hardcoded prompt (existing behavior)
         if not expertise or not expertise.extraction_prompt:
             tool_prefix = f"{tool_context}\n\n" if tool_context else ""
+            attr_schema_section = f"\n\n{attribute_schema}" if attribute_schema else ""
             prompt = f"""{tool_prefix}Extract entities, relationships, and events from each text section below.
 
 Entity types to find: {", ".join(entity_types)}
@@ -2370,7 +2651,7 @@ Return a JSON object with a "sections" array, one object per section:
     ...
 ]}}
 
-Each section follows the same entity/relationship/event format.
+Each section follows the same entity/relationship/event format.{attribute_nudge}{attr_schema_section}
 Return ONLY valid JSON, no other text."""
 
         try:
@@ -2481,8 +2762,17 @@ Return ONLY valid JSON, no other text."""
                     # content with a truncation finish_reason, which must drive
                     # bisection rather than be mislabelled as an empty response.
                     if _is_truncation_finish_reason(finish_reason):
+                        # #1564: name the truncation class so genuine output-cap
+                        # events (finish_reason=length) are greppable apart from
+                        # other provider truncation reasons (e.g. Gemini/Vertex
+                        # MAX_TOKENS). The pre-#1563 message tagged mislabelled
+                        # parse failures as "truncated" and misdirected the
+                        # investigation - keep the two distinguishable in logs.
+                        _trunc_kind = (
+                            "output-cap truncation" if str(finish_reason).lower() == "length" else "provider truncation"
+                        )
                         logger.warning(
-                            f"LLM response truncated (finish_reason={finish_reason}) in batch extraction. "
+                            f"LLM response {_trunc_kind} (finish_reason={finish_reason}) in batch extraction. "
                             f"Model: {model_used}, batch_size: {len(texts)}. "
                             f"Consider increasing max_tokens or reducing batch size."
                         )
@@ -2504,27 +2794,21 @@ Return ONLY valid JSON, no other text."""
                             for _ in texts
                         ]
 
-                    # Parse JSON with error handling - don't retry on parse errors
+                    # Parse JSON with error handling.
+                    #
+                    # The old "Unterminated string" -> truncated_response branch is
+                    # deliberately GONE (#1563): genuine truncation already returned
+                    # above on finish_reason, so a parse failure here means corrupted
+                    # NON-truncated output - bisecting it re-ran identical calls on
+                    # smaller batches for nothing (the 2.2x amplification storm, now
+                    # also fixed at the source by parse-before-repair). Log and raise
+                    # so tenacity retries the call. Accepted cost: a rare provider
+                    # stream-cutoff reporting finish_reason "stop" burns the retry
+                    # budget before surfacing as an error result instead of
+                    # bisecting; call counts are comparable and the failure is loud.
                     try:
-                        data = json.loads(_strip_json_fences(content))
+                        data = _parse_llm_json(content)
                     except json.JSONDecodeError as json_err:
-                        # "Unterminated string" = output token limit hit mid-JSON (deterministic).
-                        # Retrying will produce the same result — return truncation error so the
-                        # caller can bisect the batch instead.
-                        if "Unterminated string" in str(json_err):
-                            logger.warning(
-                                f"LLM response truncated (Unterminated string, "
-                                f"finish_reason={finish_reason}) in batch extraction. "
-                                f"Model: {model_used}, batch_size: {len(texts)}. "
-                                f"Bisection will handle this."
-                            )
-                            return [
-                                ExtractionResult(
-                                    metadata={"error": "truncated_response", "finish_reason": finish_reason}
-                                )
-                                for _ in texts
-                            ]
-                        # Other JSON errors — log and retry (model may produce valid JSON next attempt)
                         logger.warning(
                             f"JSON parse error in batch extraction (finish_reason={finish_reason}): {json_err}. "
                             f"Model: {model_used}, content_length: {len(content)}, "
@@ -2727,7 +3011,7 @@ Return ONLY valid JSON, no other text."""
                 return ExtractionResult(metadata={"error": "empty_response"})
 
             # Accept pre-parsed dict directly (from extract_multi_batch)
-            data = content if isinstance(content, dict) else json.loads(_strip_json_fences(content))
+            data = content if isinstance(content, dict) else _parse_llm_json(content)
 
             # Ensure data is actually a dict (not a string that parsed as string)
             if not isinstance(data, dict):
@@ -2770,9 +3054,23 @@ Return ONLY valid JSON, no other text."""
                             valid_until=t.get("valid_until"),
                         )
 
-                # Ensure attributes is a dict (LLM sometimes returns a list)
-                attrs = e.get("attributes", {})
-                if not isinstance(attrs, dict):
+                # Normalize attributes to a dict. The strict schema emits a list
+                # of {"key": ..., "value": ...} pairs; other paths may return a
+                # dict directly. Anything else collapses to an empty dict.
+                raw_attrs = e.get("attributes", {})
+                if isinstance(raw_attrs, dict):
+                    attrs = raw_attrs
+                elif isinstance(raw_attrs, list):
+                    attrs = {}
+                    for pair in raw_attrs:
+                        if not isinstance(pair, dict):
+                            continue
+                        key = pair.get("key")
+                        if not isinstance(key, str):
+                            continue
+                        value = pair.get("value")
+                        attrs[key] = str(value) if value is not None else ""
+                else:
                     attrs = {}
 
                 # QUALITY FIX: Use heuristic confidence instead of hardcoded 0.9
@@ -2895,13 +3193,21 @@ Return ONLY valid JSON, no other text."""
         if json_match:
             try:
                 data = json.loads(json_match.group())
+                # #1564: count the rescue - these raw re-parses recovered
+                # thousands of chunks with zero metric footprint before now.
+                _EXTRACTION_PARSE_RESCUED_COUNTER.add(1)
                 # Pass dict directly — _parse_response accepts dicts and skips
-                # json.loads. Re-serializing with json.dumps would re-enter
-                # _parse_response as a string, risking mutual recursion if
-                # _strip_json_fences mangles the output back into invalid JSON.
+                # the parse step. (Historically this rescue also dodged the
+                # pre-#1563 repair-before-parse corruption; kept as a last-ditch
+                # extractor for JSON embedded in prose.)
                 return self._parse_response(data)
             except json.JSONDecodeError:
                 pass
 
         logger.warning("Could not extract valid JSON from response")
-        return ExtractionResult(metadata={"raw_response": text[:500]})
+        # #1563: carry an error key so this terminal outcome trips the #889
+        # extraction_errors accounting and the all_failed breaker instead of
+        # masquerading as a successful empty extraction. Behavior change is
+        # deliberate: a persistently unparseable model now fails loudly
+        # (single-doc fallback / breaker) rather than silently losing chunks.
+        return ExtractionResult(metadata={"error": "unparseable_response", "raw_response": text[:500]})

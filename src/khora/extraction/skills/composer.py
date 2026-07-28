@@ -137,7 +137,16 @@ class ExpertiseComposer:
         - tool_schemas: Tool schema dict
         - tools: List of tool names
         - parent_prompt: Parent's system prompt (for inheritance)
-        - context: Any additional context passed in
+        - source_tool: Name of the source tool for the content, if any
+        - tool_context: Source/tool field-context block ("" when absent)
+        - attribute_schema: Per-type ATTRIBUTE SCHEMA block naming each entity
+          type's required/optional attribute keys, supplied on the extraction
+          path. A custom ``extraction_prompt`` must interpolate
+          ``{{ attribute_schema }}`` to surface these per-type keys — unlike the
+          general "emit attributes" nudge, which is baked into the built-in
+          prompt text and is always present. Renders "" when no extracted type
+          declares attributes.
+        - context: Any additional context passed in (e.g. ``text``)
 
         Args:
             template: Jinja2 template string

@@ -244,6 +244,7 @@ async def stream_extract_and_embed_entities(
     extraction_timeout: int = 120,
     extraction_max_retries: int = 3,
     extraction_retry_wait: float = 2.0,
+    extraction_attribute_prompts: bool = False,
     embedding_batch_size: int = 100,
     extraction_batch_size: int = 10,
     extraction_max_tokens: int | None = None,
@@ -310,6 +311,7 @@ async def stream_extract_and_embed_entities(
                 timeout=extraction_timeout,
                 max_retries=extraction_max_retries,
                 retry_wait=extraction_retry_wait,
+                attribute_prompts=extraction_attribute_prompts,
             )
             if extraction_max_tokens is not None:
                 extractor_kwargs["max_tokens"] = extraction_max_tokens
@@ -375,6 +377,16 @@ async def stream_extract_and_embed_entities(
                         _vu = _parse_temporal_date(_t.valid_until) if _t else None
                         if _vu and (not existing.valid_until or _vu > existing.valid_until):
                             existing.valid_until = _vu
+                        # Union attributes across chunks: prefer existing non-empty, fill
+                        # missing or empty from later chunks, skip None/empty incoming (#1544)
+                        existing_attrs = existing.attributes if isinstance(existing.attributes, dict) else {}
+                        incoming_attrs = extracted.attributes if isinstance(extracted.attributes, dict) else {}
+                        for _k, _v in incoming_attrs.items():
+                            if _v in (None, ""):
+                                continue
+                            if existing_attrs.get(_k) in (None, ""):
+                                existing_attrs[_k] = _v
+                        existing.attributes = existing_attrs
                     else:
                         entity_type = extracted.entity_type or "CONCEPT"
 
@@ -928,6 +940,7 @@ async def process_document(
     extraction_min_importance: float = 0.2,
     ketrag_skeleton_channel: bool = False,
     extraction_second_pass: bool = False,
+    extraction_attribute_prompts: bool = False,
     bulk_mode: bool = False,
 ) -> dict[str, Any]:
     """Process a document through the enrichment pipeline.
@@ -1062,6 +1075,7 @@ async def process_document(
                     extraction_min_importance=extraction_min_importance,
                     ketrag_skeleton_channel=ketrag_skeleton_channel,
                     extraction_second_pass=extraction_second_pass,
+                    extraction_attribute_prompts=extraction_attribute_prompts,
                     shared_extractor=shared_extractor,
                 )
 
@@ -1714,6 +1728,7 @@ async def ingest_documents(
     extraction_min_importance: float = 0.2,
     ketrag_skeleton_channel: bool = False,
     extraction_second_pass: bool = False,
+    extraction_attribute_prompts: bool = False,
     skip_checksum_dedup: bool = False,
     **kwargs,
 ) -> dict[str, Any]:
@@ -1841,6 +1856,7 @@ async def ingest_documents(
             max_retries=extraction_max_retries,
             retry_wait=extraction_retry_wait,
             second_pass=extraction_second_pass,
+            attribute_prompts=extraction_attribute_prompts,
         )
         if extraction_max_tokens is not None:
             extractor_kwargs["max_tokens"] = extraction_max_tokens
@@ -1888,6 +1904,7 @@ async def ingest_documents(
                 extraction_min_importance=extraction_min_importance,
                 ketrag_skeleton_channel=ketrag_skeleton_channel,
                 extraction_second_pass=extraction_second_pass,
+                extraction_attribute_prompts=extraction_attribute_prompts,
                 bulk_mode=skip_checksum_dedup,
             )
 

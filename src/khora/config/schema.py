@@ -9,6 +9,7 @@ from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
 import yaml
+from loguru import logger
 from pydantic import AliasChoices, BaseModel, Discriminator, Field, SecretStr, Tag, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -19,6 +20,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Issue #576 Phase 1 Item 4.
 from khora.config._secrets import AllowSecretTyping
 from khora.config.llm import DEFAULT_API_KEY_ENV, derive_api_key_env
+
+# pgvector HNSW opclass dimension ceilings live in the migration-side module so
+# the config-time guard and the migration-time index sizing share one source of
+# truth and cannot drift apart (#1260). ``_schema_config`` is a leaf (only reads
+# the Alembic context), so this import adds no heavy dependency or cycle.
+from khora.db.migrations._schema_config import (
+    HALFVEC_HNSW_MAX_DIM as _PGVECTOR_HALFVEC_MAX_DIM,
+)
+from khora.db.migrations._schema_config import (
+    VECTOR_HNSW_MAX_DIM as _PGVECTOR_VECTOR_MAX_DIM,
+)
 from khora.dream.config import DreamConfig
 from khora.hooks.models import SemanticHooksConfig as _SemanticHooksConfig
 
@@ -831,6 +843,31 @@ GraphConfig = Annotated[
 # ---------------------------------------------------------------------------
 
 
+def _validate_pg_embedding_dimension(dim: int, use_halfvec: bool) -> None:
+    """Raise ``ValueError`` if ``dim`` is not HNSW-indexable on pgvector.
+
+    ``vector`` (float32) caps at 2000 dims, ``halfvec`` (float16, the default via
+    ``use_halfvec``) at 4000. Shared by the construction-time guard and the
+    point-of-use accessor so both paths (and in-place mutations) are covered.
+    """
+    if dim <= 0:
+        raise ValueError(f"embedding_dimension must be positive, got {dim}.")
+    max_dim = _PGVECTOR_HALFVEC_MAX_DIM if use_halfvec else _PGVECTOR_VECTOR_MAX_DIM
+    if dim > max_dim:
+        precision = "halfvec" if use_halfvec else "vector"
+        raise ValueError(
+            f"Postgres backend cannot HNSW-index embedding_dimension={dim}: pgvector's "
+            f"{precision} opclass caps at {max_dim} dims. "
+            + (
+                "Request a shortened dimension via the embedding model's `dimensions` parameter "
+                "(e.g. text-embedding-3-large supports 256-3072)."
+                if use_halfvec
+                else "Enable halfvec (storage.use_halfvec=True, the default) to index up to 4000 dims, "
+                "or request a shortened dimension via the model's `dimensions` parameter."
+            )
+        )
+
+
 class PgVectorConfig(BaseModel):
     """pgvector vector backend configuration."""
 
@@ -1270,30 +1307,6 @@ class StorageSettings(BaseSettings):
 
         return data
 
-    @model_validator(mode="after")
-    def _guard_postgres_embedding_dimension(self) -> StorageSettings:
-        """Reject non-1536 embedding dimensions on the Postgres backend.
-
-        The Postgres / pgvector schema hardcodes ``Vector(1536)`` columns
-        (#925), so a configured dimension other than 1536 would pass
-        through the embedder (#926) and then crash at store time. Until the
-        parameterized migration lands (tracked in #925 for a future
-        release) we fail fast at config time on the Postgres path only.
-        sqlite_lance and surrealdb size their vector columns from config
-        and support arbitrary dimensions, so this guard does not apply to
-        them.
-        """
-        if self.backend != "postgres":
-            return self
-        pgvector_dim = self.vector.embedding_dimension if isinstance(self.vector, PgVectorConfig) else 1536
-        if pgvector_dim != 1536 or self.embedding_dimension != 1536:
-            raise ValueError(
-                "Postgres backend currently supports only embedding_dimension=1536; "
-                "arbitrary dimensions are tracked in #925 for a future release. "
-                "Use sqlite_lance for other dimensions, or set embedding_dimension=1536."
-            )
-        return self
-
 
 class LLMSettings(BaseSettings):
     """LLM configuration settings.
@@ -1463,6 +1476,26 @@ class PipelineSettings(BaseSettings):
         "connections at extra LLM cost. Default off to keep the default ingest cost "
         "profile flat; enable via KHORA_PIPELINES_EXTRACTION_SECOND_PASS=true for "
         "denser graphs.",
+    )
+    extraction_attribute_prompts: bool = Field(
+        default=False,
+        description="Opt-in attribute-prompt surfaces for entity extraction (#1562). When "
+        "True, the extraction prompts carry the general 'emit attributes' nudge lines "
+        "(#1549) AND, for expertise-driven runs, the per-type ATTRIBUTE SCHEMA hint block "
+        "(#1552). Default False: the nudge lines and hint block are suppressed and the "
+        "flag-off prompt is byte-identical to v0.23.1 (the required 'attributes' pair "
+        "channel in the strict schema and its parser stay unconditional either way, so "
+        "STATE_CHANGE / temporal machinery keeps working). "
+        "IMPORTANT (#1541 disposition): at the default the generic attribute-fill goal is "
+        "opt-in. The sanctioned route to attribute fill is flag-on AND an expertise "
+        "config that declares per-type attributes - the per-type hint block only renders "
+        "when both hold. Expertise users at the default therefore get ZERO attribute "
+        "prompting (less than v0.23.1's tool-context listing, which was removed in "
+        "a799b8c6 and is not restored); they must set "
+        "KHORA_PIPELINES_EXTRACTION_ATTRIBUTE_PROMPTS=true to re-enable it. This is a "
+        "deliberate default-wontfix for generic attribute fill - the prompt nudges "
+        "measurably suppressed entity yield and, before #1563, interacted with a JSON "
+        "repair bug to stall ingestion.",
     )
 
     # Entity embedding skip rules — skip embedding generation for low-value entity types
@@ -2540,6 +2573,28 @@ class KhoraConfig(BaseSettings):
             self.llm.extraction_model = self.llm_extraction_model
         return self
 
+    @model_validator(mode="after")
+    def _guard_postgres_embedding_dimension(self) -> KhoraConfig:
+        """Reject embedding dimensions pgvector cannot index on Postgres.
+
+        Keyed on the EFFECTIVE embedder-facing dimension
+        (``llm.embedding_dimension``) so the guard catches the path the
+        embedder docs point users down (issue #1260 repro (b)), not only the
+        storage-side fields. pgvector's HNSW opclasses cap the indexable range:
+        ``vector`` at 2000 dims (full precision) and ``halfvec`` at 4000 dims
+        (half precision, the default via ``use_halfvec``). sqlite_lance and
+        surrealdb size their vector columns from config and support arbitrary
+        dimensions, so this guard is Postgres-only.
+
+        Enforced at construction here AND at point-of-use in
+        ``get_effective_embedding_dimension()`` (the single value the column,
+        index, migration, and runtime cast derive from), so an in-place
+        mutation such as ``config.llm.embedding_dimension = 4001`` after
+        construction is still caught before it reaches migrations.
+        """
+        self.get_effective_embedding_dimension()  # raises on an unindexable dim
+        return self
+
     @classmethod
     def from_yaml(cls, path: str | Path) -> KhoraConfig:
         """Load configuration from a YAML file.
@@ -2704,15 +2759,50 @@ class KhoraConfig(BaseSettings):
         """Get the vector backend configuration.
 
         If using legacy config, builds a PgVectorConfig from the flat fields.
+
+        For pgvector, the embedding dimension always follows the authoritative
+        embedder-facing value (``llm.embedding_dimension``) so the runtime
+        backend casts to the same dimension the columns/indexes were sized to
+        by migration (#1260). Storage-side dimension fields never diverge from
+        the vectors the embedder actually produces.
         """
         vector = self.storage.vector
-        if isinstance(vector, PgVectorConfig) and not vector.url:
-            # Populate from legacy fields. Both ``pgvector_url`` and
-            # ``PgVectorConfig.url`` are ``SecretStr``; unwrap the legacy
-            # field here so Pydantic re-wraps consistently.
-            url = _secret_value(self.storage.pgvector_url) or self.get_postgresql_url()
+        if isinstance(vector, PgVectorConfig):
+            # ``url`` may be unset (legacy flat fields) — fall back to the
+            # pgvector/PostgreSQL URL. Both are SecretStr; unwrap so Pydantic
+            # re-wraps consistently.
+            url = _secret_value(vector.url) or _secret_value(self.storage.pgvector_url) or self.get_postgresql_url()
+            effective_dim = self.get_effective_embedding_dimension()
+            if vector.embedding_dimension != effective_dim:
+                # Storage follows llm (the embedder-facing dimension); an
+                # explicit storage-side value that disagrees is intentionally
+                # ignored, but surface it so it isn't silently mystifying.
+                logger.debug(
+                    "storage.vector.embedding_dimension={} ignored on pgvector; using "
+                    "llm.embedding_dimension={} (the embedder-facing source of truth).",
+                    vector.embedding_dimension,
+                    effective_dim,
+                )
             return PgVectorConfig(
                 url=url,
-                embedding_dimension=self.storage.embedding_dimension,
+                embedding_dimension=effective_dim,
             )
         return vector
+
+    def get_effective_embedding_dimension(self) -> int:
+        """Single source of truth for the embedding dimension.
+
+        Follows the chosen embedding model via ``llm.embedding_dimension``. The
+        storage column, HNSW index, migrations, runtime backend cast, and the
+        Postgres guardrail all derive from this one value so they cannot
+        silently diverge from the vectors the embedder produces (#1260).
+
+        On the Postgres backend the value is validated against pgvector's HNSW
+        index limits here, at point-of-use, so an out-of-range dimension is
+        rejected even when set by in-place mutation (which bypasses the
+        construction-time validator).
+        """
+        dim = self.llm.embedding_dimension
+        if self.storage.backend == "postgres":
+            _validate_pg_embedding_dimension(dim, self.storage.use_halfvec)
+        return dim

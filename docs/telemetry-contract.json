@@ -324,6 +324,12 @@
       "owner": "vectorcypher"
     },
     {
+      "name": "khora.vectorcypher.remember_batch.window",
+      "stability": "internal",
+      "owner": "vectorcypher",
+      "_comment": "Issue #1564. Per-window progress span inside remember_batch, mirroring the batch-level span. Attributes: window_index, window_count, window_chunks, chunks_done, chunks_total, docs_processed, extraction_errors, elapsed_ms. Free when telemetry is disabled; used for in-flight ingestion progress."
+    },
+    {
       "name": "khora.skeleton.chunk",
       "stability": "public",
       "owner": "skeleton"
@@ -1660,6 +1666,41 @@
         {"name": "reason", "values": ["extraction_failed"], "_comment": "Low-cardinality enum; extend when adding new failure categories. ``extraction_failed`` covers truncated LLM responses, parse failures, and retry exhaustion - the per-chunk reason lives on the ADR-001 degradation entry in RememberResult.metadata['degradations']."}
       ],
       "description": "Issue #889. LLM extraction failures per chunk: incremented once per chunk where ``LLMEntityExtractor`` returned an ``ExtractionResult`` with an ``error`` metadata key (truncated response, parse error, retry exhaustion). The same event is also appended to ``RememberResult.metadata['degradations']`` as an ADR-001 ``Degradation`` entry with ``component='extraction.llm'``. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
+    },
+    {
+      "name": "khora.extraction.chunk_outcome_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "owner": "extraction",
+      "labels": [
+        {"name": "outcome", "values": ["extracted", "skipped_short", "lost_truncated", "lost_parse", "lost_error"], "_comment": "Terminal per-chunk extraction outcome. ``extracted`` (no error) / ``lost_truncated`` / ``lost_parse`` / ``lost_error`` are emitted by extract_multi in llm.py from ExtractionResult.metadata['error']; ``skipped_short`` is emitted by the vectorcypher engine's min_extraction_tokens gate where chunks never reach the LLM."}
+      ],
+      "description": "Issue #1564. Per-chunk terminal extraction-outcome taxonomy. Declared identically in llm.py (four LLM outcomes) and engine.py (skipped_short) - both write the same stream. Denominator for terminal-chunk-loss gate checks. NO namespace_id label - cardinality rule."
+    },
+    {
+      "name": "khora.extraction.chunks_processed_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "owner": "extraction",
+      "description": "Issue #1564. Chunks that flowed through a remember_batch window's extraction stage, incremented per window by the window's stored-chunk count. Denominator for the call-amplification gate (LLM calls / chunks). NO namespace_id label - cardinality rule."
+    },
+    {
+      "name": "khora.extraction.parse_rescued_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "owner": "extraction",
+      "description": "Issue #1564. Extractions rescued by _extract_json_from_text's raw re-parse after structured JSON parsing failed. Had no metric footprint before #1564 (rescues were WARNING-logged only). NO namespace_id label - cardinality rule."
+    },
+    {
+      "name": "khora.extraction.bisection_floor_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "owner": "extraction",
+      "description": "Issue #1564. Bisection reached the single-text floor while resolving output truncation - the worst-case LLM-call-amplification signal. NO namespace_id label - cardinality rule."
     },
     {
       "name": "khora.storage.replace_document.partial_failure",

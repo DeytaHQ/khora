@@ -117,6 +117,74 @@ def _patch_extract_multi(monkeypatch, *, fail: bool) -> None:
 
 class TestStreamingBatchExtractionFailure:
     @pytest.mark.asyncio
+    async def test_document_creation_failure_identifies_input_and_error(self) -> None:
+        engine = _make_streaming_engine()
+        error = "value too long for type character varying(64)"
+        storage = engine._storage
+        assert storage is not None
+        storage.create_document = AsyncMock(side_effect=ValueError(error))
+
+        result = await engine.remember_batch(
+            [{"content": "document", "external_id": "corpus:two"}],
+            uuid4(),
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+
+        assert result.failed == 1
+        assert result.per_document[0]["external_id"] == "corpus:two"
+        assert result.per_document[0]["error"] == error
+
+    @pytest.mark.asyncio
+    async def test_document_creation_failure_surfaces_on_batch_metadata(self) -> None:
+        # #1538: a document-creation rejection is aggregated onto
+        # BatchResult.metadata (the #1410 treatment of extraction failures), so a
+        # caller doing batch-granular retry/resume sees the batch did not fully
+        # succeed without walking per_document.
+        engine = _make_streaming_engine()
+        error = "value too long for type character varying(64)"
+        storage = engine._storage
+        assert storage is not None
+        storage.create_document = AsyncMock(side_effect=ValueError(error))
+
+        result = await engine.remember_batch(
+            [
+                {"content": "first document", "external_id": "corpus:one"},
+                {"content": "second document", "external_id": "corpus:two"},
+            ],
+            uuid4(),
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+
+        assert result.failed == 2
+        assert result.metadata.get("document_errors") == 2
+        failed = result.metadata.get("failed_documents")
+        assert failed is not None
+        assert {f["external_id"] for f in failed} == {"corpus:one", "corpus:two"}
+        assert all(f["error"] == error for f in failed)
+        assert {f["index"] for f in failed} == {0, 1}
+
+    @pytest.mark.asyncio
+    async def test_all_documents_succeed_leaves_metadata_clean(self, monkeypatch) -> None:
+        # #1538 guard: the document-failure keys must NOT appear when every
+        # document creates successfully - the happy path stays empty.
+        engine = _make_streaming_engine()
+        _patch_extract_multi(monkeypatch, fail=False)
+
+        result = await engine.remember_batch(
+            [{"content": _LONG_CONTENT, "external_id": "corpus:ok"}],
+            uuid4(),
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+
+        assert result.failed == 0
+        assert "document_errors" not in result.metadata
+        assert "failed_documents" not in result.metadata
+        assert result.per_document[0].get("error") is None
+
+    @pytest.mark.asyncio
     async def test_failed_extraction_surfaces_degradations(self, monkeypatch) -> None:
         engine = _make_streaming_engine()
         _patch_extract_multi(monkeypatch, fail=True)

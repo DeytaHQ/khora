@@ -8,5 +8,12 @@ dependencies = [
     "google-adk>=1.32,<2.0",
 ]
 
+[tool.uv]
+# google-adk (>=1.32) requires opentelemetry-resourcedetector-gcp, whose only
+# satisfying releases are pre-releases (>=1.9.0a0). uv rejects pre-releases by
+# default, so a fresh unlocked `uv sync` here fails to resolve. Allow
+# pre-releases so the example resolves (uv's own hint for this case).
+prerelease = "allow"
+
 [tool.uv.sources]
 khora = { path = "../../..", editable = true }
