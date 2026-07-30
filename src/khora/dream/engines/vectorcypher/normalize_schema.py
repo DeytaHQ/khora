@@ -14,7 +14,7 @@ queue and deciding which renames to apply.
 consumer contract (``khora-cli``, ``khora-explorer``). Running this op
 on a production namespace requires lockstep updates to any downstream
 consumer that pattern-matches on ``entity_type`` / ``relationship_type``
-values. See ``docs/consumers.md``.
+values. See ``https://docs.deyta.ai/khora``.
 
 Stability: **internal**. The op kind string
 ``vectorcypher_normalize_schema`` is part of :class:`khora.dream.OpKind`

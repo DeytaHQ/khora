@@ -33,6 +33,6 @@ Built memory hooks: app_id='example'
 
 ## See also
 
-- `docs/integrations/openai_agents.md` - the quickstart byte-identical
-  to this directory's `example.py` (CI enforces drift).
+- https://docs.deyta.ai/khora/integrations/openai-agents - the published
+  quickstart, mirroring this directory's `example.py`.
 - `src/khora/integrations/openai_agents/` - adapter source.

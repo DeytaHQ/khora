@@ -26,8 +26,7 @@ WHY VECTORCYPHER WITH ``skeleton_core_ratio=1.0``
 =================================================
 Full extraction on every chunk is what made the deprecated ``graphrag``
 engine useful. VectorCypher at ``skeleton_core_ratio=1.0`` is the
-documented replacement — same shape, one less codebase. See
-``docs/engines/engine-comparison.md#replacing-graphrag-removed-in-0101``.
+documented replacement — same shape, one less codebase.
 
 Why full extraction (vs the 0.70 default) for resumes?
 

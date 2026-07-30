@@ -13,7 +13,7 @@ Demonstrates:
   (chunk_id, document_id, abstention signal).
 
 ``KhoraMemoryBlock`` and ``KhoraChatStore`` are also exported by the
-adapter; see ``docs/integrations/llamaindex.md`` for usage notes.
+adapter; see https://docs.deyta.ai/khora/integrations/llamaindex for usage notes.
 """
 
 from __future__ import annotations

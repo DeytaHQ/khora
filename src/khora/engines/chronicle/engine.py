@@ -74,7 +74,7 @@ ChronicleStorageBackend = Literal["pgvector", "lancedb"]
 
 # Chronicle temporal-decay parameters - single source of truth for defaults.
 # Bump in lockstep with config/schema.py (QuerySettings.temporal_half_life_hours,
-# chronicle_decay_weight) and docs/engines/chronicle-engine.md.
+# chronicle_decay_weight).
 DEFAULT_CHRONICLE_HALF_LIFE_HOURS: float = 168.0
 DEFAULT_CHRONICLE_DECAY_WEIGHT: float = 0.30
 

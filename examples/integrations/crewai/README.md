@@ -11,5 +11,5 @@ uv run python example.py
 ```
 
 The `examples-smoke` CI job runs this file under a 30s timeout. The
-`docs/integrations/crewai.md` quickstart snippet is byte-identical to
-`example.py` (gated by `tools/check_examples_drift.py`).
+published quickstart at https://docs.deyta.ai/khora/integrations/crewai
+mirrors this `example.py` (maintained in the Mintlify docs repo).

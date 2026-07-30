@@ -17,7 +17,7 @@ the Python module ``agents`` (note: no ``openai_`` prefix). The
 
 Stability: experimental. The SDK is pre-1.0 (17 releases in 7 months as
 of v0.17). The adapter pins ``openai-agents>=0.17,<0.18`` and bumps in a
-deliberate PR per upstream minor — see ``docs/integrations/openai_agents.md``.
+deliberate PR per upstream minor — see ``https://docs.deyta.ai/khora/integrations/openai-agents``.
 
 Module-load discipline: nothing from ``agents`` is imported at module
 top level. Verified by ``tests/unit/integrations/test_no_eager_imports.py``

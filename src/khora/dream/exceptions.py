@@ -78,7 +78,7 @@ class DreamBackendUnsupported(KhoraError):
     orchestrator raises this exception, logs a warning, and marks the op
     as skipped so the run completes cleanly.
 
-    See ``docs/dream-phase.md`` for the list of Postgres-only ops.
+    See ``https://docs.deyta.ai/khora/dream-phase`` for the list of Postgres-only ops.
     """
 
 

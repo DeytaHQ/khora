@@ -21,9 +21,11 @@ Rules every example must follow:
 - **No API keys.** Use the mock LLM from `examples/_helpers/mock_llm.py`
   (monkeypatches `litellm.acompletion` / `litellm.aembedding`). Embeddings
   are deterministic-by-text-hash; completions return a configurable stub.
-- **Byte-identical doc snippets.** The `python title="example.py"` block in
-  the matching `docs/integrations/<framework>.md` must equal the example
-  file byte-for-byte. CI enforces this via `tools/check_examples_drift.py`.
+- **Docs mirror the example.** The published quickstart at
+  `https://docs.deyta.ai/khora/integrations/<framework>` is kept in sync with
+  this `example.py` (maintained in the Mintlify docs repo). The in-repo
+  `tools/check_examples_drift.py` gate is dormant - it activates only if
+  `docs/integrations/*.md` is reintroduced here.
 - **30-second timeout.** Each example is smoke-tested under a 30s budget
   in the `examples-smoke` CI job. Wall-clock target is < 2 min for the
   whole loop across all shipping adapters.
@@ -32,8 +34,8 @@ Rules every example must follow:
 
 The `examples-smoke` job in `.github/workflows/ci.yml` runs after `install`:
 
-1. `python tools/check_examples_drift.py` - fails if any doc snippet diverges
-   from its `example.py`.
+1. `python tools/check_examples_drift.py` - dormant: no `docs/integrations/*.md`
+   ship in-repo, so it exits 0 (foundation state).
 2. For each `examples/integrations/<framework>/` directory, runs
    `uv sync` inside that dir (to pull the adapter's own extra) and then
    `uv run python example.py` under a 30s timeout.
