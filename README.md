@@ -89,8 +89,8 @@ Opt-in adapters for the major agentic frameworks. Each adapter is in its own ext
 |---|---|---|
 | [CrewAI](https://docs.deyta.ai/khora/integrations/crewai) | `uv add khora[crewai]` | `KhoraMemory` - drop-in storage backend for CrewAI's unified `Memory`. |
 | [LangGraph](https://docs.deyta.ai/khora/integrations/langgraph) | `uv add khora[langgraph]` | `KhoraStore` - `BaseStore` implementation for `StateGraph` semantic long-term memory. |
-| [Google ADK](https://docs.deyta.ai/khora/integrations/google_adk) | `uv add khora[google-adk]` | `KhoraMemoryService` - `BaseMemoryService` drop-in for ADK `Runner`. |
-| [OpenAI Agents SDK](https://docs.deyta.ai/khora/integrations/openai_agents) | `uv add khora[openai-agents]` | `KhoraSession`, `khora_recall_tool`, `KhoraMemoryHooks`. |
+| [Google ADK](https://docs.deyta.ai/khora/integrations/google-adk) | `uv add khora[google-adk]` | `KhoraMemoryService` - `BaseMemoryService` drop-in for ADK `Runner`. |
+| [OpenAI Agents SDK](https://docs.deyta.ai/khora/integrations/openai-agents) | `uv add khora[openai-agents]` | `KhoraSession`, `khora_recall_tool`, `KhoraMemoryHooks`. |
 | [LlamaIndex](https://docs.deyta.ai/khora/integrations/llamaindex) | `uv add khora[llamaindex]` | `KhoraRetriever`, `KhoraMemoryBlock`. |
 
 See the [docs](https://docs.deyta.ai/khora) for per-adapter guides and the "write your own" Protocol surface.
