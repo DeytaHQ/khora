@@ -190,8 +190,13 @@ class TestTieBreak:
         order = _order(union_best_rank_fusion([("vector", vector), ("graph", graph)]))
         assert order == [a, b]
 
-    def test_norm_score_breaks_same_channel_same_rank_is_stable(self) -> None:
-        # Determinism: identical scenarios produce identical order across runs.
+    def test_order_is_deterministic(self) -> None:
+        # Identical scenarios produce identical order across runs. Key 4 of the
+        # hierarchy (in-channel min-max norm, desc) is a defensive tiebreak that
+        # is in fact unreachable for distinct items: keys 1-3 tying implies the
+        # same best channel at the same rank, and ranks are unique within a
+        # channel, so two distinct items can never reach key 4. str(item_id)
+        # (key 5) is the effective final tiebreak and guarantees determinism.
         vector = _channel("v", 3)
         graph = _channel("g", 3)
         first = _order(union_best_rank_fusion([("vector", vector), ("graph", graph)]))

@@ -542,7 +542,16 @@ def _build_union_result(
     item_ranks: dict[str, int],
     item_scores: dict[str, float],
 ) -> FusedResult:
-    """Synthesize a ``FusedResult`` with per-channel provenance back-filled."""
+    """Synthesize a ``FusedResult`` with per-channel provenance back-filled.
+
+    The channel-name set {"vector", "graph", "bm25"} is coupled across three
+    sites and must stay in sync: the ``QuerySettings.union_rank_channels``
+    ``Literal`` (config/schema.py), the field mapping here, and the
+    ``channel_attrs`` quota computation in ``retriever._select_rerank_window``.
+    A channel added to the config ``Literal`` without a ``FusedResult`` field
+    here would fuse correctly but carry no rank, so the rerank window would not
+    reserve its quota.
+    """
     return FusedResult(
         item_id=item_id,
         item=item,
