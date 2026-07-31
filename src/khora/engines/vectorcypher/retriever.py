@@ -61,6 +61,8 @@ from .fusion import (
     normalize_scores,
     score_calibrated_fusion,
     score_calibrated_fusion_nlist,
+    union_best_rank_fusion,
+    union_mnz_fusion,
     weighted_rrf,
     weighted_rrf_normalized,
 )
@@ -318,6 +320,12 @@ _RELATIONSHIP_TYPE_PRIORS: dict[str, float] = {
 }
 _DEFAULT_RELATIONSHIP_TYPE_PRIOR = 1.0
 
+# #1518: fusion modes that use the union interleave/CombMNZ fusers and the
+# paired quota-aware cross-encoder admission. Membership gates both the
+# ``_fuse_results`` dispatch and the ``_apply_reranking`` window selection;
+# "rrf"/"calibrated" take neither path (byte-identical).
+_UNION_FUSION_MODES: frozenset[str] = frozenset({"union_best_rank", "union_mnz"})
+
 
 def _relationship_type_prior(rel_type: str | None) -> float:
     """Static per-type prior for typed/weighted graph expansion (#1474 leg 2)."""
@@ -524,6 +532,11 @@ class RetrieverConfig:
     # below weak-cosine chunks that merely co-occur across channels. Default-OFF;
     # A/B is downstream (khora-graphrag-benchmark#12).
     fusion_mode: str = "rrf"
+    # #1518: union-fusion channel config. Only consulted when ``fusion_mode``
+    # is "union_best_rank"/"union_mnz". Defaults reproduce the all-channels
+    # union; ordering is the union tiebreak priority.
+    union_rank_channels: list[str] = field(default_factory=lambda: ["vector", "graph", "bm25"])
+    union_rank_per_channel_limit: int | None = None
 
     # Per-complexity fusion overrides (used when routing is enabled)
     simple_vector_weight: float = 0.8
@@ -3257,6 +3270,68 @@ class VectorCypherRetriever:
 
         return result
 
+    def _select_rerank_window(
+        self, fused_results: list[FusedResult], top_n: int
+    ) -> tuple[list[FusedResult], list[FusedResult]]:
+        """Partition ``fused_results`` into the cross-encoder window + remainder.
+
+        Default (rrf/calibrated): the post-boost top-``top_n`` slice, byte-for-byte
+        identical to the historic ``fused_results[:top_n]`` / ``[top_n:]`` split.
+
+        Under a union fusion mode (#1518, co-primary): the window is
+        quota-aware. Each active channel is guaranteed its top-``floor(top_n /
+        n_active)`` candidates BY FUSION-EXIT CHANNEL RANK a slot, so the
+        recency-boost and coherence-blend re-sorts that run between fusion exit
+        and this slice (§4.1) cannot evict a channel's head from the window.
+        Because ``n_active * floor(top_n / n_active) <= top_n``, the guaranteed
+        set always fits. Remaining slots fill by post-boost order; the returned
+        window + remainder is a partition of ``fused_results`` that preserves
+        post-boost order within each part.
+
+        "Active" is gated on ``union_rank_channels`` (the config toggle), then
+        intersected with channels that actually produced provenance in the pool.
+        A channel absent from ``union_rank_channels`` never contributes to the
+        union (``_fuse_results`` excludes it) and gets NO quota reservation here,
+        so per-channel on/off is honored end to end.
+        """
+        if self._config.fusion_mode not in _UNION_FUSION_MODES:
+            return fused_results[:top_n], fused_results[top_n:]
+
+        # Only channels the config enabled may claim a quota. Coupled with the
+        # {vector,graph,bm25} name set in fusion._build_union_result and the
+        # QuerySettings.union_rank_channels Literal - keep the three in sync.
+        channel_attr_by_name = {"vector": "vector_rank", "graph": "graph_rank", "bm25": "bm25_rank"}
+        enabled = set(self._config.union_rank_channels)
+        active = [
+            attr
+            for name, attr in channel_attr_by_name.items()
+            if name in enabled and any(getattr(r, attr) is not None for r in fused_results)
+        ]
+        if not active or top_n <= 0:
+            return fused_results[:top_n], fused_results[top_n:]
+
+        quota = top_n // len(active)
+        guaranteed_ids: set[UUID] = set()
+        if quota >= 1:
+            for attr in active:
+                members = sorted(
+                    (r for r in fused_results if getattr(r, attr) is not None),
+                    key=lambda r, a=attr: getattr(r, a),
+                )
+                guaranteed_ids.update(r.item_id for r in members[:quota])
+
+        # Fill the remaining window slots by post-boost order; the window is
+        # exactly ``top_n`` items (the guaranteed set fits, see docstring).
+        window_ids = set(guaranteed_ids)
+        for r in fused_results:
+            if len(window_ids) >= top_n:
+                break
+            window_ids.add(r.item_id)
+
+        window = [r for r in fused_results if r.item_id in window_ids]
+        remainder = [r for r in fused_results if r.item_id not in window_ids]
+        return window, remainder
+
     async def _apply_reranking(
         self,
         query: str,
@@ -3288,8 +3363,7 @@ class VectorCypherRetriever:
         from khora.query.reranking import CrossEncoderReranker, RerankCandidate, hydrate_doc_titles
 
         top_n = min(self._config.reranking_top_n, len(fused_results))
-        candidates_to_rerank = fused_results[:top_n]
-        remainder = fused_results[top_n:]
+        candidates_to_rerank, remainder = self._select_rerank_window(fused_results, top_n)
 
         # Normalize original scores to [0,1] before passing to the reranker
         # so the 0.3 original_score blend is meaningful (raw RRF scores are
@@ -5736,6 +5810,41 @@ class VectorCypherRetriever:
             span.set_attribute("fusion_mode", fusion_mode)
             if calibrated and raw_cosine_by_id:
                 vector_chunks = [(cid, raw_cosine_by_id.get(cid, score), chunk) for cid, score, chunk in vector_chunks]
+
+            # ── Union fusion (#1518): rank-preserving interleave / CombMNZ ──
+            # Channel set is config-driven (union_rank_channels ∩ non-empty),
+            # not bm25-presence-driven, so this dispatches ahead of the
+            # rrf/calibrated blocks. Provenance (incl. bm25) is back-filled so
+            # the paired quota-aware CE admission can recover fusion-exit ranks.
+            if fusion_mode in _UNION_FUSION_MODES:
+                bm25_weight = self._config.bm25_weight
+                channel_lists: dict[str, list[tuple[UUID, float, Chunk]]] = {
+                    "vector": vector_chunks,
+                    "graph": graph_chunks,
+                    "bm25": bm25_chunks or [],
+                }
+                channels = [
+                    (name, channel_lists[name]) for name in self._config.union_rank_channels if channel_lists.get(name)
+                ]
+                span.set_attribute("union_rank_channels", ",".join(name for name, _ in channels))
+                per_channel_limit = self._config.union_rank_per_channel_limit
+                if fusion_mode == "union_mnz":
+                    fused_union = union_mnz_fusion(
+                        channels,
+                        {"vector": vector_weight, "graph": graph_weight, "bm25": bm25_weight},
+                        rrf_k=self._config.rrf_k,
+                        per_channel_limit=per_channel_limit,
+                    )
+                else:
+                    fused_union = union_best_rank_fusion(
+                        channels,
+                        rrf_k=self._config.rrf_k,
+                        per_channel_limit=per_channel_limit,
+                    )
+                if exclude_bm25_only:
+                    non_lexical_ids = {cid for cid, _s, _c in vector_chunks} | {cid for cid, _s, _c in graph_chunks}
+                    fused_union = [fr for fr in fused_union if fr.item_id in non_lexical_ids]
+                return fused_union
 
             # ── 3-channel fusion (vector + graph + BM25) ────────────────
             if bm25_chunks:

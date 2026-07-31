@@ -26,6 +26,11 @@ class FusedResult:
     graph_rank: int | None = None
     vector_score: float | None = None
     graph_score: float | None = None
+    # #1518: BM25 channel provenance. Populated only by the union fusers so
+    # quota-aware cross-encoder admission can recover a channel's fusion-exit
+    # rank; the RRF/calibrated fusers leave these None (byte-identical).
+    bm25_rank: int | None = None
+    bm25_score: float | None = None
 
 
 def reciprocal_rank_fusion(
@@ -481,6 +486,168 @@ def score_calibrated_fusion_nlist(
     return fused
 
 
+def _union_channel_ranks(
+    channels: list[tuple[str, list[tuple[UUID, float, Any]]]],
+    *,
+    per_channel_limit: int | None = None,
+    with_norm: bool = False,
+) -> tuple[
+    dict[UUID, dict[str, int]],
+    dict[UUID, dict[str, float]],
+    dict[UUID, Any],
+    dict[UUID, dict[str, float]],
+]:
+    """Collect per-channel rank/score provenance for the union fusers (#1518).
+
+    ``channels`` is ordered by priority (the ``union_rank_channels`` order).
+    Returns ``(ranks, scores, items, norms)`` keyed by item id then channel
+    name. ``norms`` (per-channel min-max normalized score) is only populated
+    when ``with_norm`` is True.
+    """
+    ranks: dict[UUID, dict[str, int]] = {}
+    scores: dict[UUID, dict[str, float]] = {}
+    items: dict[UUID, Any] = {}
+    norms: dict[UUID, dict[str, float]] = {}
+
+    for name, results in channels:
+        if per_channel_limit is not None:
+            results = results[:per_channel_limit]
+        normalized = _min_max_normalize([s for _id, s, _item in results]) if with_norm else None
+        for idx, (item_id, score, item) in enumerate(results):
+            rank = idx + 1
+            ranks.setdefault(item_id, {})[name] = rank
+            scores.setdefault(item_id, {})[name] = score
+            items.setdefault(item_id, item)
+            if normalized is not None:
+                norms.setdefault(item_id, {})[name] = normalized[idx]
+
+    return ranks, scores, items, norms
+
+
+def _best_channel(item_ranks: dict[str, int], priority: dict[str, int]) -> tuple[int, str]:
+    """Return ``(best_rank, best_channel)`` for an item.
+
+    The best channel is the one where the item achieves its minimum rank,
+    breaking ties by channel priority index (position in ``union_rank_channels``).
+    """
+    best_rank = min(item_ranks.values())
+    best_channel = min((name for name, r in item_ranks.items() if r == best_rank), key=lambda n: priority[n])
+    return best_rank, best_channel
+
+
+def _build_union_result(
+    item_id: UUID,
+    item: Any,
+    rrf_score: float,
+    item_ranks: dict[str, int],
+    item_scores: dict[str, float],
+) -> FusedResult:
+    """Synthesize a ``FusedResult`` with per-channel provenance back-filled.
+
+    The channel-name set {"vector", "graph", "bm25"} is coupled across three
+    sites and must stay in sync: the ``QuerySettings.union_rank_channels``
+    ``Literal`` (config/schema.py), the field mapping here, and the
+    ``channel_attrs`` quota computation in ``retriever._select_rerank_window``.
+    A channel added to the config ``Literal`` without a ``FusedResult`` field
+    here would fuse correctly but carry no rank, so the rerank window would not
+    reserve its quota.
+    """
+    return FusedResult(
+        item_id=item_id,
+        item=item,
+        rrf_score=rrf_score,
+        vector_rank=item_ranks.get("vector"),
+        graph_rank=item_ranks.get("graph"),
+        vector_score=item_scores.get("vector"),
+        graph_score=item_scores.get("graph"),
+        bm25_rank=item_ranks.get("bm25"),
+        bm25_score=item_scores.get("bm25"),
+    )
+
+
+def union_best_rank_fusion(
+    channels: list[tuple[str, list[tuple[UUID, float, Any]]]],
+    *,
+    rrf_k: int = 60,
+    per_channel_limit: int | None = None,
+) -> list[FusedResult]:
+    """Rank-preserving union interleave (#1518, spec §4.1).
+
+    Candidates are the union of the enabled channels' lists (``channels`` is
+    ordered by priority). Items are ordered by a lexicographic key with zero
+    numeric knobs:
+
+    1. ``best_rank`` = min rank across the item's channels - ascending
+    2. ``channel_count`` - descending (corroboration across channels)
+    3. priority index of the best channel - ascending
+    4. min-max-normalized score within the best channel - descending
+    5. ``str(item_id)`` - total determinism
+
+    Never compares raw scores across channels (cosine vs ts_rank vs
+    mentions-scale). Emits a synthetic ``rrf_score = 1 / (rrf_k + pos)`` -
+    positive and strictly decreasing - so the downstream multiplicative
+    recency boost and coherence blend keep working unchanged.
+
+    The interleave guarantees that channel ``c``'s top-``m`` sits within the
+    first ``m * len(channels)`` positions at fusion exit (the exposure
+    property); the recency/coherence re-sorts downstream can break it, which
+    is why union modes pair with quota-aware cross-encoder admission.
+    """
+    priority = {name: idx for idx, (name, _results) in enumerate(channels)}
+    ranks, scores, items, norms = _union_channel_ranks(channels, per_channel_limit=per_channel_limit, with_norm=True)
+
+    def sort_key(item_id: UUID) -> tuple[int, int, int, float, str]:
+        best_rank, best_channel = _best_channel(ranks[item_id], priority)
+        return (
+            best_rank,
+            -len(ranks[item_id]),
+            priority[best_channel],
+            -norms[item_id][best_channel],
+            str(item_id),
+        )
+
+    ordered = sorted(items, key=sort_key)
+    return [
+        _build_union_result(item_id, items[item_id], 1.0 / (rrf_k + pos), ranks[item_id], scores[item_id])
+        for pos, item_id in enumerate(ordered, start=1)
+    ]
+
+
+def union_mnz_fusion(
+    channels: list[tuple[str, list[tuple[UUID, float, Any]]]],
+    weights: dict[str, float],
+    *,
+    rrf_k: int = 60,
+    per_channel_limit: int | None = None,
+) -> list[FusedResult]:
+    """CombMNZ over RRF contributions (#1518, spec §4.2 - diagnostic sibling).
+
+    ``score(d) = channel_count(d) * sum_{c in hits} w_c / (rrf_k + rank_c(d))``
+
+    Reuses the existing per-channel weight ladder (``weights``) and ``rrf_k``.
+    ``rrf_score`` carries the MNZ score directly (a real positive magnitude, so
+    the downstream boosts operate as they do on RRF scores). Ties break by the
+    same hierarchy as :func:`union_best_rank_fusion` for full determinism.
+    """
+    priority = {name: idx for idx, (name, _results) in enumerate(channels)}
+    ranks, scores, items, _norms = _union_channel_ranks(channels, per_channel_limit=per_channel_limit)
+
+    mnz: dict[UUID, float] = {}
+    for item_id, item_ranks in ranks.items():
+        contribution = sum(weights.get(name, 0.0) / (rrf_k + rank) for name, rank in item_ranks.items())
+        mnz[item_id] = len(item_ranks) * contribution
+
+    def sort_key(item_id: UUID) -> tuple[float, int, int, int, str]:
+        best_rank, best_channel = _best_channel(ranks[item_id], priority)
+        return (-mnz[item_id], best_rank, -len(ranks[item_id]), priority[best_channel], str(item_id))
+
+    ordered = sorted(items, key=sort_key)
+    return [
+        _build_union_result(item_id, items[item_id], mnz[item_id], ranks[item_id], scores[item_id])
+        for item_id in ordered
+    ]
+
+
 def weighted_rrf_nlist(
     sources: list[tuple[list[tuple[UUID, float, Any]], float]],
     *,
@@ -638,6 +805,8 @@ __all__ = [
     "reciprocal_rank_fusion",
     "score_calibrated_fusion",
     "score_calibrated_fusion_nlist",
+    "union_best_rank_fusion",
+    "union_mnz_fusion",
     "weighted_rrf",
     "weighted_rrf_normalized",
 ]
