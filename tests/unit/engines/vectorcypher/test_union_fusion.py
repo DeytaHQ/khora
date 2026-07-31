@@ -282,6 +282,27 @@ class TestQuotaAwareAdmission:
         assert window == fused[:2]
         assert remainder == fused[2:]
 
+    def test_disabled_channel_gets_no_quota_slot(self) -> None:
+        # Same pool, same top_n=2, one demoted bm25 head b1. Toggling bm25 in
+        # union_rank_channels flips whether the quota reserves a slot for it -
+        # per-channel on/off is honored in admission, not just in fusion. The
+        # bm25 provenance is present on b1 in BOTH cases; only the config differs.
+        v1 = _fr(0.99, vector_rank=1)
+        v2 = _fr(0.98, vector_rank=2)
+        b1 = _fr(0.10, bm25_rank=1)  # bm25 head demoted below the window
+        pool = [v1, v2, b1]
+
+        # bm25 enabled -> quota reserves b1 (n_active=2, quota=1).
+        enabled = _retriever("union_best_rank", union_rank_channels=["vector", "bm25"])
+        win_on, _ = enabled._select_rerank_window(pool, top_n=2)
+        assert b1.item_id in {r.item_id for r in win_on}
+
+        # bm25 disabled -> b1 gets NO slot (n_active=1 over vector only).
+        disabled = _retriever("union_best_rank", union_rank_channels=["vector"])
+        win_off, _ = disabled._select_rerank_window(pool, top_n=2)
+        assert b1.item_id not in {r.item_id for r in win_off}
+        assert {r.item_id for r in win_off} == {v1.item_id, v2.item_id}
+
 
 @pytest.mark.unit
 class TestByteIdenticalDefault:
@@ -365,8 +386,10 @@ class TestFuseResultsUnionDispatch:
         assert _order(got) == ids
 
     def test_union_disabled_channel_excluded(self) -> None:
-        # union_rank_channels=[vector, bm25] drops the graph channel entirely.
-        retriever = _retriever("union_best_rank", union_rank_channels=["vector", "bm25"])
+        # union_rank_channels=["bm25", "vector"] drops the graph channel entirely
+        # even though the graph channel produced results, and the bm25-first
+        # priority order leads the rank-1 block.
+        retriever = _retriever("union_best_rank", union_rank_channels=["bm25", "vector"])
         v_id, g_id, b_id = uuid4(), uuid4(), uuid4()
         vector = [(v_id, 0.9, self._chunk(v_id))]
         graph = [(g_id, 5.0, self._chunk(g_id))]
@@ -379,6 +402,8 @@ class TestFuseResultsUnionDispatch:
             fusion_mode="union_best_rank",
         )
         assert {r.item_id for r in got} == {v_id, b_id}  # graph-only chunk absent
+        assert all(r.graph_rank is None for r in got)  # graph never participates
+        assert _order(got) == [b_id, v_id]  # bm25 priority leads (config order)
 
     def test_union_exclude_bm25_only_filters_lexical_singletons(self) -> None:
         retriever = _retriever("union_best_rank")
@@ -435,3 +460,52 @@ class TestConfigValidators:
 
         assert QuerySettings(fusion_mode="union_best_rank").fusion_mode == "union_best_rank"
         assert QuerySettings(fusion_mode="union_mnz").fusion_mode == "union_mnz"
+
+
+@pytest.mark.unit
+class TestConfigRoundTrip:
+    """All three union knobs round-trip QuerySettings -> assembled RetrieverConfig.
+
+    This is the exact path the khora-benchmarks adapter uses to set them
+    per-adapter: the bench builds ``QuerySettings(**whitelisted_kwargs)``, and
+    ``_assemble_retriever_config`` reads ``KhoraConfig.query.*`` (engine.py),
+    mirroring how the existing ``fusion_mode`` (#1475) field is wired. If any of
+    the three were on ``VectorCypherConfig`` only, they would NOT be reachable
+    this way.
+    """
+
+    def _assemble(self, **query_kwargs: Any):
+        from khora.config.schema import KhoraConfig, QuerySettings
+        from khora.engines.vectorcypher.engine import VectorCypherEngine
+
+        engine = VectorCypherEngine(KhoraConfig(query=QuerySettings(**query_kwargs)))
+        return engine._assemble_retriever_config()
+
+    def test_all_three_union_knobs_round_trip(self) -> None:
+        rc = self._assemble(
+            fusion_mode="union_best_rank",
+            union_rank_channels=["bm25", "vector"],
+            union_rank_per_channel_limit=7,
+        )
+        assert rc.fusion_mode == "union_best_rank"
+        assert rc.union_rank_channels == ["bm25", "vector"]
+        assert rc.union_rank_per_channel_limit == 7
+
+    def test_defaults_round_trip_to_todays_behavior(self) -> None:
+        rc = self._assemble()
+        assert rc.fusion_mode == "rrf"
+        assert rc.union_rank_channels == ["vector", "graph", "bm25"]
+        assert rc.union_rank_per_channel_limit is None
+
+    def test_union_mnz_round_trips(self) -> None:
+        rc = self._assemble(fusion_mode="union_mnz")
+        assert rc.fusion_mode == "union_mnz"
+
+    def test_fusion_mode_reachable_via_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The bench can also drive it via KHORA_QUERY_* env (BaseSettings).
+        from khora.config.schema import KhoraConfig
+        from khora.engines.vectorcypher.engine import VectorCypherEngine
+
+        monkeypatch.setenv("KHORA_QUERY_FUSION_MODE", "union_best_rank")
+        rc = VectorCypherEngine(KhoraConfig())._assemble_retriever_config()
+        assert rc.fusion_mode == "union_best_rank"

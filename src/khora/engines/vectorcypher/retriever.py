@@ -3279,20 +3279,34 @@ class VectorCypherRetriever:
         identical to the historic ``fused_results[:top_n]`` / ``[top_n:]`` split.
 
         Under a union fusion mode (#1518, co-primary): the window is
-        quota-aware. Each active channel (one with any fusion-exit provenance in
-        the pool) is guaranteed its top-``floor(top_n / n_active)`` candidates BY
-        FUSION-EXIT CHANNEL RANK a slot, so the recency-boost and coherence-blend
-        re-sorts that run between fusion exit and this slice (§4.1) cannot evict a
-        channel's head from the window. Because ``n_active * floor(top_n /
-        n_active) <= top_n``, the guaranteed set always fits. Remaining slots fill
-        by post-boost order; the returned window + remainder is a partition of
-        ``fused_results`` that preserves post-boost order within each part.
+        quota-aware. Each active channel is guaranteed its top-``floor(top_n /
+        n_active)`` candidates BY FUSION-EXIT CHANNEL RANK a slot, so the
+        recency-boost and coherence-blend re-sorts that run between fusion exit
+        and this slice (§4.1) cannot evict a channel's head from the window.
+        Because ``n_active * floor(top_n / n_active) <= top_n``, the guaranteed
+        set always fits. Remaining slots fill by post-boost order; the returned
+        window + remainder is a partition of ``fused_results`` that preserves
+        post-boost order within each part.
+
+        "Active" is gated on ``union_rank_channels`` (the config toggle), then
+        intersected with channels that actually produced provenance in the pool.
+        A channel absent from ``union_rank_channels`` never contributes to the
+        union (``_fuse_results`` excludes it) and gets NO quota reservation here,
+        so per-channel on/off is honored end to end.
         """
         if self._config.fusion_mode not in _UNION_FUSION_MODES:
             return fused_results[:top_n], fused_results[top_n:]
 
-        channel_attrs = ("vector_rank", "graph_rank", "bm25_rank")
-        active = [attr for attr in channel_attrs if any(getattr(r, attr) is not None for r in fused_results)]
+        # Only channels the config enabled may claim a quota. Coupled with the
+        # {vector,graph,bm25} name set in fusion._build_union_result and the
+        # QuerySettings.union_rank_channels Literal - keep the three in sync.
+        channel_attr_by_name = {"vector": "vector_rank", "graph": "graph_rank", "bm25": "bm25_rank"}
+        enabled = set(self._config.union_rank_channels)
+        active = [
+            attr
+            for name, attr in channel_attr_by_name.items()
+            if name in enabled and any(getattr(r, attr) is not None for r in fused_results)
+        ]
         if not active or top_n <= 0:
             return fused_results[:top_n], fused_results[top_n:]
 
