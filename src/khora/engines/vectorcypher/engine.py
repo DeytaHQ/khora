@@ -993,6 +993,11 @@ class VectorCypherEngine:
             # KhoraConfig.query (no VectorCypherConfig equivalent), mirroring
             # coherence_weight above. Default "rrf" = unchanged.
             fusion_mode=self._config.query.fusion_mode,
+            # #1518: union-fusion channel config. Read straight from
+            # KhoraConfig.query (mirroring fusion_mode); only consulted under
+            # union fusion modes. Defaults reproduce the all-channels union.
+            union_rank_channels=list(self._config.query.union_rank_channels),
+            union_rank_per_channel_limit=self._config.query.union_rank_per_channel_limit,
             min_entity_similarity=self._vc_config.retriever_min_entity_similarity,
             # Issue #1406 - chunk-channel cosine floor. Read straight from
             # KhoraConfig.query (no VectorCypherConfig equivalent exists),

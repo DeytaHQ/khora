@@ -1656,15 +1656,51 @@ class QuerySettings(BaseSettings):
     # complex_reasoning + BEAM multi-session is downstream
     # (khora-graphrag-benchmark#12). Targets multi-hop (complex_reasoning /
     # contextual_summarization); makes no fact_retrieval claims.
-    fusion_mode: Literal["rrf", "calibrated"] = Field(
+    fusion_mode: Literal["rrf", "calibrated", "union_best_rank", "union_mnz"] = Field(
         default="rrf",
         description=(
-            "Fusion strategy: 'rrf' (default, rank-only weighted RRF, unchanged) "
-            "or 'calibrated' (magnitude-aware convex blend of per-channel "
-            "min-max-normalized scores; surfaces lone strong-cosine winners). "
-            "Default-OFF; A/B is downstream (#1475)."
+            "Fusion strategy: 'rrf' (default, rank-only weighted RRF, unchanged), "
+            "'calibrated' (magnitude-aware convex blend of per-channel "
+            "min-max-normalized scores; surfaces lone strong-cosine winners), "
+            "'union_best_rank' (#1518, rank-preserving union interleave that "
+            "exposes each enabled channel's head, zero numeric knobs), or "
+            "'union_mnz' (#1518, CombMNZ count-boost diagnostic sibling). Both "
+            "union modes pair with quota-aware cross-encoder admission and only "
+            "affect the complex VectorCypher path. Default-OFF; A/B downstream."
         ),
     )
+    # #1518: union-fusion channel selection. ``union_rank_channels`` is the set
+    # of channels the union modes merge, ordered by tiebreak priority; a channel
+    # absent here (or one that produced no results) contributes nothing.
+    # ``union_rank_per_channel_limit`` optionally truncates each channel's list
+    # before the union. Both are only consulted when ``fusion_mode`` is a union
+    # mode; the defaults reproduce the all-channels union.
+    union_rank_channels: list[Literal["vector", "graph", "bm25"]] = Field(
+        default=["vector", "graph", "bm25"],
+        description=(
+            "Channels merged by the union fusion modes, ordered by tiebreak "
+            "priority (union_best_rank/union_mnz only). Must be non-empty with "
+            "no duplicates."
+        ),
+    )
+    union_rank_per_channel_limit: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Optional per-channel candidate cap applied before the union merge "
+            "(union_best_rank/union_mnz only). None (default) = no cap."
+        ),
+    )
+
+    @field_validator("union_rank_channels")
+    @classmethod
+    def _validate_union_rank_channels(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError("union_rank_channels must be non-empty")
+        if len(set(v)) != len(v):
+            raise ValueError("union_rank_channels must not contain duplicates")
+        return v
+
     # ``confidence_calibration`` selects how ``engine_info['confidence']`` is
     # derived. "legacy" (default) keeps the #1331 formula byte-identical:
     # 0.8*clip01(top_cosine/target_cosine) + 0.2*clip01(gap/target_gap), which
