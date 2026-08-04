@@ -657,7 +657,7 @@ def test_compiled_filter_carries_canonical_hash() -> None:
 
     node = _ast({"source_name": "linear"})
     compiled = compile_python(node, _CTX)
-    assert compiled.canonical_hash == canonical_hash(node)
+    assert compiled.consumed_slice_hash == canonical_hash(node)
 
 
 # ===========================================================================

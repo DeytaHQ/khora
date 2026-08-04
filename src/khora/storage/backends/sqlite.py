@@ -1370,7 +1370,7 @@ from khora.storage.backends._sqlite_capabilities import sqlite_has_json1  # noqa
 # above). ``created_at`` and ``source_timestamp`` are real columns but are
 # withheld on purpose: their stored format makes a pushed comparison silently
 # wrong — see the datetime hazard in ``_documents_compile_context``'s docstring.
-_BACKED_SYSTEM_KEYS: frozenset[str] = frozenset(
+_PUSHABLE_SYSTEM_KEYS: frozenset[str] = frozenset(
     {
         "source_type",
         "source_name",
@@ -1435,10 +1435,15 @@ def _documents_compile_context() -> CompileContext:
     was free and dropping them would only have understated the mapping. Now that
     the key set is honoured as a whitelist, declaring them would *keep* pushing
     the broken comparison above; leaving them out routes both to the post-filter.
-    Re-adding either key to ``_BACKED_SYSTEM_KEYS`` re-opens the silent
+    Re-adding either key to ``_PUSHABLE_SYSTEM_KEYS`` re-opens the silent
     wrong-rows defect — including the unrecoverable false-exclude, which no
     post-filter can undo — and the compiler cannot catch that for you: the
-    mapping is the only place the constraint lives.
+    mapping is the only place the constraint lives. That caveat holds **unless
+    the write path is UTC-normalized first**: unlike the shared-model store,
+    which discards the offset at write and so cannot recover the instant for
+    existing rows, this store's :func:`_dt_to_str` preserves the writer's offset,
+    so its data is lossless and a coercing write path (plus a backfill of the
+    naive and non-UTC rows) would make these keys soundly pushable again.
 
     **The same write shape reaches the chunk rows** — :func:`_dt_to_str` also
     writes ``chunks.created_at`` / ``chunks.source_timestamp`` — but nothing is
@@ -1462,7 +1467,7 @@ def _documents_compile_context() -> CompileContext:
     it names; that keeps caller correctness independent of how precisely the
     compiler tracks partial pushdown.
     """
-    field_mapping = {key: key for key in _BACKED_SYSTEM_KEYS} | {"metadata": "metadata_"}
+    field_mapping = {key: key for key in _PUSHABLE_SYSTEM_KEYS} | {"metadata": "metadata_"}
     return CompileContext(
         backend_target="documents",
         field_mapping=field_mapping,

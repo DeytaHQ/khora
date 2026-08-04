@@ -354,4 +354,4 @@ def test_carries_canonical_hash() -> None:
 
     node = _ast({_PUSHED_KEY: {"$gte": _LB}})
     compiled = compile_chronicle(node, _CTX)
-    assert compiled.canonical_hash == canonical_hash(node)
+    assert compiled.consumed_slice_hash == canonical_hash(node)

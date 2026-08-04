@@ -697,7 +697,7 @@ def test_composition_binds_are_distinct_per_clause() -> None:
 def test_compiled_filter_carries_canonical_hash() -> None:
     node = _ast({"occurred_at": _DT})
     compiled = compile_surrealdb(node, _CTX)
-    assert compiled.canonical_hash == canonical_hash(node)
+    assert compiled.consumed_slice_hash == canonical_hash(node)
 
 
 def test_compiled_filter_consumed_keys_is_frozenset() -> None:

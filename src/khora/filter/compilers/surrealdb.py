@@ -105,9 +105,9 @@ from khora.filter.ast import (
     FilterNode,
 )
 from khora.filter.compilers._split import (
-    consumed_slice_hash,
-    deferred_paths,
+    ConsumableMemo,
     node_consumable,
+    split_report,
 )
 from khora.filter.context import CompileError
 from khora.filter.model import SYSTEM_KEYS, Op
@@ -157,20 +157,29 @@ def compile_surrealdb(ast: FilterNode, ctx: CompileContext) -> CompiledFilter[st
     consumed: set[str] = set()
     builder = _Builder(ctx=ctx, consumed=consumed)
     predicate = builder.compile_node(ast)
+    # One pruned-tree reconstruction feeds both outputs; under "raise" the walk is
+    # skipped entirely (nothing can have been deferred).
+    deferred, slice_hash = split_report(
+        ast,
+        builder._clause_consumable,
+        on_unsupported=ctx.on_unsupported,
+        memo=builder._consumable_memo,
+    )
     return CompiledFilter(
         predicate=predicate,
         params=builder.params,
         # A dotted path is only reported consumed when EVERY occurrence of it was
         # pushed: the emission accumulator records the leaves that emitted real
-        # SurrealQL, and ``deferred_paths`` removes any path that ALSO occurs
+        # SurrealQL, and the deferred set removes any path that ALSO occurs
         # inside a subtree the split gate deferred (else a caller differencing
         # ``leaf_keys - consumed_keys`` would never re-check that occurrence).
-        consumed_keys=frozenset(consumed) - deferred_paths(ast, builder._clause_consumable),
-        # The hash covers the CONSUMED SLICE, not the whole AST — two filters that
-        # differ only in a deferred subtree compile to the same WHERE and must
-        # share a cache key. In on_unsupported="raise" mode every leaf is
-        # consumable, so the slice IS the whole tree and the hash is unchanged.
-        canonical_hash=consumed_slice_hash(ast, builder._clause_consumable),
+        consumed_keys=frozenset(consumed) - deferred,
+        # Plan identity over the CONSUMED SLICE, not the whole AST: two filters
+        # differing only in a deferred subtree emit the same predicate and share
+        # this. They do NOT share a result set — the deferred remainder is enforced
+        # by the caller's post-filter — so this is never a result-cache key. In
+        # on_unsupported="raise" mode the slice IS the whole tree.
+        consumed_slice_hash=slice_hash,
     )
 
 
@@ -192,6 +201,10 @@ class _Builder:
     def __init__(self, *, ctx: CompileContext, consumed: set[str]) -> None:
         self._ctx = ctx
         self._consumed = consumed
+        # One memo per compile pass so the all-or-nothing gate is O(n) rather
+        # than re-testing each leaf once per enclosing OR/NOT level. Keyed on
+        # id(node) — sound only for this pass's lifetime, which is its scope.
+        self._consumable_memo: ConsumableMemo = {}
         self._alias = ctx.table_alias
         self.params: dict[str, Any] = {}
         self._counter = 0
@@ -277,7 +290,9 @@ class _Builder:
             if not node.children:
                 # The validator forbids an empty $or; guard defensively.
                 return "false"
-            if self._ctx.on_unsupported == "split" and not node_consumable(node, self._clause_consumable):
+            if self._ctx.on_unsupported == "split" and not node_consumable(
+                node, self._clause_consumable, self._consumable_memo
+            ):
                 # A non-consumable disjunct would compile to "true", making the
                 # whole OR match-all here while the post-filter still narrows —
                 # safe in positive position but it under-pushes silently AND
@@ -292,7 +307,9 @@ class _Builder:
         # consumable; otherwise defer the whole NOT (in "split" mode). In "raise"
         # mode we descend so the offending leaf raises rather than being silently
         # swallowed by the all-or-nothing gate.
-        if self._ctx.on_unsupported == "split" and not node_consumable(node, self._clause_consumable):
+        if self._ctx.on_unsupported == "split" and not node_consumable(
+            node, self._clause_consumable, self._consumable_memo
+        ):
             return "true"
         return f"!({self.compile_node(node.children[0])})"
 
@@ -317,13 +334,25 @@ class _Builder:
         It deliberately does NOT consider :data:`_SAFE_SEGMENT_RE` safety, because
         it mirrors the emit path and the emit path is not mode-dependent there:
         :meth:`_metadata_path` raises :class:`CompileError` on an unsafe segment
-        under BOTH modes (it is an injection guard, not a capability gap), so such
-        a leaf is never deferred. Reporting it unconsumable *here alone* would
-        desynchronize the gate from emission — the enclosing subtree would defer,
+        under BOTH modes (it is an injection guard, not a capability gap).
+        Reporting such a leaf unconsumable *here alone* would desynchronize the
+        gate from emission — the enclosing subtree would defer,
         :meth:`_metadata_path` would never run, and the guard would not fire at
         all. If the guard is ever turned into a real split-mode capability gap
         (routing to :meth:`_unsupported` instead of raising), this branch must
         become mode-aware in the same change.
+
+        **The guard's firing is nevertheless sibling-dependent, and a caller must
+        not assume otherwise.** An unsafe segment raises when the emit walk reaches
+        it, which it does not when the leaf sits inside an ``$or`` / ``$not`` that
+        the all-or-nothing gate defers for an *unrelated* reason — say an
+        undeclared system key elsewhere in the same disjunction. That subtree emits
+        the placeholder and the leaf reaches ``compile_python`` instead, which
+        handles hyphenated keys correctly, so the rows are right either way and
+        nothing unsafe is interpolated. But a scan path that maps
+        :class:`CompileError` onto the public unsupported-filter error MUST treat
+        that mapping as best-effort: the same filter can raise or not depending on
+        what else is in the enclosing subtree.
         """
         path = clause.path
         if len(path) == 1 and path[0] in SYSTEM_KEYS:

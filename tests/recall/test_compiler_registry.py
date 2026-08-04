@@ -42,11 +42,11 @@ def _clean_registry() -> None:
 
 
 def _fake_compiler(ast: FilterNode, ctx: CompileContext) -> CompiledFilter:
-    return CompiledFilter(predicate="WHERE 1=1", params={}, consumed_keys=frozenset(), canonical_hash="abc")
+    return CompiledFilter(predicate="WHERE 1=1", params={}, consumed_keys=frozenset(), consumed_slice_hash="abc")
 
 
 def _other_compiler(ast: FilterNode, ctx: CompileContext) -> CompiledFilter:
-    return CompiledFilter(predicate="WHERE 2=2", params={}, consumed_keys=frozenset(), canonical_hash="def")
+    return CompiledFilter(predicate="WHERE 2=2", params={}, consumed_keys=frozenset(), consumed_slice_hash="def")
 
 
 # ---------------------------------------------------------------------------
@@ -234,16 +234,16 @@ def test_compiled_filter_fields() -> None:
         predicate="WHERE x = :f_0",
         params={"f_0": 1},
         consumed_keys=frozenset({"source_name"}),
-        canonical_hash="deadbeef",
+        consumed_slice_hash="deadbeef",
     )
     assert cf.predicate == "WHERE x = :f_0"
     assert cf.params == {"f_0": 1}
     assert cf.consumed_keys == frozenset({"source_name"})
-    assert cf.canonical_hash == "deadbeef"
+    assert cf.consumed_slice_hash == "deadbeef"
 
 
 def test_compiled_filter_is_frozen() -> None:
-    cf = CompiledFilter(predicate=1, params={}, consumed_keys=frozenset(), canonical_hash="h")
+    cf = CompiledFilter(predicate=1, params={}, consumed_keys=frozenset(), consumed_slice_hash="h")
     with pytest.raises((AttributeError, TypeError)):
         cf.predicate = 2  # type: ignore[misc]
 
@@ -258,7 +258,7 @@ def test_compiled_filter_predicate_type_is_generic() -> None:
         predicate=_callable_predicate,
         params={},
         consumed_keys=frozenset({"source_name", "title"}),
-        canonical_hash="h",
+        consumed_slice_hash="h",
     )
     assert cf.predicate is _callable_predicate
     assert cf.consumed_keys == frozenset({"source_name", "title"})
@@ -269,7 +269,7 @@ def test_compiled_filter_consumed_keys_is_frozenset() -> None:
         predicate="p",
         params={"f_0": 1},
         consumed_keys=frozenset({"a"}),
-        canonical_hash="h",
+        consumed_slice_hash="h",
     )
     assert isinstance(cf.consumed_keys, frozenset)
 

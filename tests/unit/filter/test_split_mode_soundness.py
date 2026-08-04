@@ -781,12 +781,13 @@ def test_surrealdb_reads_an_absent_mapping_as_declaring_nothing() -> None:
 
 
 def test_two_different_splits_of_one_filter_hash_differently() -> None:
-    """The same AST that splits differently must NOT share a cache key.
+    """The same AST that splits differently must NOT share a plan-identity hash.
 
     Two contexts differing ONLY in ``sqlite_json1``: with JSON1 the metadata leaf
     is pushed, without it the leaf is deferred and the backend receives a
-    match-all. Those are different queries and must not collide. Hashing the
-    whole AST — what the compilers did before — gave them the same key.
+    match-all. Those are different queries, so the hash identifying the emitted
+    plan must distinguish them. Hashing the whole AST — what the compilers did
+    before — gave them the same value.
     """
     ast = _ast({"metadata.tier": "gold"})
     on = CompileContext(backend_target="khora_chunks", on_unsupported="split", schema_capabilities=_JSON1_ON)
@@ -797,15 +798,16 @@ def test_two_different_splits_of_one_filter_hash_differently() -> None:
 
     assert pushed.consumed_keys == frozenset({"metadata.tier"})
     assert deferred.consumed_keys == frozenset()
-    assert pushed.canonical_hash != deferred.canonical_hash
+    assert pushed.consumed_slice_hash != deferred.consumed_slice_hash
 
     # The pushed side consumed everything, so its slice IS the whole AST.
-    assert pushed.canonical_hash == canonical_hash(ast)
+    assert pushed.consumed_slice_hash == canonical_hash(ast)
     # The deferred side pushed nothing, so its slice is the match-everything AST
-    # — and any other fully-deferred filter shares that key, correctly, because
-    # they send the backend the identical query.
-    assert deferred.canonical_hash == canonical_hash(FilterNode(op=Op.AND, children=()))
-    assert deferred.canonical_hash == compile_lance(_ast({"metadata.other": "x"}), off).canonical_hash
+    # — and any other fully-deferred filter shares that hash, correctly, because
+    # they send the backend the identical query. That collision is also exactly
+    # why this value is NOT a result-cache key: these two keep different rows.
+    assert deferred.consumed_slice_hash == canonical_hash(FilterNode(op=Op.AND, children=()))
+    assert deferred.consumed_slice_hash == compile_lance(_ast({"metadata.other": "x"}), off).consumed_slice_hash
 
 
 @pytest.mark.parametrize(("name", "compiler", "builder_cls", "ctx"), _GATED_TARGETS, ids=_GATED_IDS)
@@ -815,11 +817,12 @@ def test_equal_hash_implies_equal_emitted_predicate(
     builder_cls: Any,
     ctx: CompileContext,
 ) -> None:
-    """The cache-key contract: same ``canonical_hash`` ⟹ same emitted predicate.
+    """The plan-identity contract: equal hash ⟹ equal emitted predicate.
 
-    ``CompiledFilter.canonical_hash`` is documented as identifying *the predicate
-    this compiler emitted*, so anything keying a prepared-statement or plan cache
-    on it needs this implication to hold. It is what the OR branch of the gate
+    ``CompiledFilter.consumed_slice_hash`` identifies *the predicate this compiler
+    emitted*, so anything keying a prepared-statement or plan cache on it needs
+    this implication to hold. A *result* cache must NOT key on it — the deferred
+    remainder still narrows the rows; see the field's docstring. It is what the OR branch of the gate
     actually buys, and it is why that branch is correctness rather than tidiness.
 
     Two filters differing ONLY in a bind inside a deferred ``$or`` both prune to
@@ -840,7 +843,7 @@ def test_equal_hash_implies_equal_emitted_predicate(
 
     # Non-vacuity: the two filters really are different, and really do collide.
     assert consumable_leaf != other
-    assert first.canonical_hash == second.canonical_hash
+    assert first.consumed_slice_hash == second.consumed_slice_hash
     assert _render(first.predicate) == _render(second.predicate)
 
 
@@ -860,7 +863,7 @@ def test_raise_mode_canonical_hash_is_unchanged_over_the_corpus(
 ) -> None:
     """In ``"raise"`` mode the hash still equals ``canonical_hash(ast)``.
 
-    Chunk-tier cache keys must not move. In raise mode every leaf that reaches
+    Chunk-tier plan-identity hashes must not move. In raise mode every leaf that reaches
     emission is consumable (an unconsumable one raises instead), so the consumed
     slice IS the whole tree and hashing the slice is hashing the AST. Asserted
     over the whole corpus rather than a sample, because "the keys did not move"
@@ -871,7 +874,7 @@ def test_raise_mode_canonical_hash_is_unchanged_over_the_corpus(
             compiled = compiler(ast, ctx)
         except (RecallFilterUnsupportedError, CompileError):
             continue
-        assert compiled.canonical_hash == canonical_hash(ast), f"{name} {case}: cache key moved"
+        assert compiled.consumed_slice_hash == canonical_hash(ast), f"{name} {case}: plan hash moved"
         assert compiled.consumed_keys == filter_leaf_keys(ast), f"{name} {case}: raise mode left a residual"
 
 
@@ -1248,6 +1251,22 @@ def test_clause_consumable_mirrors_what_emission_did(
     That UNDER-claim direction costs pushdown rather than rows, so it is the
     cheaper failure — but do not read an all-green mirror as proof that predicate
     and emission agree in both directions. Invariant (a) carries that half.
+
+    **One known, documented under-claim exists today.** ``compile_lance``'s
+    ``_clause_unconsumable`` tests ``isinstance(operand, (DateLiteral, dict))``
+    *before* dispatching on the operator, while ``_compile_metadata_clause`` only
+    consults the operand type for ``$eq`` / ``$ne`` / range. So for ``$exists``,
+    and for range / ``$in`` / ``$nin`` carrying a dict operand, the predicate
+    reports unconsumable while emission pushes the leaf. It is validator-reachable
+    (``{"metadata.tier": {"$gt": {"a": 1}}}`` validates), and it is in the SAFE
+    direction — the leaf stays post-filtered, so no row is dropped. Its one visible
+    consequence is that ``consumed_slice_hash`` prunes a leaf the WHERE still
+    contains, which makes the equal-hash-implies-equal-predicate property
+    (:func:`test_equal_hash_implies_equal_emitted_predicate`) hold with this single
+    documented exception. The line pre-dates the split machinery; narrowing it to
+    mirror the emit path's op dispatch is a tracked follow-up, deliberately not
+    done here because it changes pre-existing pushdown behaviour and needs its own
+    corpus case.
 
     Each leaf runs in ISOLATION (``FilterNode(AND, (leaf,))``), which is the
     right shape: ``_clause_consumable`` is per-leaf by definition, and

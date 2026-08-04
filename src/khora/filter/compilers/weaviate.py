@@ -125,10 +125,12 @@ def compile_weaviate(ast: FilterNode, ctx: CompileContext) -> CompiledFilter[Any
         predicate=predicate,
         params={},
         consumed_keys=frozenset(consumed),
-        # canonical_hash over the whole AST — the engine re-checks the whole AST in
-        # its post-filter (the pushed-down filter is only a superset prefilter), so
-        # the cache key is keyed on the full predicate, not the pushed slice.
-        canonical_hash=canonical_hash(ast),
+        # Whole-AST hash — the engine re-checks the whole AST in its post-filter
+        # (the pushed-down filter is only a superset prefilter), so identifying the
+        # full predicate rather than the pushed slice is the useful granularity
+        # here. It is also a conservative plan identity: equal hash implies equal
+        # AST, hence equal slice, so it can only over-distinguish, never conflate.
+        consumed_slice_hash=canonical_hash(ast),
     )
 
 

@@ -84,7 +84,7 @@ pytestmark = pytest.mark.unit
 _DT = datetime(2026, 1, 31, 12, 30, tzinfo=UTC)
 
 # The nine system keys a ``documents`` row backs with a real column, restated
-# here independently of the store modules' own ``_BACKED_SYSTEM_KEYS`` — a test
+# here independently of the store modules' own ``_PUSHABLE_SYSTEM_KEYS`` — a test
 # that imported the constant under test would assert nothing.
 _BACKED_KEYS: frozenset[str] = frozenset(
     {
@@ -882,7 +882,7 @@ def test_sqlite_lance_datetime_bind_does_not_match_the_stored_format() -> None:
 
     The previous revision pinned ``consumed_keys == {"created_at"}`` here,
     because the mapping declared the key and ``compile_lance`` ignored the key
-    set anyway. Dropping the two date keys from ``_BACKED_SYSTEM_KEYS`` is what
+    set anyway. Dropping the two date keys from ``_PUSHABLE_SYSTEM_KEYS`` is what
     makes that assertion fail, and the inverted assertion below — the key is a
     RESIDUAL — is the standing guard that the drop stays dropped. Do NOT restore
     green by re-declaring ``created_at``: that reinstates the silent mismatch.

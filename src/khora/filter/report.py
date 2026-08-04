@@ -61,12 +61,20 @@ class FilterChannelReport(BaseModel):
     dotted constraint-leaf keys (``".".join(clause.path)``) that this channel's
     compiler pushed into its backend query versus the ones it re-checked in
     memory. Both lists are sorted for deterministic, JSON-stable output.
+
+    Membership is per **occurrence**, not per leaf: a key appears in
+    ``pushed_keys`` only when EVERY occurrence of it in the AST was pushed. A key
+    can therefore appear in the emitted query and still be reported post-filtered,
+    when a second occurrence sat inside an ``$or`` / ``$not`` the backend's
+    all-or-nothing split gate deferred wholesale. That direction is the honest one
+    — the post-filter does re-check it — and the reverse would tell a caller a
+    deferred occurrence was already enforced.
     """
 
     model_config = ConfigDict(frozen=True)
 
     pushed_keys: list[str] = Field(default_factory=list)
-    """Constraint-leaf keys this channel pushed into its backend query (sorted)."""
+    """Keys fully pushed into this channel's backend query — every occurrence (sorted)."""
 
     post_filtered_keys: list[str] = Field(default_factory=list)
     """Constraint-leaf keys this channel re-checked with an in-memory predicate (sorted)."""

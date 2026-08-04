@@ -598,7 +598,7 @@ def test_compiled_filter_carries_canonical_hash() -> None:
     compiled = compile_cypher(node, _CTX)
     from khora.filter.ast import canonical_hash
 
-    assert compiled.canonical_hash == canonical_hash(node)
+    assert compiled.consumed_slice_hash == canonical_hash(node)
 
 
 def test_compiled_filter_consumed_keys_is_frozenset() -> None:

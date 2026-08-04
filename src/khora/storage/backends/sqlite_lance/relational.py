@@ -1096,7 +1096,7 @@ from khora.storage.backends._sqlite_capabilities import sqlite_has_json1  # noqa
 # ``created_at`` and ``source_timestamp`` are real columns but are withheld on
 # purpose: their stored format makes a pushed comparison silently wrong — see
 # the datetime hazard in ``_documents_compile_context``'s docstring below.
-_BACKED_SYSTEM_KEYS: frozenset[str] = frozenset(
+_PUSHABLE_SYSTEM_KEYS: frozenset[str] = frozenset(
     {
         "source_type",
         "source_name",
@@ -1160,7 +1160,7 @@ def _documents_compile_context() -> CompileContext:
     was free and dropping them would only have understated the mapping. Now that
     the key set is honoured as a whitelist, declaring them would *keep* pushing
     the broken comparison above; leaving them out routes both to the post-filter.
-    Re-adding either key to ``_BACKED_SYSTEM_KEYS`` re-opens the silent
+    Re-adding either key to ``_PUSHABLE_SYSTEM_KEYS`` re-opens the silent
     wrong-rows defect, and the compiler cannot catch that for you — the mapping
     is the only place the constraint lives.
 
@@ -1177,7 +1177,7 @@ def _documents_compile_context() -> CompileContext:
     it names; that keeps caller correctness independent of how precisely the
     compiler tracks partial pushdown.
     """
-    field_mapping = {key: key for key in _BACKED_SYSTEM_KEYS} | {"metadata": "metadata"}
+    field_mapping = {key: key for key in _PUSHABLE_SYSTEM_KEYS} | {"metadata": "metadata"}
     return CompileContext(
         backend_target="documents",
         field_mapping=field_mapping,

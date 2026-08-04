@@ -99,9 +99,9 @@ from khora.filter.ast import (
     FilterNode,
 )
 from khora.filter.compilers._split import (
-    consumed_slice_hash,
-    deferred_paths,
+    ConsumableMemo,
     node_consumable,
+    split_report,
     system_key_declared,
 )
 from khora.filter.model import SYSTEM_KEYS, Op
@@ -155,20 +155,29 @@ def compile_lance(ast: FilterNode, ctx: CompileContext) -> CompiledFilter[str]:
     consumed: set[str] = set()
     builder = _Builder(ctx=ctx, consumed=consumed)
     predicate = builder.compile_node(ast)
+    # One pruned-tree reconstruction feeds both outputs; under "raise" the walk is
+    # skipped entirely (nothing can have been deferred).
+    deferred, slice_hash = split_report(
+        ast,
+        builder._clause_consumable,
+        on_unsupported=ctx.on_unsupported,
+        memo=builder._consumable_memo,
+    )
     return CompiledFilter(
         predicate=predicate,
         params={"args": builder.args},
         # A dotted path is only reported consumed when EVERY occurrence of it was
         # pushed: the emission accumulator records the leaves that emitted real
-        # SQL, and ``deferred_paths`` removes any path that ALSO occurs inside a
+        # SQL, and the deferred set removes any path that ALSO occurs inside a
         # subtree the split gate deferred (else a caller differencing
         # ``leaf_keys - consumed_keys`` would never re-check that occurrence).
-        consumed_keys=frozenset(consumed) - deferred_paths(ast, builder._clause_consumable),
-        # The hash covers the CONSUMED SLICE, not the whole AST — two filters that
-        # differ only in a deferred subtree compile to the same WHERE and must
-        # share a cache key. In on_unsupported="raise" mode every leaf is
-        # consumable, so the slice IS the whole tree and the hash is unchanged.
-        canonical_hash=consumed_slice_hash(ast, builder._clause_consumable),
+        consumed_keys=frozenset(consumed) - deferred,
+        # Plan identity over the CONSUMED SLICE, not the whole AST: two filters
+        # differing only in a deferred subtree emit the same WHERE and share this.
+        # They do NOT share a result set — the deferred remainder is enforced by
+        # the caller's post-filter — so this is never a result-cache key. In
+        # on_unsupported="raise" mode the slice IS the whole tree.
+        consumed_slice_hash=slice_hash,
     )
 
 
@@ -209,6 +218,10 @@ class _Builder:
     def __init__(self, *, ctx: CompileContext, consumed: set[str]) -> None:
         self._ctx = ctx
         self._consumed = consumed
+        # One memo per compile pass so the all-or-nothing gate is O(n) rather
+        # than re-testing each leaf once per enclosing OR/NOT level. Keyed on
+        # id(node) — sound only for this pass's lifetime, which is its scope.
+        self._consumable_memo: ConsumableMemo = {}
         self._qualifier = ctx.table_alias or ctx.backend_target
         self.args: list[Any] = []
 
@@ -261,7 +274,9 @@ class _Builder:
             if not node.children:
                 # The validator forbids an empty $or; guard defensively.
                 return "0"
-            if self._ctx.on_unsupported == "split" and not node_consumable(node, self._clause_consumable):
+            if self._ctx.on_unsupported == "split" and not node_consumable(
+                node, self._clause_consumable, self._consumable_memo
+            ):
                 # A non-consumable disjunct would compile to "1", making the whole
                 # OR match-all here while the post-filter still narrows — safe in
                 # positive position but it under-pushes silently AND becomes a
@@ -274,7 +289,9 @@ class _Builder:
         # polarities, so the negation is sound); otherwise defer the whole NOT
         # (in "split" mode). In "raise" mode we descend so the offending leaf
         # raises rather than being silently swallowed by the all-or-nothing gate.
-        if self._ctx.on_unsupported == "split" and not node_consumable(node, self._clause_consumable):
+        if self._ctx.on_unsupported == "split" and not node_consumable(
+            node, self._clause_consumable, self._consumable_memo
+        ):
             return "1"
         return f"(NOT ({self.compile_node(node.children[0])}))"
 

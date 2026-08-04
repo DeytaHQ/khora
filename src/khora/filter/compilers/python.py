@@ -124,7 +124,7 @@ def compile_python(ast: FilterNode, ctx: CompileContext) -> CompiledFilter[Calla
         predicate=predicate,
         params={},
         consumed_keys=frozenset(consumed),
-        canonical_hash=canonical_hash(ast),
+        consumed_slice_hash=canonical_hash(ast),
     )
 
 

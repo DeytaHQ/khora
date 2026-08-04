@@ -521,7 +521,7 @@ def test_no_field_mapping_pushes_nothing() -> None:
 def test_compiled_filter_carries_canonical_hash() -> None:
     node = _ast({"occurred_at": "2026-02-03T00:00:00Z"})
     compiled = compile_weaviate(node, _CTX)
-    assert compiled.canonical_hash == canonical_hash(node)
+    assert compiled.consumed_slice_hash == canonical_hash(node)
 
 
 def test_params_always_empty() -> None:
