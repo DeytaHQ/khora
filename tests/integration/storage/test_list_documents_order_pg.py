@@ -15,14 +15,13 @@ configured ``KHORA_DATABASE_URL`` is unreachable.
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime
 
 import pytest
 
 from khora.core.models import Document, MemoryNamespace
 from khora.db.session import run_migrations
 from khora.storage.backends.postgresql import PostgreSQLBackend
-from tests.test_helpers.document_order import id_ladder, seed_order, walk_pages
+from tests.test_helpers.document_order import order_seed, walk_pages
 
 DATABASE_URL = os.environ.get(
     "KHORA_DATABASE_URL",
@@ -80,39 +79,46 @@ async def backend(_run_migrations_once):
 
 @pytest.fixture
 async def seeded(backend: PostgreSQLBackend):
-    """A fresh namespace holding ``SEED_SIZE`` documents that share ``created_at``.
+    """A fresh namespace holding ``SEED_SIZE`` documents pinning both sort keys.
 
     Rows are written in ``seed_order`` (non-monotonic by id) so that neither
     insertion order nor its reverse can coincide with the expected sequence.
     """
     ns = await backend.create_namespace(MemoryNamespace())
-    shared_created_at = datetime.now(UTC)
-    ids = id_ladder(SEED_SIZE)
-    for i, doc_id in enumerate(seed_order(ids)):
+    seed = order_seed(SEED_SIZE)
+    for i, (doc_id, created_at) in enumerate(seed.writes):
         await backend.create_document(
             Document(
                 id=doc_id,
                 namespace_id=ns.id,
                 content="tied content",
                 checksum=f"sum-{i}",
-                created_at=shared_created_at,
-                updated_at=shared_created_at,
+                created_at=created_at,
+                updated_at=created_at,
             )
         )
-    return ns, ids
+    return ns, seed
 
 
 @skip_no_pg
 class TestListDocumentsTotalOrderPg:
-    async def test_ties_break_on_id_desc_and_repeat_identically(self, backend: PostgreSQLBackend, seeded) -> None:
-        ns, ids = seeded
+    async def test_orders_by_created_at_then_id_desc_and_repeats_identically(
+        self, backend: PostgreSQLBackend, seeded
+    ) -> None:
+        ns, seed = seeded
 
         docs = await backend.list_documents(ns.id)
 
         # The tie is real: if these differed, ``created_at`` alone would decide
         # the order and the id tie-break would never be exercised.
-        assert len({d.created_at for d in docs}) == 1
-        assert [d.id for d in docs] == sorted(ids, reverse=True)
+        assert len({d.created_at for d in docs if d.id in seed.tied_ids}) == 1
+
+        # ``created_at`` leads: these two rows carry the id that would put them
+        # at the opposite end, so only a leading ``created_at`` lands them here.
+        assert docs[0].id == seed.newest_id
+        assert docs[-1].id == seed.oldest_id
+
+        assert [d.id for d in docs] == seed.expected
 
         # Same query, same answer - the order is a property of the query, not
         # of whatever the scan happened to produce on the first call.
@@ -122,8 +128,8 @@ class TestListDocumentsTotalOrderPg:
     async def test_offset_pagination_is_exhaustive_and_non_overlapping(
         self, backend: PostgreSQLBackend, seeded
     ) -> None:
-        ns, ids = seeded
-        expected = sorted(ids, reverse=True)
+        ns, seed = seeded
+        expected = seed.expected
 
         # Page size deliberately does not divide the seed size, so the final
         # page is short and an off-by-one at the boundary shows up.

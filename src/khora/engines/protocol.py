@@ -324,7 +324,7 @@ class MemoryEngineProtocol(Protocol):
         *,
         limit: int = 100,
     ) -> list[Document]:
-        """List documents in a namespace.
+        """List documents in a namespace, newest first, ties broken by descending id.
 
         Args:
             namespace_id: Namespace UUID

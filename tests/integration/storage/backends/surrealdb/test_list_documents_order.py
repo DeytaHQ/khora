@@ -18,7 +18,6 @@ Skipped when the ``surrealdb`` extra is not installed.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -29,8 +28,8 @@ from khora.core.models import Document, MemoryNamespace, TenancyMode  # noqa: E4
 from khora.storage.backends.surrealdb.connection import SurrealDBConnection  # noqa: E402
 from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter  # noqa: E402
 from tests.test_helpers.document_order import (  # noqa: E402
-    id_ladder,
-    seed_order,
+    OrderSeed,
+    order_seed,
     walk_pages,
 )
 
@@ -57,38 +56,43 @@ async def namespace(adapter):
     return await adapter.create_namespace(ns)
 
 
-async def _seed_tied_documents(adapter, namespace) -> list:
-    """Seed ``SEED_SIZE`` documents sharing one ``created_at``.
+async def _seed_ordered_documents(adapter, namespace) -> OrderSeed:
+    """Seed ``SEED_SIZE`` documents pinning both sort keys.
 
     Rows are written in ``seed_order`` (non-monotonic by id) so that neither
     insertion order nor its reverse can coincide with the expected sequence.
     """
-    shared_created_at = datetime.now(UTC)
-    ids = id_ladder(SEED_SIZE)
-    for i, doc_id in enumerate(seed_order(ids)):
+    seed = order_seed(SEED_SIZE)
+    for i, (doc_id, created_at) in enumerate(seed.writes):
         await adapter.create_document(
             Document(
                 id=doc_id,
                 namespace_id=namespace.id,
                 content="tied content",
                 checksum=f"sum-{i}",
-                created_at=shared_created_at,
-                updated_at=shared_created_at,
+                created_at=created_at,
+                updated_at=created_at,
             )
         )
-    return ids
+    return seed
 
 
-async def test_ties_break_on_id_desc_and_repeat_identically(adapter, namespace) -> None:
-    ids = await _seed_tied_documents(adapter, namespace)
+async def test_orders_by_created_at_then_id_desc_and_repeats_identically(adapter, namespace) -> None:
+    seed = await _seed_ordered_documents(adapter, namespace)
 
     docs = await adapter.list_documents(namespace.id)
 
     # The tie is real: if these differed, ``created_at`` alone would decide the
     # order and the id tie-break would never be exercised.
-    assert len({d.created_at for d in docs}) == 1
+    assert len({d.created_at for d in docs if d.id in seed.tied_ids}) == 1
+
+    # ``created_at`` leads: these two rows carry the id that would put them at
+    # the opposite end, so only a leading ``created_at`` lands them here.
+    assert docs[0].id == seed.newest_id
+    assert docs[-1].id == seed.oldest_id
+
     # RecordID ordering agrees with descending UUID order.
-    assert [d.id for d in docs] == sorted(ids, reverse=True)
+    assert [d.id for d in docs] == seed.expected
 
     # Same query, same answer - the order is a property of the query, not of
     # whatever the scan happened to produce on the first call.
@@ -97,8 +101,8 @@ async def test_ties_break_on_id_desc_and_repeat_identically(adapter, namespace) 
 
 
 async def test_offset_pagination_is_exhaustive_and_non_overlapping(adapter, namespace) -> None:
-    ids = await _seed_tied_documents(adapter, namespace)
-    expected = sorted(ids, reverse=True)
+    seed = await _seed_ordered_documents(adapter, namespace)
+    expected = seed.expected
 
     # Page size deliberately does not divide the seed size, so the final page is
     # short and an off-by-one at the boundary shows up.

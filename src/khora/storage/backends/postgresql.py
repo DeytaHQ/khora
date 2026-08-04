@@ -477,7 +477,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
         limit: int = 100,
         offset: int = 0,
     ) -> list[Document]:
-        """List documents in a namespace."""
+        """List documents in a namespace, newest first, ties broken by descending id."""
         async with self._get_session() as session:
             query = select(DocumentModel).where(DocumentModel.namespace_id == namespace_id)
             if status:

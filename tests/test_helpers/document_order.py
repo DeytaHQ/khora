@@ -1,9 +1,12 @@
-"""Seed + paging helpers for the ``list_documents`` tie-break ordering tests.
+"""Seed + paging helpers for the ``list_documents`` ordering tests.
 
-``list_documents`` sorts on ``(created_at DESC, id DESC)``. Proving the
-``id DESC`` leg requires a seed where ``created_at`` alone cannot decide the
-order, and an expected sequence that is fixed by construction rather than by
-chance - hence :func:`id_ladder` and :func:`seed_order`.
+``list_documents`` sorts on ``(created_at DESC, id DESC)``, and each key needs
+its own witness. Proving the ``id DESC`` leg requires rows where ``created_at``
+alone cannot decide the order, and an expected sequence that is fixed by
+construction rather than by chance - hence :func:`id_ladder` and
+:func:`seed_order`. Proving that ``created_at`` LEADS requires rows outside that
+tie block whose timestamp and id disagree. :func:`order_seed` builds both halves
+in one seed.
 
 Shared by the four backend test modules (postgresql, raw sqlite, sqlite_lance,
 surrealdb) so the "why this seed is not vacuous" reasoning lives in one place.
@@ -12,6 +15,8 @@ surrealdb) so the "why this seed is not vacuous" reasoning lives in one place.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 
@@ -66,6 +71,61 @@ def seed_order(ids: Sequence[UUID]) -> list[UUID]:
     return out
 
 
+@dataclass(frozen=True)
+class OrderSeed:
+    """A seed plan: the rows to write, and the one order they must come back in."""
+
+    writes: list[tuple[UUID, datetime]]
+    """``(id, created_at)`` pairs, in the order the rows must be written."""
+
+    expected: list[UUID]
+    """The single correct result of an unfiltered ``list_documents``."""
+
+    tied_ids: set[UUID]
+    """The ids of the rows sharing one ``created_at``."""
+
+    newest_id: UUID
+    """Newest ``created_at``, lowest id - must sort FIRST."""
+
+    oldest_id: UUID
+    """Oldest ``created_at``, highest id - must sort LAST."""
+
+
+def order_seed(total: int) -> OrderSeed:
+    """Build a seed of ``total`` documents that pins both sort keys.
+
+    ``total - 2`` rows share one ``created_at``, so only the ``id DESC`` leg can
+    decide their order. The other two sit outside that tie block with timestamp
+    and id deliberately in conflict: the newest row carries the LOWEST id and
+    the oldest row the HIGHEST. An implementation that sorts on ``id`` first
+    therefore parks them at exactly the wrong ends, so a swapped-key
+    ``ORDER BY id DESC, created_at DESC`` cannot reproduce :attr:`expected`.
+
+    Without those two rows the whole seed ties on ``created_at`` and the two
+    orderings are byte-identical - checked, not assumed: a key swap in the
+    SQLite backend left every one of these tests passing.
+    """
+    if total < 4:
+        raise ValueError(f"total must leave a tie block of at least 2 rows, got {total}")
+
+    ids = id_ladder(total)
+    newest_id, oldest_id = ids[0], ids[-1]
+    tied = ids[1:-1]
+
+    shared = datetime.now(UTC)
+    stamps = dict.fromkeys(tied, shared)
+    stamps[newest_id] = shared + timedelta(seconds=1)
+    stamps[oldest_id] = shared - timedelta(seconds=1)
+
+    return OrderSeed(
+        writes=[(doc_id, stamps[doc_id]) for doc_id in seed_order(ids)],
+        expected=[newest_id, *reversed(tied), oldest_id],
+        tied_ids=set(tied),
+        newest_id=newest_id,
+        oldest_id=oldest_id,
+    )
+
+
 async def walk_pages(
     list_documents: Callable[..., Awaitable[Sequence]],
     namespace_id: UUID,
@@ -92,4 +152,4 @@ async def walk_pages(
     raise AssertionError(f"list_documents did not drain within {max_pages} pages of {page_size}")
 
 
-__all__ = ["id_ladder", "seed_order", "walk_pages"]
+__all__ = ["OrderSeed", "id_ladder", "order_seed", "seed_order", "walk_pages"]
