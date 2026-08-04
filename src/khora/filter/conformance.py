@@ -852,7 +852,7 @@ _OP_BACKENDS: frozenset[str] = _INMEM_BACKENDS | _LIVE_BACKENDS
 # metadata path segment surrealdb can safely interpolate. A segment that fails this
 # (e.g. a ``$``-prefixed key) makes the surrealdb compiler raise ``CompileError``, so
 # the case is pruned from the surrealdb leg only — every other backend binds the path.
-_SURREAL_SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_SURREAL_SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
 def _surreal_excluded(filter_: dict[str, Any] | RecallFilter, seed: tuple[SeedRecord, ...]) -> bool:

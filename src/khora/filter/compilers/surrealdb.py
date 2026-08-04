@@ -103,7 +103,11 @@ from khora.filter.ast import (
     DateLiteral,
     FilterClause,
     FilterNode,
-    canonical_hash,
+)
+from khora.filter.compilers._split import (
+    consumed_slice_hash,
+    deferred_paths,
+    node_consumable,
 )
 from khora.filter.context import CompileError
 from khora.filter.model import SYSTEM_KEYS, Op
@@ -123,7 +127,10 @@ _RANGE_OP = {
 # underscore, then alphanumerics / underscores. Stricter than the storage-layer
 # ``_sanitize_field_name`` (no dots — each AST path segment is already a single
 # field name) and kept self-contained so the compiler embeds no storage import.
-_SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Anchored with ``\Z``, NOT ``$``: ``$`` also matches just before a trailing
+# newline, so ``"tier\n"`` would pass a ``^...$`` guard and be interpolated
+# verbatim into the predicate string. ``\Z`` is the absolute end of the string.
+_SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
 def compile_surrealdb(ast: FilterNode, ctx: CompileContext) -> CompiledFilter[str]:
@@ -153,11 +160,17 @@ def compile_surrealdb(ast: FilterNode, ctx: CompileContext) -> CompiledFilter[st
     return CompiledFilter(
         predicate=predicate,
         params=builder.params,
-        consumed_keys=frozenset(consumed),
-        # canonical_hash over the whole AST. In on_unsupported="raise" mode (the
-        # only mode the skeleton engine uses) every leaf is consumed, so the whole
-        # tree == the consumed slice.
-        canonical_hash=canonical_hash(ast),
+        # A dotted path is only reported consumed when EVERY occurrence of it was
+        # pushed: the emission accumulator records the leaves that emitted real
+        # SurrealQL, and ``deferred_paths`` removes any path that ALSO occurs
+        # inside a subtree the split gate deferred (else a caller differencing
+        # ``leaf_keys - consumed_keys`` would never re-check that occurrence).
+        consumed_keys=frozenset(consumed) - deferred_paths(ast, builder._clause_consumable),
+        # The hash covers the CONSUMED SLICE, not the whole AST — two filters that
+        # differ only in a deferred subtree compile to the same WHERE and must
+        # share a cache key. In on_unsupported="raise" mode every leaf is
+        # consumable, so the slice IS the whole tree and the hash is unchanged.
+        canonical_hash=consumed_slice_hash(ast, builder._clause_consumable),
     )
 
 
@@ -187,7 +200,11 @@ class _Builder:
         # undeclared — the backend does not back it with a column, so the
         # system-key branch of :meth:`compile_clause` routes it to ``_unsupported``.
         # The ``metadata`` root is keyed separately, so the metadata branch never
-        # consults this set.
+        # consults this set. ``or {}`` means a ``None`` ``field_mapping`` declares
+        # NOTHING here — deliberately stricter than
+        # ``_split.system_key_declared``'s identity reading, which postgres/lance
+        # use. Do not "unify" the two: see :meth:`_clause_consumable` for why a
+        # backend that cannot fail loud must fail closed.
         self._declared: dict[str, str] = dict(ctx.field_mapping or {})
 
     # ----- bind allocation ------------------------------------------------ #
@@ -234,7 +251,21 @@ class _Builder:
     # ----- logical node walk ---------------------------------------------- #
 
     def compile_node(self, node: FilterNode | FilterClause) -> str:
-        """Compile a logical node or leaf to a SurrealQL boolean string."""
+        """Compile a logical node or leaf to a SurrealQL boolean string.
+
+        **Split-mode soundness — "AND distributes; OR/NOT are all-or-nothing."**
+        The match-all placeholder ``"true"`` an unsupported leaf emits under
+        ``on_unsupported="split"`` is superset-safe only in *positive* position:
+        ``A AND true`` ≡ ``A`` (still narrows correctly), but ``!(A OR true)`` ≡
+        ``!true`` ≡ ``false`` — which would *drop every row the filter keeps*,
+        breaking the superset invariant (the caller's post-filter only narrows; it
+        cannot add a wrongly-excluded row back). So an ``OR`` / ``NOT`` node is
+        pushed down only when its **entire** subtree is consumable; otherwise the
+        whole node emits ``"true"`` and consumes nothing, deferring it wholesale to
+        the post-filter. An ``AND`` still handles each child independently — a
+        non-consumable child becomes ``"true"`` and the consumable siblings still
+        narrow. See :mod:`khora.filter.compilers._split`.
+        """
         if isinstance(node, FilterClause):
             return self.compile_clause(node)
         if node.op == Op.AND:
@@ -246,11 +277,60 @@ class _Builder:
             if not node.children:
                 # The validator forbids an empty $or; guard defensively.
                 return "false"
+            if self._ctx.on_unsupported == "split" and not node_consumable(node, self._clause_consumable):
+                # A non-consumable disjunct would compile to "true", making the
+                # whole OR match-all here while the post-filter still narrows —
+                # safe in positive position but it under-pushes silently AND
+                # becomes a false-exclude if a parent NOT wraps it. Defer the whole
+                # OR. In "raise" mode we instead descend so the offending leaf
+                # raises.
+                return "true"
             return "(" + " OR ".join(self.compile_node(c) for c in node.children) + ")"
         # Op.NOT — exactly one child per the AST contract. SurrealQL's NONE-boolean
         # algebra makes every leaf total, so this negation flips absent rows
-        # correctly without a coalesce wrapper.
+        # correctly without a coalesce wrapper. Pushed only when the child is fully
+        # consumable; otherwise defer the whole NOT (in "split" mode). In "raise"
+        # mode we descend so the offending leaf raises rather than being silently
+        # swallowed by the all-or-nothing gate.
+        if self._ctx.on_unsupported == "split" and not node_consumable(node, self._clause_consumable):
+            return "true"
         return f"!({self.compile_node(node.children[0])})"
+
+    def _clause_consumable(self, clause: FilterClause) -> bool:
+        """True iff this leaf compiles to real SurrealQL — the gate predicate.
+
+        The pure mirror of :meth:`compile_clause`'s dispatch (no bind allocation,
+        no ``consumed`` mutation), so the all-or-nothing ``OR`` / ``NOT`` gate and
+        the consumed-slice reconstruction both see exactly what emission does.
+
+        **Deliberately asymmetric with postgres / lance on the system-key gate.**
+        Those two read a ``None`` ``field_mapping`` as the identity mapping (no
+        whitelist, every system key pushes) via
+        :func:`~khora.filter.compilers._split.system_key_declared`; this compiler
+        instead consults ``self._declared`` — ``dict(ctx.field_mapping or {})`` — so
+        an absent mapping declares *nothing*. The asymmetry is the point: SQL fails
+        LOUD on a missing column (the query errors), whereas on a SCHEMAFULL
+        SurrealDB table a missing field reads ``NONE`` and SurrealQL's total-false
+        absent-compare (``NONE = x`` → ``false``) would silently drop every row. A
+        backend that cannot fail loud must fail closed.
+
+        It deliberately does NOT consider :data:`_SAFE_SEGMENT_RE` safety, because
+        it mirrors the emit path and the emit path is not mode-dependent there:
+        :meth:`_metadata_path` raises :class:`CompileError` on an unsafe segment
+        under BOTH modes (it is an injection guard, not a capability gap), so such
+        a leaf is never deferred. Reporting it unconsumable *here alone* would
+        desynchronize the gate from emission — the enclosing subtree would defer,
+        :meth:`_metadata_path` would never run, and the guard would not fire at
+        all. If the guard is ever turned into a real split-mode capability gap
+        (routing to :meth:`_unsupported` instead of raising), this branch must
+        become mode-aware in the same change.
+        """
+        path = clause.path
+        if len(path) == 1 and path[0] in SYSTEM_KEYS:
+            return path[0] in self._declared
+        if path and path[0] == "metadata":
+            return len(path) > 1 or clause.op == Op.EQ
+        return False
 
     # ----- leaf key-kind split -------------------------------------------- #
 
@@ -274,7 +354,13 @@ class _Builder:
                 )
             expr = self._compile_system_clause(clause)
         elif path and path[0] == "metadata":
-            expr = self._compile_metadata_clause(clause)
+            compiled = self._compile_metadata_clause(clause)
+            if compiled is None:
+                # Unsupported metadata shape — route it BEFORE the ``consumed`` add
+                # below, so the emit path and :meth:`_clause_consumable` agree on
+                # what was actually pushed.
+                return self._unsupported(clause, "only $eq is defined on the bare metadata blob")
+            expr = compiled
         else:
             return self._unsupported(clause, "path is neither a system key nor a metadata path")
         self._consumed.add(_path_str(path))
@@ -343,7 +429,13 @@ class _Builder:
 
     # ----- metadata leaves (native object descent) ------------------------ #
 
-    def _compile_metadata_clause(self, clause: FilterClause) -> str:
+    def _compile_metadata_clause(self, clause: FilterClause) -> str | None:
+        """Compile a metadata leaf, or ``None`` if this backend cannot express it.
+
+        Returning ``None`` (rather than calling ``_unsupported`` here) keeps the
+        unsupported leaf out of ``consumed`` — the caller routes it per
+        ``on_unsupported`` before recording anything.
+        """
         path = clause.path
         op = clause.op
         operand = clause.operand
@@ -352,7 +444,9 @@ class _Builder:
         # equality is structural / key-order-insensitive.
         if len(path) == 1:
             if op != Op.EQ:
-                return self._unsupported(clause, "only $eq is defined on the bare metadata blob")
+                # Only $eq is defined on the bare blob — unsupported (the caller
+                # turns this into the ``on_unsupported`` handling).
+                return None
             root = (self._ctx.field_mapping or {}).get("metadata", "metadata")
             return f"({root} = {self._bind(operand)})"
 

@@ -69,8 +69,19 @@ class CompiledFilter(Generic[T]):
     * ``consumed_keys`` — the AST leaves this compiler handled, for partial
       pushdown: when ``CompileContext.on_unsupported == "split"`` the engine
       post-filters whatever is *not* in this set.
-    * ``canonical_hash`` — the stable hash of the consumed slice, the engine's
-      cache-key source.
+    * ``canonical_hash`` — a stable hash identifying the predicate this compiler
+      emitted. Compilers that reconstruct the consumed slice (postgres / lance /
+      surrealdb) hash that slice, so in ``"split"`` mode two filters that push the
+      same predicate share a hash while their result sets differ; **for those it
+      is not a recall-result cache key** — the deferred remainder still narrows
+      the result set through the engine's post-filter. Compilers that hash the
+      whole AST (cypher / weaviate / python / chronicle) do not have that property
+      — equal hash there implies equal AST, hence equal result set;
+      ``compile_weaviate`` explains its choice at the construction site. In
+      ``"raise"`` mode the slice IS the whole AST and the two rules coincide, so
+      raise-mode callers are unaffected. Key a result cache on
+      ``canonical_hash(filter_ast)`` over the full AST regardless, as
+      ``engines/vectorcypher/recall_cache.py`` does.
     """
 
     predicate: T

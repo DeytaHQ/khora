@@ -485,13 +485,13 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         # flag can never be added to one path and silently missed by the other — the
         # report can't drift from the executed WHERE. consumed_keys is
         # alias-independent (``_clause_unconsumable`` reads only clause.path /
-        # SYSTEM_KEYS / sqlite_json1 / operand shape, never table_alias) and
-        # compile_lance is deterministic, so this alias=None compile reports the same
-        # keys the per-pass alias="c"/None WHERE compiles emit. NO-DEMOTE: a consumed
-        # leaf stays in pushed_keys even though the always-on compile_python
-        # post-filter re-checks the full AST (defensive_recheck=True). The plan is
-        # handed back per-call via ``filter_plan_out`` (no mutable instance state —
-        # race-free under concurrent recalls on a shared store).
+        # SYSTEM_KEYS / sqlite_json1 / field_mapping / operand shape, never
+        # table_alias) and compile_lance is deterministic, so this alias=None compile
+        # reports the same keys the per-pass alias="c"/None WHERE compiles emit.
+        # NO-DEMOTE: a consumed leaf stays in pushed_keys even though the always-on
+        # compile_python post-filter re-checks the full AST (defensive_recheck=True).
+        # The plan is handed back per-call via ``filter_plan_out`` (no mutable
+        # instance state — race-free under concurrent recalls on a shared store).
         if filter_ast is not None and filter_ast.children:
             from khora.filter.compilers.lance import compile_lance
             from khora.filter.execute import filter_leaf_keys

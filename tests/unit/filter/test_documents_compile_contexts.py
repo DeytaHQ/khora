@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -60,9 +61,11 @@ from khora.filter import RecallFilter
 from khora.filter.ast import FilterNode, parse_to_ast
 from khora.filter.compilers.lance import compile_lance
 from khora.filter.compilers.postgres import compile_postgres
+from khora.filter.compilers.python import compile_python
 from khora.filter.compilers.surrealdb import compile_surrealdb
 from khora.filter.context import CompileContext, SchemaCapabilities
-from khora.filter.model import SYSTEM_KEYS, RecallFilterUnsupportedError
+from khora.filter.execute import build_compile_context
+from khora.filter.model import SYSTEM_KEYS
 from khora.filter.registry import CompiledFilter
 from khora.storage.backends._sqlite_capabilities import sqlite_has_json1
 from khora.storage.backends.postgresql import _documents_compile_context as postgres_context
@@ -96,6 +99,29 @@ _BACKED_KEYS: frozenset[str] = frozenset(
         "title",
     }
 )
+
+# Backed by a column but deliberately NOT declared, per context. Since the
+# compilers honour a non-``None`` ``field_mapping`` key set as the pushdown
+# whitelist, an omission is now enforced rather than advisory — so "which keys
+# are withheld" is a behavioural claim, not bookkeeping.
+#
+# Both SQLite-backed stores withhold the two date-valued keys: they write
+# timestamps as strings whose format does not order lexicographically against
+# the ISO-8601 bind ``compile_lance`` emits, so a pushed comparison silently
+# returns wrong rows (pinned below, and proved against a real table in
+# :func:`test_sqlite_lance_date_predicate_survives_the_day_boundary`). Postgres
+# and SurrealDB compare real timestamp values and withhold nothing.
+_WITHHELD_KEYS: Mapping[str, frozenset[str]] = {
+    "postgresql": frozenset(),
+    "sqlite": frozenset({"created_at", "source_timestamp"}),
+    "sqlite_lance": frozenset({"created_at", "source_timestamp"}),
+    "surrealdb": frozenset(),
+}
+
+
+def _declared_keys(name: str) -> frozenset[str]:
+    """The system keys ``name``'s context declares — backed minus withheld."""
+    return _BACKED_KEYS - _WITHHELD_KEYS[name]
 
 
 def _ast(wire: dict) -> FilterNode:
@@ -158,17 +184,17 @@ _ALL_CONTEXTS: tuple[tuple[str, Callable[[], CompileContext], str, str], ...] = 
     ("surrealdb", surrealdb_context, "document", "metadata_"),
 )
 
-# The enumeration contract specifies ``"split"`` everywhere. The SurrealDB
-# context ships ``"raise"`` as an interim posture because ``compile_surrealdb``
-# is not sound under split — its unsupported-leaf placeholder inverts under
-# ``$not``/``$or`` (pinned in the known-gap section below). Raising is strictly
-# narrower, so widening it back to ``"split"`` with the compiler soundness gate
-# is not a breaking change for a caller.
+# The enumeration contract specifies ``"split"`` everywhere, and every context
+# now ships it. SurrealDB previously shipped ``"raise"`` as an interim posture,
+# because ``compile_surrealdb``'s unsupported-leaf placeholder inverted under
+# ``$not``/``$or``; the all-or-nothing gate in
+# :mod:`khora.filter.compilers._split` closed that, so the context is back on
+# ``"split"`` with the rest.
 _EXPECTED_UNSUPPORTED_MODE: Mapping[str, str] = {
     "postgresql": "split",
     "sqlite": "split",
     "sqlite_lance": "split",
-    "surrealdb": "raise",
+    "surrealdb": "split",
 }
 
 # The two ``compile_lance``-driven contexts, which share every behaviour that
@@ -210,12 +236,16 @@ def test_context_declares_the_physical_schema(
 
     mapping = ctx.field_mapping
     assert mapping is not None
-    # Exactly the nine backed system keys plus the ``metadata`` root — the
+    # Exactly the declared system keys plus the ``metadata`` root — the
     # ``metadata`` entry must be present even where it is identity, because
     # ``compile_postgres`` resolves it eagerly.
-    assert set(mapping) == set(_BACKED_KEYS) | {"metadata"}
-    assert all(mapping[key] == key for key in _BACKED_KEYS)
+    declared = _declared_keys(name)
+    assert set(mapping) == set(declared) | {"metadata"}
+    assert all(mapping[key] == key for key in declared)
     assert mapping["metadata"] == metadata_column
+    # The withheld keys are absent — and that omission is what routes them to
+    # the caller's post-filter, since the key set IS the pushdown whitelist.
+    assert not set(mapping) & _WITHHELD_KEYS[name]
 
 
 @pytest.mark.parametrize(
@@ -307,6 +337,34 @@ def test_occurred_at_is_absent_from_every_real_documents_schema(
     # the schemas themselves rather than left as prose: it is chunk event-time
     # and no documents table has a column for it on any backend.
     assert "occurred_at" not in _real_columns(name)
+
+
+@pytest.mark.parametrize(
+    ("name", "builder", "target", "metadata_column"),
+    _ALL_CONTEXTS,
+    ids=[case[0] for case in _ALL_CONTEXTS],
+)
+def test_withheld_keys_are_real_columns_withheld_for_soundness(
+    name: str,
+    builder: Callable[[], CompileContext],
+    target: str,
+    metadata_column: str,
+) -> None:
+    """The withheld keys DO have columns — they are held back, not missing.
+
+    This is what separates the two reasons a key can be undeclared, which the
+    mapping alone cannot distinguish. ``occurred_at`` is undeclared because no
+    ``documents`` table has the column; ``created_at`` / ``source_timestamp`` on
+    the two SQLite stores are undeclared even though the columns exist, because
+    the stored string format does not order against this compiler's binds.
+    Asserting the columns are real is what keeps the second reason from being
+    quietly re-read as the first — and what would fail if someone "fixed" a
+    withheld key by deleting the column instead of the pushdown.
+    """
+    columns = _real_columns(name)
+    assert columns, f"failed to read any columns for {name}"
+    for key in _WITHHELD_KEYS[name]:
+        assert key in columns, f"{name} withholds {key!r}, which is not even a column"
 
 
 def test_only_the_sqlite_contexts_declare_a_capability() -> None:
@@ -724,100 +782,95 @@ def test_context_reads_the_probe_rather_than_hardcoding_it(
 
 
 # ===========================================================================
-# KNOWN GAPS — pinned as they behave today, NOT as they should behave.
+# The undeclared-key defences — each of these INVERTED a pin from the previous
+# revision, where the same shape was recorded as a known gap.
 # ===========================================================================
 
 
 def test_occurred_at_is_defended_on_surrealdb() -> None:
-    """The shipped SurrealDB context REJECTS an undeclared system key.
+    """The shipped SurrealDB context DEFERS an undeclared system key.
 
     ``compile_surrealdb`` treats the ``field_mapping`` key set as its
     declared+pushable whitelist, so the undeclared ``occurred_at`` leaf never
-    reaches the query. Under the shipped ``on_unsupported="raise"`` that surfaces
-    as a structured error rather than a silent placeholder — the interim posture
-    that keeps the inversion below unreachable until the compiler soundness gate
-    lands. This is the one backend where the context alone prevents the bad
-    predicate; the three SQL backends cannot (see the case below).
-
-    When the context flips back to ``"split"``, this expectation changes to the
-    placeholder shape — ``predicate == "(true)"`` with empty ``consumed_keys`` —
-    which is only safe once the compiler defers rather than emitting a
-    match-all in place.
+    reaches the query. This used to surface as a ``RecallFilterUnsupportedError``
+    because the context shipped ``on_unsupported="raise"`` — an interim posture
+    that existed only to keep the placeholder inversion below unreachable. With
+    the all-or-nothing gate in :mod:`khora.filter.compilers._split` closing that,
+    the context is back on ``"split"`` and the leaf takes the ordinary residual
+    path: a match-all placeholder, nothing consumed, the caller's post-filter
+    enforces it.
     """
-    ctx = surrealdb_context()
-    with pytest.raises(RecallFilterUnsupportedError):
-        compile_surrealdb(_ast({"occurred_at": {"$gte": _DT}}), ctx)
+    compiled = compile_surrealdb(_ast({"occurred_at": {"$gte": _DT}}), surrealdb_context())
+    # Non-constraining placeholder, not a predicate against a field the
+    # ``document`` table does not have.
+    assert compiled.predicate.strip() == "(true)"
+    assert compiled.params == {}
+    assert compiled.consumed_keys == frozenset()
+    assert not _emits_column(_norm(compiled.predicate), "occurred_at")
 
 
-def test_occurred_at_is_not_defended_on_sql_backends() -> None:
-    """KNOWN GAP — pins today's behaviour so the caller contract is written down.
+def test_occurred_at_is_defended_on_sql_backends() -> None:
+    """The three SQL contexts defer ``occurred_at`` instead of inventing a column.
 
-    ``compile_postgres`` and ``compile_lance`` fall back to identity for a key
-    that is absent from ``field_mapping``, so an ``occurred_at`` leaf compiles to
-    a column that does not exist on ``documents`` AND is reported in
-    ``consumed_keys`` — the caller is told the leaf was pushed down and will not
-    post-filter it, while the statement itself fails at execute time. Nothing
-    expressible in a compile context prevents this; until the compilers honour
-    the key set as a whitelist, the enumeration caller MUST strip ``occurred_at``
-    before compiling. These assertions encode the gap, not the desired behaviour.
+    Previously ``compile_postgres`` / ``compile_lance`` fell back to identity for
+    a key absent from ``field_mapping``, so this leaf compiled to
+    ``documents.occurred_at`` — a column no ``documents`` table has — AND was
+    reported in ``consumed_keys``, telling the caller it had been pushed while
+    the statement itself would fail at execute time. Both compilers now honour a
+    non-``None`` key set as the pushdown whitelist, so the undeclared key emits
+    the match-all placeholder and stays a residual.
 
-    **This expectation INVERTS when the pushdown whitelist gate lands.**
-    ``consumed_keys`` becomes ``frozenset()`` and no ``documents.occurred_at``
-    column is emitted at all, matching what ``compile_surrealdb`` already does
-    (see the test above) — that is the fix landing, not a regression. Update the
-    assertions; do NOT restore green by declaring ``occurred_at`` in the
-    ``field_mapping``, which would point the leaf at a column no ``documents``
-    table has.
+    Do NOT restore green here by declaring ``occurred_at`` in a ``field_mapping``
+    — that points the leaf back at a column that does not exist.
     """
     wire = {"occurred_at": {"$gte": _DT}}
 
     sql = _postgres_sql(wire, postgres_context())
-    assert _emits_column(sql, "documents.occurred_at")
-    assert compile_postgres(_ast(wire), postgres_context()).consumed_keys == frozenset({"occurred_at"})
+    assert not _emits_column(sql, "documents.occurred_at")
+    assert compile_postgres(_ast(wire), postgres_context()).consumed_keys == frozenset()
 
     for _name, builder, _column in _SQLITE_CONTEXTS:
         compiled = compile_lance(_ast(wire), builder())
-        assert _emits_column(_norm(compiled.predicate), "documents.occurred_at")
-        assert compiled.consumed_keys == frozenset({"occurred_at"})
+        assert not _emits_column(_norm(compiled.predicate), "documents.occurred_at")
+        assert compiled.predicate.strip() == "(1)"
+        assert compiled.consumed_keys == frozenset()
 
 
-def test_surrealdb_placeholder_inverts_under_a_negated_or() -> None:
-    """KNOWN GAP — an undeclared key under ``$not``/``$or`` matches nothing.
+def test_surrealdb_defers_a_negated_or_rather_than_inverting_a_placeholder() -> None:
+    """An undeclared key under ``$not``/``$or`` defers the node, it does not invert.
 
     The placeholder ``compile_surrealdb`` emits for an unsupported leaf is the
     literal ``true``, which is non-constraining only inside a positive
-    conjunction. Under a negated OR it inverts: ``!(... OR true)`` is always
-    false, so the query silently returns no rows while ``consumed_keys`` still
-    reports the leaf as the caller's to post-filter — and post-filtering can only
-    narrow, never recover the dropped rows. Pinned as it behaves today; the fix
-    is a soundness gate in the compiler, not in this context.
+    conjunction. Under a negated OR it used to invert: ``!(... OR true)`` is
+    always false, so the query silently returned NO rows while ``consumed_keys``
+    still reported ``title`` as pushed — and a post-filter only narrows, so the
+    wrongly-excluded rows were unrecoverable. The gate now defers the whole
+    ``$not`` subtree instead, emitting the bare match-all and consuming nothing.
 
-    The SHIPPED context now uses ``on_unsupported="raise"`` precisely to keep
-    this unreachable, so the defect is pinned here against an explicitly
-    split-mode copy of it. That keeps the compiler bug documented and guarded
-    while no caller can trip it — and it is why this case must build its own
-    context rather than using the shipped one.
-
-    **This expectation INVERTS when that soundness gate lands.** A gated
-    ``compile_surrealdb`` defers the whole ``OR`` node rather than letting a
-    match-all placeholder invert, so ``or (true)`` disappears from the emitted
-    predicate and ``title`` stops being consumed — that is the fix landing, not a
-    regression. Update the assertions to the deferred shape; do NOT restore green
-    by relaxing them back to accepting an inverted placeholder.
+    Run against the SHIPPED context, not a split-mode copy of it. The previous
+    revision had to build its own context because the shipped one was
+    ``"raise"``; asserting against the real one is what makes this the alarm for
+    a future ``"split"`` flip landing without the gate.
     """
-    split_ctx = dataclasses.replace(surrealdb_context(), on_unsupported="split")
     compiled = compile_surrealdb(
         _ast({"$not": {"$or": [{"title": "x"}, {"occurred_at": {"$gt": _DT}}]}}),
-        split_ctx,
+        surrealdb_context(),
     )
     sql = _norm(compiled.predicate)
-    assert sql.startswith("!(")
-    assert "or (true)" in sql
-    assert compiled.consumed_keys == frozenset({"title"})
+    # The whole negation is deferred: the bare placeholder, with no negation and
+    # no inverted disjunct left in the fragment at all.
+    assert sql.strip() == "true"
+    assert "!(" not in sql
+    assert "or" not in sql
+    assert compiled.params == {}
+    # ``title`` IS declared and would push on its own — it is unconsumed here
+    # only because the gate deferred the subtree containing it.
+    assert compiled.consumed_keys == frozenset()
+    assert compile_surrealdb(_ast({"title": "x"}), surrealdb_context()).consumed_keys == frozenset({"title"})
 
 
 def test_sqlite_lance_datetime_bind_does_not_match_the_stored_format() -> None:
-    """KNOWN GAP — the pushed-down bind format differs from the stored format.
+    """The date-valued keys are withheld, so the mismatched bind never ships.
 
     ``documents`` rows on this stack are written through SQLAlchemy's SQLite
     ``DATETIME`` type, which stores ``'2026-01-31 12:30:00.000000'`` (SPACE
@@ -825,22 +878,256 @@ def test_sqlite_lance_datetime_bind_does_not_match_the_stored_format() -> None:
     ``.isoformat()`` (``'T'`` separator, offset included) and relies on
     lexicographic ISO comparison. ``' '`` (0x20) sorts before ``'T'`` (0x54), so a
     pushed-down ``created_at`` / ``source_timestamp`` bound silently excludes rows
-    from its own day. The bind value is pinned here so the mismatch is visible in
-    a test rather than only in a docstring; the caller must strip the date-valued
-    system keys until the bind format is fixed upstream.
+    from its own day.
 
-    **This expectation INVERTS when the pushdown whitelist gate lands.**
-    ``consumed_keys`` becomes ``frozenset()`` once ``compile_lance`` honours the
-    ``field_mapping`` key set and the two date keys are dropped from the
-    sqlite_lance mapping — that is the fix landing, not a regression. Update the
-    assertion; do NOT restore green by re-declaring ``created_at`` in the
-    mapping, which would reinstate the silent mismatch this test documents.
+    The previous revision pinned ``consumed_keys == {"created_at"}`` here,
+    because the mapping declared the key and ``compile_lance`` ignored the key
+    set anyway. Dropping the two date keys from ``_BACKED_SYSTEM_KEYS`` is what
+    makes that assertion fail, and the inverted assertion below — the key is a
+    RESIDUAL — is the standing guard that the drop stays dropped. Do NOT restore
+    green by re-declaring ``created_at``: that reinstates the silent mismatch.
+
+    The second half compiles the same leaf through a context that DOES declare
+    the key, so the defective bind is still visible in a test rather than only in
+    a docstring. That is what keeps the withholding legible as load-bearing —
+    without it, nothing here shows what re-declaring the key would cost.
     """
     compiled = compile_lance(_ast({"created_at": {"$gte": _DT}}), sqlite_lance_context())
-    assert compiled.params == {"args": ["2026-01-31T12:30:00+00:00"]}
+    assert compiled.consumed_keys == frozenset()
+    assert compiled.predicate.strip() == "(1)"
+    assert compiled.params == {"args": []}
+    assert not _emits_column(_norm(compiled.predicate), "documents.created_at")
+
+    # What re-declaring the key would emit: the ``'T'``-separated, offset-bearing
+    # bind that does not compare against the stored ``' '``-separated form.
+    ctx = sqlite_lance_context()
+    redeclared = dataclasses.replace(ctx, field_mapping=dict(ctx.field_mapping or {}) | {"created_at": "created_at"})
+    pushed = compile_lance(_ast({"created_at": {"$gte": _DT}}), redeclared)
+    assert pushed.consumed_keys == frozenset({"created_at"})
+    assert pushed.params == {"args": ["2026-01-31T12:30:00+00:00"]}
     # Stored form for the same instant, which the bind above does NOT equal.
-    assert "2026-01-31 12:30:00.000000" != compiled.params["args"][0]
-    assert compiled.consumed_keys == frozenset({"created_at"})
+    assert "2026-01-31 12:30:00.000000" != pushed.params["args"][0]
+
+
+def test_sqlite_lance_date_predicate_survives_the_day_boundary() -> None:
+    """A same-day row survives a ``$gte`` on midnight — against a REAL table.
+
+    The end-to-end form of the mismatch above, which is the only form that shows
+    the consequence rather than the bind string. A row written at 09:00 on the
+    filter's own day is materialized through the SAME SQLAlchemy column type the
+    ``documents`` model declares, so the stored spelling is authentic rather than
+    restated here; then the compiled fragment is executed as the ``WHERE`` clause
+    it would be in production.
+
+    The CONTROL is what makes this a proof: compiled through a context that
+    re-declares ``created_at`` — i.e. the mapping as it shipped before the two
+    date keys were withheld — the very same row is EXCLUDED, because
+    ``'2026-08-04 09:00:00.000000' >= '2026-08-04T00:00:00+00:00'`` is false
+    lexicographically (``' '`` 0x20 sorts before ``'T'`` 0x54). Under the shipped
+    mapping the leaf is not pushed at all, the row reaches the caller, and the
+    full-AST post-filter keeps it.
+
+    Deliberately not a lancedb test: only the relational half is in play, so this
+    stays a hermetic in-memory SQLite case with no optional extra required.
+    """
+    row_at = datetime(2026, 8, 4, 9, 0, tzinfo=UTC)
+    # A two-column stand-in, but ``created_at`` carries the model's OWN type
+    # object — the stored format is decided by that type plus the SQLite
+    # dialect, so reusing it is what keeps this faithful. Building the full
+    # ``DocumentModel`` table is not possible here: its ``JSONB`` columns have no
+    # SQLite DDL rendering outside the migration chain, and none of them matter
+    # to a datetime comparison.
+    metadata = sa.MetaData()
+    documents = sa.Table(
+        "documents",
+        metadata,
+        sa.Column("id", sa.Text, primary_key=True),
+        sa.Column("created_at", DocumentModel.__table__.c.created_at.type, nullable=False),
+    )
+    engine = sa.create_engine("sqlite://")
+    try:
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.execute(sa.insert(documents).values(id="doc-1", created_at=row_at))
+            stored = conn.exec_driver_sql("SELECT created_at FROM documents").scalar_one()
+        # The stored spelling, read back from the table rather than asserted from
+        # memory: space-separated, no offset.
+        assert stored == "2026-08-04 09:00:00.000000"
+
+        ast = _ast({"created_at": {"$gte": "2026-08-04T00:00:00+00:00"}})
+
+        def _survivors(ctx: CompileContext) -> list[str]:
+            compiled = compile_lance(ast, ctx)
+            with engine.begin() as conn:
+                rows = conn.exec_driver_sql(
+                    f"SELECT id FROM documents WHERE {compiled.predicate}",  # noqa: S608 - compiled fragment, binds are parameterized
+                    tuple(compiled.params["args"]),
+                ).fetchall()
+            return [row[0] for row in rows]
+
+        ctx = sqlite_lance_context()
+        # SHIPPED: the leaf is withheld, so the prefilter does not narrow and the
+        # row reaches the caller.
+        assert _survivors(ctx) == ["doc-1"]
+
+        # CONTROL: re-declare the key and the same row disappears — the defect
+        # this withholding exists to prevent, executed rather than described.
+        redeclared = dataclasses.replace(
+            ctx, field_mapping=dict(ctx.field_mapping or {}) | {"created_at": "created_at"}
+        )
+        assert _survivors(redeclared) == []
+    finally:
+        engine.dispose()
+
+    # The caller's post-filter evaluates the FULL AST and keeps the row, so the
+    # shipped path returns it — correct rows across the day boundary.
+    post_filter = compile_python(ast, build_compile_context("documents", on_unsupported="split")).predicate
+    assert post_filter({"id": "doc-1", "created_at": row_at}) is True
+
+
+# ===========================================================================
+# Split-mode soundness — the all-or-nothing OR/NOT gate, per documents context.
+# ===========================================================================
+
+
+# The unconsumable leaf every documents context agrees on: ``occurred_at`` is a
+# system key (so it reaches a compiler as an AST leaf) that no documents mapping
+# declares. Using one shape across all four keeps the gate the only variable.
+_UNDECLARED_LEAF: dict = {"occurred_at": {"$gt": _DT}}
+
+# ``(compiler, context builder, the match-all placeholder that compiler emits)``.
+_SPLIT_TARGETS: tuple[tuple[str, Callable, Callable[[], CompileContext], str], ...] = (
+    ("postgresql", compile_postgres, postgres_context, "true"),
+    ("sqlite", compile_lance, sqlite_context, "1"),
+    ("sqlite_lance", compile_lance, sqlite_lance_context, "1"),
+    ("surrealdb", compile_surrealdb, surrealdb_context, "true"),
+)
+
+
+def _rendered(name: str, compiled: CompiledFilter[Any]) -> str:
+    """The emitted fragment as a string, rendering SQLAlchemy elements inline.
+
+    ``literal_binds`` matters here rather than being cosmetic: SQLAlchemy folds
+    ``or_(x, true())`` down to ``true`` during compilation, so whether the gate
+    fired is only observable AFTER rendering. Reading ``str(element)`` would show
+    an un-short-circuited tree and hide it.
+    """
+    if name == "postgresql":
+        predicate = compiled.predicate
+        assert isinstance(predicate, ColumnElement), f"not a SQLAlchemy element: {type(predicate)!r}"
+        return _norm(str(predicate.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})))
+    return _norm(compiled.predicate)
+
+
+@pytest.mark.parametrize(
+    ("name", "compiler", "builder", "placeholder"),
+    _SPLIT_TARGETS,
+    ids=[case[0] for case in _SPLIT_TARGETS],
+)
+def test_negated_or_defers_whole_rather_than_inverting(
+    name: str,
+    compiler: Callable,
+    builder: Callable[[], CompileContext],
+    placeholder: str,
+) -> None:
+    """``$not`` over an ``$or`` holding an undeclared key defers the WHOLE node.
+
+    The soundness property behind every documents context, stated per compiler.
+    A match-all placeholder is superset-safe only in positive position: under a
+    negation it inverts to match-NOTHING, which empties the result set — and a
+    post-filter only narrows, so those rows are unrecoverable. The gate therefore
+    refuses to push an ``$or`` / ``$not`` unless its entire subtree is
+    consumable.
+
+    The assertion is on the RENDERED fragment: it must be the bare match-all, not
+    a negation and not a ``false``. ``title`` is declared on every documents
+    mapping and pushes on its own, so its absence from ``consumed_keys`` here is
+    the gate deferring the subtree — not the key being unsupported.
+    """
+    ctx = builder()
+    assert ctx.on_unsupported == "split", "this case only means anything under split"
+
+    compiled = compiler(_ast({"$not": {"$or": [{"title": "x"}, _UNDECLARED_LEAF]}}), ctx)
+    sql = _rendered(name, compiled)
+
+    # The bare match-all placeholder — the whole negation deferred.
+    assert sql.strip() == placeholder
+    # Nothing that could empty the result set survived into the fragment.
+    assert "not" not in sql
+    assert "!(" not in sql
+    assert " or " not in sql
+    assert "false" not in sql
+    assert "0" not in sql.replace(placeholder, "")
+    assert compiled.consumed_keys == frozenset()
+
+    # CONTROL — ``title`` alone DOES push here, so the empty ``consumed_keys``
+    # above is the gate firing rather than a uniformly unsupported leaf.
+    assert compiler(_ast({"title": "x"}), ctx).consumed_keys == frozenset({"title"})
+
+
+@pytest.mark.parametrize(
+    ("name", "compiler", "builder", "placeholder"),
+    _SPLIT_TARGETS,
+    ids=[case[0] for case in _SPLIT_TARGETS],
+)
+def test_key_in_both_a_pushed_leaf_and_a_deferred_subtree_is_not_consumed(
+    name: str,
+    compiler: Callable,
+    builder: Callable[[], CompileContext],
+    placeholder: str,
+) -> None:
+    """A path pushed in one branch and deferred in another is NOT reported consumed.
+
+    ``consumed_keys`` is a set of dotted paths, but a path can occur many times
+    in one AST. Here the same key sits in a conjunctive leaf that IS pushed and
+    again inside a ``$not`` the gate defers wholesale. Reporting it consumed
+    would tell a caller differencing ``leaf_keys - consumed_keys`` that the
+    deferred occurrence is already enforced, so it would never be post-filtered
+    and the query would return rows the filter excludes.
+
+    Both halves of the emitted fragment are asserted, because the interesting
+    failure is not "nothing was pushed": the conjunctive leaf SHOULD still push
+    (that is the pushdown being preserved) while the key is still reported as a
+    residual. A test that only checked ``consumed_keys`` would pass against a
+    compiler that had simply stopped pushing anything.
+    """
+    ctx = builder()
+    key, pushed_leaf, deferred_leaf = _repeated_key_case(name)
+
+    compiled = compiler(
+        _ast({"$and": [pushed_leaf, {"$not": {"$or": [deferred_leaf, _UNDECLARED_LEAF]}}]}),
+        ctx,
+    )
+    sql = _rendered(name, compiled)
+
+    # The conjunctive occurrence still pushed — pushdown is preserved.
+    assert key in sql, f"expected the conjunctive {key!r} leaf to still push: {sql}"
+    # ...and the key is nonetheless a residual, because its other occurrence was
+    # deferred with the ``$not``.
+    assert key not in compiled.consumed_keys
+    assert compiled.consumed_keys == frozenset()
+
+    # CONTROL — the same key with only the conjunctive occurrence IS consumed,
+    # so the exclusion above is per-occurrence accounting and not the key being
+    # unpushable on this context.
+    assert compiler(_ast(pushed_leaf), ctx).consumed_keys == frozenset({key})
+
+
+def _repeated_key_case(name: str) -> tuple[str, dict, dict]:
+    """A declared key plus two leaves on it, for the repeated-path case above.
+
+    The key has to be one the context actually declares, or the case degenerates
+    to "nothing was pushed" and proves nothing. The two SQLite contexts withhold
+    both date-valued keys, so they use a string key and equality leaves instead
+    of a range.
+    """
+    if name in {"sqlite", "sqlite_lance"}:
+        return "source_type", {"source_type": "email"}, {"source_type": "web"}
+    return (
+        "created_at",
+        {"created_at": {"$gte": "2026-01-01T00:00:00+00:00"}},
+        {"created_at": {"$lt": "2026-02-01T00:00:00+00:00"}},
+    )
 
 
 # ===========================================================================

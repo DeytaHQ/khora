@@ -1167,40 +1167,40 @@ def _documents_compile_context() -> CompileContext:
 
     ``field_mapping`` declares the nine backed system keys (identity-mapped to
     their bare fields) plus the ``metadata`` root remap to the physical
-    ``metadata_`` field.
-
-    **``on_unsupported="raise"`` is an interim posture, not the end state.** The
-    enumeration contract specifies split semantics — an unpushable leaf is left
-    unconsumed for the caller's post-filter rather than raising — and this
-    context will use ``"split"`` once the compiler is sound under it. It is not
-    sound today, for the reason below, and the staged raise-then-split rollout
-    is explicitly permitted: raising is a strictly narrower behaviour that a
-    later loosening can widen without breaking a caller. Nothing consumes this
-    context yet, so the interim posture costs nothing and removes both live
-    hazards. The soundness gate flips it back.
+    ``metadata_`` field. ``on_unsupported="split"`` per the enumeration
+    contract: a document enumeration always has an in-memory post-filter
+    available, so an unpushable leaf is left unconsumed rather than raising.
 
     ``occurred_at`` is deliberately absent: no ``document`` row backs it.
     ``compile_surrealdb`` treats the ``field_mapping`` key set as the backend's
     declared+pushable whitelist, so an undeclared system key never emits a
-    predicate against a missing field — the only documents backend where the
-    omission has that effect. Under ``"raise"`` such a leaf now surfaces as a
-    :class:`~khora.filter.model.RecallFilterUnsupportedError` instead of being
-    silently absorbed.
+    predicate against a missing field. Under ``"split"`` such a leaf emits the
+    match-all placeholder, stays out of ``CompiledFilter.consumed_keys``, and
+    reaches the caller's post-filter.
 
-    **Why ``"split"`` is unsafe here until the gate lands.**
-    ``compile_surrealdb`` has no all-or-nothing split gate (the one
-    ``compile_lance`` documents at ``_consumable``), so under ``"split"`` an
-    undeclared leaf emits the literal ``true`` in place, whatever its position
-    in the tree. That is harmless in positive position (``A AND true`` is
-    ``A``) but not under ``$not`` / ``$or``: a filter such as
-    ``{"$not": {"$or": [{"title": "x"}, {"occurred_at": {"$gt": ...}}]}}``
-    compiles to ``!((((title = $f_0)) OR (true)))``, which is ``!true`` — it
-    matches ZERO rows, silently, while ``consumed_keys`` reports ``occurred_at``
-    as still needing a post-filter that can only narrow further. The
-    known-gap test pins this against an explicitly split-mode copy of this
-    context, so the defect stays documented while the shipped context avoids it.
+    That whitelist matters more here than on the SQL backends. Were such a
+    predicate emitted, SQL would ERROR on a column that does not exist — loud,
+    and impossible to mistake for a result — whereas on the SCHEMAFULL
+    ``document`` table a missing field reads ``NONE`` and SurrealQL's
+    total-false absent-compare would return an empty result set that looks
+    exactly like a legitimate no-match. ``compile_surrealdb`` is correspondingly
+    stricter about what counts as declared; see its own gate for the difference.
 
-    **A third gap survives both modes.** ``compile_surrealdb`` raises the
+    **``"split"`` is sound here only because of the all-or-nothing gate.** The
+    ``true`` placeholder an unpushable leaf emits is superset-safe in positive
+    position (``A AND true`` is ``A``) but inverts under ``$not`` / ``$or``:
+    ``{"$not": {"$or": [{"title": "x"}, {"occurred_at": {"$gt": ...}}]}}`` would
+    compile to ``!((((title = $f_0)) OR (true)))`` — ``!true``, matching ZERO
+    rows silently, while ``consumed_keys`` reported ``title`` as pushed and left
+    the caller a post-filter that can only narrow further. ``compile_surrealdb``
+    therefore pushes an ``OR`` / ``NOT`` node only when its ENTIRE subtree is
+    pushable; otherwise the whole node defers to the post-filter, consuming
+    nothing. The filter above now compiles to a bare ``true`` with empty
+    ``consumed_keys``. This context's ``"split"`` posture depends on that gate:
+    relaxing it re-opens the zero-row defect above.
+    ``tests/unit/filter/test_documents_compile_contexts.py`` pins the behaviour.
+
+    **A separate gap survives both modes.** ``compile_surrealdb`` raises the
     internal ``CompileError`` on an unsafe (non-identifier) metadata path
     segment — a hyphenated key such as ``metadata.due-date`` is legal JSON and
     common in the wild — and it does so regardless of ``on_unsupported``, since
@@ -1209,6 +1209,26 @@ def _documents_compile_context() -> CompileContext:
     the documents scan path is obliged to catch it and re-raise it as
     ``RecallFilterUnsupportedError`` so it surfaces as a structured rejection.
     That mapping belongs to the scan path and cannot be implemented from here.
+    The cleaner long-term remedy is compiler-side and deliberately not done in
+    this change: under ``"split"``, "I cannot render this segment as a SurrealQL
+    identifier" is a capability gap, not an internal fault, so the leaf belongs
+    on the unsupported path (placeholder, unconsumed, post-filtered) with
+    ``CompileError`` reserved for ``"raise"``. That has to move the emit path and
+    the gate predicate together — changing only one would make them disagree —
+    which is why it is a follow-up rather than a line here.
+
+    **The enumeration post-filter must evaluate the FULL filter AST
+    unconditionally.** Everything the compiler pushes is a superset filter, but
+    only because of two specific properties — it is not a free-standing
+    guarantee. The all-or-nothing gate above defers a whole subtree it cannot
+    fully express, rather than leaving a ``true`` placeholder inside it that
+    would invert under negation and wrongly EXCLUDE rows; and an undeclared
+    system key defers its own leaf rather than compiling to a ``NONE`` compare
+    that would drop every row. Given both, re-running every leaf in memory can
+    only narrow. Treat ``consumed_keys`` as a reporting and
+    overfetch-sizing signal, not as permission to skip the leaves it names; that
+    keeps caller correctness independent of how precisely the compiler tracks
+    partial pushdown.
 
     ``backend_target`` is the SINGULAR ``document``, the real physical table name
     (``surrealdb/schema.py``), not the plural registry key. ``compile_surrealdb``
@@ -1220,13 +1240,11 @@ def _documents_compile_context() -> CompileContext:
     return CompileContext(
         backend_target="document",
         field_mapping=field_mapping,
-        # Interim posture — see the docstring. The contract specifies "split";
-        # this compiler is not sound under it (an unsupported leaf emits a bare
-        # ``true`` that inverts under ``$not``/``$or``), and the staged
-        # raise-then-split rollout is permitted precisely so a context can ship
-        # narrow and widen later. Flip back to "split" with the compiler
-        # soundness gate.
-        on_unsupported="raise",
+        # The enumeration contract's mode. Safe only because ``compile_surrealdb``
+        # keeps an ``OR`` / ``NOT`` node all-or-nothing — see the docstring; a bare
+        # ``true`` placeholder inside a negated subtree would otherwise match zero
+        # rows silently.
+        on_unsupported="split",
     )
 
 

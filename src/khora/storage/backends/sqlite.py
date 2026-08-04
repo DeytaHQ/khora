@@ -1362,17 +1362,16 @@ from khora.filter import CompileContext, CompilerRegistry, SchemaCapabilities  #
 from khora.filter.compilers.lance import compile_lance  # noqa: E402
 from khora.storage.backends._sqlite_capabilities import sqlite_has_json1  # noqa: E402
 
-# The system keys this table backs with a real column — the single source of
-# truth for the documents tier. Nine of the ten ``SYSTEM_KEYS``; ``occurred_at``
-# is a recall-chunk column and has no ``documents`` counterpart (see the
-# ``CREATE TABLE IF NOT EXISTS documents`` DDL in ``_SCHEMA_SQL`` above).
-# NOTE: ``created_at`` and ``source_timestamp`` are declared here but their
-# pushdown is NOT sound on this store — see the datetime hazard and the
-# forward-coupling alarm in ``_documents_compile_context``'s docstring below.
+# The system keys this table backs with a real column AND can push down soundly
+# — the single source of truth for the documents tier, and the pushdown
+# whitelist the compiler enforces. Seven of the ten ``SYSTEM_KEYS``.
+# ``occurred_at`` is a recall-chunk column and has no ``documents`` counterpart
+# (see the ``CREATE TABLE IF NOT EXISTS documents`` DDL in ``_SCHEMA_SQL``
+# above). ``created_at`` and ``source_timestamp`` are real columns but are
+# withheld on purpose: their stored format makes a pushed comparison silently
+# wrong — see the datetime hazard in ``_documents_compile_context``'s docstring.
 _BACKED_SYSTEM_KEYS: frozenset[str] = frozenset(
     {
-        "created_at",
-        "source_timestamp",
         "source_type",
         "source_name",
         "source_url",
@@ -1387,31 +1386,33 @@ _BACKED_SYSTEM_KEYS: frozenset[str] = frozenset(
 def _documents_compile_context() -> CompileContext:
     """Build the recall-filter :class:`CompileContext` for the ``documents`` table.
 
-    ``field_mapping`` declares the nine backed system keys (identity-mapped to
-    their bare columns) plus the ``metadata`` root remap to the physical
-    ``metadata_`` column — this backend's raw DDL diverges from the shared
-    SQLAlchemy model, which names the same column ``metadata``.
-    ``on_unsupported="split"`` because a document enumeration always has an
-    in-memory post-filter available, so an unpushable leaf is left unconsumed
-    rather than raising.
+    ``field_mapping`` declares the seven system keys this table both backs and
+    can push down soundly (identity-mapped to their bare columns) plus the
+    ``metadata`` root remap to the physical ``metadata_`` column — this backend's
+    raw DDL diverges from the shared SQLAlchemy model, which names the same
+    column ``metadata``. ``on_unsupported="split"`` because a document
+    enumeration always has an in-memory post-filter available, so an unpushable
+    leaf is left unconsumed rather than raising.
 
-    ``occurred_at`` is deliberately absent: no ``documents`` row backs it.
-    ``compile_lance`` does not treat the ``field_mapping`` key set as a pushdown
-    whitelist (``_col`` falls back to identity), so this context alone cannot
-    stop an ``occurred_at`` leaf from compiling to a non-existent column. Worse
-    than the resulting error: the leaf is also reported in
-    ``CompiledFilter.consumed_keys``, so the caller is told it was pushed down
-    and will not post-filter it. The caller must reject or strip the key before
-    compiling.
+    **The declared key set IS the pushdown whitelist.** ``compile_lance`` treats
+    a system key this mapping does not declare as unpushable: the leaf emits the
+    match-all placeholder, is kept out of ``CompiledFilter.consumed_keys``, and
+    reaches the caller's post-filter. Three of the ten system keys are withheld,
+    each for its own reason — the omissions are load-bearing, not oversights.
 
-    **Datetime binds on this table are not safe to push down.** Same class of
-    defect as the ``sqlite_lance`` adapter, different shape. This store writes
-    timestamps with :func:`_dt_to_str`, a bare ``dt.isoformat()`` with **no UTC
-    coercion**, into ``TEXT`` columns; ``compile_lance`` binds a datetime
-    operand as a UTC-normalized ``value.isoformat()`` and relies on
-    lexicographic ISO comparison. The two formats look compatible, which is
-    exactly why this is invisible without materializing a table — but the stored
-    string carries the *writer's* offset while the bind always carries
+    ``occurred_at`` is withheld because no ``documents`` row backs it: pushing it
+    would compile a predicate against a column that does not exist.
+
+    ``created_at`` and ``source_timestamp`` are withheld even though both are
+    real columns, because **datetime binds on this table are not safe to push
+    down.** Same class of defect as the ``sqlite_lance`` adapter, different
+    shape. This store writes timestamps with :func:`_dt_to_str`, a bare
+    ``dt.isoformat()`` with **no UTC coercion**, into ``TEXT`` columns;
+    ``compile_lance`` binds a datetime operand as a UTC-normalized
+    ``value.isoformat()`` and relies on lexicographic ISO comparison. The two
+    formats look compatible, which is exactly why this is invisible without
+    materializing a table — but the stored string carries the *writer's* offset
+    while the bind always carries
     ``+00:00``, so the comparison is on wall clock, not on instant. Against a
     ``$gte`` bound of ``'2026-01-31T12:30:00+00:00'``:
 
@@ -1425,20 +1426,41 @@ def _documents_compile_context() -> CompileContext:
 
     Reachable in practice: ``source_timestamp`` is caller-supplied with no
     default and no timezone normalization anywhere on this write path. This
-    cannot be corrected from a compile context — a caller using this context
-    must route the date-valued system keys to its post-filter.
+    cannot be corrected from a compile context — the date-valued system keys
+    have to reach the caller's post-filter, and withholding them from the
+    mapping is what sends them there.
 
-    **When the pushdown whitelist gate lands, drop ``created_at`` and
-    ``source_timestamp`` from ``_BACKED_SYSTEM_KEYS`` above.** They are declared
-    today only because ``compile_lance`` ignores the key set — every logical key
-    falls through to identity, so declaring them changes nothing and removing
-    them would make the mapping understate what it declares. Once the compiler
-    honours the key set as a pushdown whitelist, leaving them declared *keeps*
-    pushing the broken comparison described above; removing them routes both
-    keys to the caller's post-filter instead. The test signal for that edit is
-    INVERTED — forgetting the drop leaves both keys consumed and every test
-    green, while remembering it forces a test update — so this note is the
-    alarm.
+    **Withholding the two keys is what enforces that remedy.** While the
+    compiler still fell back to identity for an undeclared key, declaring them
+    was free and dropping them would only have understated the mapping. Now that
+    the key set is honoured as a whitelist, declaring them would *keep* pushing
+    the broken comparison above; leaving them out routes both to the post-filter.
+    Re-adding either key to ``_BACKED_SYSTEM_KEYS`` re-opens the silent
+    wrong-rows defect — including the unrecoverable false-exclude, which no
+    post-filter can undo — and the compiler cannot catch that for you: the
+    mapping is the only place the constraint lives.
+
+    **The same write shape reaches the chunk rows** — :func:`_dt_to_str` also
+    writes ``chunks.created_at`` / ``chunks.source_timestamp`` — but nothing is
+    broken there today, because ``documents`` is this backend's only registered
+    compile target and no chunk-tier context exists to push a date predicate.
+    Adding one would reintroduce the hazard on the chunk tier; that context
+    would have to withhold the same two keys, or the write path would have to
+    UTC-coerce first (:func:`khora.storage.temporal.sqlite_lance._dt_to_iso` is
+    the correct shape) plus backfill the existing rows.
+
+    **The enumeration post-filter must evaluate the FULL filter AST
+    unconditionally.** Everything the compiler pushes is a superset filter, but
+    only because of two specific properties — it is not a free-standing
+    guarantee. The all-or-nothing ``$or`` / ``$not`` gate defers a whole subtree
+    it cannot fully express, rather than leaving a match-all placeholder inside
+    it that would invert under negation and wrongly EXCLUDE rows; and keys whose
+    stored format does not order against this compiler's binds are kept out of
+    the declared mapping entirely, per the paragraphs above. Given both,
+    re-running every leaf in memory can only narrow. Treat ``consumed_keys`` as a
+    reporting and overfetch-sizing signal, not as permission to skip the leaves
+    it names; that keeps caller correctness independent of how precisely the
+    compiler tracks partial pushdown.
     """
     field_mapping = {key: key for key in _BACKED_SYSTEM_KEYS} | {"metadata": "metadata_"}
     return CompileContext(
