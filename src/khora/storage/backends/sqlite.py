@@ -448,7 +448,7 @@ class SQLiteRelationalBackend:
         where = " AND ".join(conditions)
         params.extend([limit, offset])
         cursor = await self._conn.execute(
-            f"SELECT * FROM documents WHERE {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",  # noqa: S608
+            f"SELECT * FROM documents WHERE {where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",  # noqa: S608
             params,
         )
         rows = await cursor.fetchall()

@@ -381,7 +381,7 @@ class SurrealDBRelationalAdapter:
         limit: int = 100,
         offset: int = 0,
     ) -> list[Document]:
-        """List documents in a namespace, newest first."""
+        """List documents in a namespace, newest first, ties broken by descending id."""
         ns_str = str(namespace_id)
         conditions = ["namespace_id = $ns"]
         params: dict = {"ns": ns_str, "lim": limit, "off": offset}
@@ -393,7 +393,7 @@ class SurrealDBRelationalAdapter:
             params["updated_before"] = updated_before.isoformat()
         where = " AND ".join(conditions)
         rows = await self._conn.query(
-            f"SELECT * FROM document WHERE {where} ORDER BY created_at DESC LIMIT $lim START $off",  # noqa: S608
+            f"SELECT * FROM document WHERE {where} ORDER BY created_at DESC, id DESC LIMIT $lim START $off",  # noqa: S608
             params,
         )
         return [self._row_to_document(r) for r in rows]

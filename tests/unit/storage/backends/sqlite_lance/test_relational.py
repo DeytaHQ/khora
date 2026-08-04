@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -17,6 +17,7 @@ except ImportError:
 
 from khora.core.models import Document, MemoryNamespace, TenancyMode
 from khora.core.models.document import DocumentStatus
+from tests.test_helpers.document_order import id_ladder, seed_order, walk_pages
 
 pytestmark = pytest.mark.skipif(not _HAS_EMBEDDED, reason="aiosqlite/lancedb not installed")
 
@@ -308,6 +309,66 @@ async def test_dedup_excludes_failed_documents(adapter, namespace):
     await adapter.create_document(failed)
 
     assert await adapter.get_document_by_checksum(namespace.id, "same") is None
+
+
+# ---------------------------------------------------------------------------
+# list_documents total order
+# ---------------------------------------------------------------------------
+#
+# ``list_documents`` sorts on ``(created_at DESC, id DESC)``. Bulk ingest stamps
+# many documents with the same ``created_at``; on that seed ``created_at`` alone
+# leaves the sort under-determined and row positions are not addressable. See
+# ``tests.test_helpers.document_order`` for why the seed below is non-vacuous.
+
+_ORDER_SEED_SIZE = 12
+
+
+async def _seed_tied_documents(adapter, namespace) -> list:
+    """Seed ``_ORDER_SEED_SIZE`` documents sharing one ``created_at``.
+
+    Rows are written in ``seed_order`` (non-monotonic by id) so that neither
+    insertion order nor its reverse can coincide with the expected sequence.
+    """
+    shared_created_at = datetime.now(UTC)
+    ids = id_ladder(_ORDER_SEED_SIZE)
+    for i, doc_id in enumerate(seed_order(ids)):
+        doc = _make_document(namespace.id, checksum=f"sum-{i}")
+        doc.id = doc_id
+        doc.created_at = shared_created_at
+        doc.updated_at = shared_created_at
+        await adapter.create_document(doc)
+    return ids
+
+
+async def test_list_documents_ties_break_on_id_desc_and_repeat_identically(adapter, namespace):
+    ids = await _seed_tied_documents(adapter, namespace)
+
+    docs = await adapter.list_documents(namespace.id)
+
+    # The tie is real: if these differed, ``created_at`` alone would decide the
+    # order and the id tie-break would never be exercised.
+    assert len({d.created_at for d in docs}) == 1
+    assert [d.id for d in docs] == sorted(ids, reverse=True)
+
+    # Same query, same answer - the order is a property of the query, not of
+    # whatever the scan happened to produce on the first call.
+    for _ in range(2):
+        assert [d.id for d in await adapter.list_documents(namespace.id)] == [d.id for d in docs]
+
+
+async def test_list_documents_offset_pagination_is_exhaustive_and_non_overlapping(adapter, namespace):
+    ids = await _seed_tied_documents(adapter, namespace)
+    expected = sorted(ids, reverse=True)
+
+    # Page size deliberately does not divide the seed size, so the final page is
+    # short and an off-by-one at the boundary shows up.
+    pages = await walk_pages(adapter.list_documents, namespace.id, page_size=5)
+    seen = [d.id for page in pages for d in page]
+
+    assert [len(p) for p in pages] == [5, 5, 2]
+    assert len(seen) == len(set(seen))  # no document served twice
+    assert set(seen) == set(expected)  # every document served
+    assert seen == expected  # and in the same order as the unpaged read
 
 
 # ---------------------------------------------------------------------------
