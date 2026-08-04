@@ -53,6 +53,7 @@ import os
 import socket
 import sqlite3
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
@@ -143,14 +144,41 @@ def _indexed_columns(indexdef: str) -> list[str]:
     return [c.strip() for c in inner.split(",")]
 
 
+@pytest.fixture(scope="module")
+def scratch_db_url() -> Iterator[str]:
+    """A throwaway Postgres database at head, for the rewind tests below.
+
+    These tests downgrade and re-upgrade, so they must NOT run against the
+    shared dev database. CI runs the integration job with
+    ``--timeout-method=thread``, which kills the process outright - ``finally``
+    blocks do not run. A rewind-then-restore against the shared database would
+    therefore leave it stranded at the previous revision on timeout, and every
+    later test in the serial job would fail against a stale schema with the real
+    cause several tests back. Owning the database removes the hazard rather than
+    narrowing the window: the worst a timeout can do here is leak one uniquely
+    named database.
+    """
+    maintenance_url = _maintenance_url(DATABASE_URL)
+    db_name = f"khora_mig054_lifecycle_{uuid.uuid4().hex[:8]}"
+
+    try:
+        asyncio.run(_create_database(maintenance_url, db_name))
+    except Exception as exc:  # pragma: no cover - depends on role privileges
+        pytest.skip(f"cannot create a throwaway database (needs CREATEDB): {exc}")
+
+    url = _with_database(DATABASE_URL, db_name)
+    try:
+        command.upgrade(_make_config(url), "head")
+        yield url
+    finally:
+        asyncio.run(_drop_database(maintenance_url, db_name))
+
+
 @skip_no_pg
 class TestMigration054IndexLifecycle:
-    def test_head_has_widened_index_and_dropped_the_narrow_one(self) -> None:
+    def test_head_has_widened_index_and_dropped_the_narrow_one(self, scratch_db_url: str) -> None:
         """At head: 3-column index present with the covering column order, 2-column gone."""
-        cfg = _make_config(DATABASE_URL)
-        command.upgrade(cfg, _HEAD)  # idempotent when the dev DB is already at head
-
-        indexes = asyncio.run(_documents_indexes(DATABASE_URL))
+        indexes = asyncio.run(_documents_indexes(scratch_db_url))
 
         assert NEW_INDEX in indexes, f"{NEW_INDEX} missing at head; found {sorted(indexes)}"
         assert _indexed_columns(indexes[NEW_INDEX]) == ["namespace_id", "created_at", "id"], (
@@ -166,29 +194,29 @@ class TestMigration054IndexLifecycle:
             "so keeping both costs an index maintenance write per document insert"
         )
 
-    def test_downgrade_restores_the_narrow_index_and_removes_the_wide_one(self) -> None:
+    def test_downgrade_restores_the_narrow_index_and_removes_the_wide_one(self, scratch_db_url: str) -> None:
         """Downgrading to the previous revision mirrors the upgrade exactly."""
-        cfg = _make_config(DATABASE_URL)
-        command.upgrade(cfg, _HEAD)
+        cfg = _make_config(scratch_db_url)
 
         try:
             command.downgrade(cfg, _PREV)
-            indexes = asyncio.run(_documents_indexes(DATABASE_URL))
+            indexes = asyncio.run(_documents_indexes(scratch_db_url))
 
             assert OLD_INDEX in indexes, f"downgrade did not restore {OLD_INDEX}; found {sorted(indexes)}"
             assert _indexed_columns(indexes[OLD_INDEX]) == ["namespace_id", "created_at"]
             assert NEW_INDEX not in indexes, f"downgrade left {NEW_INDEX} behind"
         finally:
-            # Always restore the true chain head - "head" rather than the pinned
-            # _HEAD stays correct once a later migration lands on top of 054.
+            # Leave the module's database back at head for the sibling tests.
+            # This is intra-module hygiene only - the database is this module's
+            # own, so a killed process cannot strand anything shared.
             command.upgrade(cfg, "head")
 
         # Re-running the upgrade rebuilds the wide index: IF NOT EXISTS re-run safety.
-        indexes = asyncio.run(_documents_indexes(DATABASE_URL))
+        indexes = asyncio.run(_documents_indexes(scratch_db_url))
         assert NEW_INDEX in indexes
         assert OLD_INDEX not in indexes
 
-    def test_post_downgrade_state_satisfies_the_unqualified_drop_below(self) -> None:
+    def test_post_downgrade_state_satisfies_the_unqualified_drop_below(self, scratch_db_url: str) -> None:
         """After downgrading past 054, the earlier migration's drop still works.
 
         That migration removes the 2-column index with a bare
@@ -197,12 +225,11 @@ class TestMigration054IndexLifecycle:
         exact statement against the post-downgrade database inside a transaction
         that is rolled back, so the check is the real thing and leaves no trace.
         """
-        cfg = _make_config(DATABASE_URL)
-        command.upgrade(cfg, _HEAD)
+        cfg = _make_config(scratch_db_url)
 
         try:
             command.downgrade(cfg, _PREV)
-            asyncio.run(_assert_unqualified_drop_succeeds(DATABASE_URL))
+            asyncio.run(_assert_unqualified_drop_succeeds(scratch_db_url))
         finally:
             command.upgrade(cfg, "head")
 
@@ -228,12 +255,22 @@ async def _assert_unqualified_drop_succeeds(url: str) -> None:
 
 
 @skip_no_pg
+@pytest.mark.slow
 class TestMigration054DowngradeWalk:
     """End-to-end downgrade walk, on a throwaway database.
 
     Walking dozens of migrations backwards drops real tables, so this never
     touches the shared dev database - it creates its own, walks it, and drops
     it again.
+
+    Marked ``slow``: one test does CREATE DATABASE, the full migration chain up,
+    a ~36-step walk back down, and DROP DATABASE. That is far and away the most
+    expensive test in this module, and it is excluded from the default local run
+    by the ``-m "not slow"`` default in ``pyproject.toml``. Note the CI
+    integration job selects on ``-m "integration and not filter_conformance"``,
+    which does NOT exclude ``slow`` - so this still runs there, which is where
+    the coverage is wanted. The SQLite lifecycle class below walks the same path
+    cheaply on every run, so nothing is lost when this one is skipped locally.
     """
 
     def test_downgrade_walks_past_the_index_origin_without_error(self) -> None:

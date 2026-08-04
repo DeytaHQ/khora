@@ -174,23 +174,98 @@ class TestORMMigrationDrift:
 # ---------------------------------------------------------------------------
 
 
-def _index_ops(migration_file: str, func_name: str) -> tuple[dict[str, tuple[str, ...]], set[str]]:
-    """Extract the index DDL a migration's ``upgrade``/``downgrade`` performs.
+IndexOps = tuple[dict[str, tuple[str, ...]], set[str]]
+"""``(created, dropped)``: created maps index name to its ORDERED column tuple."""
 
-    Returns ``(created, dropped)`` where ``created`` maps index name to its
-    ORDERED column tuple and ``dropped`` is the set of index names removed.
+
+def _mentions_is_postgres(test: ast.expr) -> bool:
+    return any(isinstance(n, ast.Name) and n.id == "_is_postgres" for n in ast.walk(test))
+
+
+def _dialect_branches(func: ast.FunctionDef) -> dict[str, list[ast.stmt]]:
+    """Split a migration function body into its per-dialect branches.
+
+    Returns ``{"postgresql": [...], "other": [...]}`` for a dialect-gated
+    migration, or ``{"": [...]}`` for one that issues the same DDL everywhere.
+
+    Splitting matters because the two branches emit the SAME index names via
+    DIFFERENT spellings. Scanning the whole function body into one dict keyed by
+    index name lets whichever branch is visited last silently overwrite the
+    other, so a Postgres branch declaring the wrong column ORDER would be masked
+    by a correct SQLite branch. Both branches have to be checked on their own.
+
+    Handles the two shapes this codebase uses:
+
+    * ``if _is_postgres(): <A> else: <B>`` - and the negated spelling.
+    * ``if not _is_postgres(): return`` followed by the Postgres DDL, i.e. the
+      early-return form. Statements after the ``If`` belong to the branch that
+      falls through, so a migration that silently no-ops on SQLite yields an
+      EMPTY ``other`` branch and trips the assertions below rather than passing.
+    """
+    for i, stmt in enumerate(func.body):
+        if isinstance(stmt, ast.If) and _mentions_is_postgres(stmt.test):
+            negated = isinstance(stmt.test, ast.UnaryOp) and isinstance(stmt.test.op, ast.Not)
+            rest = func.body[i + 1 :]
+            if negated:
+                return {"postgresql": stmt.orelse + rest, "other": stmt.body}
+            return {"postgresql": stmt.body, "other": stmt.orelse + rest}
+    return {"": func.body}
+
+
+def _scan(nodes: list[ast.stmt]) -> IndexOps:
+    """Collect index DDL from a list of statements.
+
+    Both spellings are recognised, since a dialect-gated migration typically
+    uses raw SQL on one branch and the Alembic helpers on the other:
+
+    * ``op.execute("CREATE INDEX ... ON t (a, b)")`` / ``op.execute("DROP INDEX ...")``
+    * ``op.create_index("name", "t", ["a", "b"])`` / ``op.drop_index("name", ...)``
+    """
+    created: dict[str, tuple[str, ...]] = {}
+    dropped: set[str] = set()
+
+    for root in nodes:
+        for node in ast.walk(root):
+            if not isinstance(node, ast.Call):
+                continue
+            target = node.func
+            if not (
+                isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) and target.value.id == "op"
+            ):
+                continue
+
+            if target.attr == "execute" and node.args and isinstance(node.args[0], ast.Constant):
+                statement = str(node.args[0].value)
+                collapsed = " ".join(statement.split())
+                upper = collapsed.upper()
+                if upper.startswith("CREATE INDEX"):
+                    head, _, cols = collapsed.partition("(")
+                    name = head.split()[-3]  # "... <name> ON <table>"
+                    created[name] = tuple(c.strip() for c in cols.rstrip(")").split(","))
+                elif upper.startswith("DROP INDEX"):
+                    dropped.add(collapsed.split()[-1])
+
+            elif target.attr == "create_index" and len(node.args) >= 3:
+                name_node, cols_node = node.args[0], node.args[2]
+                if isinstance(name_node, ast.Constant) and isinstance(cols_node, ast.List):
+                    created[str(name_node.value)] = tuple(
+                        str(c.value) for c in cols_node.elts if isinstance(c, ast.Constant)
+                    )
+
+            elif target.attr == "drop_index" and node.args and isinstance(node.args[0], ast.Constant):
+                dropped.add(str(node.args[0].value))
+
+    return created, dropped
+
+
+def _index_ops(migration_file: str, func_name: str) -> dict[str, IndexOps]:
+    """Extract the index DDL a migration performs, KEYED BY DIALECT BRANCH.
 
     Parsed from the AST rather than by regex over the raw source, because the
     concurrent-index DDL is written as adjacent string literals that Python
     concatenates at parse time - a regex over the source text would see the
     statement split across two fragments and match neither. The AST hands back
     the already-joined constant.
-
-    Both spellings are recognised, so this keeps working if a dialect-gated
-    branch is added alongside the raw-SQL one:
-
-    * ``op.execute("CREATE INDEX ... ON t (a, b)")`` / ``op.execute("DROP INDEX ...")``
-    * ``op.create_index("name", "t", ["a", "b"])`` / ``op.drop_index("name", ...)``
     """
     source = (VERSIONS_DIR / migration_file).read_text()
     tree = ast.parse(source)
@@ -200,38 +275,7 @@ def _index_ops(migration_file: str, func_name: str) -> tuple[dict[str, tuple[str
     )
     assert func is not None, f"{migration_file} defines no {func_name}()"
 
-    created: dict[str, tuple[str, ...]] = {}
-    dropped: set[str] = set()
-
-    for node in ast.walk(func):
-        if not isinstance(node, ast.Call):
-            continue
-        target = node.func
-        if not (isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) and target.value.id == "op"):
-            continue
-
-        if target.attr == "execute" and node.args and isinstance(node.args[0], ast.Constant):
-            statement = str(node.args[0].value)
-            collapsed = " ".join(statement.split())
-            upper = collapsed.upper()
-            if upper.startswith("CREATE INDEX"):
-                head, _, cols = collapsed.partition("(")
-                name = head.split()[-3]  # "... <name> ON <table>"
-                created[name] = tuple(c.strip() for c in cols.rstrip(")").split(","))
-            elif upper.startswith("DROP INDEX"):
-                dropped.add(collapsed.split()[-1])
-
-        elif target.attr == "create_index" and len(node.args) >= 3:
-            name_node, cols_node = node.args[0], node.args[2]
-            if isinstance(name_node, ast.Constant) and isinstance(cols_node, ast.List):
-                created[str(name_node.value)] = tuple(
-                    str(c.value) for c in cols_node.elts if isinstance(c, ast.Constant)
-                )
-
-        elif target.attr == "drop_index" and node.args and isinstance(node.args[0], ast.Constant):
-            dropped.add(str(node.args[0].value))
-
-    return created, dropped
+    return {branch: _scan(body) for branch, body in _dialect_branches(func).items()}
 
 
 def _orm_index_columns(table_name: str, index_name: str) -> tuple[str, ...] | None:
@@ -262,12 +306,32 @@ class TestDocumentsCreatedAtIndexAgreement:
     Column ORDER is asserted, not just membership. ``(namespace_id,
     created_at, id)`` covers the query; a permutation such as ``(namespace_id,
     id, created_at)`` does not, and a set comparison would wave it through.
+
+    EVERY dialect branch is asserted independently. The migration emits the same
+    index names through different spellings per dialect, and the embedded stack
+    takes its schema from this chain and nothing else - so a branch that creates
+    the wrong index, the wrong column order, or nothing at all is a real defect
+    on that dialect even when its sibling branch is correct.
     """
 
     MIGRATION = "054_documents_namespace_created_at_id.py"
     NEW_INDEX = "ix_documents_namespace_created_at_id"
     OLD_INDEX = "ix_documents_namespace_created_at"
     EXPECTED_COLUMNS = ("namespace_id", "created_at", "id")
+
+    def test_migration_is_branched_per_dialect(self):
+        """Guard the guard: the per-branch assertions below need branches to exist.
+
+        If the migration is ever collapsed to a single unbranched body, the
+        parser yields one nameless branch and the loops below would assert
+        against it once instead of twice - still correct, but quietly weaker
+        than it reads. Pin the shape so that change is visible.
+        """
+        for func_name in ("upgrade", "downgrade"):
+            branches = _index_ops(self.MIGRATION, func_name)
+            assert set(branches) == {"postgresql", "other"}, (
+                f"{self.MIGRATION} {func_name}() no longer splits per dialect; found branches {sorted(branches)}"
+            )
 
     def test_orm_declares_the_sort_covering_index(self):
         """The ORM carries the 3-column index, in the covering order."""
@@ -282,19 +346,29 @@ class TestDocumentsCreatedAtIndexAgreement:
         assert _orm_index_columns("documents", self.OLD_INDEX) is None
 
     def test_migration_creates_exactly_what_the_orm_declares(self):
-        """Migration upgrade builds the index the ORM declares, same columns, same order."""
-        created, _ = _index_ops(self.MIGRATION, "upgrade")
-
-        assert self.NEW_INDEX in created, (
-            f"{self.MIGRATION} upgrade() does not create {self.NEW_INDEX}; it creates {sorted(created)}"
-        )
-        assert created[self.NEW_INDEX] == _orm_index_columns("documents", self.NEW_INDEX)
-        assert created[self.NEW_INDEX] == self.EXPECTED_COLUMNS
+        """Every branch of upgrade builds the ORM's index, same columns, same order."""
+        for branch, (created, _dropped) in _index_ops(self.MIGRATION, "upgrade").items():
+            assert self.NEW_INDEX in created, (
+                f"{self.MIGRATION} upgrade() [{branch} branch] does not create {self.NEW_INDEX}; "
+                f"it creates {sorted(created)}. A branch that skips the index leaves that dialect "
+                "on the narrower one."
+            )
+            assert created[self.NEW_INDEX] == _orm_index_columns("documents", self.NEW_INDEX), (
+                f"upgrade() [{branch} branch] disagrees with the ORM: "
+                f"{created[self.NEW_INDEX]} vs {_orm_index_columns('documents', self.NEW_INDEX)}"
+            )
+            assert created[self.NEW_INDEX] == self.EXPECTED_COLUMNS, (
+                f"upgrade() [{branch} branch] built {created[self.NEW_INDEX]}, "
+                f"expected {self.EXPECTED_COLUMNS} - column order is what makes it cover the sort"
+            )
 
     def test_migration_drops_the_superseded_index(self):
-        """Upgrade removes the 2-column index the 3-column one subsumes."""
-        _, dropped = _index_ops(self.MIGRATION, "upgrade")
-        assert self.OLD_INDEX in dropped
+        """Every branch of upgrade removes the 2-column index the 3-column one subsumes."""
+        for branch, (_created, dropped) in _index_ops(self.MIGRATION, "upgrade").items():
+            assert self.OLD_INDEX in dropped, (
+                f"upgrade() [{branch} branch] leaves {self.OLD_INDEX} in place; it shares a prefix "
+                f"with {self.NEW_INDEX}, so both would be maintained on every insert"
+            )
 
     def test_downgrade_restores_the_superseded_index(self):
         """Downgrade must put the 2-column index back, with its original columns.
@@ -303,13 +377,17 @@ class TestDocumentsCreatedAtIndexAgreement:
         drops it by an unqualified ``op.drop_index(...)``, which errors if the
         index is absent - so a downgrade that walks past it would fail outright
         unless this migration restores it on the way down.
-        """
-        created, dropped = _index_ops(self.MIGRATION, "downgrade")
 
-        assert created.get(self.OLD_INDEX) == ("namespace_id", "created_at"), (
-            f"downgrade() must recreate {self.OLD_INDEX} on (namespace_id, created_at); it creates {created}"
-        )
-        assert self.NEW_INDEX in dropped, "downgrade() must remove the 3-column index"
+        Asserted per branch: the walk past that migration happens on whichever
+        dialect the operator is running, so a restore present on only one of
+        them leaves the other broken.
+        """
+        for branch, (created, dropped) in _index_ops(self.MIGRATION, "downgrade").items():
+            assert created.get(self.OLD_INDEX) == ("namespace_id", "created_at"), (
+                f"downgrade() [{branch} branch] must recreate {self.OLD_INDEX} on "
+                f"(namespace_id, created_at); it creates {created}"
+            )
+            assert self.NEW_INDEX in dropped, f"downgrade() [{branch} branch] must remove the 3-column index"
 
 
 # ---------------------------------------------------------------------------

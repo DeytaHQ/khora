@@ -39,12 +39,30 @@ from uuid import UUID, uuid4
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import event, select
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy import event
 
 from khora.db.models import DocumentModel
 
-pytestmark = [pytest.mark.integration, pytest.mark.embedded]
+try:
+    import aiosqlite  # noqa: F401
+    import lancedb  # noqa: F401
+
+    _HAS_EMBEDDED = True
+except ImportError:
+    _HAS_EMBEDDED = False
+
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.embedded,
+    pytest.mark.skipif(not _HAS_EMBEDDED, reason="aiosqlite/lancedb not installed"),
+]
+
+if _HAS_EMBEDDED:
+    from khora.storage.backends.sqlite_lance.connection import (
+        EmbeddedStorageHandle,
+        EmbeddedStorageHandleConfig,
+    )
+    from khora.storage.backends.sqlite_lance.relational import SQLiteLanceRelationalAdapter
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "src" / "khora" / "db" / "migrations"
 
@@ -127,13 +145,25 @@ def pristine_db() -> Iterator[Path]:
 
 
 @pytest.fixture
-async def engine(mutable_db) -> AsyncIterator[AsyncEngine]:
+async def adapter(mutable_db, tmp_path) -> AsyncIterator[SQLiteLanceRelationalAdapter]:
+    """The REAL embedded relational backend, opened on the seeded database.
+
+    The plan assertions have to be made against the query the shipped
+    ``list_documents`` emits. Driving the actual adapter is what guarantees
+    that: reorder the ``order_by`` in the backend and these tests change
+    behaviour, which a locally rebuilt ``select(DocumentModel)`` would not.
+    """
     db_path, _ = mutable_db
-    eng = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    handle = EmbeddedStorageHandle(
+        EmbeddedStorageHandleConfig(db_path=str(db_path), lance_path=str(tmp_path / "khora.lance")),
+    )
+    be = SQLiteLanceRelationalAdapter(handle)
+    await be.connect()
     try:
-        yield eng
+        yield be
     finally:
-        await eng.dispose()
+        await be.disconnect()
+        await handle.disconnect()
 
 
 def _documents_indexes(db_path: Path) -> dict[str, str]:
@@ -147,37 +177,33 @@ def _documents_indexes(db_path: Path) -> dict[str, str]:
     return {name: sql or "" for name, sql in rows}
 
 
-async def _capture_list_documents_sql(engine: AsyncEngine, namespace_id: UUID, *, offset: int) -> tuple[str, Any]:
+async def _capture_list_documents_sql(
+    adapter: SQLiteLanceRelationalAdapter, namespace_id: UUID, *, offset: int
+) -> tuple[str, Any]:
     """Return the SQL the embedded ``list_documents`` emits, plus its parameters.
 
-    Built from the ORM statement the backend constructs and captured off the
-    live cursor, rather than hand-written here - a hand-written query would
-    drift from the implementation and the test would assert a good plan for a
-    query nobody runs.
+    Captured off the live cursor while the REAL backend method runs, rather than
+    rebuilt here. A locally constructed ``select(DocumentModel)`` would drift the
+    moment someone edits ``list_documents`` - and the test would then keep
+    passing while asserting a good plan for a query nobody runs, which is the
+    exact failure this indirection exists to prevent. Mirrors the Postgres
+    sibling module.
     """
+    engine = adapter._engine
+    assert engine is not None, "adapter is not connected"
     captured: list[tuple[str, Any]] = []
 
     def _capture(conn, cursor, statement, parameters, context, executemany) -> None:
         if "documents" in statement and "ORDER BY" in statement:
             captured.append((statement, parameters))
 
-    stmt = (
-        select(DocumentModel)
-        .where(DocumentModel.namespace_id == namespace_id)
-        .limit(PAGE_SIZE)
-        .offset(offset)
-        .order_by(DocumentModel.created_at.desc(), DocumentModel.id.desc())
-    )
-
     event.listen(engine.sync_engine, "before_cursor_execute", _capture)
     try:
-        async with engine.connect() as conn:
-            result = await conn.execute(stmt)
-            rows = result.fetchall()
+        docs = await adapter.list_documents(namespace_id, limit=PAGE_SIZE, offset=offset)
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", _capture)
 
-    assert len(rows) == PAGE_SIZE, f"seed too small: page at offset {offset} returned {len(rows)} rows"
+    assert len(docs) == PAGE_SIZE, f"seed too small: page at offset {offset} returned {len(docs)} rows"
     assert captured, "no SELECT against documents was captured"
     return captured[-1]
 
@@ -206,9 +232,9 @@ class TestSqliteSortIndexDifferential:
     planner.
     """
 
-    async def _plan_with_index(self, engine: AsyncEngine, mutable_db, create_sql: str) -> list[str]:
+    async def _plan_with_index(self, adapter: SQLiteLanceRelationalAdapter, mutable_db, create_sql: str) -> list[str]:
         db_path, ns = mutable_db
-        statement, parameters = await _capture_list_documents_sql(engine, ns, offset=0)
+        statement, parameters = await _capture_list_documents_sql(adapter, ns, offset=0)
 
         con = sqlite3.connect(db_path)
         try:
@@ -222,9 +248,9 @@ class TestSqliteSortIndexDifferential:
 
         return _query_plan(db_path, statement, parameters)
 
-    async def test_two_column_index_forces_a_sort(self, engine: AsyncEngine, mutable_db) -> None:
+    async def test_two_column_index_forces_a_sort(self, adapter, mutable_db) -> None:
         plan = await self._plan_with_index(
-            engine, mutable_db, f"CREATE INDEX {OLD_INDEX} ON documents (namespace_id, created_at)"
+            adapter, mutable_db, f"CREATE INDEX {OLD_INDEX} ON documents (namespace_id, created_at)"
         )
         assert any(OLD_INDEX in line for line in plan), f"expected the 2-column index to be used: {plan}"
         assert _sorts(plan), (
@@ -232,9 +258,9 @@ class TestSqliteSortIndexDifferential:
             f"if it does not, this module's premise is wrong. Plan: {plan}"
         )
 
-    async def test_three_column_index_removes_the_sort(self, engine: AsyncEngine, mutable_db) -> None:
+    async def test_three_column_index_removes_the_sort(self, adapter, mutable_db) -> None:
         plan = await self._plan_with_index(
-            engine, mutable_db, f"CREATE INDEX {NEW_INDEX} ON documents (namespace_id, created_at, id)"
+            adapter, mutable_db, f"CREATE INDEX {NEW_INDEX} ON documents (namespace_id, created_at, id)"
         )
         assert any(NEW_INDEX in line for line in plan), f"expected the 3-column index to be used: {plan}"
         assert not _sorts(plan), (

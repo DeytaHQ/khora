@@ -99,23 +99,59 @@ PAGE_SIZE = 100
 # Timestamp granularity: bulk ingest stamps many documents with the same
 # ``created_at``, so ties are the realistic case and the trailing ``id`` key is
 # load-bearing rather than decorative.
+#
+# Note this is the FAVORABLE case for the change. The ORM stamps ``created_at``
+# per row, so production tie-groups are often size 1 and PG's win is smaller
+# than a tie-heavy seed suggests. It does not affect the plan-shape assertions,
+# which hold at any group size.
 ROWS_PER_TIMESTAMP = 50
+
+# WARNING - the seed's INSERT ORDER is load-bearing, not incidental.
+#
+# ``_rows`` writes ``i`` ascending while ``created_at`` descends, so physical
+# heap order is almost exactly the reverse of index order and
+# ``pg_stats.correlation`` lands near -1. PG interpolates an index scan's
+# heap-access cost between its random and sequential bounds by that
+# correlation, so a near-perfect value collapses the cost of the ~100 (or, at
+# depth, ~2900) heap fetches these queries perform. Without it, default
+# ``random_page_cost = 4.0`` makes an index scan roughly 2.5x more expensive
+# than a seq scan plus top-N heapsort at this table size, and the Seq Scan
+# guard below fires - for a reason that has nothing to do with the index being
+# wrong.
+#
+# So: do NOT "tidy" this fixture by shuffling the seed or inserting in id
+# order. If you need to change the write order, expect to raise the row counts
+# to compensate, and re-run against real Postgres rather than reasoning about
+# it - the cost model here is not intuitive.
 
 # Documents seeded into OTHER namespaces, so the namespace filter is selective.
 #
-# This is load-bearing, not padding. `documents` also carries a single-column
-# `ix_documents_created_at` (added by an earlier temporal-search migration). If
-# every row in the table belongs to the namespace under test, `WHERE
-# namespace_id = ?` excludes nothing, and at a deep offset the planner correctly
-# prefers a backward scan of that narrower single-column index - it reads fewer
-# pages to reach the same rows, and the namespace-leading index buys it nothing.
-# The plan then legitimately stops using the index this migration adds.
+# These are the only thing that makes ``namespace_id`` a DISCRIMINATING key, and
+# without that there is no cost reason for PG to prefer a 3-column index over a
+# 1-column one on the same leading sort column. Not realism dressing - the
+# assertions below are meaningless without them. Learned from a CI failure, so
+# the reasoning is recorded rather than left to be rediscovered:
 #
-# That is an artifact of an all-one-namespace table, not of production. Khora is
-# multi-tenant: a namespace is a fraction of `documents`, which is exactly the
-# regime where the namespace-leading index wins. Seeding decoy namespaces makes
-# the fixture match that regime, so the assertions below measure the index
-# rather than the seed's shape.
+# ``documents`` also carries a single-column ``ix_documents_created_at`` (from an
+# earlier temporal-search migration). Both it and the 3-column index lead on
+# ``created_at``, so the near-perfect heap correlation described above discounts
+# BOTH equally - heap access stops being the discriminator, and the tiebreak
+# becomes index entry width: one timestamptz (~8 bytes) against
+# uuid + timestamptz + uuid (~40). At ``OFFSET 2800`` the scan traverses ~2900
+# entries, so that 3-4x page difference decides it and the narrower index wins.
+# This is why the failure appeared at depth and not on the first page.
+#
+# Decoy rows break that tie. ``ix_documents_created_at`` carries no
+# ``namespace_id``, so every tuple it returns needs a recheck - free when one
+# namespace is 100% of the table, but real work once the table holds rows the
+# scan must read and discard, while the 3-column index seeks straight to the
+# namespace's range. Khora is multi-tenant, so that is also the production
+# regime.
+#
+# Seed the decoys across the SAME timestamp range as the namespace under test
+# (see ``seeded_namespace``): decoys bunched at one end would let a
+# created_at-ordered scan skip them in a single range, leaving the filter
+# selective in name only.
 DECOY_NAMESPACES = 4
 DECOY_ROWS_EACH = 3000
 
@@ -268,6 +304,34 @@ def _sort_nodes(root: dict) -> list[str]:
     return [t for t in _node_types(root) if "Sort" in t]
 
 
+def _render(root: dict) -> str:
+    """Compact one-line-per-node rendering of a plan tree, for failure output.
+
+    Every assertion below reports this rather than just the node it tripped on.
+    A plan-shape test that fails with only ``{'ix_documents_created_at'}`` tells
+    you which index lost but not what the planner did instead - and since these
+    tests only ever run in CI, a failure that needs a follow-up run to diagnose
+    costs a whole cycle. The interesting attributes are the ones that explain a
+    choice: which index, which direction, and what any sort is sorting on.
+    """
+    lines: list[str] = []
+
+    def walk(node: dict, depth: int) -> None:
+        parts = [node["Node Type"]]
+        for key in ("Index Name", "Scan Direction", "Sort Key", "Presorted Key", "Filter"):
+            if key in node:
+                parts.append(f"{key}={node[key]}")
+        for key in ("Actual Rows", "Plan Rows"):
+            if key in node:
+                parts.append(f"{key}={node[key]}")
+        lines.append("  " * depth + " | ".join(str(p) for p in parts))
+        for child in node.get("Plans", []):
+            walk(child, depth + 1)
+
+    walk(root, 0)
+    return "\n" + "\n".join(lines)
+
+
 class TestListDocumentsIndexPlanPg:
     async def test_query_is_a_sort_free_backward_index_scan(
         self, backend: PostgreSQLBackend, seeded_namespace: UUID
@@ -282,18 +346,18 @@ class TestListDocumentsIndexPlanPg:
         # plan that has no index scan at all. Fail loudly instead.
         assert "Seq Scan" not in types, (
             f"planner chose a sequential scan - the seed ({SEED_ROWS} rows) is too small "
-            f"or ANALYZE did not commit, so this test proves nothing. Plan nodes: {types}"
+            f"or ANALYZE did not commit, so this test proves nothing. Plan:{_render(root)}"
         )
 
         scans = _index_scans(root)
-        assert scans, f"expected an index scan, got plan nodes: {types}"
+        assert scans, f"expected an index scan, got plan:{_render(root)}"
         used = {s.get("Index Name") for s in scans}
-        assert NEW_INDEX in used, f"expected {NEW_INDEX} to serve the query, plan used {used}"
+        assert NEW_INDEX in used, f"expected {NEW_INDEX} to serve the query, plan used {used}. Plan:{_render(root)}"
 
         # The whole point of the change: no sort step.
         assert not _sort_nodes(root), (
             f"expected no Sort / Incremental Sort above the index scan, found {_sort_nodes(root)}. "
-            f"That is the regression the 3-column index exists to prevent. Plan nodes: {types}"
+            f"That is the regression the 3-column index exists to prevent. Plan:{_render(root)}"
         )
 
         # A backward scan is the MECHANISM: the index is declared all-ASC, so
@@ -317,16 +381,16 @@ class TestListDocumentsIndexPlanPg:
         root = await _explain(backend, statement, parameters, analyze=True)
         types = _node_types(root)
 
-        assert "Seq Scan" not in types, f"planner chose a sequential scan at depth. Plan nodes: {types}"
+        assert "Seq Scan" not in types, f"planner chose a sequential scan at depth. Plan:{_render(root)}"
 
         used = {s.get("Index Name") for s in _index_scans(root)}
         assert NEW_INDEX in used, (
             f"expected {NEW_INDEX} to serve the deep page, plan used {used}. "
             "If this names the single-column ix_documents_created_at, the namespace filter was "
             "not selective enough for the namespace-leading index to win - check that the decoy "
-            "namespaces actually got seeded (see DECOY_NAMESPACES)."
+            f"namespaces actually got seeded (see DECOY_NAMESPACES). Plan:{_render(root)}"
         )
-        assert not _sort_nodes(root), f"deep page grew a sort node: {_sort_nodes(root)}"
+        assert not _sort_nodes(root), f"deep page grew a sort node: {_sort_nodes(root)}. Plan:{_render(root)}"
 
     async def test_old_two_column_index_would_reintroduce_a_sort(
         self, backend: PostgreSQLBackend, seeded_namespace: UUID
