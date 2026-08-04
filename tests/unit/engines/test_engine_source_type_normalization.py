@@ -24,22 +24,32 @@ site                                                 seam the test captures at
 Each test captures the value at the seam and then stops the flow, so no
 extraction, embedding or storage work runs.
 
-Worth being precise about what this layer buys, because it is easy to
-overstate: it is **not** the thing standing between a caller and an
-``IntegrityError``. These dicts flow into ``pipelines/flows/ingest.py``, whose
-own ``or "manual"`` already rules out NULL (covered in
-``tests/unit/test_pipelines_ingest.py``), and the four ``Khora`` entry points
-normalize before any engine is reached. What the engine normalization decides
-is the *value*: without it, a doc dict carrying ``source_type=None`` silently
-lands as ``'manual'`` — the ingest-pipeline default — instead of the
-batch-level value the caller passed. The reviewer classed these sites as not
-publicly reachable; they are covered anyway because pinning them is cheaper
-than re-deriving the reachability argument every time someone edits one.
+Only Chronicle routes through ``pipelines/flows/ingest.py``; VectorCypher and
+Skeleton do not. VectorCypher's streaming branch constructs ``Document(...)``
+itself and its two other sites forward to ``self.remember(...)``, so for those
+four sites there is no downstream ``or "manual"`` to fall back on — the value
+these expressions produce is the value that reaches ``create_document``.
+
+Two levels are covered, because they fail differently:
+
+* **per-doc** — ``doc_data.get("source_type") or source_type``. Without the
+  ``or``, a dict carrying an explicit ``None`` forwards the falsy value
+  instead of inheriting the batch-level one.
+* **batch-level** — ``source_type = source_type or "library"`` at each batch
+  method's entry. The per-doc expressions only rule out a falsy *per-doc*
+  value; a caller passing ``source_type=""`` would otherwise have the empty
+  string preserved all the way to the column. ``documents.source_type`` is
+  NOT NULL but not non-empty — migration 055 deliberately adds no
+  ``CHECK (source_type <> '')`` — so nothing downstream would reject it.
+
+The reviewer classed the engine entry points as not publicly reachable; they
+are covered anyway because pinning them is cheaper than re-deriving the
+reachability argument every time someone edits one.
 """
 
 from __future__ import annotations
 
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -224,8 +234,19 @@ def _vectorcypher_engine(*, streaming: bool):
 
 
 async def _capture_vectorcypher_remember_kwargs(documents: list[dict], *, legacy: bool, **kwargs) -> dict:
-    """Drive the two branches that forward through ``self.remember``."""
-    engine = _vectorcypher_engine(streaming=False)
+    """Drive the two branches that forward through ``self.remember``.
+
+    The two are reached by genuinely different routes, and conflating them is
+    easy to do by accident: with ``streaming_pipeline=False``,
+    ``_remember_batch_impl`` immediately delegates to ``_remember_batch_legacy``,
+    so calling it captures the *legacy* site twice and never exercises its own.
+
+    ``_remember_batch_impl``'s own ``self.remember(...)`` is the Stage-0a
+    external-id dispatch: a document whose ``external_id`` already exists in
+    the namespace is routed to the replace path. Reaching it needs streaming
+    **on** and a storage stub that reports the id as already present.
+    """
+    engine = _vectorcypher_engine(streaming=not legacy)
 
     captured: list[dict] = []
 
@@ -233,23 +254,46 @@ async def _capture_vectorcypher_remember_kwargs(documents: list[dict], *, legacy
         captured.append(remember_kwargs)
         raise _StopAfterCapture
 
-    method = engine._remember_batch_legacy if legacy else engine._remember_batch_impl
+    delegated: list[int] = []
+
+    async def _spy_legacy(*_args, **_kwargs):
+        delegated.append(1)
+        raise _StopAfterCapture
+
+    if legacy:
+        method = engine._remember_batch_legacy
+    else:
+        method = engine._remember_batch_impl
+        # Make every doc look like an existing external_id so Stage 0a fires.
+        documents = [{**doc, "external_id": "ext-1"} for doc in documents]
+        engine._storage.get_documents_by_external_ids = AsyncMock(return_value={"ext-1": MagicMock()})
 
     # The engines wrap per-document work in try/except and record a failure
     # rather than propagating, so the sentinel does not reach us. Suppressing
     # broadly here is deliberate: the assertion below is on what was captured
     # at the seam, not on how the flow ended.
-    with patch.object(type(engine), "remember", side_effect=_fake_remember), suppress(BaseException):
-        await method(
-            documents,
-            uuid4(),
-            deduplicate=False,
-            entity_types=["PERSON"],
-            relationship_types=["KNOWS"],
-            **kwargs,
-        )
+    with patch.object(type(engine), "remember", side_effect=_fake_remember):
+        with (
+            patch.object(type(engine), "_remember_batch_legacy", side_effect=_spy_legacy)
+            if not legacy
+            else nullcontext()
+        ):
+            with suppress(BaseException):
+                await method(
+                    documents,
+                    uuid4(),
+                    deduplicate=False,
+                    entity_types=["PERSON"],
+                    relationship_types=["KNOWS"],
+                    **kwargs,
+                )
 
     assert captured, "self.remember() was never reached"
+    if not legacy:
+        # Guards the mistake this helper used to make: with streaming off,
+        # _remember_batch_impl delegates to _remember_batch_legacy and the
+        # "direct" case silently captured the legacy site instead of its own.
+        assert not delegated, "the direct case delegated to _remember_batch_legacy — its own site was not exercised"
     return captured[0]
 
 
@@ -317,3 +361,67 @@ class TestVectorCypherRememberBatchSourceType:
         )
 
         assert kwargs["source_type"] == "file"
+
+
+# ---------------------------------------------------------------------------
+# Batch-level normalization — the falsy value the per-doc `or` cannot catch
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestBatchLevelSourceTypeNormalization:
+    """A falsy *batch-level* ``source_type`` collapses to the default.
+
+    Distinct from the per-doc cases above, and not covered by them: the per-doc
+    expressions are ``doc_data.get("source_type") or source_type``, so they only
+    rule out a falsy per-doc value. With ``source_type=""`` and no per-doc key,
+    every one of those expressions evaluates to ``""`` and writes it. Nothing
+    downstream rejects it — ``documents.source_type`` is NOT NULL but not
+    non-empty, and migration 055 deliberately adds no
+    ``CHECK (source_type <> '')``.
+
+    ``None`` is included alongside ``""`` even though the parameter is annotated
+    ``str``: passing it was always a type violation, but before migration 055 it
+    wrote SQL NULL silently rather than raising, so a caller may well be doing
+    it today.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("falsy", FALSY)
+    async def test_chronicle_falsy_batch_source_type(self, falsy) -> None:
+        doc_inputs = await _capture_chronicle_doc_inputs([{"content": "body"}], source_type=falsy)
+
+        assert doc_inputs[0]["source_type"] == "library"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("falsy", FALSY)
+    async def test_skeleton_falsy_batch_source_type(self, falsy) -> None:
+        kwargs = await _capture_skeleton_document([{"content": "body"}], source_type=falsy)
+
+        assert kwargs["source_type"] == "library"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("falsy", FALSY)
+    @pytest.mark.parametrize("legacy", [False, True], ids=["direct", "legacy"])
+    async def test_vectorcypher_falsy_batch_source_type(self, falsy, legacy) -> None:
+        kwargs = await _capture_vectorcypher_remember_kwargs(
+            [{"content": "body"}],
+            legacy=legacy,
+            source_type=falsy,
+        )
+
+        assert kwargs["source_type"] == "library"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("falsy", FALSY)
+    async def test_vectorcypher_streaming_falsy_batch_source_type(self, falsy) -> None:
+        kwargs = await _capture_vectorcypher_document([{"content": "body"}], source_type=falsy)
+
+        assert kwargs["source_type"] == "library"
+
+    @pytest.mark.asyncio
+    async def test_a_real_batch_value_is_not_collapsed(self) -> None:
+        """Positive control: the normalization must only touch falsy values."""
+        doc_inputs = await _capture_chronicle_doc_inputs([{"content": "body"}], source_type="slack")
+
+        assert doc_inputs[0]["source_type"] == "slack"

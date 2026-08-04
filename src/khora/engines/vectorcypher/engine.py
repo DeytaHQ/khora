@@ -3318,6 +3318,15 @@ class VectorCypherEngine:
         source_timestamp: datetime | None = None,
     ) -> BatchResult:
         """Internal implementation of remember_batch (separated for bulk_mode wrapping)."""
+        # Collapse a falsy batch-level source_type before it is dispatched
+        # anywhere. The per-doc expressions below are ``doc_data.get(...) or
+        # source_type``, which only rules out a falsy *per-doc* value — with
+        # source_type="" they preserve the empty string, and documents.source_type
+        # is NOT NULL but not non-empty (migration 055 deliberately adds no
+        # CHECK). Normalizing here rather than at each site covers the streaming
+        # branch, the direct branch, and the legacy path this method delegates
+        # to, which is every place the batch-level value is read.
+        source_type = source_type or "library"
         use_streaming = self._vc_config.streaming_pipeline
         if not use_streaming:
             # Legacy path: fall back to per-document processing
@@ -4391,6 +4400,12 @@ class VectorCypherEngine:
         source_timestamp: datetime | None = None,
     ) -> BatchResult:
         """Legacy per-document remember_batch (non-streaming pipeline)."""
+        # Normalized again rather than relying on the caller. _remember_batch_impl
+        # already collapses this before delegating here, so on the real path this
+        # is a no-op — but the method reads source_type and builds documents from
+        # it, so it should not depend on being entered through one particular
+        # caller to be correct.
+        source_type = source_type or "library"
         storage = self._get_storage()
         total = len(documents)
         results: dict[str, int] = {

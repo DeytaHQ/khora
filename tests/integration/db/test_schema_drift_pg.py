@@ -43,9 +43,7 @@ Run locally::
 
 from __future__ import annotations
 
-import os
-import socket
-from urllib.parse import urlparse
+import asyncio
 
 import pytest
 import sqlalchemy as sa
@@ -54,6 +52,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from khora.db.migrations._schema_config import DEFAULT_EMBEDDING_DIMENSION
 from khora.db.session import run_migrations
+from tests.test_helpers.pg_scratch_db import pg_reachable, scratch_database
 from tests.test_helpers.schema_drift import (
     INDEX_BASELINE,
     NULLABILITY_BASELINE,
@@ -88,52 +87,35 @@ pytestmark = pytest.mark.integration
 _MIGRATION_EMBEDDING_DIMENSION = DEFAULT_EMBEDDING_DIMENSION
 
 
-DATABASE_URL = os.environ.get(
-    "KHORA_DATABASE_URL",
-    "postgresql+asyncpg://khora:khora@localhost:5434/khora",
-)
-if DATABASE_URL.startswith("postgresql://"):
-    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
-elif DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
+_PG_AVAILABLE = pg_reachable()
 
 
-def _pg_reachable() -> bool:
-    parsed = urlparse(DATABASE_URL.replace("+asyncpg", ""))
-    host = parsed.hostname or "localhost"
-    port = parsed.port or 5432
-    try:
-        with socket.create_connection((host, port), timeout=2):
-            return True
-    except OSError:
-        return False
+async def _prepare_scratch(url: str) -> None:
+    """Make a brand-new database ready for the chain.
 
+    No ``DROP SCHEMA`` — the database was created seconds ago by
+    ``scratch_database`` and is dropped afterwards, so there is nothing to
+    wipe. The previous version of this fixture reset ``public`` on whatever
+    ``KHORA_DATABASE_URL`` pointed at, which is the shared dev database by
+    default and destroys real data if a runner ever aims that variable
+    somewhere else.
 
-_PG_AVAILABLE = _pg_reachable()
+    The scratch database is also the more correct substrate, not merely the
+    safer one: this gate reflects *what the chain builds*, so it needs the
+    chain to be the only thing that has ever touched the schema. Reusing a
+    shared database made that a property of whatever ran last.
 
-
-async def _reset_public_schema() -> None:
-    """Wipe ``public`` so the chain builds the schema from a clean slate.
-
-    Mirrors ``test_migration_replay_idempotent.py``: drop leftover enum
-    types, recreate the schema, re-create the ``vector`` extension, and
-    pre-create ``khora_alembic_version`` with VARCHAR(64) so the wide
-    revision ids apply cleanly.
+    ``khora_alembic_version`` is pre-created at VARCHAR(64) because alembic
+    would otherwise create it at VARCHAR(32), and several revision ids in this
+    chain are wider.
     """
-    eng = create_async_engine(DATABASE_URL)
+    eng = create_async_engine(url)
     try:
         async with eng.begin() as conn:
-            r = await conn.execute(
-                text("SELECT typname FROM pg_type WHERE typnamespace = 'public'::regnamespace AND typtype = 'e'")
-            )
-            for (typname,) in r.fetchall():
-                await conn.execute(text(f"DROP TYPE IF EXISTS public.{typname} CASCADE"))
-            await conn.execute(text("DROP SCHEMA public CASCADE"))
-            await conn.execute(text("CREATE SCHEMA public"))
             await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             await conn.execute(
                 text(
-                    "CREATE TABLE khora_alembic_version ("
+                    "CREATE TABLE IF NOT EXISTS khora_alembic_version ("
                     "  version_num VARCHAR(64) NOT NULL,"
                     "  CONSTRAINT khora_alembic_version_pkc PRIMARY KEY (version_num)"
                     ")"
@@ -153,24 +135,23 @@ def pg_head_drift():
     if not _PG_AVAILABLE:
         pytest.skip("PostgreSQL not reachable (run `make dev` first)")
 
-    import asyncio
-
-    async def build():
-        await _reset_public_schema()
+    async def build(url: str):
+        await _prepare_scratch(url)
         # Pass the dimension explicitly rather than relying on the implicit
         # fallback — see ``_MIGRATION_EMBEDDING_DIMENSION``.
-        result = await run_migrations(DATABASE_URL, embedding_dimension=_MIGRATION_EMBEDDING_DIMENSION)
+        result = await run_migrations(url, embedding_dimension=_MIGRATION_EMBEDDING_DIMENSION)
         assert result.success is True, f"migration chain failed: {result.error}"
         assert result.skipped is False, "chain unexpectedly took the ahead-skip path"
 
-        eng = create_async_engine(DATABASE_URL)
+        eng = create_async_engine(url)
         try:
             async with eng.connect() as conn:
                 return await conn.run_sync(lambda sync_conn: collect_drift(sa.inspect(sync_conn), sqlite=False))
         finally:
             await eng.dispose()
 
-    return asyncio.run(build())
+    with scratch_database("drift_gate") as url:
+        yield asyncio.run(build(url))
 
 
 class TestSchemaDriftPostgres:
@@ -203,8 +184,8 @@ class TestSchemaDriftPostgres:
     def test_documents_alignment_is_not_in_the_ledger(self, pg_head_drift):
         """The two drifts migration 055 fixes must be gated, not ledgered.
 
-        Ledgering them would make the gate green whether or not 054 exists.
-        Their absence from both ledgers is what makes removing 054 fail the
+        Ledgering them would make the gate green whether or not 055 exists.
+        Their absence from both ledgers is what makes removing 055 fail the
         two tests above by name.
         """
         assert "documents.ix_documents_namespace_source_type" not in INDEX_BASELINE

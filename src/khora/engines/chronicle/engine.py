@@ -3347,6 +3347,11 @@ class ChronicleEngine:
         Returns:
             BatchResult with aggregated statistics
         """
+        # Collapse a falsy batch-level source_type before any per-doc dict or
+        # Document is built. The per-doc expressions below are
+        # ``doc_data.get(...) or source_type``, which only rules out a falsy
+        # *per-doc* value — with source_type="" they preserve the empty string.
+        source_type = source_type or "library"
         expertise = _resolve_expertise(expertise)
         timings: dict[str, float] = {}
         total_start = time.perf_counter()
