@@ -78,11 +78,41 @@ CREATE TABLE IF NOT EXISTS documents (
     source_timestamp TEXT,
     external_id TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_docs_ns ON documents(namespace_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_docs_checksum
     ON documents(namespace_id, checksum) WHERE checksum != '';
 CREATE INDEX IF NOT EXISTS idx_docs_ns_external_id
     ON documents(namespace_id, external_id) WHERE external_id IS NOT NULL;
+-- Sort index for ``list_documents``, which pins the total order
+-- ``ORDER BY created_at DESC, id DESC``. All three keys are ASC, which a
+-- backward scan reads as that DESC order. Without the trailing ``id`` key
+-- SQLite adds a per-page ``USE TEMP B-TREE FOR ORDER BY`` — invisible on a
+-- first page, dominant on a full drain. The ``status`` / ``updated_at``
+-- predicates are residual filters on top of the scan and do not defeat it.
+-- Mirrors ``db/migrations/versions/054_documents_namespace_created_at_id.py``,
+-- which does not reach this store and carries the full argument.
+--
+-- ``idx_docs_ns`` is dropped as a now-redundant strict prefix, mirroring the
+-- other half of that migration. The namespace aggregates all re-plan onto
+-- this index as covering scans: ``get_last_activity_at``'s ``MAX(created_at)``
+-- stops reading the table altogether, ``get_document_stats`` follows it down,
+-- and bare ``count_documents`` pays slightly more for the wider index
+-- entries. Ratios are omitted on purpose — they scale with rows per
+-- namespace. The partial ``idx_docs_checksum`` / ``idx_docs_ns_external_id``
+-- also lead with ``namespace_id`` but are NOT redundant — their ``WHERE``
+-- clauses make them a different index.
+--
+-- Created before the drop so no connect ever observes the table with neither
+-- index. Both re-run on every ``connect()`` and are a no-op once converged, so
+-- an existing database converts on its next open, paying one inline index
+-- build of order 60 ms per 100k rows — WAL keeps readers going, other writers
+-- wait.
+--
+-- Keep this comment free of semicolons — ``_create_schema`` splits this blob
+-- on the semicolon, so one inside a ``--`` comment would cut the comment in
+-- half and feed the remainder to SQLite as a statement.
+CREATE INDEX IF NOT EXISTS idx_docs_ns_created_id
+    ON documents(namespace_id, created_at, id);
+DROP INDEX IF EXISTS idx_docs_ns;
 
 CREATE TABLE IF NOT EXISTS chunks (
     id TEXT PRIMARY KEY,

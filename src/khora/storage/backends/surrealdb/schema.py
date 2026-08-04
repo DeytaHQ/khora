@@ -90,6 +90,33 @@ DEFINE INDEX IF NOT EXISTS idx_document_ns_session ON document FIELDS namespace_
 DEFINE INDEX IF NOT EXISTS idx_document_ns_checksum ON document FIELDS namespace_id, checksum;
 DEFINE INDEX IF NOT EXISTS idx_document_ns_status ON document FIELDS namespace_id, status;
 DEFINE INDEX IF NOT EXISTS idx_document_ns_external_id ON document FIELDS namespace_id, external_id;
+-- Sort index backing ``list_documents``' pinned ``ORDER BY created_at DESC,
+-- id DESC``, mirroring the relational backends' index from
+-- ``db/migrations/versions/054_documents_namespace_created_at_id.py``.
+-- Two fields, not three: ``id`` is the record identifier rather than an
+-- ordinary field, so naming it in ``FIELDS`` fails to define on this
+-- SCHEMAFULL table unless a ``DEFINE FIELD id`` is added first — and since
+-- ``DEFINE FIELD IF NOT EXISTS`` is append-only that would type ``id`` on
+-- fresh databases only, diverging them permanently from existing ones.
+-- It is also unnecessary: a non-unique index carries the record id as its
+-- trailing key component, so a backward scan of ``(namespace_id,
+-- created_at)`` already yields exactly ``created_at DESC, id DESC``.
+-- Measured over ``ws://``, on the exact versions named — nothing between
+-- 2.6.5 and 3.0.5 was run, so treat the boundary as unknown rather than
+-- assuming it is the major bump. Servers 3.0.5 and 3.2.0 drop the sort
+-- entirely and push LIMIT/START into a backward index scan (first page
+-- 8-23x faster at 4k rows, full drain 1.6-5.1x). Server 2.6.5 does not:
+-- the plan is byte-identical with and without this index because that
+-- engine sorts in memory unconditionally, so there the index buys nothing
+-- and costs only write-side maintenance (~6% on a batched 4k-row insert).
+-- The embedded engine (``memory://`` / ``surrealkv://``) reports
+-- ``surrealdb-2.0.0`` and behaves like 2.6.5 — embedded gets the write cost
+-- and none of the benefit. The benefit is also latent everywhere for now:
+-- the ``FLEXIBLE TYPE`` clauses elsewhere in this DDL do not parse on either
+-- 3.x server (they require ``TYPE ... FLEXIBLE``, and reject FLEXIBLE on
+-- non-object types), so schema init cannot currently reach a server that
+-- would use this index.
+DEFINE INDEX IF NOT EXISTS idx_document_ns_created ON document FIELDS namespace_id, created_at;
 
 -- Chunk (with HNSW vector index and BM25 full-text index)
 DEFINE TABLE IF NOT EXISTS chunk SCHEMAFULL;
