@@ -4,7 +4,9 @@ Each module here lowers a canonical :class:`~khora.filter.ast.FilterNode` to one
 backend's query fragment. A compiler is a stateless
 ``Callable[[FilterNode, CompileContext], CompiledFilter]`` registered against an
 ``(engine_id, storage_target)`` key on the
-:class:`~khora.filter.registry.CompilerRegistry` at engine import time.
+:class:`~khora.filter.registry.CompilerRegistry` at the registrant module's
+import time — an engine module on the recall path, a relational storage-backend
+module on the document-enumeration path.
 
 ``@internal``. Re-exported under :mod:`khora.filter.compilers` only — not from
 :mod:`khora.__init__`.

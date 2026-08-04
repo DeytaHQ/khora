@@ -1048,3 +1048,62 @@ class PostgreSQLBackend(AsyncSessionMixin):
                 )
                 session.add(model)
             await session.commit()
+
+
+# --------------------------------------------------------------------------- #
+# Documents-tier recall-filter compile context + compiler registration.
+# --------------------------------------------------------------------------- #
+from khora.filter import CompileContext, CompilerRegistry  # noqa: E402
+from khora.filter.compilers.postgres import compile_postgres  # noqa: E402
+
+# The system keys this table backs with a real column — the single source of
+# truth for the documents tier. Nine of the ten ``SYSTEM_KEYS``; ``occurred_at``
+# is a recall-chunk column and has no ``documents`` counterpart (see
+# ``DocumentModel`` in ``khora/db/models.py``).
+_BACKED_SYSTEM_KEYS: frozenset[str] = frozenset(
+    {
+        "created_at",
+        "source_timestamp",
+        "source_type",
+        "source_name",
+        "source_url",
+        "external_id",
+        "content_type",
+        "source",
+        "title",
+    }
+)
+
+
+def _documents_compile_context() -> CompileContext:
+    """Build the recall-filter :class:`CompileContext` for the ``documents`` table.
+
+    ``field_mapping`` declares the nine backed system keys (identity-mapped to
+    their own columns) plus the ``metadata`` root remap to the physical
+    ``metadata`` column — ``DocumentModel`` maps the ``metadata_`` attribute to a
+    column literally named ``metadata``. ``on_unsupported="split"`` because a
+    document enumeration always has an in-memory post-filter available, so an
+    unpushable leaf is left unconsumed rather than raising.
+
+    ``occurred_at`` is deliberately absent: no ``documents`` row backs it.
+    ``compile_postgres`` does not treat the ``field_mapping`` key set as a
+    pushdown whitelist (``_col`` falls back to identity), so this context alone
+    cannot stop an ``occurred_at`` leaf from compiling to a non-existent column.
+    Worse than the resulting error: the leaf is also reported in
+    ``CompiledFilter.consumed_keys``, so the caller is told it was pushed down
+    and will not post-filter it. The caller must reject or strip the key before
+    compiling.
+    """
+    field_mapping = {key: key for key in _BACKED_SYSTEM_KEYS} | {"metadata": "metadata"}
+    return CompileContext(
+        backend_target="documents",
+        field_mapping=field_mapping,
+        on_unsupported="split",
+    )
+
+
+# Register the deterministic recall-filter compiler for this store/target at
+# import time (idempotent — same function object). Registration fires when
+# ``khora.storage.backends`` is imported, since this module is imported eagerly
+# by the package ``__init__``.
+CompilerRegistry.register("relational.postgresql", "documents", compile_postgres)

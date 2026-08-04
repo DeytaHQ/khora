@@ -1353,3 +1353,109 @@ class SQLiteVectorBackend:
             created_at=_parse_dt(row["created_at"]) or datetime.now(UTC),
             updated_at=_parse_dt(row["updated_at"]) or datetime.now(UTC),
         )
+
+
+# --------------------------------------------------------------------------- #
+# Documents-tier recall-filter compile context + compiler registration.
+# --------------------------------------------------------------------------- #
+from khora.filter import CompileContext, CompilerRegistry, SchemaCapabilities  # noqa: E402
+from khora.filter.compilers.lance import compile_lance  # noqa: E402
+from khora.storage.backends._sqlite_capabilities import sqlite_has_json1  # noqa: E402
+
+# The system keys this table backs with a real column — the single source of
+# truth for the documents tier. Nine of the ten ``SYSTEM_KEYS``; ``occurred_at``
+# is a recall-chunk column and has no ``documents`` counterpart (see the
+# ``CREATE TABLE IF NOT EXISTS documents`` DDL in ``_SCHEMA_SQL`` above).
+# NOTE: ``created_at`` and ``source_timestamp`` are declared here but their
+# pushdown is NOT sound on this store — see the datetime hazard and the
+# forward-coupling alarm in ``_documents_compile_context``'s docstring below.
+_BACKED_SYSTEM_KEYS: frozenset[str] = frozenset(
+    {
+        "created_at",
+        "source_timestamp",
+        "source_type",
+        "source_name",
+        "source_url",
+        "external_id",
+        "content_type",
+        "source",
+        "title",
+    }
+)
+
+
+def _documents_compile_context() -> CompileContext:
+    """Build the recall-filter :class:`CompileContext` for the ``documents`` table.
+
+    ``field_mapping`` declares the nine backed system keys (identity-mapped to
+    their bare columns) plus the ``metadata`` root remap to the physical
+    ``metadata_`` column — this backend's raw DDL diverges from the shared
+    SQLAlchemy model, which names the same column ``metadata``.
+    ``on_unsupported="split"`` because a document enumeration always has an
+    in-memory post-filter available, so an unpushable leaf is left unconsumed
+    rather than raising.
+
+    ``occurred_at`` is deliberately absent: no ``documents`` row backs it.
+    ``compile_lance`` does not treat the ``field_mapping`` key set as a pushdown
+    whitelist (``_col`` falls back to identity), so this context alone cannot
+    stop an ``occurred_at`` leaf from compiling to a non-existent column. Worse
+    than the resulting error: the leaf is also reported in
+    ``CompiledFilter.consumed_keys``, so the caller is told it was pushed down
+    and will not post-filter it. The caller must reject or strip the key before
+    compiling.
+
+    **Datetime binds on this table are not safe to push down.** Same class of
+    defect as the ``sqlite_lance`` adapter, different shape. This store writes
+    timestamps with :func:`_dt_to_str`, a bare ``dt.isoformat()`` with **no UTC
+    coercion**, into ``TEXT`` columns; ``compile_lance`` binds a datetime
+    operand as a UTC-normalized ``value.isoformat()`` and relies on
+    lexicographic ISO comparison. The two formats look compatible, which is
+    exactly why this is invisible without materializing a table — but the stored
+    string carries the *writer's* offset while the bind always carries
+    ``+00:00``, so the comparison is on wall clock, not on instant. Against a
+    ``$gte`` bound of ``'2026-01-31T12:30:00+00:00'``:
+
+    * a row stored ``'2026-01-31T13:00:00+02:00'`` — 11:00Z, ninety minutes
+      BEFORE the bound — is wrongly INCLUDED. A post-filter can remove it.
+    * a row stored ``'2026-01-31T12:30:00'`` (naive, written by a caller that
+      supplied a naive datetime) is exactly AT the bound but is wrongly
+      EXCLUDED, because the shorter string is a prefix of the bind and sorts
+      first. Since the key is reported consumed, **a post-filter can only narrow
+      and cannot recover this row.**
+
+    Reachable in practice: ``source_timestamp`` is caller-supplied with no
+    default and no timezone normalization anywhere on this write path. This
+    cannot be corrected from a compile context — a caller using this context
+    must route the date-valued system keys to its post-filter.
+
+    **When the pushdown whitelist gate lands, drop ``created_at`` and
+    ``source_timestamp`` from ``_BACKED_SYSTEM_KEYS`` above.** They are declared
+    today only because ``compile_lance`` ignores the key set — every logical key
+    falls through to identity, so declaring them changes nothing and removing
+    them would make the mapping understate what it declares. Once the compiler
+    honours the key set as a pushdown whitelist, leaving them declared *keeps*
+    pushing the broken comparison described above; removing them routes both
+    keys to the caller's post-filter instead. The test signal for that edit is
+    INVERTED — forgetting the drop leaves both keys consumed and every test
+    green, while remembering it forces a test update — so this note is the
+    alarm.
+    """
+    field_mapping = {key: key for key in _BACKED_SYSTEM_KEYS} | {"metadata": "metadata_"}
+    return CompileContext(
+        backend_target="documents",
+        field_mapping=field_mapping,
+        schema_capabilities=SchemaCapabilities(sqlite_json1=sqlite_has_json1()),
+        on_unsupported="split",
+    )
+
+
+# Register the deterministic recall-filter compiler for this store/target at
+# import time (idempotent — same function object). Registration fires when
+# ``khora.storage.backends`` is imported, which imports this module eagerly —
+# but inside a ``try``/``except ImportError`` that sets the backend to ``None``
+# (unlike the PostgreSQL backend, which is imported unconditionally). Two
+# consequences: without the optional SQLite dependencies this key never
+# registers at all, and an ``ImportError`` raised anywhere in the filter imports
+# above would be swallowed there, silently disabling this whole backend rather
+# than surfacing. Keep those imports to ``khora.filter`` (stdlib-only deps).
+CompilerRegistry.register("relational.sqlite", "documents", compile_lance)
