@@ -101,6 +101,42 @@ PAGE_SIZE = 100
 # load-bearing rather than decorative.
 ROWS_PER_TIMESTAMP = 50
 
+# Documents seeded into OTHER namespaces, so the namespace filter is selective.
+#
+# This is load-bearing, not padding. `documents` also carries a single-column
+# `ix_documents_created_at` (added by an earlier temporal-search migration). If
+# every row in the table belongs to the namespace under test, `WHERE
+# namespace_id = ?` excludes nothing, and at a deep offset the planner correctly
+# prefers a backward scan of that narrower single-column index - it reads fewer
+# pages to reach the same rows, and the namespace-leading index buys it nothing.
+# The plan then legitimately stops using the index this migration adds.
+#
+# That is an artifact of an all-one-namespace table, not of production. Khora is
+# multi-tenant: a namespace is a fraction of `documents`, which is exactly the
+# regime where the namespace-leading index wins. Seeding decoy namespaces makes
+# the fixture match that regime, so the assertions below measure the index
+# rather than the seed's shape.
+DECOY_NAMESPACES = 4
+DECOY_ROWS_EACH = 3000
+
+_INSERT_DOCUMENTS = sa.text(
+    "INSERT INTO documents (id, namespace_id, content, checksum, status, created_at, updated_at) "
+    "VALUES (:id, :ns, :content, :checksum, 'completed', :ts, :ts)"
+)
+
+
+def _rows(namespace_id: UUID, base: datetime, count: int, tag: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": uuid4(),
+            "ns": namespace_id,
+            "content": f"{tag} document {i}",
+            "checksum": f"{tag}-{namespace_id}-{i}",
+            "ts": base - timedelta(seconds=i // ROWS_PER_TIMESTAMP),
+        }
+        for i in range(count)
+    ]
+
 
 @pytest.fixture(scope="module")
 async def _run_migrations_once():
@@ -122,32 +158,28 @@ async def backend(_run_migrations_once) -> AsyncIterator[PostgreSQLBackend]:
 async def seeded_namespace(backend: PostgreSQLBackend) -> AsyncIterator[UUID]:
     """A namespace holding ``SEED_ROWS`` documents, with committed statistics.
 
+    Sits inside a table that also holds several other namespaces of comparable
+    size, so ``WHERE namespace_id = ?`` is selective - see ``DECOY_NAMESPACES``
+    for why that matters to the plan.
+
     Documents go in by bulk INSERT rather than ``create_document`` - this
-    fixture cares about table size and planner statistics, and 3000 round trips
-    would dominate the test's runtime for no added coverage.
+    fixture cares about table size and planner statistics, and thousands of
+    round trips would dominate the test's runtime for no added coverage.
     """
     ns = await backend.create_namespace(MemoryNamespace())
+    decoys = [await backend.create_namespace(MemoryNamespace()) for _ in range(DECOY_NAMESPACES)]
     engine = backend._engine
     assert engine is not None
 
     base = datetime.now(UTC)
     async with engine.begin() as conn:
-        await conn.execute(
-            sa.text(
-                "INSERT INTO documents (id, namespace_id, content, checksum, status, created_at, updated_at) "
-                "VALUES (:id, :ns, :content, :checksum, 'completed', :ts, :ts)"
-            ),
-            [
-                {
-                    "id": uuid4(),
-                    "ns": ns.id,
-                    "content": f"seed document {i}",
-                    "checksum": f"plan-seed-{i}",
-                    "ts": base - timedelta(seconds=i // ROWS_PER_TIMESTAMP),
-                }
-                for i in range(SEED_ROWS)
-            ],
-        )
+        await conn.execute(_INSERT_DOCUMENTS, _rows(ns.id, base, SEED_ROWS, "plan-seed"))
+        for decoy in decoys:
+            # Same timestamp range as the namespace under test, so the decoys
+            # interleave rather than sorting cleanly to one end - otherwise a
+            # created_at-ordered scan could skip them all in one range and the
+            # namespace filter would be selective in name only.
+            await conn.execute(_INSERT_DOCUMENTS, _rows(decoy.id, base, DECOY_ROWS_EACH, "plan-decoy"))
 
     # ANALYZE must COMMIT - pg_statistic updates are MVCC-transactional, so an
     # autobegun-then-rolled-back connection would silently discard them and the
@@ -158,9 +190,22 @@ async def seeded_namespace(backend: PostgreSQLBackend) -> AsyncIterator[UUID]:
     try:
         yield ns.id
     finally:
+        namespace_ids = [ns.id, *(d.id for d in decoys)]
+        # Expanding IN rather than ``= ANY(:ns)``: SQLAlchemy renders one bind
+        # per element, so the driver never has to infer a uuid[] array type for
+        # a bare Python list. Teardown failing here would leak thousands of rows
+        # into every later test's planner statistics.
         async with engine.begin() as conn:
-            await conn.execute(sa.text("DELETE FROM documents WHERE namespace_id = :ns"), {"ns": ns.id})
-            await conn.execute(sa.text("DELETE FROM memory_namespaces WHERE id = :ns"), {"ns": ns.id})
+            await conn.execute(
+                sa.text("DELETE FROM documents WHERE namespace_id IN :ns").bindparams(
+                    sa.bindparam("ns", expanding=True)
+                ),
+                {"ns": namespace_ids},
+            )
+            await conn.execute(
+                sa.text("DELETE FROM memory_namespaces WHERE id IN :ns").bindparams(sa.bindparam("ns", expanding=True)),
+                {"ns": namespace_ids},
+            )
 
 
 async def _capture_list_documents_sql(
@@ -273,7 +318,14 @@ class TestListDocumentsIndexPlanPg:
         types = _node_types(root)
 
         assert "Seq Scan" not in types, f"planner chose a sequential scan at depth. Plan nodes: {types}"
-        assert NEW_INDEX in {s.get("Index Name") for s in _index_scans(root)}
+
+        used = {s.get("Index Name") for s in _index_scans(root)}
+        assert NEW_INDEX in used, (
+            f"expected {NEW_INDEX} to serve the deep page, plan used {used}. "
+            "If this names the single-column ix_documents_created_at, the namespace filter was "
+            "not selective enough for the namespace-leading index to win - check that the decoy "
+            "namespaces actually got seeded (see DECOY_NAMESPACES)."
+        )
         assert not _sort_nodes(root), f"deep page grew a sort node: {_sort_nodes(root)}"
 
     async def test_old_two_column_index_would_reintroduce_a_sort(
