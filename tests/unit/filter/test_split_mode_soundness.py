@@ -39,6 +39,7 @@ from __future__ import annotations
 import dataclasses
 import re
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -349,6 +350,95 @@ def test_bare_or_over_an_unconsumable_leaf_also_defers_whole(
     assert sql.strip() in {"true", "1"}, f"expected the bare placeholder, got: {sql}"
     assert " or " not in sql.lower()
     assert compiled.consumed_keys == frozenset()
+
+
+@pytest.mark.parametrize(("name", "compiler", "builder_cls", "ctx"), _GATED_TARGETS, ids=_GATED_IDS)
+def test_bare_not_over_an_unconsumable_leaf_defers(
+    name: str,
+    compiler: Callable,
+    builder_cls: Any,
+    ctx: CompileContext,
+) -> None:
+    """A ``$not`` directly over an unconsumable LEAF — the NOT branch on its own.
+
+    Separated from the ``$not($or)`` case deliberately. ``OR`` and ``NOT`` are
+    different branches of :meth:`compile_node`, and ``$not($or)`` exercises both
+    at once, so a bug confined to the plain ``NOT``-over-leaf path can hide
+    behind the OR branch handling it first. This is the shape with no ``$or``
+    anywhere in it.
+    """
+    _consumable_leaf, unconsumable_leaf = _leaf_pair(name)
+    compiled = compiler(_ast({"$not": unconsumable_leaf}), ctx)
+    sql = _render(compiled.predicate)
+
+    assert sql.strip() in {"true", "1"}, f"expected the bare match-all placeholder, got: {sql}"
+    assert "not" not in sql.lower()
+    assert "!(" not in sql
+    assert compiled.consumed_keys == frozenset()
+
+
+# ``(id, shape builder)`` — the three logical shapes the gate can defer, built
+# from two leaves. Used for the over-deferral controls below.
+_LOGICAL_SHAPES: tuple[tuple[str, Callable[[dict, dict], dict]], ...] = (
+    ("or", lambda a, b: {"$or": [a, b]}),
+    ("not", lambda a, _b: {"$not": a}),
+    ("not_or", lambda a, b: {"$not": {"$or": [a, b]}}),
+)
+
+
+# NOTE this one runs over ALL split targets, not just the gated ones: it needs
+# no unconsumable leaf, only two consumable ones. ``postgres/chunk`` is excluded
+# elsewhere for lack of an ordinary unconsumable leaf, but it is precisely where
+# an over-deferral regression would hurt most — it is the pgvector recall path.
+@pytest.mark.parametrize(("name", "compiler", "builder_cls", "ctx"), _split_targets(), ids=_SPLIT_IDS)
+@pytest.mark.parametrize(("shape", "build"), _LOGICAL_SHAPES, ids=[case[0] for case in _LOGICAL_SHAPES])
+def test_a_fully_consumable_or_not_is_still_pushed(
+    shape: str,
+    build: Callable[[dict, dict], dict],
+    name: str,
+    compiler: Callable,
+    builder_cls: Any,
+    ctx: CompileContext,
+) -> None:
+    """OVER-DEFERRAL CONTROL — the gate must defer correctly, not defer everything.
+
+    Every other gate case in this module asserts that something IS deferred, so
+    all of them pass against a compiler that simply never pushes an ``$or`` /
+    ``$not`` at all. Measured, not assumed: forcing both gate branches to defer
+    unconditionally leaves every dedicated gate test in this file GREEN, and is
+    caught only incidentally by
+    :func:`test_the_two_accounting_invariants_over_the_corpus`, whose failure
+    message says nothing about over-deferral.
+
+    So this is the other direction, stated per shape: with EVERY leaf consumable,
+    the node is pushed and both keys are consumed. Losing this costs no
+    correctness — an under-pushed filter still returns the right rows — which is
+    exactly why nothing else would notice it, and why a silent collapse of all
+    disjunctive pushdown needs its own guard.
+    """
+    first, second = _consumable_pair(name)
+    keys = filter_leaf_keys(_ast(first)) | filter_leaf_keys(_ast(second))
+
+    compiled = compiler(_ast(build(first, second)), ctx)
+    sql = _render(compiled.predicate)
+
+    assert sql.strip() not in {"true", "1"}, f"{shape} was deferred despite being fully consumable: {sql}"
+    expected = filter_leaf_keys(_ast(first)) if shape == "not" else keys
+    assert compiled.consumed_keys == expected
+    # The negation / disjunction really is in the emitted fragment, rather than
+    # the leaves having been flattened into a bare conjunction.
+    assert ("!(" in sql or "not" in sql.lower()) if shape.startswith("not") else (" or " in sql.lower())
+
+
+def _consumable_pair(name: str) -> tuple[dict, dict]:
+    """Two leaves on DIFFERENT keys that the given target can both push."""
+    if name == "surreal/chunk":
+        # Only occurred_at / created_at / metadata are declared here.
+        return {"created_at": {"$gte": _D1}}, {"occurred_at": {"$gte": _D1}}
+    if name == "lance/chunk":
+        return {"source_type": "email"}, {"source_name": "linear"}
+    # Both documents tiers declare these two.
+    return {"title": "x"}, {"source_type": "email"}
 
 
 @pytest.mark.parametrize(("name", "compiler", "builder_cls", "ctx"), _GATED_TARGETS, ids=_GATED_IDS)
@@ -837,30 +927,49 @@ _PG_RAISE_PINS: tuple[tuple[str, dict, Any], ...] = (
     ),
 )
 
-_SURREAL_RAISE_PINS: tuple[tuple[str, dict, Any], ...] = (
-    ("bare", {}, "true"),
-    ("sys_range", {"created_at": {"$gte": _D1}}, "((created_at IS NOT NONE AND created_at >= $f_0))"),
+# The bind values the ``$f_N`` placeholders below refer to, as real objects —
+# ``compile_surrealdb`` carries datetimes through verbatim rather than
+# stringifying them, which is itself part of what these pins protect.
+_DT1 = datetime(2026, 1, 1, tzinfo=UTC)
+_DT2 = datetime(2026, 2, 1, tzinfo=UTC)
+
+_SURREAL_RAISE_PINS: tuple[tuple[str, dict, Any, dict], ...] = (
+    ("bare", {}, "true", {}),
+    (
+        "sys_range",
+        {"created_at": {"$gte": _D1}},
+        "((created_at IS NOT NONE AND created_at >= $f_0))",
+        {"f_0": _DT1},
+    ),
     # Undeclared on this whitelist — raising is the pre-existing behaviour and
     # the gate must not have widened it into a placeholder.
-    ("undeclared_sys", {"source_type": "email"}, _RAISES),
-    ("undeclared_exists", {"source_url": {"$exists": True}}, _RAISES),
+    ("undeclared_sys", {"source_type": "email"}, _RAISES, {}),
+    ("undeclared_exists", {"source_url": {"$exists": True}}, _RAISES, {}),
     (
         "or_sys",
         {"$or": [{"occurred_at": {"$gte": _D1}}, {"created_at": {"$lt": _D2}}]},
         "(((occurred_at IS NOT NONE AND occurred_at >= $f_0)) OR ((created_at IS NOT NONE AND created_at < $f_1)))",
+        {"f_0": _DT1, "f_1": _DT2},
     ),
-    ("not_sys", {"$not": {"created_at": {"$gte": _D1}}}, "!(((created_at IS NOT NONE AND created_at >= $f_0)))"),
+    (
+        "not_sys",
+        {"$not": {"created_at": {"$gte": _D1}}},
+        "!(((created_at IS NOT NONE AND created_at >= $f_0)))",
+        {"f_0": _DT1},
+    ),
     (
         "not_or_mixed",
         {"$not": {"$or": [{"metadata.tier": "gold"}, {"created_at": {"$lt": _D2}}]}},
         "!((((metadata_.tier = $f_0 OR (type::is::array(metadata_.tier) AND metadata_.tier CONTAINS $f_0))) "
         "OR ((created_at IS NOT NONE AND created_at < $f_1))))",
+        {"f_0": "gold", "f_1": _DT2},
     ),
     (
         "mixed_and",
         {"$and": [{"created_at": {"$gte": _D1}}, {"metadata.tier": "gold"}]},
         "((created_at IS NOT NONE AND created_at >= $f_0) "
         "AND (metadata_.tier = $f_1 OR (type::is::array(metadata_.tier) AND metadata_.tier CONTAINS $f_1)))",
+        {"f_0": _DT1, "f_1": "gold"},
     ),
 )
 
@@ -883,15 +992,30 @@ def test_postgres_raise_mode_emission_is_byte_identical(case: str, wire: dict, e
     assert _render(compile_postgres(_ast(wire), ctx).predicate) == expected
 
 
-@pytest.mark.parametrize(("case", "wire", "expected"), _SURREAL_RAISE_PINS, ids=[pin[0] for pin in _SURREAL_RAISE_PINS])
-def test_surrealdb_raise_mode_emission_is_byte_identical(case: str, wire: dict, expected: Any) -> None:
-    """The SurrealDB chunk-tier context emits exactly what it emitted before."""
+@pytest.mark.parametrize(
+    ("case", "wire", "expected", "expected_params"),
+    _SURREAL_RAISE_PINS,
+    ids=[pin[0] for pin in _SURREAL_RAISE_PINS],
+)
+def test_surrealdb_raise_mode_emission_is_byte_identical(
+    case: str, wire: dict, expected: Any, expected_params: dict
+) -> None:
+    """The SurrealDB chunk-tier context emits exactly what it emitted before.
+
+    Both halves are pinned: the predicate string AND the bind values it refers
+    to. ``compile_surrealdb`` emits NAMED placeholders (``$f_0``), so — unlike
+    the postgres table, where ``literal_binds`` inlines operands into the string
+    — the predicate alone would leave every operand unasserted, and "predicate
+    and binds unchanged" would only be half-checked.
+    """
     ctx = CompileContext(backend_target="temporal_chunk", field_mapping=_SURREAL_CHUNK_MAPPING, on_unsupported="raise")
     if expected is _RAISES:
         with pytest.raises(RecallFilterUnsupportedError):
             compile_surrealdb(_ast(wire), ctx)
         return
-    assert _render(compile_surrealdb(_ast(wire), ctx).predicate) == expected
+    compiled = compile_surrealdb(_ast(wire), ctx)
+    assert _render(compiled.predicate) == expected
+    assert compiled.params == expected_params
 
 
 @pytest.mark.parametrize(("name", "compiler", "builder_cls", "ctx"), _raise_targets(), ids=_RAISE_IDS)
@@ -1100,15 +1224,30 @@ def test_clause_consumable_mirrors_what_emission_did(
 ) -> None:
     """``_clause_consumable`` must agree with what ``compile_clause`` ACTUALLY did.
 
-    **This is the load-bearing test of the module.** The gate defers an ``OR`` /
-    ``NOT`` based on ``_clause_consumable``, and the shipped implementation
-    RE-DERIVES the deferred set from that same predicate rather than recording
-    what emission chose. So if the predicate ever drifts from the emit path — a
+    **This is the load-bearing test for the DANGEROUS direction.** The gate
+    defers an ``OR`` / ``NOT`` based on ``_clause_consumable``, and the shipped
+    implementation RE-DERIVES the deferred set from that same predicate rather
+    than recording what emission chose. So if the predicate ever OVER-claims — a
     new unsupported metadata shape handled in ``compile_clause`` but not mirrored
-    in ``_clause_consumable``, say — the gate would judge a subtree consumable,
-    push it, and let a match-all placeholder invert under a negation. That is a
-    silent row-drop, and the deferred-path subtraction cannot catch it: the
-    subtraction guards the REPORT, only this guards the PREDICATE.
+    in ``_clause_consumable`` — the gate would judge a subtree consumable, push
+    it, and let a match-all placeholder invert under a negation. That is a silent
+    row-drop, and the deferred-path subtraction cannot catch it: the subtraction
+    guards the REPORT, only this guards the PREDICATE.
+
+    **It is one-directional, and deliberately not the whole story.** It reads
+    ``actual = bool(compiled.consumed_keys)``, and ``consumed_keys`` is itself
+    derived from ``_clause_consumable`` via ``deferred_paths`` — so when the
+    predicate says *unconsumable*, the subtraction forces ``consumed_keys`` empty
+    no matter what emission did, and the assertion becomes self-satisfying.
+    Measured: making the postgres metadata branch return ``False`` while emission
+    still pushes those leaves leaves this test GREEN on all six targets, and is
+    caught only by invariant (a) in
+    :func:`test_the_two_accounting_invariants_over_the_corpus`, which compares
+    the raw emission accumulator against an independently-derived slice.
+
+    That UNDER-claim direction costs pushdown rather than rows, so it is the
+    cheaper failure — but do not read an all-green mirror as proof that predicate
+    and emission agree in both directions. Invariant (a) carries that half.
 
     Each leaf runs in ISOLATION (``FilterNode(AND, (leaf,))``), which is the
     right shape: ``_clause_consumable`` is per-leaf by definition, and
