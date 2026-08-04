@@ -12,6 +12,7 @@ from khora.core.models.document import DocumentStatus
 from khora.core.models.entity import Entity
 from khora.core.models.tenancy import TenancyMode
 from khora.storage.backends.sqlite import SQLiteRelationalBackend, SQLiteVectorBackend
+from tests.test_helpers.document_order import OrderSeed, order_seed, walk_pages
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -383,6 +384,75 @@ class TestDocumentCRUD:
         sources = await relational.get_document_sources_batch([doc.id], namespace_id=ns.id)
         assert len(sources) == 1
         assert sources[doc.id].title == "Test Document"
+
+
+# ---------------------------------------------------------------------------
+# list_documents total order
+# ---------------------------------------------------------------------------
+
+
+class TestListDocumentsTotalOrder:
+    """Documents come back newest first, ties broken by ``id DESC``.
+
+    Bulk ingest stamps many documents with the same ``created_at``; on that seed
+    ``created_at`` alone leaves the sort under-determined and row positions are
+    not addressable. See :mod:`tests.test_helpers.document_order` for why the
+    seed makes these assertions non-vacuous.
+    """
+
+    SEED_SIZE = 12
+
+    async def _seed(self, relational: SQLiteRelationalBackend) -> tuple[MemoryNamespace, OrderSeed]:
+        ns = _make_namespace()
+        await relational.create_namespace(ns)
+
+        seed = order_seed(self.SEED_SIZE)
+        for i, (doc_id, created_at) in enumerate(seed.writes):
+            await relational.create_document(
+                _make_document(
+                    ns.id,
+                    id=doc_id,
+                    checksum=f"sum-{i}",
+                    created_at=created_at,
+                    updated_at=created_at,
+                )
+            )
+        return ns, seed
+
+    async def test_orders_by_created_at_then_id_desc_and_repeats_identically(self, relational: SQLiteRelationalBackend):
+        ns, seed = await self._seed(relational)
+
+        docs = await relational.list_documents(ns.id)
+
+        # The tie is real: if these differed, ``created_at`` alone would decide
+        # the order and the id tie-break would never be exercised.
+        assert len({d.created_at for d in docs if d.id in seed.tied_ids}) == 1
+
+        # ``created_at`` leads: these two rows carry the id that would put them
+        # at the opposite end, so only a leading ``created_at`` lands them here.
+        assert docs[0].id == seed.newest_id
+        assert docs[-1].id == seed.oldest_id
+
+        assert [d.id for d in docs] == seed.expected
+
+        # Same query, same answer - the order is a property of the query, not
+        # of whatever the scan happened to produce on the first call.
+        for _ in range(2):
+            assert [d.id for d in await relational.list_documents(ns.id)] == [d.id for d in docs]
+
+    async def test_offset_pagination_is_exhaustive_and_non_overlapping(self, relational: SQLiteRelationalBackend):
+        ns, seed = await self._seed(relational)
+        expected = seed.expected
+
+        # Page size deliberately does not divide the seed size, so the final
+        # page is short and an off-by-one at the boundary shows up.
+        pages = await walk_pages(relational.list_documents, ns.id, page_size=5)
+        seen = [d.id for page in pages for d in page]
+
+        assert [len(p) for p in pages] == [5, 5, 2]
+        assert len(seen) == len(set(seen))  # no document served twice
+        assert set(seen) == set(expected)  # every document served
+        assert seen == expected  # and in the same order as the unpaged read
 
 
 # ---------------------------------------------------------------------------

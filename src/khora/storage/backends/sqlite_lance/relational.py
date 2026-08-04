@@ -468,7 +468,7 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
                 query = query.where(DocumentModel.status == status)
             if updated_before is not None:
                 query = query.where(DocumentModel.updated_at < updated_before)
-            query = query.limit(limit).offset(offset).order_by(DocumentModel.created_at.desc())
+            query = query.limit(limit).offset(offset).order_by(DocumentModel.created_at.desc(), DocumentModel.id.desc())
             result = await session.execute(query)
             return [self._document_model_to_domain(m) for m in result.scalars().all()]
 

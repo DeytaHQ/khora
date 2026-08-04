@@ -2883,7 +2883,7 @@ class Khora:
         namespace: str | UUID,
         limit: int = 100,
     ) -> list[Document]:
-        """List documents in a namespace.
+        """List documents in a namespace, newest first, ties broken by descending id.
 
         Args:
             namespace: Namespace UUID (as UUID or string)

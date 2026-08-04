@@ -145,7 +145,7 @@ class RelationalBackendProtocol(Protocol):
         limit: int = 100,
         offset: int = 0,
     ) -> list[Document]:
-        """List documents in a namespace."""
+        """List documents in a namespace, newest first, ties broken by descending id."""
         ...
 
     @abstractmethod
