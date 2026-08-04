@@ -273,14 +273,31 @@ async def _capture_list_documents_sql(
     return captured[-1]
 
 
-async def _explain(backend: PostgreSQLBackend, statement: str, parameters: Any, *, analyze: bool) -> dict:
-    """Run EXPLAIN over *statement* and return the root plan node."""
+async def _explain(
+    backend: PostgreSQLBackend,
+    statement: str,
+    parameters: Any,
+    *,
+    analyze: bool,
+    settings: dict[str, str] | None = None,
+) -> dict:
+    """Run EXPLAIN over *statement* and return the root plan node.
+
+    *settings* are applied with ``SET LOCAL`` inside the same transaction as
+    the EXPLAIN, so they affect this plan and nothing else.
+    """
     engine = backend._engine
     assert engine is not None
     options = "ANALYZE, FORMAT JSON" if analyze else "FORMAT JSON"
     async with engine.connect() as conn:
-        result = await conn.exec_driver_sql(f"EXPLAIN ({options}) {statement}", parameters)
-        raw = result.scalar()
+        trans = await conn.begin()
+        try:
+            for key, value in (settings or {}).items():
+                await conn.exec_driver_sql(f"SET LOCAL {key} = {value}")
+            result = await conn.exec_driver_sql(f"EXPLAIN ({options}) {statement}", parameters)
+            raw = result.scalar()
+        finally:
+            await trans.rollback()
     plan = json.loads(raw) if isinstance(raw, str) else raw
     return plan[0]["Plan"]
 
@@ -369,28 +386,59 @@ class TestListDocumentsIndexPlanPg:
             f"expected a Backward scan of {NEW_INDEX}, got {scan.get('Scan Direction')!r}"
         )
 
-    async def test_deep_offset_page_is_also_sort_free(self, backend: PostgreSQLBackend, seeded_namespace: UUID) -> None:
-        """Sort-freedom must hold at depth, not just on the first page.
+    async def test_deep_offset_page_can_be_served_without_a_sort(
+        self, backend: PostgreSQLBackend, seeded_namespace: UUID
+    ) -> None:
+        """At depth, the index can still supply the whole order with no sort.
 
         Full-drain pagination is where the regression actually bit: the sort is
         redone once per page, so the cost is paid ``rows / page_size`` times.
-        A deep page is the representative case, not the first one.
+
+        This asserts CAPABILITY, not the planner's unaided choice, and the
+        distinction is deliberate. At the scale CI can afford (a few thousand
+        rows) a deep page is genuinely cheaper as a bitmap heap scan plus a
+        sort: sorting 3000 rows costs almost nothing, while an ordered index
+        scan pays ~2900 random heap fetches. PostgreSQL picking that plan here
+        is the cost model working correctly, not the index failing - and it
+        flips the other way at production scale, where the sort is the
+        expensive half. Pinning the planner's *choice* at CI scale would
+        therefore be pinning an artifact of the seed size; it failed in CI
+        exactly that way, first via the single-column ``ix_documents_created_at``
+        and then via a bitmap plan.
+
+        So the alternatives are switched off and the question narrowed to the
+        one this migration actually answers: *when* an ordered scan is used, does
+        the index supply ``(created_at DESC, id DESC)`` outright, or does a sort
+        still have to be bolted on? Under the 2-column index the answer is a
+        sort even with these settings - that is the differential test below.
+        ``test_query_is_a_sort_free_backward_index_scan`` covers the unaided
+        planner choice on the first page, so between them both properties are
+        pinned.
         """
         deep_offset = SEED_ROWS - PAGE_SIZE * 2
         statement, parameters = await _capture_list_documents_sql(backend, seeded_namespace, offset=deep_offset)
-        root = await _explain(backend, statement, parameters, analyze=True)
-        types = _node_types(root)
-
-        assert "Seq Scan" not in types, f"planner chose a sequential scan at depth. Plan:{_render(root)}"
+        root = await _explain(
+            backend,
+            statement,
+            parameters,
+            analyze=True,
+            # Leave only the ordered-index-scan path available. Without this the
+            # planner reasonably prefers bitmap+sort at this row count.
+            settings={"enable_bitmapscan": "off", "enable_seqscan": "off"},
+        )
 
         used = {s.get("Index Name") for s in _index_scans(root)}
         assert NEW_INDEX in used, (
             f"expected {NEW_INDEX} to serve the deep page, plan used {used}. "
-            "If this names the single-column ix_documents_created_at, the namespace filter was "
-            "not selective enough for the namespace-leading index to win - check that the decoy "
-            f"namespaces actually got seeded (see DECOY_NAMESPACES). Plan:{_render(root)}"
+            "With bitmap and sequential scans disabled the only remaining paths are ordered "
+            f"index scans, so a different index here means this one cannot supply the order. "
+            f"Plan:{_render(root)}"
         )
-        assert not _sort_nodes(root), f"deep page grew a sort node: {_sort_nodes(root)}. Plan:{_render(root)}"
+        assert not _sort_nodes(root), (
+            f"deep page grew a sort node: {_sort_nodes(root)}. The index was used but did not "
+            f"supply the full ordering, which is the regression this migration exists to fix. "
+            f"Plan:{_render(root)}"
+        )
 
     async def test_old_two_column_index_would_reintroduce_a_sort(
         self, backend: PostgreSQLBackend, seeded_namespace: UUID
@@ -428,6 +476,13 @@ class TestListDocumentsIndexPlanPg:
             "the 2-column index was expected to force a sort for "
             f"ORDER BY created_at DESC, id DESC, but the plan has none: {_node_types(root)}. "
             "Without that contrast the sort-free assertions in this module prove nothing."
+        )
+        # Guard the contrast itself: a sort node proves nothing if the widened
+        # index somehow survived the swap and the plan sorted for an unrelated
+        # reason. Its absence is what makes the sort attributable to the swap.
+        assert NEW_INDEX not in {s.get("Index Name") for s in _index_scans(root)}, (
+            f"{NEW_INDEX} was still in the plan during the differential, so the swap did not "
+            f"take effect and the sort above is not attributable to it. Plan:{_render(root)}"
         )
 
         # And the indexes really did come back on rollback.
