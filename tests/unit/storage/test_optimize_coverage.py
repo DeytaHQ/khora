@@ -587,3 +587,53 @@ async def test_optimize_storage_skips_neo4j_when_no_driver_attr(monkeypatch: pyt
 
     result = await opt_mod.optimize_storage(coord)
     assert result["neo4j"] is None
+
+
+# ---------------------------------------------------------------------------
+# PG_INDEXES must not resurrect the superseded documents sort index
+# ---------------------------------------------------------------------------
+
+
+def _documents_index_columns(sql: str) -> list[str] | None:
+    """Ordered column list of a ``CREATE INDEX ... ON documents (...)``, else None."""
+    lowered = sql.lower()
+    marker = "on documents ("
+    if marker not in lowered:
+        return None
+    inner = sql[lowered.index(marker) + len(marker) : sql.rindex(")")]
+    # Strip per-column direction/opclass qualifiers - only the key order matters.
+    return [c.strip().split()[0].lower() for c in inner.split(",") if c.strip()]
+
+
+@pytest.mark.unit
+def test_pg_indexes_does_not_recreate_the_superseded_documents_index() -> None:
+    """``optimize_storage()`` must not hand back the 2-column documents index.
+
+    Migration 054 widened ``(namespace_id, created_at)`` to
+    ``(namespace_id, created_at, id)`` so ``list_documents``' pinned
+    ``ORDER BY created_at DESC, id DESC`` is served without a sort, and dropped
+    the narrower index so the ingest path does not maintain two indexes sharing
+    a prefix.
+
+    ``PG_INDEXES`` is applied with ``CREATE INDEX IF NOT EXISTS`` against live
+    databases, so an entry here silently undoes that migration on every
+    deployment that runs ``optimize_storage()`` - no migration, no review,
+    nothing in the Alembic history to point at. It also hands the planner
+    another candidate on the same leading columns.
+
+    Any documents index keyed on ``(namespace_id, created_at, ...)`` is
+    rejected. A wider index that merely starts with those two keys is exactly
+    the near-duplicate this guards against; genuinely different documents
+    indexes are unaffected.
+    """
+    offenders = []
+    for entry in opt_mod.PG_INDEXES:
+        columns = _documents_index_columns(entry["sql"])
+        if columns and columns[:2] == ["namespace_id", "created_at"]:
+            offenders.append((entry["name"], columns))
+
+    assert not offenders, (
+        f"PG_INDEXES re-creates a documents index on the (namespace_id, created_at) prefix: "
+        f"{offenders}. Migration 054 deliberately dropped that index; recreating it here would "
+        "undo the migration on any deployment running optimize_storage()."
+    )

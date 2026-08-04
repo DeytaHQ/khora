@@ -26,13 +26,12 @@ PG_INDEXES = [
         "sql": ("CREATE INDEX IF NOT EXISTS idx_chunks_namespace_created ON chunks (namespace_id, created_at DESC)"),
         "purpose": "Temporal filtering within namespace",
     },
-    {
-        "name": "idx_documents_namespace_created",
-        "sql": (
-            "CREATE INDEX IF NOT EXISTS idx_documents_namespace_created ON documents (namespace_id, created_at DESC)"
-        ),
-        "purpose": "Document temporal queries",
-    },
+    # NOTE: no (namespace_id, created_at) index on ``documents`` here. Migration
+    # 054 widened that index to (namespace_id, created_at, id) to cover
+    # list_documents' pinned ORDER BY, and dropped the 2-column version so the
+    # ingest path does not maintain two indexes sharing a prefix. Re-adding a
+    # near-duplicate here would undo that and give the planner a fourth
+    # candidate on the same leading columns.
     {
         "name": "idx_entities_namespace_type_name",
         "sql": (

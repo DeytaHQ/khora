@@ -92,7 +92,10 @@ def _pg_reachable() -> bool:
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "src" / "khora" / "db" / "migrations"
 
-_HEAD_REVISION = "053_khora_chunks_bookkeeping_to_chunker_info"
+# The revision under test, used as an explicit upgrade target. NOT the chain
+# head - later migrations sit on top of it - so it must not be bumped when a
+# new migration lands.
+_TARGET_REVISION = "053_khora_chunks_bookkeeping_to_chunker_info"
 _PREV_REVISION = "052_entities_source_chunk_ids_gin"
 
 _TSV_TRIGGER = "khora_chunks_content_tsv_update"
@@ -332,7 +335,7 @@ class TestMigration053OnSqlite:
     def test_archetypes(self, sqlite_url: str) -> None:
         asyncio.run(_seed_sqlite(sqlite_url))
         cfg = _make_config(sqlite_url)
-        command.upgrade(cfg, _HEAD_REVISION)
+        command.upgrade(cfg, _TARGET_REVISION)
 
         # 1. Tier-1 match: all four stripped from metadata (user key survives);
         #    chunker_info carries the twin's info + the four column values.
@@ -390,7 +393,7 @@ class TestMigration053OnSqlite:
     def test_idempotent_rerun(self, sqlite_url: str) -> None:
         asyncio.run(_seed_sqlite(sqlite_url))
         cfg = _make_config(sqlite_url)
-        command.upgrade(cfg, _HEAD_REVISION)
+        command.upgrade(cfg, _TARGET_REVISION)
 
         first = {
             cid: asyncio.run(_read_row(sqlite_url, cid))
@@ -407,7 +410,7 @@ class TestMigration053OnSqlite:
         # Step the version back and re-run: the guarded UPDATEs must touch zero
         # rows (chunker_info now carries chunk_index everywhere it was moved).
         asyncio.run(_step_version_back_sqlite(sqlite_url))
-        command.upgrade(cfg, _HEAD_REVISION)
+        command.upgrade(cfg, _TARGET_REVISION)
 
         second = {cid: asyncio.run(_read_row(sqlite_url, cid)) for cid in first}
         assert first == second, "re-run changed an already-migrated row"
