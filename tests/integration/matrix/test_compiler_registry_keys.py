@@ -27,6 +27,10 @@ import pytest
 # Importing these modules fires their module-level ``CompilerRegistry.register``
 # calls (the registry is empty until an engine/backend module imports).
 import khora.engines.chronicle.engine  # noqa: F401
+import khora.storage.backends.postgresql  # noqa: F401
+import khora.storage.backends.sqlite  # noqa: F401
+import khora.storage.backends.sqlite_lance.relational  # noqa: F401
+import khora.storage.backends.surrealdb.relational  # noqa: F401
 import khora.storage.temporal.pgvector  # noqa: F401
 import khora.storage.temporal.sqlite_lance  # noqa: F401
 import khora.storage.temporal.surrealdb  # noqa: F401
@@ -43,9 +47,16 @@ pytestmark = [pytest.mark.filter_conformance]
 # ``test_registry_holds_exactly_expected_keys`` fails until you do, so a new
 # registration can no longer be silently excluded from the conformance matrix.
 # Currently registered: chronicle, skeleton.pgvector, skeleton.sqlite_lance,
-# skeleton.surrealdb, skeleton.weaviate.
+# skeleton.surrealdb, skeleton.weaviate (chunk tier), and relational.postgresql,
+# relational.sqlite, relational.sqlite_lance, relational.surrealdb (documents
+# tier — the first key component names the query-path owner, which on the
+# document-enumeration path is a store id rather than an engine id).
 EXPECTED_KEYS: tuple[tuple[str, str], ...] = (
     ("chronicle", "chunks"),
+    ("relational.postgresql", "documents"),
+    ("relational.sqlite", "documents"),
+    ("relational.sqlite_lance", "documents"),
+    ("relational.surrealdb", "documents"),
     ("skeleton.pgvector", "khora_chunks"),
     ("skeleton.sqlite_lance", "khora_chunks"),
     ("skeleton.surrealdb", "temporal_chunk"),

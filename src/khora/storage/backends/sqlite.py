@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import UTC, datetime
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
@@ -1353,3 +1354,81 @@ class SQLiteVectorBackend:
             created_at=_parse_dt(row["created_at"]) or datetime.now(UTC),
             updated_at=_parse_dt(row["updated_at"]) or datetime.now(UTC),
         )
+
+
+# --------------------------------------------------------------------------- #
+# Documents-tier recall-filter compile context + compiler registration.
+# --------------------------------------------------------------------------- #
+from khora.filter import CompileContext, CompilerRegistry, SchemaCapabilities  # noqa: E402
+from khora.filter.compilers.lance import compile_lance  # noqa: E402
+
+# The system keys this table backs with a real column — the single source of
+# truth for the documents tier. Nine of the ten ``SYSTEM_KEYS``; ``occurred_at``
+# is a recall-chunk column and has no ``documents`` counterpart (see the
+# ``CREATE TABLE IF NOT EXISTS documents`` DDL in ``_SCHEMA_SQL`` above).
+_BACKED_SYSTEM_KEYS: frozenset[str] = frozenset(
+    {
+        "created_at",
+        "source_timestamp",
+        "source_type",
+        "source_name",
+        "source_url",
+        "external_id",
+        "content_type",
+        "source",
+        "title",
+    }
+)
+
+
+@lru_cache(maxsize=1)
+def _sqlite_has_json1() -> bool:
+    """Whether this process's SQLite build has the JSON1 functions.
+
+    ``compile_lance`` gates metadata pushdown on this (``json_extract`` /
+    ``json_type`` / ``json_each``). Probed once per process against an in-memory
+    database: aiosqlite runs on the same in-process ``sqlite3`` library, so the
+    answer is process-wide. ``False`` on any error — under
+    ``on_unsupported="split"`` that only means every metadata leaf falls to the
+    caller's post-filter, never a wrong row-set.
+    """
+    conn = sqlite3.connect(":memory:")
+    try:
+        return conn.execute("SELECT json_valid('{}')").fetchone()[0] == 1
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
+
+def _documents_compile_context() -> CompileContext:
+    """Build the recall-filter :class:`CompileContext` for the ``documents`` table.
+
+    ``field_mapping`` declares the nine backed system keys (identity-mapped to
+    their bare columns) plus the ``metadata`` root remap to the physical
+    ``metadata_`` column — this backend's raw DDL diverges from the shared
+    SQLAlchemy model, which names the same column ``metadata``.
+    ``on_unsupported="split"`` because a document enumeration always has an
+    in-memory post-filter available, so an unpushable leaf is left unconsumed
+    rather than raising.
+
+    ``occurred_at`` is deliberately absent: no ``documents`` row backs it.
+    ``compile_lance`` does not treat the ``field_mapping`` key set as a pushdown
+    whitelist (``_col`` falls back to identity), so this context alone cannot
+    stop an ``occurred_at`` leaf from compiling to a non-existent column — the
+    caller must reject or strip it before compiling.
+    """
+    field_mapping = {key: key for key in _BACKED_SYSTEM_KEYS} | {"metadata": "metadata_"}
+    return CompileContext(
+        backend_target="documents",
+        field_mapping=field_mapping,
+        schema_capabilities=SchemaCapabilities(sqlite_json1=_sqlite_has_json1()),
+        on_unsupported="split",
+    )
+
+
+# Register the deterministic recall-filter compiler for this store/target at
+# import time (idempotent — same function object). Registration fires when
+# ``khora.storage.backends`` is imported (this module is imported eagerly by the
+# package ``__init__``).
+CompilerRegistry.register("relational.sqlite", "documents", compile_lance)

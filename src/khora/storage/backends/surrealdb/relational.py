@@ -1135,3 +1135,79 @@ def _row_to_memory_fact(row: dict[str, Any]) -> _MemoryFactRow:
         created_at=_parse_dt(row.get("created_at")),
         updated_at=_parse_dt(row.get("updated_at")),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Documents-tier recall-filter compile context + compiler registration.
+# --------------------------------------------------------------------------- #
+from khora.filter import CompileContext, CompilerRegistry  # noqa: E402
+from khora.filter.compilers.surrealdb import compile_surrealdb  # noqa: E402
+
+# The system keys this table backs with a real field — the single source of
+# truth for the documents tier. Nine of the ten ``SYSTEM_KEYS``; ``occurred_at``
+# is a recall-chunk field and has no ``document`` counterpart (see the
+# ``DEFINE FIELD ... ON document`` block in ``surrealdb/schema.py``).
+_BACKED_SYSTEM_KEYS: frozenset[str] = frozenset(
+    {
+        "created_at",
+        "source_timestamp",
+        "source_type",
+        "source_name",
+        "source_url",
+        "external_id",
+        "content_type",
+        "source",
+        "title",
+    }
+)
+
+
+def _documents_compile_context() -> CompileContext:
+    """Build the recall-filter :class:`CompileContext` for the ``document`` table.
+
+    ``field_mapping`` declares the nine backed system keys (identity-mapped to
+    their bare fields) plus the ``metadata`` root remap to the physical
+    ``metadata_`` field. ``on_unsupported="split"`` because a document
+    enumeration always has an in-memory post-filter available, so an unpushable
+    leaf is left unconsumed rather than raising — unlike the chunk-tier context
+    in ``khora/storage/temporal/surrealdb.py``, whose engine has no post-filter
+    path and therefore uses ``"raise"``.
+
+    ``occurred_at`` is deliberately absent: no ``document`` row backs it.
+    ``compile_surrealdb`` treats the ``field_mapping`` key set as the backend's
+    declared+pushable whitelist, so an undeclared system key is left out of
+    ``consumed_keys`` and routed to the caller's post-filter instead of emitting
+    a predicate against a missing field — the only documents backend where the
+    omission has that effect.
+
+    **The placeholder is not inert under a negation.** ``compile_surrealdb`` has
+    no all-or-nothing split gate (the one ``compile_lance`` documents at
+    ``_consumable``), so an undeclared leaf emits the literal ``true`` in place,
+    whatever its position in the tree. That is safe in positive position
+    (``A AND true`` is ``A``) but not under ``$not`` / ``$or``: a filter such as
+    ``{"$not": {"$or": [{"title": "x"}, {"occurred_at": {"$gt": ...}}]}}``
+    compiles to ``!((((title = $f_0)) OR (true)))``, which is ``!true`` — it
+    matches ZERO rows, silently, while ``consumed_keys`` reports ``occurred_at``
+    as still needing a post-filter that can only narrow further. A caller must
+    reject an undeclared system key rather than rely on the post-filter to
+    recover it.
+
+    ``backend_target`` is the SINGULAR ``document``, the real physical table name
+    (``surrealdb/schema.py``), not the plural registry key. ``compile_surrealdb``
+    never reads ``backend_target``, so the value is inert today; it names the
+    physical table (house precedent) so the eventual enumeration caller reads the
+    truth rather than a plausible-looking wrong table.
+    """
+    field_mapping = {key: key for key in _BACKED_SYSTEM_KEYS} | {"metadata": "metadata_"}
+    return CompileContext(
+        backend_target="document",
+        field_mapping=field_mapping,
+        on_unsupported="split",
+    )
+
+
+# Register the deterministic recall-filter compiler for this store/target at
+# import time (idempotent — same function object). This module is imported
+# lazily by ``StorageFactory``, so registration happens when the backend is
+# first constructed.
+CompilerRegistry.register("relational.surrealdb", "documents", compile_surrealdb)

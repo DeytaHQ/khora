@@ -5,7 +5,10 @@ stateless compiler function that lowers a :class:`~khora.filter.ast.FilterNode`
 to that backend's query fragment. It is the **second** internal seam: adding a
 backend or an alternative compiler does not require touching engine code, and
 adding an engine does not require touching compiler code — within khora's own
-codebase.
+codebase. The first key component names the query-path OWNER, which is not
+always an engine: an engine id on the recall path (``"chronicle"``,
+``"skeleton.pgvector"``), a ``relational.<dialect>`` store id on the
+document-enumeration path.
 
 ``@internal``. The registry is ``__all__``'d under :mod:`khora.filter` only —
 **not** :mod:`khora.__init__`. Exposing ``register()`` as a public extension
