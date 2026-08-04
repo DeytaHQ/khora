@@ -396,23 +396,28 @@ class TestListDocumentsIndexPlanPg:
 
         This asserts CAPABILITY, not the planner's unaided choice, and the
         distinction is deliberate. At the scale CI can afford (a few thousand
-        rows) a deep page is genuinely cheaper as a bitmap heap scan plus a
-        sort: sorting 3000 rows costs almost nothing, while an ordered index
-        scan pays ~2900 random heap fetches. PostgreSQL picking that plan here
-        is the cost model working correctly, not the index failing - and it
-        flips the other way at production scale, where the sort is the
-        expensive half. Pinning the planner's *choice* at CI scale would
-        therefore be pinning an artifact of the seed size; it failed in CI
-        exactly that way, first via the single-column ``ix_documents_created_at``
-        and then via a bitmap plan.
+        rows) fetching every matching row and sorting it is simply cheaper than
+        an ordered scan: sorting 3000 rows costs almost nothing, while an
+        ordered scan pays ~2900 heap fetches to reach the same place. That is
+        the cost model working correctly, not the index failing, and it flips at
+        production scale where the sort is the expensive half. Pinning the
+        planner's unaided choice here pins an artifact of the seed size - CI
+        demonstrated that three separate ways, choosing the single-column
+        ``ix_documents_created_at``, then a bitmap heap scan, then
+        ``ix_documents_namespace_id`` with a sort on top.
 
-        So the alternatives are switched off and the question narrowed to the
-        one this migration actually answers: *when* an ordered scan is used, does
-        the index supply ``(created_at DESC, id DESC)`` outright, or does a sort
-        still have to be bolted on? Under the 2-column index the answer is a
-        sort even with these settings - that is the differential test below.
+        Disabling scan types does not settle it either, because every one of
+        those plans is really "gather the rows, then sort" and some other index
+        can always gather. ``enable_sort`` is the knob that matches the actual
+        question: with sorting priced out of reach, is there a plan at all? Only
+        an index whose key order already is ``(created_at DESC, id DESC)`` under
+        an equality-constrained ``namespace_id`` can produce one. That property
+        is scale-independent and is exactly what widening the index buys.
+
+        The 2-column index cannot produce such a plan - the differential below
+        shows it sorting under identical conditions - and
         ``test_query_is_a_sort_free_backward_index_scan`` covers the unaided
-        planner choice on the first page, so between them both properties are
+        planner choice on the first page. Between them, both properties are
         pinned.
         """
         deep_offset = SEED_ROWS - PAGE_SIZE * 2
@@ -422,17 +427,18 @@ class TestListDocumentsIndexPlanPg:
             statement,
             parameters,
             analyze=True,
-            # Leave only the ordered-index-scan path available. Without this the
-            # planner reasonably prefers bitmap+sort at this row count.
-            settings={"enable_bitmapscan": "off", "enable_seqscan": "off"},
+            # Price sorting out of reach, leaving only genuinely order-supplying
+            # plans. This is a cost penalty rather than a hard prohibition, so a
+            # Sort node surviving it means no sort-free plan exists at all.
+            settings={"enable_sort": "off"},
         )
 
         used = {s.get("Index Name") for s in _index_scans(root)}
         assert NEW_INDEX in used, (
             f"expected {NEW_INDEX} to serve the deep page, plan used {used}. "
-            "With bitmap and sequential scans disabled the only remaining paths are ordered "
-            f"index scans, so a different index here means this one cannot supply the order. "
-            f"Plan:{_render(root)}"
+            "With sorting priced out of reach, only an index that already supplies "
+            "(created_at DESC, id DESC) can produce a plan - so a different index here means "
+            f"this one cannot supply the order. Plan:{_render(root)}"
         )
         assert not _sort_nodes(root), (
             f"deep page grew a sort node: {_sort_nodes(root)}. The index was used but did not "
@@ -466,6 +472,11 @@ class TestListDocumentsIndexPlanPg:
                 await conn.exec_driver_sql(f"DROP INDEX {NEW_INDEX}")
                 await conn.exec_driver_sql(f"CREATE INDEX {OLD_INDEX} ON documents (namespace_id, created_at)")
 
+                # Same setting the deep-offset test runs under, so this is a
+                # true differential: a Sort node surviving a priced-out sort
+                # means the 2-column index cannot supply the order at all,
+                # rather than merely losing on cost.
+                await conn.exec_driver_sql("SET LOCAL enable_sort = off")
                 result = await conn.exec_driver_sql(f"EXPLAIN (FORMAT JSON) {statement}", parameters)
                 raw = result.scalar()
                 root = (json.loads(raw) if isinstance(raw, str) else raw)[0]["Plan"]
