@@ -252,11 +252,24 @@ def _is_lock_timeout(exc: DBAPIError) -> bool:
     Since ``DBAPIError`` is broad (deadlocks, connection drops, syntax
     errors, constraint violations), the ``lock_timeout_tripped`` field
     must stay keyed on the SQLSTATE so dashboards aren't misled.
+
+    Both attribute spellings are read, and that is the whole point rather
+    than belt-and-braces: **asyncpg carries the code on ``sqlstate`` and
+    leaves ``pgcode`` as ``None``**, while psycopg2/psycopg use ``pgcode``.
+    ``env.py`` normalizes Postgres URLs to ``postgresql+asyncpg``, so a
+    ``pgcode``-only check — which is what migrations 037 / 038 / 042 / 053
+    do — is dead on this driver: it can never report a lock timeout that
+    actually happened. Verified against the pinned asyncpg:
+    ``LockNotAvailableError('probe').sqlstate == '55P03'`` and
+    ``.pgcode is None``.
     """
     orig = getattr(exc, "orig", None)
     if orig is None:
         return False
-    return getattr(orig, "pgcode", None) == _PG_LOCK_NOT_AVAILABLE
+    for attr in ("sqlstate", "pgcode"):
+        if getattr(orig, attr, None) == _PG_LOCK_NOT_AVAILABLE:
+            return True
+    return False
 
 
 def _upgrade_impl() -> int:
