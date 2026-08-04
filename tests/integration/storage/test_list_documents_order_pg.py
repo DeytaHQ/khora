@@ -26,7 +26,9 @@ from tests.test_helpers.document_order import id_ladder, seed_order, walk_pages
 
 DATABASE_URL = os.environ.get(
     "KHORA_DATABASE_URL",
-    "postgresql+asyncpg://khora:khora@localhost:5432/khora",
+    # This repo's compose puts Postgres on 5434 (see compose.yaml); defaulting to
+    # 5432 would make the whole class silently skip on a local `make test`.
+    "postgresql+asyncpg://khora:khora@localhost:5434/khora",
 )
 
 if DATABASE_URL.startswith("postgresql://"):
