@@ -1088,8 +1088,11 @@ def _documents_compile_context() -> CompileContext:
     ``occurred_at`` is deliberately absent: no ``documents`` row backs it.
     ``compile_postgres`` does not treat the ``field_mapping`` key set as a
     pushdown whitelist (``_col`` falls back to identity), so this context alone
-    cannot stop an ``occurred_at`` leaf from compiling to a non-existent column
-    — the caller must reject or strip it before compiling.
+    cannot stop an ``occurred_at`` leaf from compiling to a non-existent column.
+    Worse than the resulting error: the leaf is also reported in
+    ``CompiledFilter.consumed_keys``, so the caller is told it was pushed down
+    and will not post-filter it. The caller must reject or strip the key before
+    compiling.
     """
     field_mapping = {key: key for key in _BACKED_SYSTEM_KEYS} | {"metadata": "metadata"}
     return CompileContext(

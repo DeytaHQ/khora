@@ -13,11 +13,20 @@ document-enumeration path.
 ``@internal``. The registry is ``__all__``'d under :mod:`khora.filter` only —
 **not** :mod:`khora.__init__`. Exposing ``register()`` as a public extension
 point for third-party engine/backend authors is deferred to a future improvement
-(no current caller authors compilers; khora's five built-in compilers are the
-only consumers).
+(no current caller authors compilers; khora's own built-in compilers are the
+only consumers — seven ``compile_*`` functions ship, of which five are ever
+registered: ``compile_python`` is the in-memory oracle and ``compile_cypher``
+has no registered target).
 
-The registry is **empty at import** — khora's engines register their compilers
-at engine import time, not here. This module imports no compiler.
+Registrants are **engine and relational-storage-backend modules**, each
+registering at its own import time; this module imports no compiler. The
+registry is therefore **not** empty after a bare ``import khora``: the
+PostgreSQL and raw-SQLite backends sit on :mod:`khora.storage.backends`' eager
+import path, so their two documents-tier entries are already present. The
+sqlite_lance and SurrealDB backends are imported lazily by ``StorageFactory``,
+so their entries appear only once those backends are first constructed —
+anything enumerating :meth:`CompilerRegistry.registered_keys` for a full
+picture must import all four backend modules explicitly.
 """
 
 from __future__ import annotations

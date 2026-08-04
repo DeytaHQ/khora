@@ -43,29 +43,32 @@ pinned separately, in a form that is self-consistent under either probe answer.
 
 from __future__ import annotations
 
+import dataclasses
 import re
 import sqlite3
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.sql.elements import ColumnElement
 
+from khora.db.models import DocumentModel
 from khora.filter import RecallFilter
 from khora.filter.ast import FilterNode, parse_to_ast
 from khora.filter.compilers.lance import compile_lance
 from khora.filter.compilers.postgres import compile_postgres
 from khora.filter.compilers.surrealdb import compile_surrealdb
 from khora.filter.context import CompileContext, SchemaCapabilities
-from khora.filter.model import SYSTEM_KEYS
+from khora.filter.model import SYSTEM_KEYS, RecallFilterUnsupportedError
 from khora.filter.registry import CompiledFilter
+from khora.storage.backends._sqlite_capabilities import sqlite_has_json1
 from khora.storage.backends.postgresql import _documents_compile_context as postgres_context
+from khora.storage.backends.sqlite import _SCHEMA_SQL
 from khora.storage.backends.sqlite import _documents_compile_context as sqlite_context
-from khora.storage.backends.sqlite import _sqlite_has_json1 as sqlite_has_json1
 from khora.storage.backends.sqlite_lance.relational import _documents_compile_context as sqlite_lance_context
-from khora.storage.backends.sqlite_lance.relational import _sqlite_has_json1 as sqlite_lance_has_json1
 from khora.storage.backends.surrealdb.relational import _documents_compile_context as surrealdb_context
 
 pytestmark = pytest.mark.unit
@@ -138,15 +141,12 @@ def _json1_variant(ctx: CompileContext) -> CompileContext:
     Column-mapping tests must not depend on the host's SQLite build, so they run
     against this local variant, which carries the shipped ``field_mapping``
     verbatim and only pins the capability flag.
+
+    ``dataclasses.replace`` rather than a field-by-field rebuild: a new field on
+    :class:`CompileContext` would otherwise be silently dropped from every test
+    routed through this helper, with nothing to flag it.
     """
-    return CompileContext(
-        backend_target=ctx.backend_target,
-        table_alias=ctx.table_alias,
-        param_namespace=ctx.param_namespace,
-        field_mapping=ctx.field_mapping,
-        schema_capabilities=SchemaCapabilities(sqlite_json1=True),
-        on_unsupported=ctx.on_unsupported,
-    )
+    return dataclasses.replace(ctx, schema_capabilities=SchemaCapabilities(sqlite_json1=True))
 
 
 # Every context builder, with its expected physical target/metadata column, and
@@ -157,6 +157,19 @@ _ALL_CONTEXTS: tuple[tuple[str, Callable[[], CompileContext], str, str], ...] = 
     ("sqlite_lance", sqlite_lance_context, "documents", "metadata"),
     ("surrealdb", surrealdb_context, "document", "metadata_"),
 )
+
+# The enumeration contract specifies ``"split"`` everywhere. The SurrealDB
+# context ships ``"raise"`` as an interim posture because ``compile_surrealdb``
+# is not sound under split — its unsupported-leaf placeholder inverts under
+# ``$not``/``$or`` (pinned in the known-gap section below). Raising is strictly
+# narrower, so widening it back to ``"split"`` with the compiler soundness gate
+# is not a breaking change for a caller.
+_EXPECTED_UNSUPPORTED_MODE: Mapping[str, str] = {
+    "postgresql": "split",
+    "sqlite": "split",
+    "sqlite_lance": "split",
+    "surrealdb": "raise",
+}
 
 # The two ``compile_lance``-driven contexts, which share every behaviour that
 # depends on the JSON1 capability flag.
@@ -191,8 +204,9 @@ def test_context_declares_the_physical_schema(
     assert ctx.table_alias is None
     assert ctx.param_namespace == "f"
     # A document enumeration always has an in-memory post-filter available, so an
-    # unpushable leaf is left unconsumed rather than raising.
-    assert ctx.on_unsupported == "split"
+    # unpushable leaf is normally left unconsumed rather than raising — except on
+    # SurrealDB, whose compiler is not yet sound under split (see the map above).
+    assert ctx.on_unsupported == _EXPECTED_UNSUPPORTED_MODE[name]
 
     mapping = ctx.field_mapping
     assert mapping is not None
@@ -221,6 +235,78 @@ def test_occurred_at_is_absent_from_every_documents_mapping(
     # ``documents`` column behind it.
     assert "occurred_at" in SYSTEM_KEYS
     assert set(_BACKED_KEYS) | {"occurred_at"} == set(SYSTEM_KEYS)
+
+
+def _real_columns(name: str) -> frozenset[str]:
+    """The physical column/field names each store's own schema actually defines.
+
+    Read from each store's schema artifact rather than restated here, so this is
+    a genuine cross-check of the mappings instead of a comparison against a copy
+    of them. Needs no database server and no fixtures.
+    """
+    if name in {"postgresql", "sqlite_lance"}:
+        # Both reuse the shared declarative model. ``.c`` is keyed by PHYSICAL
+        # column name, so the metadata column reads as ``metadata`` even though
+        # the mapped attribute is ``metadata_``.
+        return frozenset(DocumentModel.__table__.c.keys())
+    if name == "sqlite":
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.executescript(_SCHEMA_SQL)
+            return frozenset(row[1] for row in conn.execute("PRAGMA table_info(documents)"))
+        finally:
+            conn.close()
+    if name == "surrealdb":
+        schema = Path(
+            str(__import__("khora.storage.backends.surrealdb.schema", fromlist=["__file__"]).__file__)
+        ).read_text()
+        return frozenset(re.findall(r"DEFINE FIELD (?:IF NOT EXISTS )?(\w+) ON document\b", schema))
+    raise AssertionError(f"unknown store {name!r}")
+
+
+@pytest.mark.parametrize(
+    ("name", "builder", "target", "metadata_column"),
+    _ALL_CONTEXTS,
+    ids=[case[0] for case in _ALL_CONTEXTS],
+)
+def test_field_mapping_matches_the_real_physical_columns(
+    name: str,
+    builder: Callable[[], CompileContext],
+    target: str,
+    metadata_column: str,
+) -> None:
+    """Every declared physical name must exist in the store's own schema.
+
+    The other context assertions compare the mapping to literals restated in
+    this module, so they would happily agree with a mapping that names a column
+    no table has. This one reads each store's real schema and is the guard that
+    actually fails when a column is renamed or dropped underneath a context —
+    the exact drift this whole module exists to prevent.
+    """
+    columns = _real_columns(name)
+    assert columns, f"failed to read any columns for {name}"
+
+    mapping = builder().field_mapping
+    assert mapping is not None
+    missing = set(mapping.values()) - columns
+    assert not missing, f"{name} maps to columns its schema does not define: {sorted(missing)}"
+
+
+@pytest.mark.parametrize(
+    ("name", "builder", "target", "metadata_column"),
+    _ALL_CONTEXTS,
+    ids=[case[0] for case in _ALL_CONTEXTS],
+)
+def test_occurred_at_is_absent_from_every_real_documents_schema(
+    name: str,
+    builder: Callable[[], CompileContext],
+    target: str,
+    metadata_column: str,
+) -> None:
+    # The reason ``occurred_at`` is excluded from every mapping, asserted against
+    # the schemas themselves rather than left as prose: it is chunk event-time
+    # and no documents table has a column for it on any backend.
+    assert "occurred_at" not in _real_columns(name)
 
 
 def test_only_the_sqlite_contexts_declare_a_capability() -> None:
@@ -323,25 +409,24 @@ def test_surrealdb_metadata_leaf_addresses_the_metadata_underscore_field() -> No
 
 
 def test_metadata_column_matcher_rejects_the_swapped_mapping() -> None:
-    """The column assertions above must FAIL against the defect they guard.
+    """``_emits_column`` must DISCRIMINATE the two physical spellings.
 
-    ``metadata`` is a prefix of ``metadata_``, so a substring assertion stays
-    green when a context is wired to the other backend's column. This test runs
-    each backend's shipped assertion against a context whose metadata mapping has
-    been deliberately swapped to the wrong spelling and requires it to reject —
-    if this ever passes trivially, every metadata assertion above is worthless.
+    ``metadata`` is a prefix of ``metadata_``, so a plain substring assertion is
+    green for both and cannot fail against the defect this module exists to
+    guard. This case pins that the word-boundary matcher tells them apart:
+    compile through a context whose metadata mapping is the wrong spelling and
+    require the shipped-column assertion to reject it.
+
+    Scope, stated precisely: both the shipped and the wrong spelling are
+    hardcoded here, so this proves the MATCHER discriminates — not that any
+    shipped mapping is correct. The mapping itself is guarded by
+    :func:`test_field_mapping_matches_the_real_physical_columns` (against each
+    store's real schema) and by ``test_context_declares_the_physical_schema``.
     """
 
     def _swapped(ctx: CompileContext, wrong_column: str) -> CompileContext:
         mapping = dict(ctx.field_mapping or {}) | {"metadata": wrong_column}
-        return CompileContext(
-            backend_target=ctx.backend_target,
-            table_alias=ctx.table_alias,
-            param_namespace=ctx.param_namespace,
-            field_mapping=mapping,
-            schema_capabilities=ctx.schema_capabilities,
-            on_unsupported=ctx.on_unsupported,
-        )
+        return dataclasses.replace(ctx, field_mapping=mapping)
 
     wire = {"metadata.tier": {"$eq": "gold"}}
 
@@ -473,14 +558,9 @@ def test_shipped_sqlite_context_is_self_consistent_under_either_json1_answer(
 # The JSON1 probe — the only new runtime logic behind these contexts.
 # ===========================================================================
 
-# Both SQLite store modules carry their own copy of the probe (their schemas
-# genuinely diverge, so they share no code); both are covered.
-_JSON1_PROBES: tuple[tuple[str, Callable[[], bool]], ...] = (
-    ("sqlite", sqlite_has_json1),
-    ("sqlite_lance", sqlite_lance_has_json1),
-)
 
-
+# Both SQLite stores share ONE probe: it interrogates the process's stdlib
+# ``sqlite3`` build, not either store's schema, so the two cannot disagree.
 def _direct_json1_probe() -> bool:
     """Ask this interpreter's ``sqlite3`` build about JSON1, independently."""
     conn = sqlite3.connect(":memory:")
@@ -492,32 +572,71 @@ def _direct_json1_probe() -> bool:
         conn.close()
 
 
-@pytest.mark.parametrize(("name", "probe"), _JSON1_PROBES, ids=[case[0] for case in _JSON1_PROBES])
-def test_json1_probe_agrees_with_the_hosts_sqlite_build(name: str, probe: Callable[[], bool]) -> None:
+def test_json1_probe_agrees_with_the_hosts_sqlite_build() -> None:
     """The probe reports what this host's SQLite actually supports.
 
     Asserted against an independent probe rather than a hardcoded ``True``, so
     the test states the contract (the flag tracks the runtime) instead of the
     accident of which SQLite this host shipped. ``aiosqlite`` and SQLAlchemy's
     ``sqlite+aiosqlite`` both run on this same in-process library, which is what
-    makes a process-wide answer correct.
+    makes a single process-wide answer correct for both stores.
     """
-    result = probe()
+    result = sqlite_has_json1()
     assert isinstance(result, bool)
     assert result is _direct_json1_probe()
 
 
-@pytest.mark.parametrize(("name", "probe"), _JSON1_PROBES, ids=[case[0] for case in _JSON1_PROBES])
-def test_json1_probe_is_stable_across_calls(name: str, probe: Callable[[], bool]) -> None:
+def test_json1_probe_is_stable_across_calls() -> None:
     # Memoized: the answer cannot change within a process, and a context built
     # twice must not disagree with itself.
-    assert probe() is probe()
+    assert sqlite_has_json1() is sqlite_has_json1()
 
 
-@pytest.mark.parametrize(("name", "probe"), _JSON1_PROBES, ids=[case[0] for case in _JSON1_PROBES])
+def test_json1_probe_interrogates_json1_specifically(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The probe must ask about JSON1 — not merely run *some* query successfully.
+
+    Without this, a probe rewritten to ``SELECT 1`` passes every other case on a
+    JSON1-enabled host: the fail-closed case below drives its negative branch
+    with a connection that raises for ANY SQL, so it cannot tell the two apart.
+    A ``SELECT 1`` probe would report ``True`` on a build lacking JSON1 and
+    ``compile_lance`` would then emit ``json_extract`` / ``json_each`` against a
+    build that cannot run them — exactly what the probe exists to prevent.
+
+    Orthogonal to :func:`test_context_reads_the_probe_rather_than_hardcoding_it`:
+    that one pins the context→probe wire, this one pins what the probe asks.
+    Fixing either leaves the other's mutant alive.
+    """
+    executed: list[str] = []
+    # Bind the real factory before patching, or the wrapper below re-enters the
+    # patched one and recurses.
+    real_connect = sqlite3.connect
+
+    class _RecordingConnection:
+        def __init__(self) -> None:
+            self._conn = real_connect(":memory:")
+
+        def execute(self, sql: str) -> object:
+            executed.append(sql)
+            return self._conn.execute(sql)
+
+        def close(self) -> None:
+            self._conn.close()
+
+    monkeypatch.setattr(sqlite3, "connect", lambda *_a, **_k: _RecordingConnection())
+    sqlite_has_json1.cache_clear()
+    try:
+        sqlite_has_json1()
+    finally:
+        sqlite_has_json1.cache_clear()
+    monkeypatch.undo()
+
+    assert executed, "the probe ran no query at all"
+    assert any("json_valid" in sql for sql in executed), f"probe must interrogate a JSON1 function, but ran: {executed}"
+    # Restore the host's real answer for every later test in this process.
+    assert sqlite_has_json1() is _direct_json1_probe()
+
+
 def test_json1_probe_fails_closed_when_the_query_errors(
-    name: str,
-    probe: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A failed probe reports NO JSON1 — the conservative answer.
@@ -543,21 +662,15 @@ def test_json1_probe_fails_closed_when_the_query_errors(
     monkeypatch.setattr(sqlite3, "connect", lambda *_args, **_kwargs: _FailingConnection())
     # The probe is memoized, so the real answer must be evicted before and after
     # this case or the fake result would leak into the rest of the session.
-    probe.cache_clear()
+    sqlite_has_json1.cache_clear()
     try:
-        assert probe() is False
+        assert sqlite_has_json1() is False
     finally:
-        probe.cache_clear()
+        sqlite_has_json1.cache_clear()
 
     monkeypatch.undo()
     # Back to the host's real answer for every later test in this process.
-    assert probe() is _direct_json1_probe()
-
-
-def test_both_sqlite_probes_reach_the_same_answer() -> None:
-    # Two independent copies of the same probe against the same in-process
-    # library — a divergence would mean one of them stopped probing.
-    assert sqlite_has_json1() is sqlite_lance_has_json1()
+    assert sqlite_has_json1() is _direct_json1_probe()
 
 
 @pytest.mark.parametrize(
@@ -575,22 +688,65 @@ def test_context_capability_carries_the_probe_result(
     assert builder().schema_capabilities.sqlite_json1 is _direct_json1_probe()
 
 
+@pytest.mark.parametrize(
+    ("name", "builder", "metadata_column"),
+    _SQLITE_CONTEXTS,
+    ids=[case[0] for case in _SQLITE_CONTEXTS],
+)
+def test_context_reads_the_probe_rather_than_hardcoding_it(
+    name: str,
+    builder: Callable[[], CompileContext],
+    metadata_column: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A context that hardcoded ``sqlite_json1=True`` must fail here.
+
+    The case above compares the context's flag to a live probe, so on a
+    JSON1-enabled host both sides are ``True`` and it cannot distinguish "reads
+    the probe" from "hardcoded". Forcing the probe to the opposite answer is
+    what makes the wire observable.
+    """
+    # Patch the name in the STORE module, not in ``_sqlite_capabilities``: each
+    # store does ``from ... import sqlite_has_json1``, which binds the function
+    # object into its own namespace at import time, so patching the source
+    # module would not be observed here.
+    store_module = builder.__module__
+    for forced in (False, True):
+        monkeypatch.setattr(f"{store_module}.sqlite_has_json1", lambda _v=forced: _v)
+        try:
+            assert builder().schema_capabilities.sqlite_json1 is forced
+        finally:
+            monkeypatch.undo()
+
+    # The real probe is memoized and was never displaced, but assert the host's
+    # answer is intact so nothing leaks into later tests.
+    assert builder().schema_capabilities.sqlite_json1 is _direct_json1_probe()
+
+
 # ===========================================================================
 # KNOWN GAPS — pinned as they behave today, NOT as they should behave.
 # ===========================================================================
 
 
 def test_occurred_at_is_defended_on_surrealdb() -> None:
-    # ``compile_surrealdb`` treats the ``field_mapping`` key set as its
-    # declared+pushable whitelist, so the undeclared ``occurred_at`` leaf never
-    # reaches the query: it emits the non-constraining literal and is left out of
-    # ``consumed_keys`` for the caller to post-filter. This is the one backend
-    # where the context alone prevents the bad predicate.
+    """The shipped SurrealDB context REJECTS an undeclared system key.
+
+    ``compile_surrealdb`` treats the ``field_mapping`` key set as its
+    declared+pushable whitelist, so the undeclared ``occurred_at`` leaf never
+    reaches the query. Under the shipped ``on_unsupported="raise"`` that surfaces
+    as a structured error rather than a silent placeholder — the interim posture
+    that keeps the inversion below unreachable until the compiler soundness gate
+    lands. This is the one backend where the context alone prevents the bad
+    predicate; the three SQL backends cannot (see the case below).
+
+    When the context flips back to ``"split"``, this expectation changes to the
+    placeholder shape — ``predicate == "(true)"`` with empty ``consumed_keys`` —
+    which is only safe once the compiler defers rather than emitting a
+    match-all in place.
+    """
     ctx = surrealdb_context()
-    compiled = compile_surrealdb(_ast({"occurred_at": {"$gte": _DT}}), ctx)
-    assert compiled.predicate.strip() == "(true)"
-    assert compiled.consumed_keys == frozenset()
-    assert compiled.params == {}
+    with pytest.raises(RecallFilterUnsupportedError):
+        compile_surrealdb(_ast({"occurred_at": {"$gte": _DT}}), ctx)
 
 
 def test_occurred_at_is_not_defended_on_sql_backends() -> None:
@@ -636,6 +792,12 @@ def test_surrealdb_placeholder_inverts_under_a_negated_or() -> None:
     narrow, never recover the dropped rows. Pinned as it behaves today; the fix
     is a soundness gate in the compiler, not in this context.
 
+    The SHIPPED context now uses ``on_unsupported="raise"`` precisely to keep
+    this unreachable, so the defect is pinned here against an explicitly
+    split-mode copy of it. That keeps the compiler bug documented and guarded
+    while no caller can trip it — and it is why this case must build its own
+    context rather than using the shipped one.
+
     **This expectation INVERTS when that soundness gate lands.** A gated
     ``compile_surrealdb`` defers the whole ``OR`` node rather than letting a
     match-all placeholder invert, so ``or (true)`` disappears from the emitted
@@ -643,9 +805,10 @@ def test_surrealdb_placeholder_inverts_under_a_negated_or() -> None:
     regression. Update the assertions to the deferred shape; do NOT restore green
     by relaxing them back to accepting an inverted placeholder.
     """
+    split_ctx = dataclasses.replace(surrealdb_context(), on_unsupported="split")
     compiled = compile_surrealdb(
         _ast({"$not": {"$or": [{"title": "x"}, {"occurred_at": {"$gt": _DT}}]}}),
-        surrealdb_context(),
+        split_ctx,
     )
     sql = _norm(compiled.predicate)
     assert sql.startswith("!(")

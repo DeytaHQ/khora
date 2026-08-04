@@ -13,9 +13,7 @@ this adapter assumes tables already exist.
 
 from __future__ import annotations
 
-import sqlite3
 from datetime import UTC, datetime
-from functools import lru_cache
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
@@ -1088,11 +1086,15 @@ def _row_to_memory_fact(row: object) -> MemoryFact:
 # --------------------------------------------------------------------------- #
 from khora.filter import CompileContext, CompilerRegistry, SchemaCapabilities  # noqa: E402
 from khora.filter.compilers.lance import compile_lance  # noqa: E402
+from khora.storage.backends._sqlite_capabilities import sqlite_has_json1  # noqa: E402
 
 # The system keys this table backs with a real column — the single source of
 # truth for the documents tier. Nine of the ten ``SYSTEM_KEYS``; ``occurred_at``
 # is a recall-chunk column and has no ``documents`` counterpart (this adapter
 # reuses ``DocumentModel`` from ``khora/db/models.py``).
+# NOTE: ``created_at`` and ``source_timestamp`` are declared here but their
+# pushdown is NOT sound on this store — see the datetime hazard and the
+# forward-coupling alarm in ``_documents_compile_context``'s docstring below.
 _BACKED_SYSTEM_KEYS: frozenset[str] = frozenset(
     {
         "created_at",
@@ -1106,26 +1108,6 @@ _BACKED_SYSTEM_KEYS: frozenset[str] = frozenset(
         "title",
     }
 )
-
-
-@lru_cache(maxsize=1)
-def _sqlite_has_json1() -> bool:
-    """Whether this process's SQLite build has the JSON1 functions.
-
-    ``compile_lance`` gates metadata pushdown on this (``json_extract`` /
-    ``json_type`` / ``json_each``). Probed once per process against an in-memory
-    database: aiosqlite and SQLAlchemy's ``sqlite+aiosqlite`` both run on the
-    same in-process ``sqlite3`` library, so the answer is process-wide.
-    ``False`` on any error — under ``on_unsupported="split"`` that only means
-    every metadata leaf falls to the caller's post-filter, never a wrong row-set.
-    """
-    conn = sqlite3.connect(":memory:")
-    try:
-        return conn.execute("SELECT json_valid('{}')").fetchone()[0] == 1
-    except sqlite3.Error:
-        return False
-    finally:
-        conn.close()
 
 
 def _documents_compile_context() -> CompileContext:
@@ -1142,30 +1124,44 @@ def _documents_compile_context() -> CompileContext:
     ``occurred_at`` is deliberately absent: no ``documents`` row backs it.
     ``compile_lance`` does not treat the ``field_mapping`` key set as a pushdown
     whitelist (``_col`` falls back to identity), so this context alone cannot
-    stop an ``occurred_at`` leaf from compiling to a non-existent column — the
-    caller must reject or strip it before compiling.
+    stop an ``occurred_at`` leaf from compiling to a non-existent column. Worse
+    than the resulting error: the leaf is also reported in
+    ``CompiledFilter.consumed_keys``, so the caller is told it was pushed down
+    and will not post-filter it. The caller must reject or strip the key before
+    compiling.
 
-    **Datetime binds on this table are not yet safe to push down.** The
-    ``documents`` rows are written through SQLAlchemy's SQLite ``DATETIME``
-    type, which stores ``'2026-01-31 12:30:00.000000'`` — a SPACE separator and
-    no UTC offset. ``compile_lance`` binds a datetime operand as
-    ``value.isoformat()`` (``'T'`` separator, offset included) and relies on
-    lexicographic ISO comparison, so the two forms do not line up: ``' '``
-    (0x20) sorts before ``'T'`` (0x54), which means a ``$gte`` bound excludes
-    rows from the bound's own day. A pushed-down ``created_at`` /
-    ``source_timestamp`` comparison therefore returns silently wrong rows. This
-    cannot be corrected from a compile context. Until the bind format is fixed
-    upstream, a caller using this context must normalize its datetime binds to
-    the stored format or route the date-valued system keys to its post-filter.
+    **Datetime binds on this table are not safe to push down.** The ``documents``
+    rows are written through SQLAlchemy's SQLite ``DATETIME`` type, which stores
+    ``'2026-01-31 12:30:00.000000'`` — a SPACE separator and no UTC offset.
+    ``compile_lance`` binds a datetime operand as ``value.isoformat()`` (``'T'``
+    separator, offset included) and relies on lexicographic ISO comparison, so
+    the two forms do not line up: ``' '`` (0x20) sorts before ``'T'`` (0x54).
+    Both bound directions are wrong, in opposite ways — a ``$gte`` bound
+    EXCLUDES rows from the bound's own day, while a ``$lte`` bound INCLUDES
+    every row from that day. A pushed-down ``created_at`` / ``source_timestamp``
+    comparison therefore returns silently wrong rows.
+
+    **The only sound remedy is the post-filter.** Normalizing the caller's binds
+    to the stored format cannot work: SQLAlchemy's ``DATETIME`` discards the
+    offset at write time without converting to UTC, so the column holds
+    writer-local wall clock. Two rows at the same instant — ``12:30+00:00`` and
+    ``14:30+02:00`` — store as ``'...12:30:00.000000'`` and
+    ``'...14:30:00.000000'`` and sort two hours apart. The information needed to
+    recover an instant ordering is already gone by the time any bind is built,
+    so no bind format can be correct for every row. A caller using this context
+    must route the date-valued system keys to its post-filter and accept the
+    full-namespace scan that implies — an intentional trade, since silently
+    wrong rows are worse than slow ones.
 
     **When the pushdown whitelist gate lands, drop ``created_at`` and
     ``source_timestamp`` from ``_BACKED_SYSTEM_KEYS`` above.** They are declared
     today only because ``compile_lance`` ignores the key set — every logical key
-    falls through to identity, so declaring them changes nothing. Once the
-    compiler honours the key set as a pushdown whitelist, leaving them declared
-    starts pushing the broken comparison described above; removing them routes
-    both keys to the caller's post-filter instead. The test signal for that edit
-    is INVERTED — forgetting the drop leaves both keys consumed and every test
+    falls through to identity, so declaring them changes nothing and removing
+    them would make the mapping understate what it declares. Once the compiler
+    honours the key set as a pushdown whitelist, leaving them declared *keeps*
+    pushing the broken comparison described above; removing them routes both
+    keys to the caller's post-filter instead. The test signal for that edit is
+    INVERTED — forgetting the drop leaves both keys consumed and every test
     green, while remembering it forces a test update — so this note is the alarm.
     """
     field_mapping = {key: key for key in _BACKED_SYSTEM_KEYS} | {"metadata": "metadata"}
@@ -1173,7 +1169,7 @@ def _documents_compile_context() -> CompileContext:
         backend_target="documents",
         field_mapping=field_mapping,
         on_unsupported="split",
-        schema_capabilities=SchemaCapabilities(sqlite_json1=_sqlite_has_json1()),
+        schema_capabilities=SchemaCapabilities(sqlite_json1=sqlite_has_json1()),
     )
 
 

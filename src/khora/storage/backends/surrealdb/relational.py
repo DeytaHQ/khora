@@ -1167,30 +1167,48 @@ def _documents_compile_context() -> CompileContext:
 
     ``field_mapping`` declares the nine backed system keys (identity-mapped to
     their bare fields) plus the ``metadata`` root remap to the physical
-    ``metadata_`` field. ``on_unsupported="split"`` because a document
-    enumeration always has an in-memory post-filter available, so an unpushable
-    leaf is left unconsumed rather than raising — unlike the chunk-tier context
-    in ``khora/storage/temporal/surrealdb.py``, whose engine has no post-filter
-    path and therefore uses ``"raise"``.
+    ``metadata_`` field.
+
+    **``on_unsupported="raise"`` is an interim posture, not the end state.** The
+    enumeration contract specifies split semantics — an unpushable leaf is left
+    unconsumed for the caller's post-filter rather than raising — and this
+    context will use ``"split"`` once the compiler is sound under it. It is not
+    sound today, for the reason below, and the staged raise-then-split rollout
+    is explicitly permitted: raising is a strictly narrower behaviour that a
+    later loosening can widen without breaking a caller. Nothing consumes this
+    context yet, so the interim posture costs nothing and removes both live
+    hazards. The soundness gate flips it back.
 
     ``occurred_at`` is deliberately absent: no ``document`` row backs it.
     ``compile_surrealdb`` treats the ``field_mapping`` key set as the backend's
-    declared+pushable whitelist, so an undeclared system key is left out of
-    ``consumed_keys`` and routed to the caller's post-filter instead of emitting
-    a predicate against a missing field — the only documents backend where the
-    omission has that effect.
+    declared+pushable whitelist, so an undeclared system key never emits a
+    predicate against a missing field — the only documents backend where the
+    omission has that effect. Under ``"raise"`` such a leaf now surfaces as a
+    :class:`~khora.filter.model.RecallFilterUnsupportedError` instead of being
+    silently absorbed.
 
-    **The placeholder is not inert under a negation.** ``compile_surrealdb`` has
-    no all-or-nothing split gate (the one ``compile_lance`` documents at
-    ``_consumable``), so an undeclared leaf emits the literal ``true`` in place,
-    whatever its position in the tree. That is safe in positive position
-    (``A AND true`` is ``A``) but not under ``$not`` / ``$or``: a filter such as
+    **Why ``"split"`` is unsafe here until the gate lands.**
+    ``compile_surrealdb`` has no all-or-nothing split gate (the one
+    ``compile_lance`` documents at ``_consumable``), so under ``"split"`` an
+    undeclared leaf emits the literal ``true`` in place, whatever its position
+    in the tree. That is harmless in positive position (``A AND true`` is
+    ``A``) but not under ``$not`` / ``$or``: a filter such as
     ``{"$not": {"$or": [{"title": "x"}, {"occurred_at": {"$gt": ...}}]}}``
     compiles to ``!((((title = $f_0)) OR (true)))``, which is ``!true`` — it
     matches ZERO rows, silently, while ``consumed_keys`` reports ``occurred_at``
-    as still needing a post-filter that can only narrow further. A caller must
-    reject an undeclared system key rather than rely on the post-filter to
-    recover it.
+    as still needing a post-filter that can only narrow further. The
+    known-gap test pins this against an explicitly split-mode copy of this
+    context, so the defect stays documented while the shipped context avoids it.
+
+    **A third gap survives both modes.** ``compile_surrealdb`` raises the
+    internal ``CompileError`` on an unsafe (non-identifier) metadata path
+    segment — a hyphenated key such as ``metadata.due-date`` is legal JSON and
+    common in the wild — and it does so regardless of ``on_unsupported``, since
+    that is a guard rather than a capability gap. ``CompileError`` is documented
+    as "a bug, not a capability gap", so it would escape as an internal error;
+    the documents scan path is obliged to catch it and re-raise it as
+    ``RecallFilterUnsupportedError`` so it surfaces as a structured rejection.
+    That mapping belongs to the scan path and cannot be implemented from here.
 
     ``backend_target`` is the SINGULAR ``document``, the real physical table name
     (``surrealdb/schema.py``), not the plural registry key. ``compile_surrealdb``
@@ -1202,7 +1220,13 @@ def _documents_compile_context() -> CompileContext:
     return CompileContext(
         backend_target="document",
         field_mapping=field_mapping,
-        on_unsupported="split",
+        # Interim posture — see the docstring. The contract specifies "split";
+        # this compiler is not sound under it (an unsupported leaf emits a bare
+        # ``true`` that inverts under ``$not``/``$or``), and the staged
+        # raise-then-split rollout is permitted precisely so a context can ship
+        # narrow and widen later. Flip back to "split" with the compiler
+        # soundness gate.
+        on_unsupported="raise",
     )
 
 
