@@ -3370,7 +3370,7 @@ class ChronicleEngine:
                 "content": doc_data.get("content", ""),
                 "title": doc_data.get("title", ""),
                 "source": doc_data.get("source", ""),
-                "source_type": doc_data.get("source_type", source_type),
+                "source_type": doc_data.get("source_type") or source_type,
                 "source_name": doc_data.get("source_name", source_name),
                 "source_url": doc_data.get("source_url", source_url),
                 "source_timestamp": doc_data.get("source_timestamp", source_timestamp),

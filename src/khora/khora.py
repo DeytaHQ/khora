@@ -1673,7 +1673,10 @@ class Khora:
             content = strip_nul(content)
             title = strip_nul_json(title)
             source = strip_nul_json(source)
-            source_type = strip_nul_json(source_type)
+            # ``or "library"``: documents.source_type is NOT NULL (migration
+            # 054). strip_nul_json passes None through, and the kwarg default
+            # does not fire when a caller passes source_type=None explicitly.
+            source_type = strip_nul_json(source_type) or "library"
             source_name = strip_nul_json(source_name)
             source_url = strip_nul_json(source_url)
             external_id = strip_nul_json(external_id)
@@ -1847,7 +1850,8 @@ class Khora:
             source_timestamp = coerce_source_timestamp(source_timestamp)
             # Strip NUL bytes (#1528) from the batch-level provenance kwargs
             # before they are stamped onto per-doc dicts below.
-            source_type = strip_nul_json(source_type)
+            # ``or "library"``: see remember() — documents.source_type is NOT NULL.
+            source_type = strip_nul_json(source_type) or "library"
             source_name = strip_nul_json(source_name)
             source_url = strip_nul_json(source_url)
             extraction_config_hash = strip_nul_json(extraction_config_hash)
@@ -1865,7 +1869,10 @@ class Khora:
                     # passes non-text scalars (datetimes, UUIDs) through.
                     for _key in list(doc_data):
                         doc_data[_key] = strip_nul_json(doc_data[_key])
-                    if "source_type" not in doc_data:
+                    # Falsy (absent, None, "") rather than key-absent: a doc dict
+                    # carrying an explicit None would otherwise write NULL into
+                    # the NOT NULL documents.source_type column.
+                    if not doc_data.get("source_type"):
                         doc_data["source_type"] = source_type
                     if "source_name" not in doc_data:
                         doc_data["source_name"] = source_name
@@ -2022,7 +2029,8 @@ class Khora:
         # dict is sanitized in place BEFORE the external-id lookup so the lookup
         # keys match the (sanitized) values that get stored (a raw NUL in an
         # external_id would otherwise miss the existing row or crash the query).
-        source_type = strip_nul_json(source_type)
+        # ``or "library"``: see remember() — documents.source_type is NOT NULL.
+        source_type = strip_nul_json(source_type) or "library"
         source_name = strip_nul_json(source_name)
         source_url = strip_nul_json(source_url)
         extraction_config_hash = strip_nul_json(extraction_config_hash)
@@ -2158,7 +2166,7 @@ class Khora:
                 existing.content = content
                 existing.title = doc_data.get("title") or None
                 existing.source = doc_data.get("source") or None
-                existing.source_type = doc_data.get("source_type", source_type)
+                existing.source_type = doc_data.get("source_type") or source_type
                 existing.source_name = doc_data.get("source_name", source_name) or None
                 existing.source_url = doc_data.get("source_url", source_url) or None
                 existing.source_timestamp = coerce_source_timestamp(doc_data.get("source_timestamp", source_timestamp))
@@ -2199,7 +2207,7 @@ class Khora:
                 content=content,
                 title=doc_data.get("title") or None,
                 source=doc_data.get("source") or None,
-                source_type=doc_data.get("source_type", source_type),
+                source_type=doc_data.get("source_type") or source_type,
                 source_name=doc_data.get("source_name", source_name) or None,
                 source_url=doc_data.get("source_url", source_url) or None,
                 source_timestamp=coerce_source_timestamp(doc_data.get("source_timestamp", source_timestamp)),

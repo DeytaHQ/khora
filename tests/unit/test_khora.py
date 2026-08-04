@@ -4242,6 +4242,45 @@ class TestProvenanceKwargsRemember:
         assert kwargs["source_name"] is None
         assert kwargs["source_url"] is None
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("falsy", [None, ""])
+    async def test_falsy_source_type_normalizes_to_default(self, falsy) -> None:
+        """An explicit falsy source_type is collapsed to 'library'.
+
+        ``documents.source_type`` is NOT NULL as of migration 055, and the
+        kwarg default does not fire when a caller passes ``None``
+        explicitly — so without the normalization this call reaches the
+        INSERT as NULL and raises ``IntegrityError`` at the database. ``""``
+        is collapsed by the same expression: it used to persist verbatim, and
+        now persists as 'library' (intentional, see the migration docstring).
+        """
+        kb = _make_kb(connected=True)
+        ns_id = uuid4()
+
+        kb._engine.remember = AsyncMock(
+            return_value=RememberResult(
+                document_id=uuid4(),
+                namespace_id=ns_id,
+                chunks_created=0,
+                entities_extracted=0,
+                relationships_created=0,
+            )
+        )
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            await kb.remember(
+                "content",
+                namespace=ns_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+                source_type=falsy,
+            )
+
+        assert kb._engine.remember.call_args.kwargs["source_type"] == "library"
+
 
 class TestProvenanceKwargsRememberBatch:
     """Tests that remember_batch() stamps per-doc dicts with provenance kwargs."""
@@ -4355,6 +4394,98 @@ class TestProvenanceKwargsRememberBatch:
         assert docs[0]["source_name"] is None
         assert docs[0]["source_url"] is None
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("falsy", [None, ""])
+    async def test_falsy_top_level_source_type_normalizes_to_default(self, falsy) -> None:
+        """A falsy batch-level source_type is collapsed before it is stamped."""
+        kb = _make_kb(connected=True)
+        ns_id = uuid4()
+
+        kb._engine.remember_batch = AsyncMock(
+            return_value=BatchResult(total=1, processed=1, skipped=0, failed=0, chunks=0, entities=0, relationships=0)
+        )
+
+        docs = [{"content": "doc"}]
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            await kb.remember_batch(
+                docs,
+                namespace=ns_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+                source_type=falsy,
+            )
+
+        assert docs[0]["source_type"] == "library"
+        assert kb._engine.remember_batch.call_args.kwargs["source_type"] == "library"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("falsy", [None, ""])
+    async def test_falsy_per_doc_source_type_inherits_top_level(self, falsy) -> None:
+        """A per-doc falsy source_type inherits the batch-level value.
+
+        The stamping condition is falsiness, not key-presence: a doc dict
+        carrying an explicit ``None`` would otherwise be forwarded verbatim
+        and write NULL into the NOT NULL column. ``""`` is collapsed by the
+        same condition — it used to be preserved as a per-doc override.
+        """
+        kb = _make_kb(connected=True)
+        ns_id = uuid4()
+
+        kb._engine.remember_batch = AsyncMock(
+            return_value=BatchResult(total=1, processed=1, skipped=0, failed=0, chunks=0, entities=0, relationships=0)
+        )
+
+        docs = [{"content": "doc", "source_type": falsy}]
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            await kb.remember_batch(
+                docs,
+                namespace=ns_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+                source_type="api",
+            )
+
+        assert docs[0]["source_type"] == "api"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("falsy", [None, ""])
+    async def test_falsy_per_doc_and_no_top_level_lands_on_default(self, falsy) -> None:
+        """Falsy per-doc value + no batch kwarg → the 'library' default.
+
+        Both normalizations have to hold for this one: the batch-level kwarg
+        is collapsed to 'library' first, then the falsy per-doc value is
+        overwritten with it.
+        """
+        kb = _make_kb(connected=True)
+        ns_id = uuid4()
+
+        kb._engine.remember_batch = AsyncMock(
+            return_value=BatchResult(total=1, processed=1, skipped=0, failed=0, chunks=0, entities=0, relationships=0)
+        )
+
+        docs = [{"content": "doc", "source_type": falsy}]
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            await kb.remember_batch(
+                docs,
+                namespace=ns_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+            )
+
+        assert docs[0]["source_type"] == "library"
+
 
 class TestProvenanceKwargsSubmitBatch:
     """Tests that submit_batch() honors source_type/source_name/source_url precedence."""
@@ -4462,6 +4593,311 @@ class TestProvenanceKwargsSubmitBatch:
         assert captured[0].source_type == "library"
         assert captured[0].source_name is None
         assert captured[0].source_url is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("falsy", [None, ""])
+    async def test_falsy_top_level_source_type_normalizes_to_default(self, falsy) -> None:
+        """A falsy batch-level source_type lands on the persisted Document as 'library'."""
+        ns_id = uuid4()
+        kb = _make_kb_with_staged_support(ns_id)
+
+        captured: list = []
+
+        async def _capture_create(doc):
+            captured.append(doc)
+            return doc
+
+        kb._engine._storage.create_document = AsyncMock(side_effect=_capture_create)
+
+        handle = await kb.submit_batch(
+            [{"content": "doc"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            source_type=falsy,
+        )
+        await handle.wait()
+
+        assert len(captured) == 1
+        assert captured[0].source_type == "library"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("falsy", [None, ""])
+    async def test_falsy_per_doc_source_type_inherits_top_level(self, falsy) -> None:
+        """A per-doc falsy source_type falls back to the batch-level value."""
+        ns_id = uuid4()
+        kb = _make_kb_with_staged_support(ns_id)
+
+        captured: list = []
+
+        async def _capture_create(doc):
+            captured.append(doc)
+            return doc
+
+        kb._engine._storage.create_document = AsyncMock(side_effect=_capture_create)
+
+        handle = await kb.submit_batch(
+            [{"content": "doc", "source_type": falsy}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            source_type="api",
+        )
+        await handle.wait()
+
+        assert len(captured) == 1
+        assert captured[0].source_type == "api"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("falsy", [None, ""])
+    async def test_falsy_per_doc_and_no_top_level_lands_on_default(self, falsy) -> None:
+        """Falsy per-doc value + no batch kwarg → 'library' on the Document."""
+        ns_id = uuid4()
+        kb = _make_kb_with_staged_support(ns_id)
+
+        captured: list = []
+
+        async def _capture_create(doc):
+            captured.append(doc)
+            return doc
+
+        kb._engine._storage.create_document = AsyncMock(side_effect=_capture_create)
+
+        handle = await kb.submit_batch(
+            [{"content": "doc", "source_type": falsy}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        assert len(captured) == 1
+        assert captured[0].source_type == "library"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("falsy", [None, ""])
+    async def test_requeued_existing_document_gets_normalized_source_type(self, falsy) -> None:
+        """The re-queue branch writes through UPDATE, not INSERT — cover it too.
+
+        A doc matched by ``external_id`` takes the self-heal path, which
+        assigns ``existing.source_type`` and calls ``update_document``. That
+        is a second, independent write site for the same NOT NULL column.
+        """
+        from khora.core.models.document import Document, DocumentStatus
+
+        ns_id = uuid4()
+        kb = _make_kb_with_staged_support(ns_id)
+
+        existing = Document(
+            namespace_id=ns_id,
+            content="stale",
+            external_id="ext-1",
+            status=DocumentStatus.FAILED,
+            source_type="api",
+        )
+        kb._engine._storage.get_documents_by_external_ids = AsyncMock(return_value={"ext-1": existing})
+
+        updated: list = []
+
+        async def _capture_update(doc):
+            updated.append(doc)
+            return doc
+
+        kb._engine._storage.update_document = AsyncMock(side_effect=_capture_update)
+
+        handle = await kb.submit_batch(
+            [{"content": "fresh", "external_id": "ext-1", "source_type": falsy}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            source_type="slack",
+        )
+        await handle.wait()
+
+        assert len(updated) == 1
+        assert updated[0].source_type == "slack"
+
+
+# ---------------------------------------------------------------------------
+# source_type falsy-value normalization (documents.source_type is NOT NULL)
+# ---------------------------------------------------------------------------
+
+
+class TestSourceTypeFalsyNormalization:
+    """Falsy ``source_type`` must become the default at every write path.
+
+    Migration 054 made ``documents.source_type`` NOT NULL. Before it, an
+    explicit ``source_type=None`` wrote NULL and nobody noticed; after it, the
+    same call raises ``IntegrityError`` at the database unless the value is
+    normalized first. Every write path therefore collapses a falsy value to the
+    applicable default.
+
+    Two distinct cases, and the difference matters:
+
+    * ``None`` — ``dict.get(key, default)`` returns None when the key is
+      *present* with value None, so the old form only defaulted on a missing
+      key. ``dict.get(key) or default`` defaults on both.
+    * ``""`` — the empty string. NOT NULL does not rule it out, and this
+      codebase historically produced it (migration 000 created the column with
+      ``server_default=""``; migration 037 had to rewrite those rows to
+      ``'library'``). Collapsing it here is deliberate, and it is a real
+      behaviour change: ``remember(source_type="")`` used to persist ``""``.
+
+    Without these tests every one of those call sites can be reverted with no
+    test failure, which is exactly the state this suite was in.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("falsy", [None, ""])
+    async def test_remember_normalizes_falsy_source_type(self, falsy) -> None:
+        """``remember(source_type=None | "")`` reaches the engine as the default."""
+        kb = _make_kb(connected=True)
+        ns_id = uuid4()
+        kb._engine.remember = AsyncMock(
+            return_value=RememberResult(
+                document_id=uuid4(),
+                namespace_id=ns_id,
+                chunks_created=0,
+                entities_extracted=0,
+                relationships_created=0,
+            )
+        )
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            await kb.remember(
+                "content",
+                namespace=ns_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+                source_type=falsy,
+            )
+
+        assert kb._engine.remember.call_args.kwargs["source_type"] == "library"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("falsy", [None, ""])
+    async def test_remember_batch_normalizes_falsy_top_level(self, falsy) -> None:
+        """A falsy top-level kwarg is normalized before it stamps doc dicts."""
+        kb = _make_kb(connected=True)
+        ns_id = uuid4()
+        kb._engine.remember_batch = AsyncMock(
+            return_value=BatchResult(total=1, processed=1, skipped=0, failed=0, chunks=0, entities=0, relationships=0)
+        )
+
+        docs = [{"content": "doc"}]
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            await kb.remember_batch(
+                docs,
+                namespace=ns_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+                source_type=falsy,
+            )
+
+        assert docs[0]["source_type"] == "library"
+        assert kb._engine.remember_batch.call_args.kwargs["source_type"] == "library"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("falsy", [None, ""])
+    async def test_remember_batch_normalizes_falsy_per_doc_key(self, falsy) -> None:
+        """A doc dict carrying a falsy ``source_type`` inherits the default.
+
+        The per-doc branch tests falsiness, not key presence: a dict with
+        ``{"source_type": None}`` has the key, so a key-presence check would
+        leave the None in place and write NULL.
+        """
+        kb = _make_kb(connected=True)
+        ns_id = uuid4()
+        kb._engine.remember_batch = AsyncMock(
+            return_value=BatchResult(total=1, processed=1, skipped=0, failed=0, chunks=0, entities=0, relationships=0)
+        )
+
+        docs = [{"content": "doc", "source_type": falsy}]
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            await kb.remember_batch(
+                docs,
+                namespace=ns_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+                source_type="api",
+            )
+
+        assert docs[0]["source_type"] == "api"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("falsy", [None, ""])
+    async def test_submit_batch_persists_default_for_falsy_per_doc_key(self, falsy) -> None:
+        """The persisted ``Document`` never carries a falsy ``source_type``.
+
+        This is the assertion closest to the database: it inspects the object
+        handed to ``create_document``, which is what the NOT NULL column sees.
+        """
+        ns_id = uuid4()
+        kb = _make_kb_with_staged_support(ns_id)
+
+        captured: list = []
+
+        async def _capture_create(doc):
+            captured.append(doc)
+            return doc
+
+        kb._engine._storage.create_document = AsyncMock(side_effect=_capture_create)
+
+        handle = await kb.submit_batch(
+            [{"content": "doc", "source_type": falsy}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            source_type="api",
+        )
+        await handle.wait()
+
+        assert len(captured) == 1
+        assert captured[0].source_type == "api"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("falsy", [None, ""])
+    async def test_submit_batch_persists_default_when_top_level_is_falsy(self, falsy) -> None:
+        """Falsy at both levels still lands on the ORM default, never NULL."""
+        ns_id = uuid4()
+        kb = _make_kb_with_staged_support(ns_id)
+
+        captured: list = []
+
+        async def _capture_create(doc):
+            captured.append(doc)
+            return doc
+
+        kb._engine._storage.create_document = AsyncMock(side_effect=_capture_create)
+
+        handle = await kb.submit_batch(
+            [{"content": "doc", "source_type": falsy}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            source_type=falsy,
+        )
+        await handle.wait()
+
+        assert len(captured) == 1
+        assert captured[0].source_type == "library"
 
 
 # ---------------------------------------------------------------------------

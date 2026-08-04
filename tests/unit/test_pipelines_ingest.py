@@ -186,6 +186,75 @@ class TestStageDocument:
         assert doc.created_at.year >= 2025
 
 
+class TestStagingSourceTypeNormalization:
+    """``source_type`` must never reach the INSERT as NULL from the pipeline.
+
+    ``documents.source_type`` is NOT NULL as of migration 055, so every
+    staging entry point collapses a falsy ``doc_input["source_type"]`` to a
+    default. Note the default here is ``"manual"``, not the ``"library"``
+    the ``Khora.remember`` family uses — the same column gets a different
+    default depending on which entry point wrote the row. These tests pin
+    the actual behaviour, they do not argue it is the right one.
+
+    ``""`` is collapsed by the same expression. Before this change
+    ``.get(key, default)`` returned the empty string verbatim.
+    """
+
+    @staticmethod
+    def _storage():
+        storage = MagicMock()
+        storage.get_document_by_checksum = AsyncMock(return_value=None)
+        storage.get_documents_by_checksums = AsyncMock(return_value={})
+        storage.create_document = AsyncMock(side_effect=lambda doc: doc)
+        return storage
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("falsy", [None, ""])
+    async def test_stage_document_falsy_source_type(self, falsy) -> None:
+        from khora.pipelines.flows.ingest import stage_document
+
+        storage = self._storage()
+        doc = await stage_document({"content": "body", "source_type": falsy}, uuid4(), storage)
+
+        assert doc is not None
+        assert doc.source_type == "manual"
+
+    @pytest.mark.asyncio
+    async def test_stage_document_explicit_source_type_survives(self) -> None:
+        """The normalization must not swallow a real caller value."""
+        from khora.pipelines.flows.ingest import stage_document
+
+        storage = self._storage()
+        doc = await stage_document({"content": "body", "source_type": "slack"}, uuid4(), storage)
+
+        assert doc is not None
+        assert doc.source_type == "slack"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("falsy", [None, ""])
+    async def test_stage_documents_batch_falsy_source_type(self, falsy) -> None:
+        from khora.pipelines.flows.ingest import stage_documents_batch
+
+        storage = self._storage()
+        results = await stage_documents_batch([{"content": "body", "source_type": falsy}], uuid4(), storage)
+
+        assert len(results) == 1
+        assert results[0] is not None
+        assert results[0].source_type == "manual"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("falsy", [None, ""])
+    async def test_stage_all_documents_falsy_source_type(self, falsy) -> None:
+        from khora.pipelines.flows.ingest import _stage_all_documents
+
+        storage = self._storage()
+        results = await _stage_all_documents([{"content": "body", "source_type": falsy}], uuid4(), storage)
+
+        assert len(results) == 1
+        assert results[0] is not None
+        assert results[0].source_type == "manual"
+
+
 class TestStreamExtractAndEmbedEntities:
     """Tests for stream_extract_and_embed_entities."""
 

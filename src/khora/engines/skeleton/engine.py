@@ -948,7 +948,7 @@ class SkeletonConstructionEngine:
                     content=content,
                     title=doc_data.get("title") or None,
                     source=doc_data.get("source") or None,
-                    source_type=doc_data.get("source_type", source_type),
+                    source_type=doc_data.get("source_type") or source_type,
                     source_name=doc_data.get("source_name", source_name) or None,
                     source_url=doc_data.get("source_url", source_url) or None,
                     source_timestamp=doc_data.get("source_timestamp", source_timestamp),
