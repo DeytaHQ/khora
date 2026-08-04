@@ -12,6 +12,7 @@ from __future__ import annotations
 import ast
 import warnings
 from pathlib import Path
+from typing import NamedTuple
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -174,12 +175,47 @@ class TestORMMigrationDrift:
 # ---------------------------------------------------------------------------
 
 
-IndexOps = tuple[dict[str, tuple[str, ...]], set[str]]
-"""``(created, dropped)``: created maps index name to its ORDERED column tuple."""
+class IndexOp(NamedTuple):
+    """A single index DDL statement, with the properties worth asserting on."""
+
+    action: str  # "create" | "drop"
+    name: str
+    columns: tuple[str, ...]  # empty for drops
+    concurrent: bool
+    in_autocommit_block: bool
+
+
+class IndexOps(NamedTuple):
+    """Index DDL from one dialect branch, in SOURCE ORDER.
+
+    ``operations`` is the ordered record; ``created`` / ``dropped`` are derived
+    views over it for the assertions that do not care about sequencing.
+    """
+
+    operations: tuple[IndexOp, ...]
+
+    @property
+    def created(self) -> dict[str, tuple[str, ...]]:
+        return {op.name: op.columns for op in self.operations if op.action == "create"}
+
+    @property
+    def dropped(self) -> set[str]:
+        return {op.name for op in self.operations if op.action == "drop"}
+
+    def index_of(self, action: str, name: str) -> int | None:
+        for i, op in enumerate(self.operations):
+            if op.action == action and op.name == name:
+                return i
+        return None
 
 
 def _mentions_is_postgres(test: ast.expr) -> bool:
     return any(isinstance(n, ast.Name) and n.id == "_is_postgres" for n in ast.walk(test))
+
+
+def _is_autocommit_block(item: ast.withitem) -> bool:
+    call = item.context_expr
+    return isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == "autocommit_block"
 
 
 def _dialect_branches(func: ast.FunctionDef) -> dict[str, list[ast.stmt]]:
@@ -212,8 +248,38 @@ def _dialect_branches(func: ast.FunctionDef) -> dict[str, list[ast.stmt]]:
     return {"": func.body}
 
 
+def _op_calls(nodes: list[ast.stmt]) -> list[tuple[ast.Call, bool]]:
+    """Every ``op.*`` call in *nodes*, paired with whether it sits in an
+    ``autocommit_block()``, in source order.
+
+    Source order is why this is a hand-rolled descent rather than ``ast.walk``:
+    ``walk`` is breadth-first, so it would interleave statements from different
+    nesting depths and destroy the sequencing that ``create before drop`` needs.
+    Results are sorted by position to stay honest regardless of traversal shape.
+    """
+    found: list[tuple[ast.Call, bool]] = []
+
+    def descend(node: ast.AST, in_block: bool) -> None:
+        if isinstance(node, ast.With):
+            in_block = in_block or any(_is_autocommit_block(item) for item in node.items)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "op"
+        ):
+            found.append((node, in_block))
+        for child in ast.iter_child_nodes(node):
+            descend(child, in_block)
+
+    for root in nodes:
+        descend(root, False)
+
+    return sorted(found, key=lambda pair: (pair[0].lineno, pair[0].col_offset))
+
+
 def _scan(nodes: list[ast.stmt]) -> IndexOps:
-    """Collect index DDL from a list of statements.
+    """Collect index DDL from a list of statements, in source order.
 
     Both spellings are recognised, since a dialect-gated migration typically
     uses raw SQL on one branch and the Alembic helpers on the other:
@@ -221,41 +287,35 @@ def _scan(nodes: list[ast.stmt]) -> IndexOps:
     * ``op.execute("CREATE INDEX ... ON t (a, b)")`` / ``op.execute("DROP INDEX ...")``
     * ``op.create_index("name", "t", ["a", "b"])`` / ``op.drop_index("name", ...)``
     """
-    created: dict[str, tuple[str, ...]] = {}
-    dropped: set[str] = set()
+    operations: list[IndexOp] = []
 
-    for root in nodes:
-        for node in ast.walk(root):
-            if not isinstance(node, ast.Call):
-                continue
-            target = node.func
-            if not (
-                isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) and target.value.id == "op"
-            ):
-                continue
+    for node, in_block in _op_calls(nodes):
+        target = node.func
+        assert isinstance(target, ast.Attribute)
 
-            if target.attr == "execute" and node.args and isinstance(node.args[0], ast.Constant):
-                statement = str(node.args[0].value)
-                collapsed = " ".join(statement.split())
-                upper = collapsed.upper()
-                if upper.startswith("CREATE INDEX"):
-                    head, _, cols = collapsed.partition("(")
-                    name = head.split()[-3]  # "... <name> ON <table>"
-                    created[name] = tuple(c.strip() for c in cols.rstrip(")").split(","))
-                elif upper.startswith("DROP INDEX"):
-                    dropped.add(collapsed.split()[-1])
+        if target.attr == "execute" and node.args and isinstance(node.args[0], ast.Constant):
+            statement = str(node.args[0].value)
+            collapsed = " ".join(statement.split())
+            upper = collapsed.upper()
+            concurrent = "CONCURRENTLY" in upper
+            if upper.startswith("CREATE INDEX"):
+                head, _, cols = collapsed.partition("(")
+                name = head.split()[-3]  # "... <name> ON <table>"
+                columns = tuple(c.strip() for c in cols.rstrip(")").split(","))
+                operations.append(IndexOp("create", name, columns, concurrent, in_block))
+            elif upper.startswith("DROP INDEX"):
+                operations.append(IndexOp("drop", collapsed.split()[-1], (), concurrent, in_block))
 
-            elif target.attr == "create_index" and len(node.args) >= 3:
-                name_node, cols_node = node.args[0], node.args[2]
-                if isinstance(name_node, ast.Constant) and isinstance(cols_node, ast.List):
-                    created[str(name_node.value)] = tuple(
-                        str(c.value) for c in cols_node.elts if isinstance(c, ast.Constant)
-                    )
+        elif target.attr == "create_index" and len(node.args) >= 3:
+            name_node, cols_node = node.args[0], node.args[2]
+            if isinstance(name_node, ast.Constant) and isinstance(cols_node, ast.List):
+                columns = tuple(str(c.value) for c in cols_node.elts if isinstance(c, ast.Constant))
+                operations.append(IndexOp("create", str(name_node.value), columns, False, in_block))
 
-            elif target.attr == "drop_index" and node.args and isinstance(node.args[0], ast.Constant):
-                dropped.add(str(node.args[0].value))
+        elif target.attr == "drop_index" and node.args and isinstance(node.args[0], ast.Constant):
+            operations.append(IndexOp("drop", str(node.args[0].value), (), False, in_block))
 
-    return created, dropped
+    return IndexOps(tuple(operations))
 
 
 def _index_ops(migration_file: str, func_name: str) -> dict[str, IndexOps]:
@@ -347,7 +407,8 @@ class TestDocumentsCreatedAtIndexAgreement:
 
     def test_migration_creates_exactly_what_the_orm_declares(self):
         """Every branch of upgrade builds the ORM's index, same columns, same order."""
-        for branch, (created, _dropped) in _index_ops(self.MIGRATION, "upgrade").items():
+        for branch, ops in _index_ops(self.MIGRATION, "upgrade").items():
+            created = ops.created
             assert self.NEW_INDEX in created, (
                 f"{self.MIGRATION} upgrade() [{branch} branch] does not create {self.NEW_INDEX}; "
                 f"it creates {sorted(created)}. A branch that skips the index leaves that dialect "
@@ -364,7 +425,8 @@ class TestDocumentsCreatedAtIndexAgreement:
 
     def test_migration_drops_the_superseded_index(self):
         """Every branch of upgrade removes the 2-column index the 3-column one subsumes."""
-        for branch, (_created, dropped) in _index_ops(self.MIGRATION, "upgrade").items():
+        for branch, ops in _index_ops(self.MIGRATION, "upgrade").items():
+            dropped = ops.dropped
             assert self.OLD_INDEX in dropped, (
                 f"upgrade() [{branch} branch] leaves {self.OLD_INDEX} in place; it shares a prefix "
                 f"with {self.NEW_INDEX}, so both would be maintained on every insert"
@@ -374,20 +436,86 @@ class TestDocumentsCreatedAtIndexAgreement:
         """Downgrade must put the 2-column index back, with its original columns.
 
         Not cosmetic. The migration that originally added the 2-column index
-        drops it by an unqualified ``op.drop_index(...)``, which errors if the
-        index is absent - so a downgrade that walks past it would fail outright
+        drops it by an unconditional ``op.drop_index(...)`` - no
+        ``if_exists=True`` - which errors if the index is absent - so a downgrade that walks past it would fail outright
         unless this migration restores it on the way down.
 
         Asserted per branch: the walk past that migration happens on whichever
         dialect the operator is running, so a restore present on only one of
         them leaves the other broken.
         """
-        for branch, (created, dropped) in _index_ops(self.MIGRATION, "downgrade").items():
+        for branch, ops in _index_ops(self.MIGRATION, "downgrade").items():
+            created, dropped = ops.created, ops.dropped
             assert created.get(self.OLD_INDEX) == ("namespace_id", "created_at"), (
                 f"downgrade() [{branch} branch] must recreate {self.OLD_INDEX} on "
                 f"(namespace_id, created_at); it creates {created}"
             )
             assert self.NEW_INDEX in dropped, f"downgrade() [{branch} branch] must remove the 3-column index"
+
+    def test_replacement_index_is_built_before_the_old_one_is_dropped(self):
+        """Create must precede drop, on every branch and in both directions.
+
+        This is the migration's "never unindexed" invariant, and it is the whole
+        reason the two statements are ordered rather than merged. Dropping first
+        would leave ``get_last_activity_at()``'s ``MAX(created_at)`` with no
+        index for the duration of a concurrent build - which on a table large
+        enough to warrant a concurrent build is exactly when it matters. The
+        column assertions above are indifferent to sequencing, so without this
+        the invariant is documented in a docstring and enforced nowhere.
+        """
+        for func_name, new_first in (("upgrade", self.NEW_INDEX), ("downgrade", self.OLD_INDEX)):
+            superseded = self.OLD_INDEX if func_name == "upgrade" else self.NEW_INDEX
+            for branch, ops in _index_ops(self.MIGRATION, func_name).items():
+                create_at = ops.index_of("create", new_first)
+                drop_at = ops.index_of("drop", superseded)
+                assert create_at is not None, f"{func_name}() [{branch} branch] never creates {new_first}"
+                assert drop_at is not None, f"{func_name}() [{branch} branch] never drops {superseded}"
+                assert create_at < drop_at, (
+                    f"{func_name}() [{branch} branch] drops {superseded} before creating {new_first} "
+                    f"(positions {drop_at} and {create_at}). The replacement must exist first, or the "
+                    "namespace/created_at lookup runs unindexed for the length of the build."
+                )
+
+    def test_postgres_branch_builds_concurrently_inside_an_autocommit_block(self):
+        """Both Postgres statements must be CONCURRENTLY, and both inside the block.
+
+        A plain ``CREATE INDEX`` takes a lock that blocks writes on
+        ``documents`` for the whole build, and ``CREATE INDEX CONCURRENTLY``
+        cannot run inside a transaction at all - so the two properties are a
+        pair, and losing either one silently converts a safe migration into an
+        outage on a large table. Neither is visible to the column-level
+        assertions above.
+
+        Asserted only for the Postgres branch: concurrent builds are a Postgres
+        feature, and the other branch deliberately uses plain DDL.
+        """
+        for func_name in ("upgrade", "downgrade"):
+            postgres = _index_ops(self.MIGRATION, func_name)["postgresql"]
+            assert postgres.operations, f"{func_name}() postgresql branch issues no index DDL"
+            for op in postgres.operations:
+                assert op.concurrent, (
+                    f"{func_name}() postgresql branch runs a non-concurrent {op.action.upper()} on "
+                    f"{op.name}; that locks out writes on documents for the length of the build"
+                )
+                assert op.in_autocommit_block, (
+                    f"{func_name}() postgresql branch runs {op.action.upper()} {op.name} outside "
+                    "op.get_context().autocommit_block(); CONCURRENTLY cannot run inside a transaction"
+                )
+
+    def test_non_postgres_branch_does_not_claim_concurrency(self):
+        """The plain-DDL branch must stay plain.
+
+        Guards the inverse of the test above: pasting the Postgres spelling into
+        the other branch would emit SQL that SQLite cannot parse, and the
+        embedded stack takes its schema from this chain and nothing else.
+        """
+        for func_name in ("upgrade", "downgrade"):
+            other = _index_ops(self.MIGRATION, func_name)["other"]
+            assert other.operations, f"{func_name}() non-postgres branch issues no index DDL"
+            for op in other.operations:
+                assert not op.concurrent, (
+                    f"{func_name}() non-postgres branch marks {op.name} CONCURRENTLY; that is a Postgres-only feature"
+                )
 
 
 # ---------------------------------------------------------------------------

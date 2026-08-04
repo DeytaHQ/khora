@@ -24,19 +24,22 @@ What is verified here:
    3-column one goes away.
 3. **Downgrade stays compatible with the migration that first added the
    2-column index.** That earlier migration's ``downgrade()`` issues an
-   UNQUALIFIED ``op.drop_index("ix_documents_namespace_created_at", ...)`` -
-   no ``IF EXISTS``. If migration 054's downgrade failed to restore that index,
+   UNCONDITIONAL ``op.drop_index("ix_documents_namespace_created_at", ...)`` -
+   no ``if_exists=True``. If migration 054's downgrade failed to restore that index,
    any downgrade walking further back would abort on a missing index. This is
    the highest-risk failure mode in the change, so it is covered twice: once
-   directly (the unqualified drop is replayed against the post-downgrade state)
+   directly (the unconditional drop is replayed against the post-downgrade state)
    and once end-to-end (an actual downgrade walk past it, on a throwaway
    database).
 
-The lifecycle tests rewind the shared dev database's revision, so every restore
-``upgrade head`` runs in a ``finally`` block - the database is never left
-rewound, even on assertion failure. The end-to-end walk runs against a
-purpose-created throwaway database instead, because walking dozens of
-migrations backwards is destructive.
+No Postgres class touches the shared dev database. Both own a throwaway one,
+created and dropped per module or per test. That is deliberate rather than
+tidy: CI runs the integration job with ``--timeout-method=thread``, which kills
+the process outright, so ``finally`` blocks do not run. A rewind-then-restore
+against the shared database would strand it at the previous revision on
+timeout, and every later test in the serial job would then fail against a stale
+schema with the real cause several tests back. Owning the database bounds the
+worst case to one leaked, uniquely named database.
 
 Run explicitly (the shell may leak a different URL)::
 
@@ -99,13 +102,51 @@ _HEAD = "054_documents_namespace_created_at_id"
 _PREV = "053_khora_chunks_bookkeeping_to_chunker_info"
 
 # The revision that first added the 2-column index, and the one immediately
-# below it. Walking to ``_BELOW_ORIGIN`` forces that migration's unqualified
+# below it. Walking to ``_BELOW_ORIGIN`` forces that migration's unconditional
 # ``drop_index`` to actually execute.
 _ORIGIN = "019_document_last_activity_index"
 _BELOW_ORIGIN = "018_halfvec_hnsw_indexes"
 
 NEW_INDEX = "ix_documents_namespace_created_at_id"
 OLD_INDEX = "ix_documents_namespace_created_at"
+
+# Postgres ``insufficient_privilege``. The only ``CREATE DATABASE`` failure that
+# justifies skipping: a role without CREATEDB is an environment limitation, not
+# a defect. Everything else - bad credentials, an unparseable DSN, a driver
+# fault - means the test could not run for a reason worth seeing, and must fail
+# rather than quietly report success. PostgreSQL being down entirely is already
+# handled by the socket-reachability gate at module scope.
+_INSUFFICIENT_PRIVILEGE = "42501"
+
+
+def _sqlstates(exc: BaseException) -> set[str]:
+    """Every SQLSTATE attached to *exc* or to anything it wraps.
+
+    SQLAlchemy wraps the driver's exception (asyncpg carries ``sqlstate``) in a
+    ``DBAPIError`` reachable via ``orig``, and re-raises can add ``__cause__`` /
+    ``__context__`` links. Matching on the message text instead would break the
+    moment a driver reworded it, so the whole chain is searched for the code.
+    """
+    states: set[str] = set()
+    seen: set[int] = set()
+    stack: list[BaseException | None] = [exc]
+    while stack:
+        err = stack.pop()
+        if err is None or id(err) in seen:
+            continue
+        seen.add(id(err))
+        state = getattr(err, "sqlstate", None)
+        if isinstance(state, str):
+            states.add(state)
+        stack.extend([getattr(err, "orig", None), err.__cause__, err.__context__])
+    return states
+
+
+def _skip_only_if_cannot_create_database(exc: BaseException) -> None:
+    """Re-raise unless *exc* is a missing-CREATEDB-privilege failure."""
+    if _INSUFFICIENT_PRIVILEGE not in _sqlstates(exc):
+        raise exc
+    pytest.skip(f"role lacks CREATEDB, cannot create a throwaway database: {exc}")
 
 
 def _make_config(url: str) -> Config:
@@ -164,7 +205,7 @@ def scratch_db_url() -> Iterator[str]:
     try:
         asyncio.run(_create_database(maintenance_url, db_name))
     except Exception as exc:  # pragma: no cover - depends on role privileges
-        pytest.skip(f"cannot create a throwaway database (needs CREATEDB): {exc}")
+        _skip_only_if_cannot_create_database(exc)
 
     url = _with_database(DATABASE_URL, db_name)
     try:
@@ -216,7 +257,7 @@ class TestMigration054IndexLifecycle:
         assert NEW_INDEX in indexes
         assert OLD_INDEX not in indexes
 
-    def test_post_downgrade_state_satisfies_the_unqualified_drop_below(self, scratch_db_url: str) -> None:
+    def test_post_downgrade_state_satisfies_the_unconditional_drop_below(self, scratch_db_url: str) -> None:
         """After downgrading past 054, the earlier migration's drop still works.
 
         That migration removes the 2-column index with a bare
@@ -229,12 +270,12 @@ class TestMigration054IndexLifecycle:
 
         try:
             command.downgrade(cfg, _PREV)
-            asyncio.run(_assert_unqualified_drop_succeeds(scratch_db_url))
+            asyncio.run(_assert_unconditional_drop_succeeds(scratch_db_url))
         finally:
             command.upgrade(cfg, "head")
 
 
-async def _assert_unqualified_drop_succeeds(url: str) -> None:
+async def _assert_unconditional_drop_succeeds(url: str) -> None:
     engine = create_async_engine(url)
     try:
         async with engine.connect() as conn:
@@ -244,7 +285,7 @@ async def _assert_unqualified_drop_succeeds(url: str) -> None:
                 await conn.exec_driver_sql(f"DROP INDEX {OLD_INDEX}")
             except Exception as exc:  # pragma: no cover - the failure this test exists to catch
                 raise AssertionError(
-                    f"the unqualified DROP INDEX {OLD_INDEX} that the earlier migration's "
+                    f"the unconditional DROP INDEX {OLD_INDEX} that the earlier migration's "
                     f"downgrade() issues would fail after downgrading past 054: {exc}. "
                     "Migration 054's downgrade() must recreate that index."
                 ) from exc
@@ -281,7 +322,7 @@ class TestMigration054DowngradeWalk:
         try:
             asyncio.run(_create_database(maintenance_url, db_name))
         except Exception as exc:  # pragma: no cover - depends on role privileges
-            pytest.skip(f"cannot create a throwaway database (needs CREATEDB): {exc}")
+            _skip_only_if_cannot_create_database(exc)
 
         try:
             cfg = _make_config(scratch_url)
@@ -296,11 +337,23 @@ class TestMigration054DowngradeWalk:
                 # Distinguish the failure this test is about from an unrelated,
                 # pre-existing broken downgrade somewhere else in the chain. Only
                 # the former is evidence against this change.
-                if OLD_INDEX in str(exc):
+                #
+                # Both index names are checked, not just the old one. 054's own
+                # downgrade is the FIRST step of this walk, so a failure there -
+                # rebuilding the 2-column index, or dropping the 3-column one -
+                # can name either. Skipping on anything that fails to mention
+                # OLD_INDEX would silently retire the coverage this test exists
+                # for. (OLD_INDEX is a prefix of NEW_INDEX, so the first check
+                # subsumes the second; both are spelled out because the
+                # subsumption is an accident of naming, not a property to rely
+                # on.)
+                message = str(exc)
+                named = [index for index in (OLD_INDEX, NEW_INDEX) if index in message]
+                if named:
                     raise AssertionError(
-                        f"downgrading past {_ORIGIN} failed on {OLD_INDEX}: {exc}. "
-                        "Migration 054's downgrade() must restore the 2-column index, "
-                        "because that migration drops it unqualified."
+                        f"downgrading past {_ORIGIN} failed, naming {named}: {exc}. "
+                        f"Migration 054's downgrade() must restore {OLD_INDEX}, because "
+                        f"{_ORIGIN}'s downgrade() drops it unconditionally."
                     ) from exc
                 pytest.skip(f"downgrade chain broke for an unrelated reason before reaching {_ORIGIN}: {exc}")
 
@@ -402,7 +455,7 @@ class TestMigration054SqliteLifecycle:
         assert set(_sqlite_documents_indexes(db_path)) == {NEW_INDEX}
 
     def test_downgrade_walks_past_the_index_origin(self, tmp_path: Path) -> None:
-        """The full walk past the revision that drops the 2-column index unqualified.
+        """The full walk past the revision that drops the 2-column index unconditionally.
 
         This is the failure mode the whole downgrade branch exists for: that
         revision issues a bare ``op.drop_index`` with no ``IF EXISTS``, so it

@@ -202,46 +202,66 @@ async def seeded_namespace(backend: PostgreSQLBackend) -> AsyncIterator[UUID]:
     fixture cares about table size and planner statistics, and thousands of
     round trips would dominate the test's runtime for no added coverage.
     """
-    ns = await backend.create_namespace(MemoryNamespace())
-    decoys = [await backend.create_namespace(MemoryNamespace()) for _ in range(DECOY_NAMESPACES)]
     engine = backend._engine
     assert engine is not None
 
-    base = datetime.now(UTC)
-    async with engine.begin() as conn:
-        await conn.execute(_INSERT_DOCUMENTS, _rows(ns.id, base, SEED_ROWS, "plan-seed"))
-        for decoy in decoys:
+    # Every namespace is recorded the instant it is created, and the whole of
+    # setup runs inside the try. Each INSERT commits, so a failure part-way
+    # through - a dead connection between two decoy batches, a cancelled
+    # ANALYZE - would otherwise strand thousands of committed rows in the
+    # shared table with nothing tracking which namespaces they belong to. Those
+    # rows then skew pg_statistic for every later plan test in the serial job,
+    # which is the exact failure mode this module's assertions are least able
+    # to diagnose.
+    namespace_ids: list[UUID] = []
+    try:
+        ns = await backend.create_namespace(MemoryNamespace())
+        namespace_ids.append(ns.id)
+
+        base = datetime.now(UTC)
+        async with engine.begin() as conn:
+            await conn.execute(_INSERT_DOCUMENTS, _rows(ns.id, base, SEED_ROWS, "plan-seed"))
+
+        for _ in range(DECOY_NAMESPACES):
+            decoy = await backend.create_namespace(MemoryNamespace())
+            namespace_ids.append(decoy.id)
             # Same timestamp range as the namespace under test, so the decoys
             # interleave rather than sorting cleanly to one end - otherwise a
             # created_at-ordered scan could skip them all in one range and the
             # namespace filter would be selective in name only.
-            await conn.execute(_INSERT_DOCUMENTS, _rows(decoy.id, base, DECOY_ROWS_EACH, "plan-decoy"))
+            async with engine.begin() as conn:
+                await conn.execute(_INSERT_DOCUMENTS, _rows(decoy.id, base, DECOY_ROWS_EACH, "plan-decoy"))
 
-    # ANALYZE must COMMIT - pg_statistic updates are MVCC-transactional, so an
-    # autobegun-then-rolled-back connection would silently discard them and the
-    # planner would still be working from empty-table estimates.
-    async with engine.begin() as conn:
-        await conn.execute(sa.text("ANALYZE documents"))
+        # ANALYZE must COMMIT - pg_statistic updates are MVCC-transactional, so
+        # an autobegun-then-rolled-back connection would silently discard them
+        # and the planner would still be working from empty-table estimates.
+        async with engine.begin() as conn:
+            await conn.execute(sa.text("ANALYZE documents"))
 
-    try:
         yield ns.id
     finally:
-        namespace_ids = [ns.id, *(d.id for d in decoys)]
-        # Expanding IN rather than ``= ANY(:ns)``: SQLAlchemy renders one bind
-        # per element, so the driver never has to infer a uuid[] array type for
-        # a bare Python list. Teardown failing here would leak thousands of rows
-        # into every later test's planner statistics.
-        async with engine.begin() as conn:
-            await conn.execute(
-                sa.text("DELETE FROM documents WHERE namespace_id IN :ns").bindparams(
-                    sa.bindparam("ns", expanding=True)
-                ),
-                {"ns": namespace_ids},
-            )
-            await conn.execute(
-                sa.text("DELETE FROM memory_namespaces WHERE id IN :ns").bindparams(sa.bindparam("ns", expanding=True)),
-                {"ns": namespace_ids},
-            )
+        # Guarded rather than an early ``return``: a ``return`` inside
+        # ``finally`` discards any in-flight exception, so a setup failure here
+        # would be swallowed and reported as a confusing fixture error instead
+        # of itself. An empty expanding bind also renders invalid SQL.
+        if namespace_ids:
+            # Expanding IN rather than ``= ANY(:ns)``: SQLAlchemy renders one
+            # bind per element, so the driver never has to infer a uuid[] array
+            # type for a bare Python list. Teardown failing here would leak
+            # thousands of rows into every later test's planner statistics.
+            async with engine.begin() as conn:
+                await conn.execute(
+                    sa.text("DELETE FROM documents WHERE namespace_id IN :ns").bindparams(
+                        sa.bindparam("ns", expanding=True)
+                    ),
+                    {"ns": namespace_ids},
+                )
+                await conn.execute(
+                    sa.text("DELETE FROM memory_namespaces WHERE id IN :ns").bindparams(
+                        sa.bindparam("ns", expanding=True)
+                    ),
+                    {"ns": namespace_ids},
+                )
 
 
 async def _capture_list_documents_sql(

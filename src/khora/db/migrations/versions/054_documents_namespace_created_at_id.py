@@ -2,6 +2,7 @@
 
 Revision ID: 054_documents_namespace_created_at_id
 Revises: 053_khora_chunks_bookkeeping_to_chunker_info
+Create Date: 2026-08-04
 
 ``list_documents`` now pins a total order — ``ORDER BY created_at DESC, id
 DESC`` — across the relational backends so that offset pagination cannot drop
@@ -140,8 +141,12 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     # Exact mirror on both branches. The 2-column index MUST come back:
-    # migration 019's downgrade issues an unqualified drop of it, so leaving it
-    # absent would break any downgrade that walks past 019 — on either dialect.
+    # migration 019's downgrade() drops ix_documents_namespace_created_at
+    # unconditionally — a plain ``op.drop_index`` with no ``if_exists=True`` —
+    # so 054's downgrade must restore it or any walk past 019 aborts, on either
+    # dialect. (The table name IS passed there; it is the missing if_exists that
+    # makes the restore load-bearing, so do not read a qualified call as proof
+    # this is unnecessary.)
     if _is_postgres():
         # Same invalid-leftover trap as upgrade(), mirrored onto the 2-column
         # index this direction rebuilds.
