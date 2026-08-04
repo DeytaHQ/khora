@@ -52,13 +52,9 @@ Run explicitly (the shell may leak a different URL)::
 from __future__ import annotations
 
 import asyncio
-import os
-import socket
 import sqlite3
-import uuid
 from collections.abc import Iterator
 from pathlib import Path
-from urllib.parse import urlparse, urlunparse
 
 import pytest
 import sqlalchemy as sa
@@ -66,33 +62,17 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy.ext.asyncio import create_async_engine
 
-DATABASE_URL = os.environ.get(
-    "KHORA_DATABASE_URL",
-    "postgresql+asyncpg://khora:khora@localhost:5434/khora",
+from tests.test_helpers.pg_scratch_db import (
+    pg_reachable,
+    scratch_database,
 )
-if DATABASE_URL.startswith("postgresql://"):
-    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
-elif DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
-
-
-def _pg_reachable() -> bool:
-    parsed = urlparse(DATABASE_URL.replace("+asyncpg", ""))
-    host = parsed.hostname or "localhost"
-    port = parsed.port or 5432
-    try:
-        with socket.create_connection((host, port), timeout=2):
-            return True
-    except OSError:
-        return False
-
 
 pytestmark = [pytest.mark.integration]
 
 # Applied per class rather than module-wide: the SQLite lifecycle class below
 # runs the same migration through its non-Postgres branch and needs no server.
 skip_no_pg = pytest.mark.skipif(
-    not _pg_reachable(),
+    not pg_reachable(),
     reason="PostgreSQL not reachable (run `make dev` first)",
 )
 
@@ -109,44 +89,6 @@ _BELOW_ORIGIN = "018_halfvec_hnsw_indexes"
 
 NEW_INDEX = "ix_documents_namespace_created_at_id"
 OLD_INDEX = "ix_documents_namespace_created_at"
-
-# Postgres ``insufficient_privilege``. The only ``CREATE DATABASE`` failure that
-# justifies skipping: a role without CREATEDB is an environment limitation, not
-# a defect. Everything else - bad credentials, an unparseable DSN, a driver
-# fault - means the test could not run for a reason worth seeing, and must fail
-# rather than quietly report success. PostgreSQL being down entirely is already
-# handled by the socket-reachability gate at module scope.
-_INSUFFICIENT_PRIVILEGE = "42501"
-
-
-def _sqlstates(exc: BaseException) -> set[str]:
-    """Every SQLSTATE attached to *exc* or to anything it wraps.
-
-    SQLAlchemy wraps the driver's exception (asyncpg carries ``sqlstate``) in a
-    ``DBAPIError`` reachable via ``orig``, and re-raises can add ``__cause__`` /
-    ``__context__`` links. Matching on the message text instead would break the
-    moment a driver reworded it, so the whole chain is searched for the code.
-    """
-    states: set[str] = set()
-    seen: set[int] = set()
-    stack: list[BaseException | None] = [exc]
-    while stack:
-        err = stack.pop()
-        if err is None or id(err) in seen:
-            continue
-        seen.add(id(err))
-        state = getattr(err, "sqlstate", None)
-        if isinstance(state, str):
-            states.add(state)
-        stack.extend([getattr(err, "orig", None), err.__cause__, err.__context__])
-    return states
-
-
-def _skip_only_if_cannot_create_database(exc: BaseException) -> None:
-    """Re-raise unless *exc* is a missing-CREATEDB-privilege failure."""
-    if _INSUFFICIENT_PRIVILEGE not in _sqlstates(exc):
-        raise exc
-    pytest.skip(f"role lacks CREATEDB, cannot create a throwaway database: {exc}")
 
 
 def _make_config(url: str) -> Config:
@@ -199,20 +141,9 @@ def scratch_db_url() -> Iterator[str]:
     narrowing the window: the worst a timeout can do here is leak one uniquely
     named database.
     """
-    maintenance_url = _maintenance_url(DATABASE_URL)
-    db_name = f"khora_mig054_lifecycle_{uuid.uuid4().hex[:8]}"
-
-    try:
-        asyncio.run(_create_database(maintenance_url, db_name))
-    except Exception as exc:  # pragma: no cover - depends on role privileges
-        _skip_only_if_cannot_create_database(exc)
-
-    url = _with_database(DATABASE_URL, db_name)
-    try:
+    with scratch_database("mig054_lifecycle") as url:
         command.upgrade(_make_config(url), "head")
         yield url
-    finally:
-        asyncio.run(_drop_database(maintenance_url, db_name))
 
 
 @skip_no_pg
@@ -315,16 +246,7 @@ class TestMigration054DowngradeWalk:
     """
 
     def test_downgrade_walks_past_the_index_origin_without_error(self) -> None:
-        maintenance_url = _maintenance_url(DATABASE_URL)
-        db_name = f"khora_mig054_{uuid.uuid4().hex[:8]}"
-        scratch_url = _with_database(DATABASE_URL, db_name)
-
-        try:
-            asyncio.run(_create_database(maintenance_url, db_name))
-        except Exception as exc:  # pragma: no cover - depends on role privileges
-            _skip_only_if_cannot_create_database(exc)
-
-        try:
+        with scratch_database("mig054") as scratch_url:
             cfg = _make_config(scratch_url)
             command.upgrade(cfg, "head")
 
@@ -360,50 +282,6 @@ class TestMigration054DowngradeWalk:
             # Below the origin revision neither index should exist.
             indexes = asyncio.run(_documents_indexes(scratch_url))
             assert indexes == {}, f"expected no documents sort index below {_ORIGIN}, found {sorted(indexes)}"
-        finally:
-            asyncio.run(_drop_database(maintenance_url, db_name))
-
-
-def _maintenance_url(url: str) -> str:
-    """The same server, pointed at the default maintenance database.
-
-    ``CREATE DATABASE`` cannot run from inside the database being created, and
-    cannot run inside a transaction either - hence the AUTOCOMMIT connections
-    below.
-    """
-    return _with_database(url, "postgres")
-
-
-def _with_database(url: str, db_name: str) -> str:
-    parsed = urlparse(url)
-    return urlunparse(parsed._replace(path=f"/{db_name}"))
-
-
-async def _create_database(maintenance_url: str, db_name: str) -> None:
-    engine = create_async_engine(maintenance_url, isolation_level="AUTOCOMMIT")
-    try:
-        async with engine.connect() as conn:
-            await conn.exec_driver_sql(f'CREATE DATABASE "{db_name}"')
-    finally:
-        await engine.dispose()
-
-
-async def _drop_database(maintenance_url: str, db_name: str) -> None:
-    engine = create_async_engine(maintenance_url, isolation_level="AUTOCOMMIT")
-    try:
-        async with engine.connect() as conn:
-            # Alembic's own connections are closed by now, but a lingering
-            # backend would make DROP DATABASE fail; evict any that remain.
-            await conn.execute(
-                sa.text(
-                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                    "WHERE datname = :db AND pid <> pg_backend_pid()"
-                ),
-                {"db": db_name},
-            )
-            await conn.exec_driver_sql(f'DROP DATABASE IF EXISTS "{db_name}"')
-    finally:
-        await engine.dispose()
 
 
 def _sqlite_documents_indexes(db_path: Path) -> dict[str, str]:

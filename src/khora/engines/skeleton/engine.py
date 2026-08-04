@@ -823,6 +823,11 @@ class SkeletonConstructionEngine:
             BatchResult with processing statistics and timing metrics
         """
         timings: dict[str, float] = {}
+        # Collapse a falsy batch-level source_type before any per-doc dict or
+        # Document is built. The per-doc expressions below are
+        # ``doc_data.get(...) or source_type``, which only rules out a falsy
+        # *per-doc* value — with source_type="" they preserve the empty string.
+        source_type = source_type or "library"
         total_start = time.perf_counter()
 
         if not documents:
@@ -948,7 +953,7 @@ class SkeletonConstructionEngine:
                     content=content,
                     title=doc_data.get("title") or None,
                     source=doc_data.get("source") or None,
-                    source_type=doc_data.get("source_type", source_type),
+                    source_type=doc_data.get("source_type") or source_type,
                     source_name=doc_data.get("source_name", source_name) or None,
                     source_url=doc_data.get("source_url", source_url) or None,
                     source_timestamp=doc_data.get("source_timestamp", source_timestamp),

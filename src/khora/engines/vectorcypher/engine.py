@@ -633,6 +633,12 @@ class VectorCypherConfig:
     llm_reranking_mode: Literal["auto", "always"] = "auto"
 
 
+#: SQLSTATE ``unique_violation``. Used to tell the ``(namespace_id,
+#: external_id)`` insert race apart from the rest of the 23xxx integrity
+#: class, which ``IntegrityError`` alone does not distinguish.
+_UNIQUE_VIOLATION = "23505"
+
+
 class VectorCypherEngine:
     """VectorCypher engine - hybrid vector+graph retrieval with temporal support.
 
@@ -1300,13 +1306,24 @@ class VectorCypherEngine:
         )
         try:
             document = await storage.create_document(document)
-        except IntegrityError:
+        except IntegrityError as exc:
             # Concurrent race on `(namespace_id, external_id)`: another caller
             # inserted the same external_id between our lookup and this
             # create. The partial UNIQUE index ``ix_documents_namespace_external_id_unique``
             # converts the race into a deterministic conflict.
             # Retry the lookup and route to replace so the loser still
             # succeeds against the winner's row.
+            #
+            # Narrowed to SQLSTATE 23505 (unique_violation). IntegrityError
+            # covers the whole 23xxx class, so a NOT NULL violation (23502 —
+            # reachable since migration 055 made documents.source_type NOT NULL)
+            # would otherwise be diagnosed as the external-id race, sent into
+            # _remember_via_replace, and fail again with a misleading
+            # traceback. A driver that reports no SQLSTATE keeps the old
+            # behaviour rather than losing the race handling.
+            sqlstate = getattr(getattr(exc, "orig", None), "sqlstate", None)
+            if sqlstate is not None and sqlstate != _UNIQUE_VIOLATION:
+                raise
             if external_id is None:
                 raise
             existing_after_race = await storage.get_document_by_external_id(external_id, namespace_id=namespace_id)
@@ -3301,6 +3318,15 @@ class VectorCypherEngine:
         source_timestamp: datetime | None = None,
     ) -> BatchResult:
         """Internal implementation of remember_batch (separated for bulk_mode wrapping)."""
+        # Collapse a falsy batch-level source_type before it is dispatched
+        # anywhere. The per-doc expressions below are ``doc_data.get(...) or
+        # source_type``, which only rules out a falsy *per-doc* value — with
+        # source_type="" they preserve the empty string, and documents.source_type
+        # is NOT NULL but not non-empty (migration 055 deliberately adds no
+        # CHECK). Normalizing here rather than at each site covers the streaming
+        # branch, the direct branch, and the legacy path this method delegates
+        # to, which is every place the batch-level value is read.
+        source_type = source_type or "library"
         use_streaming = self._vc_config.streaming_pipeline
         if not use_streaming:
             # Legacy path: fall back to per-document processing
@@ -3438,7 +3464,7 @@ class VectorCypherEngine:
                     namespace_id,
                     title=doc_data.get("title", ""),
                     source=doc_data.get("source", ""),
-                    source_type=doc_data.get("source_type", source_type),
+                    source_type=doc_data.get("source_type") or source_type,
                     source_name=doc_data.get("source_name", source_name),
                     source_url=doc_data.get("source_url", source_url),
                     source_timestamp=doc_data.get("source_timestamp", source_timestamp),
@@ -3619,7 +3645,7 @@ class VectorCypherEngine:
                         title=doc_data.get("title") or None,
                         source=doc_data.get("source") or None,
                         checksum=checksum,
-                        source_type=doc_data.get("source_type", source_type),
+                        source_type=doc_data.get("source_type") or source_type,
                         source_name=doc_data.get("source_name", source_name) or None,
                         source_url=doc_data.get("source_url", source_url) or None,
                         source_timestamp=doc_data.get("source_timestamp", source_timestamp),
@@ -4374,6 +4400,12 @@ class VectorCypherEngine:
         source_timestamp: datetime | None = None,
     ) -> BatchResult:
         """Legacy per-document remember_batch (non-streaming pipeline)."""
+        # Normalized again rather than relying on the caller. _remember_batch_impl
+        # already collapses this before delegating here, so on the real path this
+        # is a no-op — but the method reads source_type and builds documents from
+        # it, so it should not depend on being entered through one particular
+        # caller to be correct.
+        source_type = source_type or "library"
         storage = self._get_storage()
         total = len(documents)
         results: dict[str, int] = {
@@ -4470,7 +4502,7 @@ class VectorCypherEngine:
                         namespace_id,
                         title=doc_data.get("title", ""),
                         source=doc_data.get("source", ""),
-                        source_type=doc_data.get("source_type", source_type),
+                        source_type=doc_data.get("source_type") or source_type,
                         source_name=doc_data.get("source_name", source_name),
                         source_url=doc_data.get("source_url", source_url),
                         source_timestamp=doc_data.get("source_timestamp", source_timestamp),

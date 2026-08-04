@@ -19,6 +19,11 @@ from khora.khora import Khora
 # Derive migrations directory from the installed package — not relative to this test file
 _MIGRATIONS_DIR = Path(khora.db.migrations.__file__).parent
 
+#: Number of migration files the chain is expected to ship. Bump this by one
+#: whenever a revision is added — see ``test_versions_dir_is_fully_bundled``
+#: for why the count is declared rather than derived.
+_EXPECTED_MIGRATION_COUNT = 56
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -442,14 +447,25 @@ class TestMigrationPackageStructure:
         assert env_path.exists(), f"env.py not found at {env_path}"
 
     @pytest.mark.unit
-    def test_versions_dir_has_55_files(self):
-        """versions/ directory contains 55 migration files."""
+    def test_versions_dir_is_fully_bundled(self):
+        """Every migration in the chain is present in the installed package.
+
+        ``_MIGRATIONS_DIR`` resolves through ``khora.db.migrations.__file__``,
+        i.e. the *installed* package rather than the repo tree, so this is a
+        packaging tripwire: it fails if a build config ever stops shipping
+        ``versions/*.py``, which would leave ``run_migrations()`` silently
+        building a partial schema. Deriving the expected count from the very
+        directory it checks would make the assertion vacuous, so the number is
+        declared. Bump ``_EXPECTED_MIGRATION_COUNT`` when you add a migration;
+        it is deliberately the only place the number appears.
+        """
         versions_dir = _MIGRATIONS_DIR / "versions"
         migration_files = sorted(versions_dir.glob("*.py"))
         # Filter out __pycache__ and __init__
         migration_files = [f for f in migration_files if not f.name.startswith("__")]
-        assert len(migration_files) == 55, (
-            f"Expected 55 migration files, found {len(migration_files)}: {[f.name for f in migration_files]}"
+        assert len(migration_files) == _EXPECTED_MIGRATION_COUNT, (
+            f"Expected {_EXPECTED_MIGRATION_COUNT} migration files, "
+            f"found {len(migration_files)}: {[f.name for f in migration_files]}"
         )
 
     @pytest.mark.unit

@@ -56,6 +56,13 @@ DEFINE FIELD IF NOT EXISTS content ON document TYPE option<string>;
 -- + redefine, which is out of scope for v0.16.
 DEFINE FIELD IF NOT EXISTS content_type ON document TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS source ON document TYPE option<string>;
+-- ``source_type`` is deliberately left ``option<string>`` even though
+-- ``documents.source_type`` is NOT NULL on Postgres/SQLite (migration 055).
+-- The same append-only caveat applies: re-typing it to ``string`` would take
+-- effect on fresh deployments only, so the two tiers would diverge from each
+-- other as well as from the relational backends. The divergence is stated
+-- rather than closed; the call-site normalization that accompanies migration
+-- 054 means writers no longer send NULL here either.
 DEFINE FIELD IF NOT EXISTS source_type ON document TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS source_name ON document TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS source_url ON document TYPE option<string>;

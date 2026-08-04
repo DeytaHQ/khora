@@ -4,7 +4,64 @@ These tests ensure that:
 1. All migration .py source files are committed (not just .pyc)
 2. ORM models and migrations produce the same schema (no drift)
 3. Composite indexes agree between the ORM and the migration that builds them
-4. create_tables() emits a deprecation warning
+4. The schema the chain actually builds matches the ORM declarations
+5. create_tables() emits a deprecation warning
+
+Two complementary gates
+=======================
+Checks 3 and 4 look like duplicates and are not. ``TestDocumentsCreatedAtIndexAgreement``
+parses *one* migration's source with ``ast`` and pins the DDL shape it emits —
+column order, the dialect branches, that the Postgres path is CONCURRENTLY
+inside an autocommit block, and that create precedes drop. It reads source, so
+it can assert things a built schema cannot show you (a concurrent build and a
+blocking one produce the same index). ``TestSchemaDriftSQLite`` runs the whole
+chain, reflects the result, and diffs it against ``Base.metadata`` globally. It
+reads outcomes, so it catches what no source scan can: a declaration no
+migration ever built. Source-shape and built-outcome are different questions;
+keep both.
+
+Drift-test coverage decision
+============================
+The source-text scans in ``TestORMMigrationDrift`` check that every ORM
+table and column *name* appears somewhere in the migration sources. That
+catches a forgotten ``add_column`` and nothing else: it reads migration
+files as strings, so it cannot see an index that was declared but never
+created, and it cannot see a nullability, type, or default that the chain
+built differently from the declaration. Two real drifts lived under a
+green 10/10 run of this file — a declared-but-never-created index on
+``documents`` and a ``nullable=False`` ORM column that was NULLABLE in
+every live database — because a substring scan is structurally incapable
+of catching either.
+
+``TestSchemaDriftSQLite`` closes three of those dimensions by building the
+schema and reflecting it: index presence, index column list, and column
+nullability. Index uniqueness, partial-index predicates, column types and
+server defaults remain unchecked — ``tests/test_helpers/schema_drift.py``
+enumerates those gaps and what each can hide. A green run here does not
+mean the schemas match.
+
+The dimensions are gated in one direction only — every ORM declaration
+must exist in the live schema. Live-only objects are ignored by
+construction, which is why the Postgres-only migrations need no allowlist
+entry here.
+
+The pre-existing drift on today's schema is large (85 nullability
+mismatches over 14 tables, 3 un-migrated ORM indexes on this leg), so the
+gate carries a baseline ledger — ``INDEX_BASELINE`` /
+``NULLABILITY_BASELINE`` in ``tests/test_helpers/schema_drift.py``, shared
+with the Postgres leg — and asserts it in *both* directions: new drift
+fails, and so does a ledger line whose drift has since been fixed. The
+second direction is the whole difference between a ratchet and a snapshot
+— it means a failure cannot be silenced by appending a line.
+
+``alembic.autogenerate.compare_metadata`` is deliberately not used; see
+``tests/test_helpers/schema_drift.py`` for why it cannot work on this leg.
+
+The Postgres leg lives in ``tests/integration/db/test_schema_drift_pg.py``.
+Six ORM index declarations and six columns are structurally invisible to
+SQLite reflection, and that invisibility is exactly this bug class, so the
+second leg is not redundant. One of those six indexes is in fact drifting
+and only that leg can see it — hence ``PG_ONLY_INDEX_BASELINE``.
 """
 
 from __future__ import annotations
@@ -16,8 +73,20 @@ from typing import NamedTuple
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import sqlalchemy as sa
 
 from khora.db.models import Base
+from tests.test_helpers.schema_drift import (
+    DEFAULT_EMBEDDING_DIMENSION,
+    INDEX_BASELINE,
+    NULLABILITY_BASELINE,
+    PG_ONLY_INDEX_BASELINE,
+    VECTOR_HNSW_MAX_DIM,
+    assert_ratchet,
+    collect_drift,
+    index_invisible_on_sqlite,
+    upgrade,
+)
 
 VERSIONS_DIR = Path(__file__).resolve().parents[2] / "src" / "khora" / "db" / "migrations" / "versions"
 
@@ -516,6 +585,286 @@ class TestDocumentsCreatedAtIndexAgreement:
                 assert not op.concurrent, (
                     f"{func_name}() non-postgres branch marks {op.name} CONCURRENTLY; that is a Postgres-only feature"
                 )
+
+
+# ---------------------------------------------------------------------------
+# Reflected schema drift (SQLite leg)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def sqlite_head_drift(tmp_path_factory: pytest.TempPathFactory):
+    """Run the full chain against a fresh SQLite file once, then diff it.
+
+    Module-scoped: the chain takes ~0.4s and every test below wants the
+    same schema.
+    """
+    db_path = tmp_path_factory.mktemp("drift") / "drift.db"
+    upgrade(f"sqlite+aiosqlite:///{db_path}")
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    try:
+        return collect_drift(sa.inspect(engine), sqlite=True)
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.unit
+class TestSchemaDriftSQLite:
+    """Reflect the migrated SQLite schema and diff it against the ORM."""
+
+    def test_no_missing_tables(self, sqlite_head_drift):
+        """Every ORM table must be built by the chain. No baseline — zero."""
+        assert sqlite_head_drift.missing_tables == set()
+
+    def test_no_missing_columns(self, sqlite_head_drift):
+        """Every ORM column must exist, bar the Vector/TSVECTOR carve-out."""
+        assert sqlite_head_drift.missing_columns == set()
+
+    def test_orm_indexes_are_built(self, sqlite_head_drift):
+        """Declared-but-never-created indexes must not grow past the ledger."""
+        assert_ratchet(sqlite_head_drift.missing_indexes, INDEX_BASELINE, "index")
+
+    def test_indexes_cover_the_declared_columns(self, sqlite_head_drift):
+        """Every index the chain builds must match its declaration exactly.
+
+        No baseline — every ORM index that exists today covers the declared
+        columns in the declared order, so this dimension starts at zero and
+        must stay there.
+        """
+        assert sqlite_head_drift.wrong_index_columns == set()
+
+    def test_orm_not_null_is_installed(self, sqlite_head_drift):
+        """``nullable=False`` in the ORM must be NOT NULL in the schema."""
+        assert_ratchet(sqlite_head_drift.nullable_in_live, NULLABILITY_BASELINE, "nullability")
+
+    def test_pg_only_ledger_holds_only_sqlite_exempt_indexes(self):
+        """The Postgres delta must not become a way around the shared ledger.
+
+        ``PG_ONLY_INDEX_BASELINE`` exists for one reason: a shared frozenset
+        asserted in both directions cannot hold an entry that one leg
+        exempts. That is a narrow licence. Every entry must therefore name an
+        ORM index this leg genuinely cannot see, and must not also sit in the
+        shared ledger. Runs here rather than on the Postgres leg because it
+        needs no database.
+        """
+        by_name = {
+            f"{table.name}.{index.name}": index for table in Base.metadata.tables.values() for index in table.indexes
+        }
+
+        for entry in PG_ONLY_INDEX_BASELINE:
+            index = by_name.get(entry)
+            assert index is not None, f"{entry} is not a declared ORM index"
+            assert index_invisible_on_sqlite(index), (
+                f"{entry} is visible on the SQLite leg, so it belongs in the shared "
+                f"INDEX_BASELINE, not in the Postgres-only delta."
+            )
+            assert entry not in INDEX_BASELINE, f"{entry} is ledgered twice"
+
+    def test_documents_alignment_is_not_in_the_ledger(self, sqlite_head_drift):
+        """The two drifts migration 055 fixes must be gated, not ledgered.
+
+        Ledgering them would make the gate green whether or not 054 exists.
+        Asserting their absence from both ledgers is what makes a revert of
+        054 fail the two tests above by name.
+        """
+        assert "documents.ix_documents_namespace_source_type" not in INDEX_BASELINE
+        assert "documents.source_type" not in NULLABILITY_BASELINE
+        # And they really are aligned in the built schema.
+        assert "documents.ix_documents_namespace_source_type" not in sqlite_head_drift.missing_indexes
+        assert "documents.source_type" not in sqlite_head_drift.nullable_in_live
+
+
+@pytest.mark.unit
+class TestConfigConditionalIndexes:
+    """Guards two preconditions the gate's correctness rests on.
+
+    Both are about the gate itself rather than about the schema, so neither
+    needs a database.
+    """
+
+    @staticmethod
+    def _orm_indexes() -> dict[str, sa.Index]:
+        return {
+            f"{table.name}.{index.name}": index for table in Base.metadata.tables.values() for index in table.indexes
+        }
+
+    def test_default_dimension_is_below_the_pgvector_hnsw_ceiling(self):
+        """Whether three ORM indexes exist at head is a runtime-config decision.
+
+        Migrations 002 / 007 / 024 build ``ix_chunks_embedding_hnsw``,
+        ``ix_entities_embedding_hnsw`` and
+        ``ix_chronicle_events_embedding_hnsw`` only when
+        ``full_precision_hnsw_supported()`` holds — pgvector caps the
+        full-precision ``vector`` HNSW opclass at ``VECTOR_HNSW_MAX_DIM``.
+        Above it the chain builds migration 018's halfvec expression index
+        instead, which the ORM does not declare.
+
+        All three are ORM-declared and in neither ledger, so the Postgres leg
+        checks them — which is only correct while the dimension it migrates at
+        stays at or below the ceiling. Raising ``DEFAULT_EMBEDDING_DIMENSION``
+        above it would turn that leg red with the actively wrong advice "Write
+        a migration — do not append to the ledger", for indexes whose
+        migrations exist and deliberately did not run.
+
+        This fails first, in the fast lane, with the reason spelled out. It is
+        the tripwire the gate has instead of an exemption rule: an exemption
+        would keep the gate green at any dimension, including when an hnsw
+        index goes missing for a reason that has nothing to do with the
+        ceiling.
+        """
+        assert DEFAULT_EMBEDDING_DIMENSION <= VECTOR_HNSW_MAX_DIM, (
+            f"DEFAULT_EMBEDDING_DIMENSION ({DEFAULT_EMBEDDING_DIMENSION}) now exceeds "
+            f"VECTOR_HNSW_MAX_DIM ({VECTOR_HNSW_MAX_DIM}). The three full-precision hnsw "
+            f"indexes are no longer built by migrations 002 / 007 / 024, so the Postgres "
+            f"drift leg will report them as missing. Decide explicitly: pin that leg's "
+            f"dimension below the ceiling, or account for the three indexes there."
+        )
+
+        # Pin the set this reasoning covers — a fourth ORM hnsw index has to
+        # come through here and be thought about.
+        hnsw = {
+            name for name, idx in self._orm_indexes().items() if idx.dialect_kwargs.get("postgresql_using") == "hnsw"
+        }
+        assert hnsw == {
+            "chunks.ix_chunks_embedding_hnsw",
+            "entities.ix_entities_embedding_hnsw",
+            "chronicle_events.ix_chronicle_events_embedding_hnsw",
+        }
+
+        # None of them is ledgered: they are genuinely built at this
+        # dimension, so a ledger entry would fail the ratchet's stale
+        # direction. This is why the config-conditionality cannot be handled
+        # with a baseline line either.
+        for entry in hnsw:
+            assert entry not in INDEX_BASELINE, f"{entry} is built at this dimension — it must not be ledgered"
+            assert entry not in PG_ONLY_INDEX_BASELINE, f"{entry} is built at this dimension — it must not be ledgered"
+
+    def test_no_orm_index_is_satisfied_only_by_a_unique_constraint(self):
+        """Pins the removal of the constraint-spelling fallback.
+
+        ``collect_drift`` used to accept an ORM index whose name matched a
+        reflected unique *constraint*. That acceptance was presence-only — a
+        constraint carries no comparable column list through the inspector —
+        so it silently skipped the column comparison that the module's own
+        docstring calls the thing keeping ``IF NOT EXISTS`` honest. No ORM
+        index took the branch on either leg, so it was dead code that could
+        only ever weaken the gate; it was deleted rather than exercised.
+
+        This test is what makes that deletion safe to keep: both unique ORM
+        indexes must be declared as indexes, so a future migration writing one
+        as ``op.create_unique_constraint`` shows up as a real failure for a
+        human to judge instead of passing on a name match.
+        """
+        unique = {name: idx for name, idx in self._orm_indexes().items() if idx.unique}
+        # Precondition: there is something to protect. If this ever drops to
+        # zero the test is vacuous and should be deleted with the concern.
+        assert unique, "no unique ORM indexes declared — this test has nothing to guard"
+        assert set(unique) == {
+            "documents.ix_documents_namespace_external_id_unique",
+            "memory_namespaces.idx_namespace_stable_active",
+        }
+
+
+@pytest.mark.unit
+class TestIndexCreatedIfNotExists:
+    """Migration 054 must survive the index already existing.
+
+    ``optimize_storage()`` is public API and ships the same
+    ``CREATE INDEX IF NOT EXISTS ix_documents_namespace_source_type`` in its
+    catch-up list, so any database an operator ran it on already carries the
+    index. A bare ``op.create_index`` would raise there and wedge the chain
+    permanently.
+
+    The full-chain replay test cannot catch this: it resets the schema
+    before each iteration, so the index never pre-exists.
+    """
+
+    def test_upgrade_succeeds_when_index_pre_exists(self, tmp_path: Path):
+        db_path = tmp_path / "preindexed.db"
+        async_url = f"sqlite+aiosqlite:///{db_path}"
+        sync_url = f"sqlite:///{db_path}"
+
+        # Stop one revision short of 054.
+        upgrade(async_url, "053_khora_chunks_bookkeeping_to_chunker_info")
+
+        # Create the index exactly as storage/optimize.py does.
+        engine = sa.create_engine(sync_url)
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    sa.text(
+                        "CREATE INDEX IF NOT EXISTS ix_documents_namespace_source_type "
+                        "ON documents (namespace_id, source_type)"
+                    )
+                )
+
+            # Must not raise: 054 passes if_not_exists=True.
+            upgrade(async_url, "head")
+
+            inspector = sa.inspect(engine)
+            names = [idx["name"] for idx in inspector.get_indexes("documents")]
+            assert names.count("ix_documents_namespace_source_type") == 1, (
+                f"expected exactly one ix_documents_namespace_source_type, got {names}"
+            )
+            source_type = next(c for c in inspector.get_columns("documents") if c["name"] == "source_type")
+            assert source_type["nullable"] is False
+        finally:
+            engine.dispose()
+
+    # NOTE: the backfill itself is covered in
+    # ``tests/integration/db/test_migration_055_documents_source_type.py``,
+    # which seeds the NULL / real-value / empty-string archetypes at revision
+    # 053 on both dialects, following the convention of the sibling migration
+    # tests (041 / 044 / 049 / 052 / 053). This class stays about the index.
+
+    def test_divergent_pre_existing_index_is_caught(self, tmp_path: Path):
+        """A name collision over the wrong columns must not read as green.
+
+        ``if_not_exists=True`` is what keeps the chain from wedging, but it
+        matches on name alone: an index that already exists under the
+        declared name over *different* columns is silently accepted, and so
+        is every later ``IF NOT EXISTS``. The wrong definition is then
+        permanent. ``optimize.py`` and ``models.py`` hold two independent
+        column-list literals with nothing pinning them together, so this is
+        reachable, not theoretical.
+
+        A name-only gate reports green here. The column-list comparison is
+        what makes it report the drift.
+        """
+        db_path = tmp_path / "divergent.db"
+        async_url = f"sqlite+aiosqlite:///{db_path}"
+        sync_url = f"sqlite:///{db_path}"
+
+        upgrade(async_url, "053_khora_chunks_bookkeeping_to_chunker_info")
+
+        engine = sa.create_engine(sync_url)
+        try:
+            # Right name, wrong columns — the ORM declares (namespace_id,
+            # source_type).
+            with engine.begin() as conn:
+                conn.execute(
+                    sa.text(
+                        "CREATE INDEX IF NOT EXISTS ix_documents_namespace_source_type "
+                        "ON documents (namespace_id, status)"
+                    )
+                )
+
+            upgrade(async_url, "head")
+
+            inspector = sa.inspect(engine)
+            live = next(
+                i for i in inspector.get_indexes("documents") if i["name"] == "ix_documents_namespace_source_type"
+            )
+            assert list(live["column_names"]) == ["namespace_id", "status"], (
+                "precondition: the divergent definition must survive the chain"
+            )
+
+            drift = collect_drift(inspector, sqlite=True)
+            assert "documents.ix_documents_namespace_source_type" in drift.wrong_index_columns
+            # It is present, so a name-only check would call this clean.
+            assert "documents.ix_documents_namespace_source_type" not in drift.missing_indexes
+        finally:
+            engine.dispose()
 
 
 # ---------------------------------------------------------------------------
