@@ -59,7 +59,14 @@ def seed_order(ids: Sequence[UUID]) -> list[UUID]:
     these tests seeded in ladder order and passed against the pre-tie-break
     implementation. A non-monotonic write order cannot coincide with descending
     id order in either direction.
+
+    Fewer than three ids cannot satisfy that contract: two ids interleave to
+    ``[ids[0], ids[1]]``, which is just ascending insertion order, so the
+    guarantee this helper exists to provide would silently not hold.
     """
+    if len(ids) < 3:
+        raise ValueError(f"seed_order requires at least 3 ids to produce a non-monotonic write order, got {len(ids)}")
+
     out: list[UUID] = []
     lo, hi = 0, len(ids) - 1
     while lo <= hi:
