@@ -45,7 +45,7 @@ must exist in the live schema. Live-only objects are ignored by
 construction, which is why the Postgres-only migrations need no allowlist
 entry here.
 
-The pre-existing drift on today's schema is large (85 nullability
+The pre-existing drift on today's schema is large (84 nullability
 mismatches over 14 tables, 3 un-migrated ORM indexes on this leg), so the
 gate carries a baseline ledger — ``INDEX_BASELINE`` /
 ``NULLABILITY_BASELINE`` in ``tests/test_helpers/schema_drift.py``, shared
@@ -661,17 +661,23 @@ class TestSchemaDriftSQLite:
             assert entry not in INDEX_BASELINE, f"{entry} is ledgered twice"
 
     def test_documents_alignment_is_not_in_the_ledger(self, sqlite_head_drift):
-        """The two drifts migration 055 fixes must be gated, not ledgered.
+        """The drifts migrations 055 and 056 fix must be gated, not ledgered.
 
-        Ledgering them would make the gate green whether or not 054 exists.
-        Asserting their absence from both ledgers is what makes a revert of
-        054 fail the two tests above by name.
+        Ledgering them would make the gate green whether or not those
+        revisions exist. Asserting their absence from both ledgers is what
+        makes a revert of either fail the two tests above by name.
+
+        ``documents.updated_at`` is deliberately not asserted here: 056 flips
+        ``created_at`` alone, so ``updated_at`` is still a live drift and
+        still ledgered.
         """
         assert "documents.ix_documents_namespace_source_type" not in INDEX_BASELINE
         assert "documents.source_type" not in NULLABILITY_BASELINE
+        assert "documents.created_at" not in NULLABILITY_BASELINE
         # And they really are aligned in the built schema.
         assert "documents.ix_documents_namespace_source_type" not in sqlite_head_drift.missing_indexes
         assert "documents.source_type" not in sqlite_head_drift.nullable_in_live
+        assert "documents.created_at" not in sqlite_head_drift.nullable_in_live
 
 
 @pytest.mark.unit

@@ -22,7 +22,7 @@ _MIGRATIONS_DIR = Path(khora.db.migrations.__file__).parent
 #: Number of migration files the chain is expected to ship. Bump this by one
 #: whenever a revision is added — see ``test_versions_dir_is_fully_bundled``
 #: for why the count is declared rather than derived.
-_EXPECTED_MIGRATION_COUNT = 56
+_EXPECTED_MIGRATION_COUNT = 57
 
 # ---------------------------------------------------------------------------
 # Helpers

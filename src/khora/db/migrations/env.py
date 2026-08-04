@@ -279,10 +279,85 @@ async def run_async_migrations() -> None:
         connectable = create_async_engine(url, poolclass=pool.NullPool)
 
         async with connectable.connect() as connection:
-            # SQLite: enable foreign keys so FK constraints behave consistently
-            # with Postgres during batch ALTER operations.
+            # SQLite: foreign key enforcement MUST be OFF on the migration
+            # connection.
+            #
+            # Ten revisions call ``op.batch_alter_table(...)`` explicitly in
+            # their bodies, across four tables — ``documents``
+            # (016 / 037 / 055 / 056), ``entities`` (008), ``memory_namespaces``
+            # (001 / 010 / 011 / 012 / 013) and ``permissions`` (010). Re-derive
+            # both the count and the list by grepping the versions/ directory,
+            # not from this comment, if a revision is ever added.
+            # (Not ``render_as_batch`` above: that is an *autogenerate rendering*
+            # option and has no effect at upgrade time. Removing it would not
+            # disable any of these rebuilds.) Batch mode performs SQLite's
+            # documented table-rebuild procedure: create temp table, copy rows,
+            # DROP TABLE, rename. That procedure's step 1 is "disable foreign
+            # key constraints" — and Alembic implements the copy/drop/rename
+            # steps but never issues that pragma itself, so it has to be done
+            # here on its behalf.
+            #
+            # With enforcement left on, the rebuild's DROP TABLE performs an
+            # implicit DELETE FROM that fires every inbound ON DELETE CASCADE,
+            # transitively, before the rename puts the table back. Closures
+            # against the schema AS IT STANDS AT HEAD — the figures that matter
+            # for "may this pragma be turned back on today", which is the
+            # decision this comment exists to inform:
+            #   documents         ->  chunks, keyword_chunks, chronicle_events
+            #                         (and, via the FTS triggers, chunks_fts)
+            #   entities          ->  relationships, temporal_edges,
+            #                         time_edge_links
+            #   memory_namespaces ->  13 direct, 14 transitive, out of the
+            #                         schema's 24 tables. The non-children are
+            #                         permissions, khora_dream_runs,
+            #                         khora_hook_subscriptions, the version
+            #                         table, and the chunks_fts* shadow tables
+            #                         (which empty anyway via the triggers).
+            #   permissions       ->  nothing; it has no inbound FKs at all, so
+            #                         010's rebuild of it is harmless either way.
+            #
+            # Those are NOT what the historical revisions destroyed — each one
+            # only reaches what existed at its own point in the chain, and no
+            # revision rebuilds memory_namespaces at head. Measured per revision:
+            # 001 -> 8, 010 / 011 / 012 / 013 -> 11 each, 008 -> 3, 016 -> 1,
+            # 037 -> 2, 055 and 056 -> 3. Do not quote the head figures as the
+            # blast radius of a past revision.
+            # On the embedded stack LanceDB still holds the embeddings, so the
+            # result is orphaned vectors rather than merely missing rows.
+            #
+            # From early starting revisions it does not even get that far: the
+            # cascade trips a constraint, the per-migration transaction rolls
+            # back, and the database is stranded at its starting revision, unable
+            # to upgrade at all. ``PRAGMA integrity_check`` still reports ok — the
+            # file is fine, the chain simply cannot move. No gate caught any of
+            # this because they all build the chain on an empty database, where
+            # a zero-row cascade is invisible.
+            #
+            # This cannot be fixed inside a revision body. The pragma takes
+            # effect only when no transaction is actually open, and pysqlite
+            # defers the real BEGIN until the first DML — so an in-body pragma
+            # *appears* to work (set before any DML it reports 0 and children
+            # survive) yet silently becomes a no-op the moment any DML precedes
+            # it, reporting the old value with no error. 056 runs its backfill
+            # UPDATE before its batch copy, which is exactly that case. Under a
+            # genuinely open transaction it is a no-op in either order.
+            # ``PRAGMA defer_foreign_keys`` does not help either — it defers
+            # violation *checking*, and a cascade is an action, not a violation.
+            #
+            # What this gives up: the migration run no longer rejects FK
+            # violations it previously would have — a revision that deleted
+            # parent rows would now orphan children silently instead of
+            # cascading. Nothing in the chain does that today, and the
+            # populated-database migration test (which asserts row counts and a
+            # clean ``PRAGMA foreign_key_check`` after upgrading to head) is what
+            # keeps it that way. The constraints themselves are unaffected: they
+            # remain in the schema and are enforced on application connections.
+            #
+            # Set explicitly rather than relying on SQLite's default — the
+            # default is overridable at compile time (SQLITE_DEFAULT_FOREIGN_KEYS),
+            # so being explicit states a requirement instead of inheriting one.
             if connection.dialect.name == "sqlite":
-                await connection.execute(text("PRAGMA foreign_keys = ON"))
+                await connection.execute(text("PRAGMA foreign_keys = OFF"))
             await connection.run_sync(do_run_migrations)
             # Explicitly commit any transaction still open on the connection.
             # Still required after the transaction_per_migration flip:

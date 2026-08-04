@@ -182,13 +182,19 @@ class TestSchemaDriftPostgres:
         assert_ratchet(pg_head_drift.nullable_in_live, NULLABILITY_BASELINE, "nullability")
 
     def test_documents_alignment_is_not_in_the_ledger(self, pg_head_drift):
-        """The two drifts migration 055 fixes must be gated, not ledgered.
+        """The drifts migrations 055 and 056 fix must be gated, not ledgered.
 
-        Ledgering them would make the gate green whether or not 055 exists.
-        Their absence from both ledgers is what makes removing 055 fail the
-        two tests above by name.
+        Ledgering them would make the gate green whether or not those
+        revisions exist. Their absence from both ledgers is what makes
+        removing either fail the two tests above by name.
+
+        ``documents.updated_at`` is deliberately not asserted here: 056 flips
+        ``created_at`` alone, so ``updated_at`` is still a live drift and
+        still ledgered.
         """
         assert "documents.ix_documents_namespace_source_type" not in INDEX_BASELINE
         assert "documents.source_type" not in NULLABILITY_BASELINE
+        assert "documents.created_at" not in NULLABILITY_BASELINE
         assert "documents.ix_documents_namespace_source_type" not in pg_head_drift.missing_indexes
         assert "documents.source_type" not in pg_head_drift.nullable_in_live
+        assert "documents.created_at" not in pg_head_drift.nullable_in_live

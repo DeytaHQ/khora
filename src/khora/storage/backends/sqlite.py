@@ -72,6 +72,15 @@ CREATE TABLE IF NOT EXISTS documents (
     error_message TEXT,
     extraction_config_hash TEXT,
     extraction_params TEXT,
+    -- NOT NULL here is independent of the Alembic chain and predates it. This
+    -- backend builds `documents` from this string at connect() time and has no
+    -- migration chain, so the constraint the Alembic-managed schema gains in
+    -- 056 could not be applied here retroactively -- it did not need to be.
+    -- create_document() is the only INSERT into this table and coalesces a
+    -- missing timestamp to now(), so a NULL is unreachable. No UPDATE path
+    -- touches the column. Verified when 056 landed -- keep it that way.
+    -- Keep this comment semicolon-free -- _create_schema() splits this string
+    -- on the semicolon character and would execute a truncated CREATE TABLE.
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     processed_at TEXT,
