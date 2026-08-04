@@ -3,11 +3,13 @@
 These tests ensure that:
 1. All migration .py source files are committed (not just .pyc)
 2. ORM models and migrations produce the same schema (no drift)
-3. create_tables() emits a deprecation warning
+3. Composite indexes agree between the ORM and the migration that builds them
+4. create_tables() emits a deprecation warning
 """
 
 from __future__ import annotations
 
+import ast
 import warnings
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -165,6 +167,149 @@ class TestORMMigrationDrift:
             f"ORM columns not covered by any migration for their table: {missing_columns}. "
             f"Create an Alembic migration for these columns."
         )
+
+
+# ---------------------------------------------------------------------------
+# ORM / migration index agreement
+# ---------------------------------------------------------------------------
+
+
+def _index_ops(migration_file: str, func_name: str) -> tuple[dict[str, tuple[str, ...]], set[str]]:
+    """Extract the index DDL a migration's ``upgrade``/``downgrade`` performs.
+
+    Returns ``(created, dropped)`` where ``created`` maps index name to its
+    ORDERED column tuple and ``dropped`` is the set of index names removed.
+
+    Parsed from the AST rather than by regex over the raw source, because the
+    concurrent-index DDL is written as adjacent string literals that Python
+    concatenates at parse time - a regex over the source text would see the
+    statement split across two fragments and match neither. The AST hands back
+    the already-joined constant.
+
+    Both spellings are recognised, so this keeps working if a dialect-gated
+    branch is added alongside the raw-SQL one:
+
+    * ``op.execute("CREATE INDEX ... ON t (a, b)")`` / ``op.execute("DROP INDEX ...")``
+    * ``op.create_index("name", "t", ["a", "b"])`` / ``op.drop_index("name", ...)``
+    """
+    source = (VERSIONS_DIR / migration_file).read_text()
+    tree = ast.parse(source)
+    func = next(
+        (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == func_name),
+        None,
+    )
+    assert func is not None, f"{migration_file} defines no {func_name}()"
+
+    created: dict[str, tuple[str, ...]] = {}
+    dropped: set[str] = set()
+
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Call):
+            continue
+        target = node.func
+        if not (isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) and target.value.id == "op"):
+            continue
+
+        if target.attr == "execute" and node.args and isinstance(node.args[0], ast.Constant):
+            statement = str(node.args[0].value)
+            collapsed = " ".join(statement.split())
+            upper = collapsed.upper()
+            if upper.startswith("CREATE INDEX"):
+                head, _, cols = collapsed.partition("(")
+                name = head.split()[-3]  # "... <name> ON <table>"
+                created[name] = tuple(c.strip() for c in cols.rstrip(")").split(","))
+            elif upper.startswith("DROP INDEX"):
+                dropped.add(collapsed.split()[-1])
+
+        elif target.attr == "create_index" and len(node.args) >= 3:
+            name_node, cols_node = node.args[0], node.args[2]
+            if isinstance(name_node, ast.Constant) and isinstance(cols_node, ast.List):
+                created[str(name_node.value)] = tuple(
+                    str(c.value) for c in cols_node.elts if isinstance(c, ast.Constant)
+                )
+
+        elif target.attr == "drop_index" and node.args and isinstance(node.args[0], ast.Constant):
+            dropped.add(str(node.args[0].value))
+
+    return created, dropped
+
+
+def _orm_index_columns(table_name: str, index_name: str) -> tuple[str, ...] | None:
+    """Ordered column names of an ORM ``Index``, or ``None`` if undeclared.
+
+    Uses ``Index.expressions`` rather than ``Index.columns``: only the former
+    is guaranteed to preserve declaration order, and for a composite index
+    serving a sort, order is the entire point.
+    """
+    table = Base.metadata.tables[table_name]
+    for index in table.indexes:
+        if index.name == index_name:
+            return tuple(c.name for c in index.expressions)
+    return None
+
+
+@pytest.mark.unit
+class TestDocumentsCreatedAtIndexAgreement:
+    """The ``documents`` sort-covering index must agree across ORM and migration.
+
+    ``list_documents`` pins ``ORDER BY created_at DESC, id DESC``. The index
+    that covers it is declared twice - once in the ORM (so autogenerate does
+    not propose re-adding it) and once in the migration that builds it. If the
+    two drift, nothing fails at runtime: the database still works, and the
+    mismatch only surfaces later as a spurious autogenerate diff on an
+    unrelated change. These assertions turn that into a red test instead.
+
+    Column ORDER is asserted, not just membership. ``(namespace_id,
+    created_at, id)`` covers the query; a permutation such as ``(namespace_id,
+    id, created_at)`` does not, and a set comparison would wave it through.
+    """
+
+    MIGRATION = "054_documents_namespace_created_at_id.py"
+    NEW_INDEX = "ix_documents_namespace_created_at_id"
+    OLD_INDEX = "ix_documents_namespace_created_at"
+    EXPECTED_COLUMNS = ("namespace_id", "created_at", "id")
+
+    def test_orm_declares_the_sort_covering_index(self):
+        """The ORM carries the 3-column index, in the covering order."""
+        assert _orm_index_columns("documents", self.NEW_INDEX) == self.EXPECTED_COLUMNS
+
+    def test_orm_no_longer_declares_the_superseded_index(self):
+        """The 2-column index is gone from the ORM.
+
+        Leaving both declared would have the ORM ask for two indexes sharing a
+        prefix - write amplification on every document insert.
+        """
+        assert _orm_index_columns("documents", self.OLD_INDEX) is None
+
+    def test_migration_creates_exactly_what_the_orm_declares(self):
+        """Migration upgrade builds the index the ORM declares, same columns, same order."""
+        created, _ = _index_ops(self.MIGRATION, "upgrade")
+
+        assert self.NEW_INDEX in created, (
+            f"{self.MIGRATION} upgrade() does not create {self.NEW_INDEX}; it creates {sorted(created)}"
+        )
+        assert created[self.NEW_INDEX] == _orm_index_columns("documents", self.NEW_INDEX)
+        assert created[self.NEW_INDEX] == self.EXPECTED_COLUMNS
+
+    def test_migration_drops_the_superseded_index(self):
+        """Upgrade removes the 2-column index the 3-column one subsumes."""
+        _, dropped = _index_ops(self.MIGRATION, "upgrade")
+        assert self.OLD_INDEX in dropped
+
+    def test_downgrade_restores_the_superseded_index(self):
+        """Downgrade must put the 2-column index back, with its original columns.
+
+        Not cosmetic. The migration that originally added the 2-column index
+        drops it by an unqualified ``op.drop_index(...)``, which errors if the
+        index is absent - so a downgrade that walks past it would fail outright
+        unless this migration restores it on the way down.
+        """
+        created, dropped = _index_ops(self.MIGRATION, "downgrade")
+
+        assert created.get(self.OLD_INDEX) == ("namespace_id", "created_at"), (
+            f"downgrade() must recreate {self.OLD_INDEX} on (namespace_id, created_at); it creates {created}"
+        )
+        assert self.NEW_INDEX in dropped, "downgrade() must remove the 3-column index"
 
 
 # ---------------------------------------------------------------------------

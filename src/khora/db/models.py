@@ -197,7 +197,11 @@ class DocumentModel(Base):
             postgresql_where=text("status != 'failed'"),
         ),
         Index("ix_documents_namespace_source_type", "namespace_id", "source_type"),
-        Index("ix_documents_namespace_created_at", "namespace_id", "created_at"),
+        # Trailing ``id`` makes this cover ``list_documents``'s pinned total
+        # order (``created_at DESC, id DESC``) via a backward index scan; the
+        # ``(namespace_id, created_at)`` prefix still serves
+        # ``get_last_activity_at()``. See migration 054.
+        Index("ix_documents_namespace_created_at_id", "namespace_id", "created_at", "id"),
         Index(
             "ix_documents_namespace_external_id_unique",
             "namespace_id",
