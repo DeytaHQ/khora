@@ -97,7 +97,12 @@ from khora.filter.ast import (
     DateLiteral,
     FilterClause,
     FilterNode,
-    canonical_hash,
+)
+from khora.filter.compilers._split import (
+    ConsumableMemo,
+    node_consumable,
+    split_report,
+    system_key_declared,
 )
 from khora.filter.model import SYSTEM_KEYS, Op
 
@@ -134,7 +139,9 @@ def compile_lance(ast: FilterNode, ctx: CompileContext) -> CompiledFilter[str]:
     the aliased FTS-join path, ``khora_chunks.occurred_at`` on the unaliased
     vector post-fetch path), and ``field_mapping`` remaps a logical key to its
     physical column name (identity when ``None``), so the compiler embeds no
-    engine schema.
+    engine schema. A **non-``None``** ``field_mapping`` is additionally the
+    declared+pushable system-key whitelist — a system key it omits is unsupported
+    (``None`` stays the plain identity mapping, whitelisting nothing away).
 
     Honors ``ctx.on_unsupported``: on a clause this backend cannot express,
     ``"raise"`` raises :class:`RecallFilterUnsupportedError`; ``"split"`` omits it
@@ -148,15 +155,29 @@ def compile_lance(ast: FilterNode, ctx: CompileContext) -> CompiledFilter[str]:
     consumed: set[str] = set()
     builder = _Builder(ctx=ctx, consumed=consumed)
     predicate = builder.compile_node(ast)
+    # One pruned-tree reconstruction feeds both outputs; under "raise" the walk is
+    # skipped entirely (nothing can have been deferred).
+    deferred, slice_hash = split_report(
+        ast,
+        builder._clause_consumable,
+        on_unsupported=ctx.on_unsupported,
+        memo=builder._consumable_memo,
+    )
     return CompiledFilter(
         predicate=predicate,
         params={"args": builder.args},
-        consumed_keys=frozenset(consumed),
-        # canonical_hash over the whole AST. In on_unsupported="raise" mode every
-        # leaf is consumed, so the whole tree == the consumed slice. When
-        # split-mode is implemented end-to-end, hash the reconstructed consumed
-        # sub-AST instead, not the whole tree.
-        canonical_hash=canonical_hash(ast),
+        # A dotted path is only reported consumed when EVERY occurrence of it was
+        # pushed: the emission accumulator records the leaves that emitted real
+        # SQL, and the deferred set removes any path that ALSO occurs inside a
+        # subtree the split gate deferred (else a caller differencing
+        # ``leaf_keys - consumed_keys`` would never re-check that occurrence).
+        consumed_keys=frozenset(consumed) - deferred,
+        # Plan identity over the CONSUMED SLICE, not the whole AST: two filters
+        # differing only in a deferred subtree emit the same WHERE and share this.
+        # They do NOT share a result set — the deferred remainder is enforced by
+        # the caller's post-filter — so this is never a result-cache key. In
+        # on_unsupported="raise" mode the slice IS the whole tree.
+        consumed_slice_hash=slice_hash,
     )
 
 
@@ -197,6 +218,10 @@ class _Builder:
     def __init__(self, *, ctx: CompileContext, consumed: set[str]) -> None:
         self._ctx = ctx
         self._consumed = consumed
+        # One memo per compile pass so the all-or-nothing gate is O(n) rather
+        # than re-testing each leaf once per enclosing OR/NOT level. Keyed on
+        # id(node) — sound only for this pass's lifetime, which is its scope.
+        self._consumable_memo: ConsumableMemo = {}
         self._qualifier = ctx.table_alias or ctx.backend_target
         self.args: list[Any] = []
 
@@ -249,7 +274,9 @@ class _Builder:
             if not node.children:
                 # The validator forbids an empty $or; guard defensively.
                 return "0"
-            if self._ctx.on_unsupported == "split" and not self._consumable(node):
+            if self._ctx.on_unsupported == "split" and not node_consumable(
+                node, self._clause_consumable, self._consumable_memo
+            ):
                 # A non-consumable disjunct would compile to "1", making the whole
                 # OR match-all here while the post-filter still narrows — safe in
                 # positive position but it under-pushes silently AND becomes a
@@ -262,38 +289,37 @@ class _Builder:
         # polarities, so the negation is sound); otherwise defer the whole NOT
         # (in "split" mode). In "raise" mode we descend so the offending leaf
         # raises rather than being silently swallowed by the all-or-nothing gate.
-        if self._ctx.on_unsupported == "split" and not self._consumable(node):
+        if self._ctx.on_unsupported == "split" and not node_consumable(
+            node, self._clause_consumable, self._consumable_memo
+        ):
             return "1"
         return f"(NOT ({self.compile_node(node.children[0])}))"
 
-    def _consumable(self, node: FilterNode | FilterClause) -> bool:
-        """True iff ``node``'s whole subtree compiles to SQL (no ``"1"`` deferral).
+    def _clause_consumable(self, clause: FilterClause) -> bool:
+        """True iff this leaf compiles to real SQL — the :mod:`_split` gate predicate.
 
-        A pure predicate — no bind allocation, no ``consumed`` mutation, no
-        telemetry. A logical node is consumable iff every child is; a leaf is
-        consumable iff it is a system key or a pushdownable metadata predicate
-        (mirrors :meth:`_clause_unconsumable`). Used to keep an ``OR`` / ``NOT``
-        all-or-nothing: a node is pushed only when nothing inside it would fall to
-        the ``"1"`` placeholder.
+        The pure mirror of :meth:`compile_clause`'s dispatch (no bind allocation,
+        no ``consumed`` mutation), so the all-or-nothing ``OR`` / ``NOT`` gate and
+        the consumed-slice reconstruction both see exactly what emission does.
         """
-        if isinstance(node, FilterClause):
-            return not self._clause_unconsumable(node)
-        return all(self._consumable(c) for c in node.children)
+        return not self._clause_unconsumable(clause)
 
     def _clause_unconsumable(self, clause: FilterClause) -> bool:
         """True iff this leaf cannot be pushed to SQL (would emit ``"1"``).
 
         Mirrors the leaf dispatch in :meth:`compile_clause` /
-        :meth:`_compile_metadata_clause` without side effects: a system key always
-        pushes; a metadata leaf is unconsumable when JSON1 is unavailable, or when
-        it is one of the shapes that cannot match the oracle in SQL — the bare-blob
-        ``$eq``, an ``object_equal`` (dict-operand) ``$eq`` / ``$ne``, a ``$date``
-        compare, or a ``$in`` / ``$nin`` carrying a dict (object_equal) or ``None``
-        (JSON-null member) element. Any non-system, non-metadata path is unconsumable.
+        :meth:`_compile_metadata_clause` without side effects: a system key pushes
+        when ``ctx`` declares it (:func:`~khora.filter.compilers._split.system_key_declared`
+        — every key when ``field_mapping`` is the identity ``None``); a metadata
+        leaf is unconsumable when JSON1 is unavailable, or when it is one of the
+        shapes that cannot match the oracle in SQL — the bare-blob ``$eq``, an
+        ``object_equal`` (dict-operand) ``$eq`` / ``$ne``, a ``$date`` compare, or a
+        ``$in`` / ``$nin`` carrying a dict (object_equal) or ``None`` (JSON-null
+        member) element. Any non-system, non-metadata path is unconsumable.
         """
         path = clause.path
         if len(path) == 1 and path[0] in SYSTEM_KEYS:
-            return False
+            return not system_key_declared(self._ctx, path[0])
         if not (path and path[0] == "metadata"):
             return True
         if not self._ctx.schema_capabilities.sqlite_json1:
@@ -320,6 +346,19 @@ class _Builder:
         """Dispatch a leaf on key-kind (system key vs metadata path)."""
         path = clause.path
         if len(path) == 1 and path[0] in SYSTEM_KEYS:
+            # A non-``None`` ``field_mapping`` IS the declared+pushable whitelist, so
+            # a store DROPPING a key from it is load-bearing: that is how a table
+            # whose column cannot be compared soundly (a SQLite ``DATETIME`` column
+            # storing a space-separated, offset-less string that does not order
+            # lexicographically against this compiler's ISO-8601 binds) keeps the
+            # leaf out of the WHERE and routes it to the caller's post-filter. The
+            # per-key reasoning lives with the mapping, in the
+            # ``_documents_compile_context`` docstrings of
+            # ``storage/backends/sqlite_lance/relational.py`` and
+            # ``storage/backends/sqlite.py``. ``field_mapping is None`` is the
+            # identity mapping (no whitelist) — every chunk-tier context passes it.
+            if not system_key_declared(self._ctx, path[0]):
+                return self._unsupported(clause, "the backend does not declare a column for this system key")
             expr = self._compile_system_clause(clause)
         elif path and path[0] == "metadata":
             if not self._ctx.schema_capabilities.sqlite_json1:

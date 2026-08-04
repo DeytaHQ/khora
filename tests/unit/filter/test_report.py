@@ -445,7 +445,14 @@ def test_model_json_schema_snapshot() -> None:
                     "One entry per retrieval channel that saw the filter. The two lists name the\n"
                     'dotted constraint-leaf keys (``".".join(clause.path)``) that this channel\'s\n'
                     "compiler pushed into its backend query versus the ones it re-checked in\n"
-                    "memory. Both lists are sorted for deterministic, JSON-stable output."
+                    "memory. Both lists are sorted for deterministic, JSON-stable output.\n\n"
+                    "Membership is per **occurrence**, not per leaf: a key appears in\n"
+                    "``pushed_keys`` only when EVERY occurrence of it in the AST was pushed. A key\n"
+                    "can therefore appear in the emitted query and still be reported post-filtered,\n"
+                    "when a second occurrence sat inside an ``$or`` / ``$not`` the backend's\n"
+                    "all-or-nothing split gate deferred wholesale. That direction is the honest one\n"
+                    "— the post-filter does re-check it — and the reverse would tell a caller a\n"
+                    "deferred occurrence was already enforced."
                 ),
                 "properties": {
                     "pushed_keys": {

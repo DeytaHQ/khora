@@ -166,7 +166,7 @@ def compile_chronicle(ast: FilterNode, ctx: CompileContext) -> CompiledFilter[Ch
         predicate=ChronicleDateBound(created_after=lower, created_before=upper),
         params={},
         consumed_keys=frozenset(consumed),
-        canonical_hash=canonical_hash(ast),
+        consumed_slice_hash=canonical_hash(ast),
     )
 
 

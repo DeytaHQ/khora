@@ -117,11 +117,23 @@ class CompileContext:
     * ``field_mapping`` — optional system-key → backend column/property name map.
       Lets one compiler serve a different schema (e.g. the legacy
       ``chunks``/``documents`` tables) without per-engine branching. ``None`` =
-      identity mapping (system key name == column name). A compiler MAY also treat
-      the KEY SET as the backend's declared+pushable property whitelist — a key
-      absent from ``field_mapping`` is then "undeclared" and not pushed down (as
-      :func:`~khora.filter.compilers.weaviate.compile_weaviate` does, leaving
-      undeclared keys to the post-filter).
+      identity mapping (system key name == column name) and **no whitelist** —
+      every system key is declared. A compiler **MAY** additionally treat a
+      *non-``None``* mapping's KEY SET as the backend's declared+pushable property
+      whitelist: a system key it omits is then "undeclared" and is not pushed down
+      (it falls to the caller's post-filter under ``"split"``, or raises under
+      ``"raise"``). Who does what today:
+
+      - ``postgres`` / ``lance`` read it as a whitelist via
+        :func:`~khora.filter.compilers._split.system_key_declared`, which preserves
+        ``field_mapping is None`` as identity-with-no-whitelist.
+      - ``weaviate`` / ``surrealdb`` are stricter: they read ``field_mapping``
+        being ``None`` as declaring *nothing*, because a missing property there
+        silently matches no rows instead of failing loud.
+      - ``cypher`` / ``python`` do **not** read it as a whitelist at all — they
+        fall back to identity for an undeclared key (``cypher.py`` and
+        ``python.py``, in each ``_col``-equivalent lookup). Neither is handed a
+        partial mapping today, so the distinction is latent rather than live.
     * ``schema_capabilities`` — what the backend can do natively
       (:class:`SchemaCapabilities`).
     * ``on_unsupported`` — ``"raise"`` stops on the first node the backend cannot

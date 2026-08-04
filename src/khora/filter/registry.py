@@ -66,17 +66,36 @@ class CompiledFilter(Generic[T]):
     * ``predicate`` — the compiled backend predicate (typed ``T``).
     * ``params`` — bind parameters for backends that bind (Postgres, Cypher);
       empty for backends that inline literals.
-    * ``consumed_keys`` — the AST leaves this compiler handled, for partial
-      pushdown: when ``CompileContext.on_unsupported == "split"`` the engine
-      post-filters whatever is *not* in this set.
-    * ``canonical_hash`` — the stable hash of the consumed slice, the engine's
-      cache-key source.
+    * ``consumed_keys`` — the dotted paths this compiler fully handled, for
+      partial pushdown: when ``CompileContext.on_unsupported == "split"`` the
+      engine post-filters whatever is *not* in this set. Membership is per
+      **occurrence**, not per leaf: a path counts as consumed only when EVERY one
+      of its occurrences in the AST was pushed, so a key pushed in a conjunctive
+      leaf but deferred inside an ``$or`` / ``$not`` the gate deferred wholesale is
+      reported *absent* and stays post-filtered. Erring the other way would tell a
+      caller differencing ``leaf_keys - consumed_keys`` that a deferred occurrence
+      was already enforced, and the query would return rows the filter excludes.
+    * ``consumed_slice_hash`` — a stable **plan-identity** hash: it identifies the
+      predicate the backend actually received, not the filter the caller asked
+      for. Under ``"split"`` two filters differing only in a deferred subtree emit
+      the same predicate and therefore share this hash **while returning different
+      rows**, because the deferred remainder is still enforced by the engine's
+      post-filter. It is consequently **never a result-cache key** — key those on
+      ``canonical_hash(filter_ast)`` over the whole AST, as
+      ``engines/vectorcypher/recall_cache.py`` does. Postgres / lance / surrealdb
+      derive it from the reconstructed slice; cypher / weaviate / python /
+      chronicle currently supply the whole-AST hash, which is a *conservative*
+      plan identity (equal hash there implies equal AST, hence equal slice — it
+      can only over-distinguish two identical plans, never conflate two different
+      ones), and ``compile_weaviate`` explains its choice at the construction
+      site. In ``"raise"`` mode the slice IS the whole AST, so every compiler
+      agrees and raise-mode callers see no difference.
     """
 
     predicate: T
     params: dict[str, Any]
     consumed_keys: frozenset[str]
-    canonical_hash: str
+    consumed_slice_hash: str
 
 
 # A compiler is a stateless function of ``(ast, ctx)``.

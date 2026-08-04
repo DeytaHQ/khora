@@ -113,11 +113,14 @@ def compile_cypher(ast: FilterNode, ctx: CompileContext) -> CompiledFilter[str]:
         predicate=predicate,
         params=builder.params,
         consumed_keys=frozenset(consumed),
-        # canonical_hash over the whole AST. In on_unsupported="raise" mode (the
-        # only mode used today) every leaf is consumed, so the whole tree == the
-        # consumed slice. When split-mode is implemented, hash the reconstructed
-        # consumed sub-AST instead, not the whole tree.
-        canonical_hash=canonical_hash(ast),
+        # Whole-AST hash as a CONSERVATIVE plan identity: equal hash implies equal
+        # AST, hence equal consumed slice, so it can only over-distinguish two
+        # identical plans — never conflate two different ones. Switching to the
+        # reconstructed slice (as postgres / lance / surrealdb do) would be a
+        # tightening, not a fix, and it is only worth doing together with this
+        # compiler's per-occurrence ``consumed_keys``, which still over-claims a
+        # path deferred inside a gated OR/NOT. Both are tracked as follow-ups.
+        consumed_slice_hash=canonical_hash(ast),
     )
 
 

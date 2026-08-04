@@ -56,7 +56,12 @@ from khora.filter.ast import (
     DateLiteral,
     FilterClause,
     FilterNode,
-    canonical_hash,
+)
+from khora.filter.compilers._split import (
+    ConsumableMemo,
+    node_consumable,
+    split_report,
+    system_key_declared,
 )
 from khora.filter.model import SYSTEM_KEYS, Op
 
@@ -104,23 +109,39 @@ def compile_postgres(ast: FilterNode, ctx: CompileContext) -> CompiledFilter[Col
 
     Column references are derived from ``ctx`` alone (``backend_target`` /
     ``table_alias`` qualify, ``field_mapping`` remaps) via :func:`_col`, so the
-    compiler embeds no engine schema. Honors ``ctx.on_unsupported``: on a clause
-    this backend cannot express (should not happen post-validation), ``"raise"``
-    raises :class:`RecallFilterUnsupportedError`; ``"split"`` omits it from
-    ``consumed_keys`` and emits a non-constraining placeholder.
+    compiler embeds no engine schema. A **non-``None``** ``field_mapping`` is
+    additionally the declared+pushable system-key whitelist — a system key it
+    omits is unsupported (``None`` stays the plain identity mapping, whitelisting
+    nothing away). Honors ``ctx.on_unsupported``: on a clause this backend cannot
+    express, ``"raise"`` raises :class:`RecallFilterUnsupportedError`; ``"split"``
+    omits it from ``consumed_keys`` and emits a non-constraining placeholder.
     """
     consumed: set[str] = set()
     builder = _Builder(ctx=ctx, consumed=consumed)
     predicate = builder.compile_node(ast)
+    # One pruned-tree reconstruction feeds both outputs; under "raise" the walk is
+    # skipped entirely (nothing can have been deferred).
+    deferred, slice_hash = split_report(
+        ast,
+        builder._clause_consumable,
+        on_unsupported=ctx.on_unsupported,
+        memo=builder._consumable_memo,
+    )
     return CompiledFilter(
         predicate=predicate,
         params={},
-        consumed_keys=frozenset(consumed),
-        # canonical_hash over the whole AST. In on_unsupported="raise" mode (the
-        # only mode used today) every leaf is consumed, so the whole tree == the
-        # consumed slice. When split-mode is implemented, hash the reconstructed
-        # consumed sub-AST instead, not the whole tree.
-        canonical_hash=canonical_hash(ast),
+        # A dotted path is only reported consumed when EVERY occurrence of it was
+        # pushed: the emission accumulator records the leaves that emitted real
+        # SQL, and the deferred set removes any path that ALSO occurs inside a
+        # subtree the split gate deferred (else a caller differencing
+        # ``leaf_keys - consumed_keys`` would never re-check that occurrence).
+        consumed_keys=frozenset(consumed) - deferred,
+        # Plan identity over the CONSUMED SLICE, not the whole AST: two filters
+        # differing only in a deferred subtree emit the same WHERE and share this.
+        # They do NOT share a result set — the deferred remainder is enforced by
+        # the caller's post-filter — so this is never a result-cache key. In
+        # on_unsupported="raise" mode the slice IS the whole tree.
+        consumed_slice_hash=slice_hash,
     )
 
 
@@ -141,6 +162,10 @@ class _Builder:
     def __init__(self, *, ctx: CompileContext, consumed: set[str]) -> None:
         self._ctx = ctx
         self._consumed = consumed
+        # One memo per compile pass so the all-or-nothing gate is O(n) rather
+        # than re-testing each leaf once per enclosing OR/NOT level. Keyed on
+        # id(node) — sound only for this pass's lifetime, which is its scope.
+        self._consumable_memo: ConsumableMemo = {}
         # The metadata column is nullable. Coalesce a NULL blob to an empty JSONB
         # object once here so every downstream operator (`?`, `@>`, `#>`, `=`) is
         # total against a NULL row: `'{}' ? k` / `'{}' @> x` return FALSE (not
@@ -152,7 +177,21 @@ class _Builder:
     # ----- logical node walk ---------------------------------------------- #
 
     def compile_node(self, node: FilterNode | FilterClause) -> ColumnElement[bool]:
-        """Compile a logical node or leaf to a boolean expression."""
+        """Compile a logical node or leaf to a boolean expression.
+
+        **Split-mode soundness — "AND distributes; OR/NOT are all-or-nothing."**
+        The match-all placeholder ``sa.true()`` an unsupported leaf emits under
+        ``on_unsupported="split"`` is superset-safe only in *positive* position:
+        ``A AND TRUE`` ≡ ``A`` (still narrows correctly), but ``NOT (A OR TRUE)``
+        ≡ ``NOT TRUE`` ≡ ``FALSE`` — which would *drop every row the filter keeps*,
+        breaking the superset invariant (the caller's post-filter only narrows; it
+        cannot add a wrongly-excluded row back). So an ``OR`` / ``NOT`` node is
+        pushed down only when its **entire** subtree is consumable; otherwise the
+        whole node emits ``sa.true()`` and consumes nothing, deferring it wholesale
+        to the post-filter. An ``AND`` still handles each child independently — a
+        non-consumable child becomes ``sa.true()`` and the consumable siblings
+        still narrow. See :mod:`khora.filter.compilers._split`.
+        """
         if isinstance(node, FilterClause):
             return self.compile_clause(node)
         if node.op == Op.AND:
@@ -164,10 +203,44 @@ class _Builder:
             if not node.children:
                 # The validator forbids an empty $or; guard defensively.
                 return sa.false()
+            if self._ctx.on_unsupported == "split" and not node_consumable(
+                node, self._clause_consumable, self._consumable_memo
+            ):
+                # A non-consumable disjunct would compile to TRUE, making the whole
+                # OR match-all here while the post-filter still narrows — safe in
+                # positive position but it under-pushes silently AND becomes a
+                # false-exclude if a parent NOT wraps it. Defer the whole OR. In
+                # "raise" mode we instead descend so the offending leaf raises.
+                return sa.true()
             return sa.or_(*(self.compile_node(c) for c in node.children))
         # Op.NOT — exactly one child per the AST contract. Leaves are built total
-        # (never NULL) so this negation flips absent rows correctly.
+        # (never NULL) so this negation flips absent rows correctly. Pushed only
+        # when the child is fully consumable; otherwise defer the whole NOT (in
+        # "split" mode). In "raise" mode we descend so the offending leaf raises
+        # rather than being silently swallowed by the all-or-nothing gate.
+        if self._ctx.on_unsupported == "split" and not node_consumable(
+            node, self._clause_consumable, self._consumable_memo
+        ):
+            return sa.true()
         return sa.not_(self.compile_node(node.children[0]))
+
+    def _clause_consumable(self, clause: FilterClause) -> bool:
+        """True iff this leaf compiles to a real predicate — the gate predicate.
+
+        The pure mirror of :meth:`compile_clause`'s dispatch (no bind allocation,
+        no ``consumed`` mutation), so the all-or-nothing ``OR`` / ``NOT`` gate and
+        the consumed-slice reconstruction both see exactly what emission does: a
+        system key pushes when ``ctx`` declares a column for it
+        (:func:`~khora.filter.compilers._split.system_key_declared` — every key
+        when ``field_mapping`` is the identity ``None``); a metadata leaf pushes
+        except the bare blob under a non-``$eq`` operator; nothing else pushes.
+        """
+        path = clause.path
+        if len(path) == 1 and path[0] in SYSTEM_KEYS:
+            return system_key_declared(self._ctx, path[0])
+        if path and path[0] == "metadata":
+            return len(path) > 1 or clause.op == Op.EQ
+        return False
 
     # ----- leaf key-kind split -------------------------------------------- #
 
@@ -175,9 +248,25 @@ class _Builder:
         """Dispatch a leaf on key-kind (system key vs metadata path)."""
         path = clause.path
         if len(path) == 1 and path[0] in SYSTEM_KEYS:
+            # A non-``None`` ``field_mapping`` IS the declared+pushable whitelist:
+            # a system key it omits is not backed by a column on this table, so
+            # pushing it would compile a predicate against a column that does not
+            # exist. Dropping a key from the mapping is therefore load-bearing —
+            # the per-key reasoning lives with the mapping, in the backends'
+            # ``_documents_compile_context`` docstrings. ``field_mapping is None``
+            # is the identity mapping (no whitelist), which is what every
+            # chunk-tier context passes.
+            if not system_key_declared(self._ctx, path[0]):
+                return self._unsupported(clause, "the backend does not declare a column for this system key")
             expr = self._compile_system_clause(clause)
         elif path and path[0] == "metadata":
-            expr = self._compile_metadata_clause(clause)
+            compiled = self._compile_metadata_clause(clause)
+            if compiled is None:
+                # Unsupported metadata shape — route it BEFORE the ``consumed``
+                # add below, so the emit path and :meth:`_clause_consumable` agree
+                # on what was actually pushed.
+                return self._unsupported(clause, "only $eq is defined on the bare metadata blob")
+            expr = compiled
         else:
             return self._unsupported(clause, "path is neither a system key nor a metadata path")
         self._consumed.add(_path_str(path))
@@ -242,7 +331,13 @@ class _Builder:
 
     # ----- metadata leaves (JSONB) ---------------------------------------- #
 
-    def _compile_metadata_clause(self, clause: FilterClause) -> ColumnElement[bool]:
+    def _compile_metadata_clause(self, clause: FilterClause) -> ColumnElement[bool] | None:
+        """Compile a metadata leaf, or ``None`` if this backend cannot express it.
+
+        Returning ``None`` (rather than calling ``_unsupported`` here) keeps the
+        unsupported leaf out of ``consumed`` — the caller routes it per
+        ``on_unsupported`` before recording anything.
+        """
         path = clause.path
         op = clause.op
         operand = clause.operand
@@ -253,7 +348,9 @@ class _Builder:
         # the empty object, so a wrapping $not includes it.
         if len(path) == 1:
             if op != Op.EQ:
-                return self._unsupported(clause, "only $eq is defined on the bare metadata blob")
+                # Only $eq is defined on the bare blob — unsupported (the caller
+                # turns this into the ``on_unsupported`` handling).
+                return None
             return self._md == _jsonb_literal(operand)
 
         segs = path[1:]  # drop the leading "metadata" root

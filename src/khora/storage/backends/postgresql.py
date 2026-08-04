@@ -1086,13 +1086,30 @@ def _documents_compile_context() -> CompileContext:
     unpushable leaf is left unconsumed rather than raising.
 
     ``occurred_at`` is deliberately absent: no ``documents`` row backs it.
-    ``compile_postgres`` does not treat the ``field_mapping`` key set as a
-    pushdown whitelist (``_col`` falls back to identity), so this context alone
-    cannot stop an ``occurred_at`` leaf from compiling to a non-existent column.
-    Worse than the resulting error: the leaf is also reported in
-    ``CompiledFilter.consumed_keys``, so the caller is told it was pushed down
-    and will not post-filter it. The caller must reject or strip the key before
-    compiling.
+    ``compile_postgres`` treats the ``field_mapping`` key set as the pushdown
+    whitelist, so the omission is enforced rather than advisory — an
+    ``occurred_at`` leaf never compiles to a predicate against a non-existent
+    column. Under this context's ``"split"`` mode it emits the match-all
+    placeholder, stays out of ``CompiledFilter.consumed_keys``, and reaches the
+    caller's post-filter; the caller no longer has to strip the key first.
+
+    All nine backed keys stay declared here, including the two date-valued ones.
+    Unlike the SQLite-backed documents adapters — where timestamps live in
+    ``TEXT`` columns compared lexicographically against a string bind — this
+    table's ``created_at`` and ``source_timestamp`` are real ``timestamptz``
+    columns and ``compile_postgres`` binds a datetime object, so the comparison
+    is on instants and both pushdowns are sound.
+
+    **The enumeration post-filter must evaluate the FULL filter AST
+    unconditionally.** Everything the compiler pushes is a superset filter, but
+    that rests on a specific property rather than being a free-standing
+    guarantee: the all-or-nothing ``$or`` / ``$not`` gate defers a whole subtree
+    it cannot fully express, rather than leaving a match-all placeholder inside
+    it that would invert under negation and wrongly EXCLUDE rows. Given that,
+    re-running every leaf in memory can only narrow. Treat
+    ``consumed_keys`` as a reporting and overfetch-sizing signal, not as
+    permission to skip the leaves it names; that keeps caller correctness
+    independent of how precisely the compiler tracks partial pushdown.
     """
     field_mapping = {key: key for key in _BACKED_SYSTEM_KEYS} | {"metadata": "metadata"}
     return CompileContext(
