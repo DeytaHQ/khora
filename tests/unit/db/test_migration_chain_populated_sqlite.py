@@ -82,11 +82,28 @@ _START_REVISIONS = [
     "054_documents_namespace_created_at_id",
 ]
 
-_HEAD_REVISION = "056_documents_created_at_not_null"
+_HEAD_REVISION = "057_drop_documents_created_at_index"
 
 #: Dropped by ``010_flatten_namespace_hierarchy``. The only tables the chain
 #: removes on the walk from any revision above.
 _TABLES_DROPPED_BY_THE_CHAIN = {"organizations", "workspaces"}
+
+#: ``documents`` indexes the chain removes ON PURPOSE on the walk to head.
+#:
+#: The index assertion below exists to catch a batch_alter_table REBUILD
+#: silently losing an index — a side effect of recreating the table, invisible
+#: at the call site. A revision that drops an index by name is a different
+#: thing entirely: it is declared, reviewed, and reversible in its own
+#: ``downgrade()``. Without this set the two are indistinguishable, and the
+#: only way to keep the suite green would be to weaken the subset check into
+#: something that no longer catches the accidental case.
+#:
+#: ``ix_documents_created_at`` is dropped by
+#: ``057_drop_documents_created_at_index``. Keep this set as tight as the
+#: table one above: an entry here is an assertion that a specific revision
+#: removes a specific index deliberately, so adding a name to silence a
+#: failure is exactly the wrong move.
+_INDEXES_DROPPED_BY_THE_CHAIN = {"ix_documents_created_at"}
 
 #: Bound as text rather than as a ``datetime``. SQLite stores DATETIME as text
 #: regardless, and Python 3.12 deprecated sqlite3's implicit datetime adapter —
@@ -326,11 +343,25 @@ def test_populated_database_survives_the_upgrade_to_head(tmp_path: Path, start_r
         "deletes parent rows now orphans children silently instead of cascading — this is the control for that."
     )
 
-    # The chain adds indexes on the way to head (054 and 055 each add one), so
-    # this is a subset check: nothing that existed may be lost, and anything
-    # still present must be defined identically.
+    # The chain both adds and drops indexes on the way to head (054 and 055
+    # each add one; 057 drops one), so this is a subset check over the indexes
+    # no revision removes on purpose: nothing else that existed may be lost,
+    # and anything still present must be defined identically.
     documents_indexes_after = _documents_index_sql(url)
-    assert documents_indexes_before.items() <= documents_indexes_after.items(), (
+    expected_indexes = {
+        name: sql for name, sql in documents_indexes_before.items() if name not in _INDEXES_DROPPED_BY_THE_CHAIN
+    }
+    assert expected_indexes.items() <= documents_indexes_after.items(), (
         f"the documents rebuild lost or altered an index: "
-        f"{sorted(set(documents_indexes_before.items()) - set(documents_indexes_after.items()))}"
+        f"{sorted(set(expected_indexes.items()) - set(documents_indexes_after.items()))}"
+    )
+
+    # And the deliberate drops really did happen. Without this the exclusion
+    # above would also pass if the revision that is supposed to drop the index
+    # silently stopped doing so.
+    still_present = _INDEXES_DROPPED_BY_THE_CHAIN & set(documents_indexes_after)
+    assert not still_present, (
+        f"{sorted(still_present)} should have been dropped on the way to head but survived. "
+        f"Either the revision that drops it regressed, or the name belongs in neither this "
+        f"assertion nor _INDEXES_DROPPED_BY_THE_CHAIN."
     )
