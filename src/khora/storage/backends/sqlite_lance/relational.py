@@ -14,7 +14,7 @@ this adapter assumes tables already exist.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 from loguru import logger
@@ -35,6 +35,7 @@ from sqlalchemy import (
     insert,
     or_,
     select,
+    text,
     update,
 )
 from sqlalchemy.ext.asyncio import (
@@ -51,13 +52,18 @@ from khora.core.models.recall import DocumentProjection
 from khora.db.models import DocumentModel, MemoryNamespaceModel, SyncCheckpointModel
 from khora.engines.chronicle.compression import MemoryFact
 from khora.engines.chronicle.events import ChronicleEvent
-from khora.storage.backends.base import PaginatedResult
+from khora.storage.backends._documents_scan import build_documents_scan_query
+from khora.storage.backends.base import DocumentScanKey, DocumentScanStep, PaginatedResult
 from khora.storage.backends.mixins import AsyncSessionMixin
 from khora.storage.backends.postgresql import _reingestable_exclusion
 
 from ..._log_safe import _safe_url_for_log
 
 if TYPE_CHECKING:
+    from sqlalchemy.sql.elements import TextClause
+
+    from khora.filter import FilterNode
+
     from .connection import EmbeddedStorageHandle
 
 
@@ -471,6 +477,103 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
             query = query.limit(limit).offset(offset).order_by(DocumentModel.created_at.desc(), DocumentModel.id.desc())
             result = await session.execute(query)
             return [self._document_model_to_domain(m) for m in result.scalars().all()]
+
+    async def scan_documents(
+        self,
+        namespace_id: UUID,
+        *,
+        filter_ast: FilterNode | None = None,
+        status: str | None = None,
+        updated_before: datetime | None = None,
+        after: DocumentScanKey | None = None,
+        scan_limit: int = 100,
+    ) -> DocumentScanStep:
+        """Scan one bounded keyset window of a namespace's documents.
+
+        ``@internal``. Not part of the public storage API — the offset-based
+        :meth:`list_documents` is unchanged. One ``SELECT`` in this adapter's own
+        session; no transaction spans calls and no consistent snapshot is
+        claimed. A caller walks the namespace by chaining
+        :attr:`DocumentScanStep.last_scanned` back in as ``after`` until the step
+        reports ``exhausted``.
+
+        Everything the two SQLAlchemy-backed relational stores share — the
+        namespace scope, the optional ``status`` / ``updated_before`` narrowing,
+        the keyset predicate, the enumeration order, the row bound, and the
+        ``scan_limit`` floor — is built by
+        :func:`~khora.storage.backends._documents_scan.build_documents_scan_query`.
+        Only the pushdown fragment's attachment is dialect-specific, and it is the
+        one thing below.
+
+        **What this store makes hazardous is the cursor's serialization, and the
+        remedy is to write none.** The shared builder binds both operands through
+        the ORM column types, which is what makes the comparison line up with the
+        bytes this store actually holds: ``created_at`` is TEXT
+        ``'YYYY-MM-DD HH:MM:SS.ffffff'`` — space separator, no offset,
+        microseconds always six digits including ``.000000`` — and ``id`` is 32
+        undashed hex characters despite its ``VARCHAR(36)`` declared type.
+        Hand-formatting the timestamp does not merely skip a row: an
+        ``isoformat()`` string sorts ABOVE every stored value because ``'T'``
+        outranks ``' '``, so the window matches the cursor's own row and a walk
+        chaining ``last_scanned`` never advances. Dashing the id is the quiet
+        mirror of that — 36 characters never match a 32-character column, so
+        every tie mis-resolves. Values read back from this store are naive
+        datetimes, because SQLAlchemy's SQLite ``DATETIME`` discards the writer's
+        offset at write time rather than converting it; the key is store-local,
+        so leave it naive and never carry it to another store.
+
+        ``filter_ast`` is compiled by this store's registered compiler and
+        ``AND``-ed into the ``WHERE``, so the window holds only rows that passed
+        the pushdown. The compiler emits positional binds for a qmark driver, so
+        the fragment is rewritten to named binds by
+        :func:`_lance_fragment_to_text` before it can join a SQLAlchemy
+        statement. Resuming past rows the pushdown rejected skips nothing **only
+        because the pushdown is a superset filter** — a row it rejected could not
+        have satisfied the full predicate either. That is a property of the
+        compilers and this store's compile context, not of this method: were a
+        compiler ever to emit a match-all placeholder inside a negation, this
+        scan would start dropping documents silently.
+
+        The date-valued system keys are deliberately unpushable here (see
+        :func:`_documents_compile_context`), so a ``created_at`` or
+        ``source_timestamp`` leaf compiles to the match-all placeholder, stays
+        out of ``consumed_keys``, and reaches the caller's post-filter. That is
+        the intended split and the reason this store's ``consumed_keys`` differs
+        from PostgreSQL's for the same filter — not drift to be "fixed" by
+        widening the pushdown whitelist.
+
+        ``consumed_keys`` is reported verbatim from the compiler. It records
+        which leaves the SQL already enforced; it is **not** permission to skip
+        them in a post-filter, which must evaluate the whole AST unconditionally.
+        """
+        consumed_keys: frozenset[str] = frozenset()
+        query = build_documents_scan_query(
+            namespace_id,
+            status=status,
+            updated_before=updated_before,
+            after=after,
+            scan_limit=scan_limit,
+        )
+        if filter_ast is not None:
+            compiler = CompilerRegistry.get("relational.sqlite_lance", "documents")
+            compiled = compiler(filter_ast, _documents_compile_context())
+            consumed_keys = compiled.consumed_keys
+            query = query.where(_lance_fragment_to_text(compiled.predicate, compiled.params["args"]))
+
+        async with self._get_session() as session:
+            result = await session.execute(query)
+            rows = list(result.scalars().all())
+
+        # ``last_scanned`` and ``exhausted`` both describe the RAW window: the
+        # final row scanned, and whether SQL ran out of rows filling it. Neither
+        # may be derived from a post-filtered subset — that would re-scan the
+        # rejected gap on resume, and would call a full window exhausted.
+        return DocumentScanStep(
+            documents=[self._document_model_to_domain(m) for m in rows],
+            last_scanned=(rows[-1].created_at, rows[-1].id) if rows else None,
+            exhausted=len(rows) < scan_limit,
+            consumed_keys=consumed_keys,
+        )
 
     async def claim_orphaned_documents(
         self,
@@ -1184,6 +1287,38 @@ def _documents_compile_context() -> CompileContext:
         on_unsupported="split",
         schema_capabilities=SchemaCapabilities(sqlite_json1=sqlite_has_json1()),
     )
+
+
+def _lance_fragment_to_text(fragment: str, args: list[Any]) -> TextClause:
+    """Rewrite ``compile_lance``'s positional binds into a SQLAlchemy ``text()``.
+
+    ``compile_lance`` targets a qmark DBAPI: it returns a SQL string carrying one
+    ``?`` per entry of ``CompiledFilter.params["args"]``, in depth-first emit
+    order. SQLAlchemy's :func:`text` wants named binds, so each ``?`` is replaced
+    positionally with ``:kf0`` … ``:kfN`` and the values are bound under the same
+    names. The ``kf`` prefix keeps them clear of the ``param_N`` /
+    ``namespace_id_1`` names SQLAlchemy generates for the rest of the statement.
+
+    Splitting on ``?`` is sound because the compiler never inlines a caller
+    value: every literal it emits is one of its own constants, and the only
+    user-derived text — a metadata JSON path — is bound rather than inlined. So
+    neither guard below can fire today. Both are kept as tripwires for the day
+    that stops being true, and both fail at construction rather than at execute.
+
+    The two guards cover the two characters ``text()`` treats as syntax. A stray
+    ``?`` would silently shift every later bind by one position; a stray ``:``
+    would be parsed as the start of a bind name, so the fragment would either
+    reference a parameter nobody supplied or swallow the ``:kfN`` that follows.
+    """
+    if ":" in fragment:
+        raise ValueError(f"compiled filter fragment contains a colon, which text() parses as a bind name: {fragment!r}")
+    parts = fragment.split("?")
+    if len(parts) - 1 != len(args):
+        raise ValueError(
+            f"compiled filter fragment has {len(parts) - 1} positional binds but {len(args)} bind values were supplied"
+        )
+    rewritten = parts[0] + "".join(f":kf{i}{part}" for i, part in enumerate(parts[1:]))
+    return text(rewritten).bindparams(**{f"kf{i}": value for i, value in enumerate(args)})
 
 
 # Register the deterministic recall-filter compiler for this store/target at
