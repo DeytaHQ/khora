@@ -1309,6 +1309,19 @@ def _lance_fragment_to_text(fragment: str, args: list[Any]) -> TextClause:
     ``?`` would silently shift every later bind by one position; a stray ``:``
     would be parsed as the start of a bind name, so the fragment would either
     reference a parameter nobody supplied or swallow the ``:kfN`` that follows.
+
+    **The result is wrapped in parentheses, and that wrap is a tenancy boundary
+    rather than tidiness.** A :class:`~sqlalchemy.sql.elements.TextClause` is
+    opaque to SQLAlchemy's operator precedence — ``self_group()`` returns it
+    unchanged for every operator — so ``.where(text(...))`` splices the fragment
+    in raw. A top-level ``OR`` would then bind looser than the ``AND`` joining it
+    to the namespace predicate: ``WHERE namespace_id = ? AND a OR b`` parses as
+    ``(namespace_id = ? AND a) OR b``, and any row satisfying ``b`` comes back
+    **regardless of namespace**. That is a silent cross-tenant read, unlike the
+    two guards above, which raise. It is latent today only because
+    ``compile_lance`` happens to parenthesize every fragment it emits — an
+    invariant owned by another module, asserted nowhere, and not ours to rely on
+    for tenant isolation. One pair of parentheses removes the dependency.
     """
     if ":" in fragment:
         raise ValueError(f"compiled filter fragment contains a colon, which text() parses as a bind name: {fragment!r}")
@@ -1318,7 +1331,7 @@ def _lance_fragment_to_text(fragment: str, args: list[Any]) -> TextClause:
             f"compiled filter fragment has {len(parts) - 1} positional binds but {len(args)} bind values were supplied"
         )
     rewritten = parts[0] + "".join(f":kf{i}{part}" for i, part in enumerate(parts[1:]))
-    return text(rewritten).bindparams(**{f"kf{i}": value for i, value in enumerate(args)})
+    return text(f"({rewritten})").bindparams(**{f"kf{i}": value for i, value in enumerate(args)})
 
 
 # Register the deterministic recall-filter compiler for this store/target at

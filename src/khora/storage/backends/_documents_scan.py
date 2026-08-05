@@ -70,8 +70,13 @@ def build_documents_scan_query(
     space-separated form, so the cursor's own row compares less than itself and a
     resumed walk returns it forever; while a space-separated form that omits the
     ``.000000`` microseconds sorts *below* its tie-mates, silently skipping them.
-    Passing a bare ``datetime`` through an untyped textual bind picks the second
-    of those, via a deprecated driver-level adapter that warns and continues.
+    Be precise about which construct reaches that second form, because it is not
+    the one people reach for. ``text(...).bindparams(x=a_datetime)`` is **safe**:
+    SQLAlchemy infers ``DateTime`` from the value, runs the processor, and emits
+    the full ``'… 12:30:00.000000'``. Only a bind explicitly typed
+    ``NullType()`` — or a value handed to the DBAPI outside SQLAlchemy's typing
+    altogether — leaves the ``datetime`` raw for the driver's own deprecated
+    adapter, and a walk built on that loses every tie-mate. Both forms measured.
 
     **Naming the type is a SQLite-side guard only — it is not what makes a cursor
     correct.** On PostgreSQL no bind processor runs, so a *well-typed* operand
@@ -82,13 +87,13 @@ def build_documents_scan_query(
     Neither spelling rescues the ``date`` — those two forms resolve midnight in
     the server's zone and the client host's respectively. A ``str`` id diverges
     the other way and is the sharpest asymmetry here: the typed spelling raises on
-    this store, because the column type's processor asks the operand for ``.hex``,
+    the *embedded* store, whose column type's processor asks the operand for ``.hex``,
     while asyncpg's uuid encoder takes the ``PyUnicode`` branch and its parser
     skips ``-`` outright, so a dashed cursor decodes to the identical sixteen
     bytes and is silently *correct* on PostgreSQL. The same bad input is loud on
     one store and harmless on the other; neither store's behaviour predicts the
     other's, which is the whole reason this rule lives here rather than in either
-    backend. That store has the same hazard by a different route, on two
+    backend. PostgreSQL has the same hazard by a different route, on two
     different evidence standards. Its ``timestamptz`` encoder converts with
     ``obj.astimezone(utc)``, so a naive cursor resolves against whatever zone the
     process happens to run in — that is plain-Python arithmetic, run across four
@@ -97,9 +102,10 @@ def build_documents_scan_query(
     host's local zone is **read from its source only**: unlike the uuid parser
     above, it is a ``cdef`` with no Python entry point, so it cannot be exercised
     without a live server. The guarantee that holds on both stores is therefore
-    the cheap one: **build a cursor from a row this store returned, never by
-    hand.** What the typed bind buys is that the SQLite path fails loudly, or not
-    at all, instead of quietly reordering — worth having, but not a substitute.
+    the cheap one: **build a cursor from a row the store you are querying
+    returned, never by hand.** What the typed bind buys is that the embedded
+    path fails loudly, or not at all, instead of quietly reordering — worth
+    having, but not a substitute.
 
     The cursor must not be *adjusted* on the way in either, and the two dialects
     make opposite adjustments look harmless. The embedded store holds wall clock

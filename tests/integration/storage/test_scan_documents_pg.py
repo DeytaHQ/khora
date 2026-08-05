@@ -86,7 +86,26 @@ async def backend(_run_migrations_once):
 
 @pytest.fixture
 async def namespace(backend: PostgreSQLBackend):
-    """A fresh namespace per test, so a scan never sees another test's rows."""
+    """A fresh namespace per test, so a scan never sees another test's rows.
+
+    ``MemoryNamespace()`` draws a distinct row-level ``id`` and stable
+    ``namespace_id``. That distinction is load-bearing: ``documents.namespace_id``
+    is a foreign key onto ``memory_namespaces.id``, so the scan's argument is the
+    row-level id despite its name, and equal ids would make a scan that resolved
+    the wrong one of the pair indistinguishable from a correct one.
+    """
+    return await backend.create_namespace(MemoryNamespace())
+
+
+@pytest.fixture
+async def other_namespace(backend: PostgreSQLBackend):
+    """A second tenant, so a scan has someone else's rows to exclude.
+
+    This database is shared across the whole integration job, so a scan will
+    always have *some* foreign rows around it. That is not an assertion — it is
+    residue, and it would silently disappear the day the job runs this module
+    alone. The isolation test seeds its own second tenant deliberately.
+    """
     return await backend.create_namespace(MemoryNamespace())
 
 
@@ -132,6 +151,64 @@ async def _seed_varied(backend: PostgreSQLBackend, namespace_id: UUID, seed: Sca
             title=f"doc-{i}",
             source_type="report" if i % 2 == 0 else "library",
         )
+
+
+@skip_no_pg
+class TestScanDocumentsTenancyPg:
+    async def test_scan_returns_only_the_scanned_namespaces_rows(
+        self, backend: PostgreSQLBackend, namespace, other_namespace
+    ) -> None:
+        """The scan never crosses a namespace, filtered or resumed.
+
+        The second tenant is seeded to be maximally confusable with the first:
+        the same timestamps, the same ``source_type`` values and the same
+        titles, so neither the enumeration order, the pushdown fragment nor the
+        keyset cursor can tell the two apart. Only the namespace predicate can.
+        Every other test in this module runs against a single tenant it created
+        itself, where deleting that predicate outright changes no result.
+
+        The two tenants are seeded here rather than inherited from whatever else
+        the shared integration database happens to hold — foreign rows that
+        arrive as residue are not an assertion, and would vanish the day this
+        module runs alone.
+
+        The filter is a top-level disjunction, matching the shape the embedded
+        sibling uses to cover its raw-text fragment splice. This store composes
+        its fragment as a SQLAlchemy expression, which carries its own grouping,
+        so the precedence hazard does not arise here — the disjunction is kept
+        for parity, and because it is the shape a real caller writes.
+        """
+        seed_a, seed_b = scan_seed(6), scan_seed(6)
+        await _seed_varied(backend, namespace.id, seed_a)
+        await _seed_varied(backend, other_namespace.id, seed_b)
+
+        wire = {"$or": [{"source_type": {"$eq": "report"}}, {"title": {"$eq": "doc-1"}}]}
+
+        def matching(doc) -> bool:
+            return doc.source_type == "report" or doc.title == "doc-1"
+
+        mine = (await backend.scan_documents(namespace.id, scan_limit=100)).documents
+        theirs = (await backend.scan_documents(other_namespace.id, scan_limit=100)).documents
+        # Non-vacuous only if the other tenant holds rows this filter would accept.
+        assert [d.id for d in theirs] == seed_b.expected
+        assert len([d for d in theirs if matching(d)]) > 1
+
+        unresumed = await backend.scan_documents(namespace.id, filter_ast=_filter_ast(wire), scan_limit=100)
+        assert {d.id for d in unresumed.documents} == {d.id for d in mine if matching(d)}
+        assert {d.id for d in unresumed.documents}.isdisjoint(seed_b.expected)
+
+        # The keyset predicate carries no namespace of its own, so the resumed
+        # path needs its own assertion rather than inheriting the one above.
+        cursor_row = mine[2]
+        resumed = await backend.scan_documents(
+            namespace.id,
+            filter_ast=_filter_ast(wire),
+            after=(cursor_row.created_at, cursor_row.id),
+            scan_limit=100,
+        )
+        assert resumed.documents, "the resumed window must not be empty, or it asserts nothing"
+        assert {d.id for d in resumed.documents}.isdisjoint(seed_b.expected)
+        assert {d.id for d in resumed.documents} == {d.id for d in mine[3:] if matching(d)}
 
 
 @skip_no_pg

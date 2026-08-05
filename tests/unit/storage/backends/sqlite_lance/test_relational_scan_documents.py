@@ -60,6 +60,7 @@ if _HAS_EMBEDDED:
     from khora.storage.backends.sqlite_lance.relational import (
         SQLiteLanceRelationalAdapter,
         _documents_compile_context,
+        _lance_fragment_to_text,
     )
 
 
@@ -79,8 +80,22 @@ async def adapter(migrated_sqlite_db, tmp_path):
 
 @pytest.fixture
 async def namespace(adapter):
-    nid = uuid4()
-    return await adapter.create_namespace(MemoryNamespace(id=nid, namespace_id=nid, tenancy_mode=TenancyMode.SHARED))
+    """A namespace whose row-level ``id`` and stable ``namespace_id`` DIFFER.
+
+    ``documents.namespace_id`` is a foreign key onto ``memory_namespaces.id``,
+    so the scan's ``namespace_id`` argument is the row-level id despite its
+    name. Leaving the two equal — as the sibling module's fixture does — would
+    make a scan that resolved the wrong one of the pair indistinguishable from a
+    correct one. Keeping them distinct means every test in this module exercises
+    the difference for free.
+    """
+    return await adapter.create_namespace(MemoryNamespace(tenancy_mode=TenancyMode.SHARED))
+
+
+@pytest.fixture
+async def other_namespace(adapter):
+    """A second tenant, so a scan has someone else's rows to exclude."""
+    return await adapter.create_namespace(MemoryNamespace(tenancy_mode=TenancyMode.SHARED))
 
 
 def _filter_ast(wire: dict[str, Any]) -> Any:
@@ -124,6 +139,83 @@ async def _seed_varied(adapter: Any, namespace_id: UUID, seed: ScanSeed) -> None
             source_type="report" if i % 2 == 0 else "library",
             metadata={"tier": "gold"} if i < 2 else {},
         )
+
+
+# --------------------------------------------------------------------------- #
+# Tenant isolation
+# --------------------------------------------------------------------------- #
+
+
+async def test_scan_returns_only_the_scanned_namespaces_rows(adapter, namespace, other_namespace) -> None:
+    """The scan never crosses a namespace, filtered or resumed.
+
+    The second tenant is seeded to be maximally confusable with the first: the
+    same timestamps, the same ``source_type`` values and the same titles, so
+    neither the enumeration order, the pushdown fragment nor the keyset cursor
+    can tell the two apart. Only the namespace predicate can. Every other test
+    in this module runs against a single-tenant database, where deleting that
+    predicate outright changes no result — which is exactly why this one exists.
+
+    The filter is a top-level disjunction because that is the shape a real
+    caller writes and the one that puts the most in the ``WHERE`` beside the
+    namespace predicate. It does **not** cover the operator-precedence hazard
+    that the fragment splice guards against — measured: every fragment
+    ``compile_lance`` emits is already self-parenthesized, so removing the
+    splice's own wrap changes no row for any shape tried here. That wrap is
+    guarded structurally instead, by
+    :func:`test_compiled_fragment_is_spliced_as_one_grouped_term`.
+    """
+    seed_a, seed_b = scan_seed(6), scan_seed(6)
+    await _seed_varied(adapter, namespace.id, seed_a)
+    await _seed_varied(adapter, other_namespace.id, seed_b)
+
+    wire = {"$or": [{"source_type": {"$eq": "report"}}, {"title": {"$eq": "doc-1"}}]}
+
+    def matching(doc) -> bool:
+        return doc.source_type == "report" or doc.title == "doc-1"
+
+    mine = (await adapter.scan_documents(namespace.id, scan_limit=100)).documents
+    theirs = (await adapter.scan_documents(other_namespace.id, scan_limit=100)).documents
+    # Non-vacuous only if the other tenant holds rows this filter would accept.
+    assert [d.id for d in theirs] == seed_b.expected
+    assert len([d for d in theirs if matching(d)]) > 1
+
+    unresumed = await adapter.scan_documents(namespace.id, filter_ast=_filter_ast(wire), scan_limit=100)
+    assert {d.id for d in unresumed.documents} == {d.id for d in mine if matching(d)}
+    assert {d.id for d in unresumed.documents}.isdisjoint(seed_b.expected)
+
+    # The keyset predicate carries no namespace of its own, so the resumed path
+    # needs its own assertion rather than inheriting the one above.
+    cursor_row = mine[2]
+    resumed = await adapter.scan_documents(
+        namespace.id,
+        filter_ast=_filter_ast(wire),
+        after=(cursor_row.created_at, cursor_row.id),
+        scan_limit=100,
+    )
+    assert resumed.documents, "the resumed window must not be empty, or it asserts nothing"
+    assert {d.id for d in resumed.documents}.isdisjoint(seed_b.expected)
+    assert {d.id for d in resumed.documents} == {d.id for d in mine[3:] if matching(d)}
+
+
+def test_compiled_fragment_is_spliced_as_one_grouped_term() -> None:
+    """The splice must parenthesize, and only a structural assertion can say so.
+
+    A ``TextClause`` is opaque to SQLAlchemy's precedence handling, so the
+    fragment lands in the ``WHERE`` verbatim. A bare top-level ``OR`` would then
+    bind looser than the ``AND`` joining it to the namespace predicate —
+    ``WHERE namespace_id = ? AND a OR b`` parses as ``(namespace_id = ? AND a)
+    OR b``, returning every row that satisfies ``b`` from every tenant.
+
+    This is asserted on the SQL rather than on returned rows because no corpus
+    can reach it: ``compile_lance`` self-parenthesizes every fragment it emits,
+    so the hazard is unreachable through the real compiler today. That is a
+    property of another module, asserted nowhere, and it is exactly what the
+    wrap exists not to depend on — which leaves the shape of the splice as the
+    only thing there is to check. The input below is therefore hand-written, not
+    compiler-produced, precisely because the compiler cannot produce it.
+    """
+    assert str(_lance_fragment_to_text("a = ? OR b = ?", ["x", "y"])) == "(a = :kf0 OR b = :kf1)"
 
 
 # --------------------------------------------------------------------------- #
