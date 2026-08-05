@@ -31,10 +31,13 @@ try:
 except ImportError:
     _HAS_EMBEDDED = False
 
+import sqlalchemy.exc
+
 from khora.core.models import Document, MemoryNamespace, TenancyMode
 from khora.core.models.document import DocumentStatus
 from khora.filter import RecallFilter
 from khora.filter.ast import parse_to_ast
+from khora.filter.compilers.python import compile_python
 from tests.test_helpers.document_scan import ScanSeed, scan_seed, walk_scan
 
 # Lives in the unit lane next to the rest of this adapter's tests, and also
@@ -50,7 +53,14 @@ if _HAS_EMBEDDED:
         EmbeddedStorageHandle,
         EmbeddedStorageHandleConfig,
     )
-    from khora.storage.backends.sqlite_lance.relational import SQLiteLanceRelationalAdapter
+
+    # ``_documents_compile_context`` is private, and imported on purpose: the
+    # superset test below must use the *same* context the scan itself compiles
+    # with, or it would prove a property of some other context.
+    from khora.storage.backends.sqlite_lance.relational import (
+        SQLiteLanceRelationalAdapter,
+        _documents_compile_context,
+    )
 
 
 @pytest.fixture
@@ -95,6 +105,25 @@ async def _write(adapter: Any, namespace_id: UUID, doc_id: UUID, created_at: dat
 async def _seed(adapter: Any, namespace_id: UUID, seed: ScanSeed) -> None:
     for doc_id, created_at in seed.writes:
         await _write(adapter, namespace_id, doc_id, created_at)
+
+
+async def _seed_varied(adapter: Any, namespace_id: UUID, seed: ScanSeed) -> None:
+    """Seed the same corpus with attribute variety, so a filter can split it.
+
+    Attributes are assigned by *write* index, which is deliberately not the
+    enumeration order — every expectation below is therefore derived from the
+    rows a scan actually returns, never from this loop's counter.
+    """
+    for i, (doc_id, created_at) in enumerate(seed.writes):
+        await _write(
+            adapter,
+            namespace_id,
+            doc_id,
+            created_at,
+            title=f"doc-{i}",
+            source_type="report" if i % 2 == 0 else "library",
+            metadata={"tier": "gold"} if i < 2 else {},
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -211,6 +240,68 @@ async def test_whole_second_cursor_excludes_its_own_row_and_keeps_its_tie_mates(
     assert ids == seed.expected[seed.expected.index(cursor_doc.id) + 1 :]
 
 
+async def test_filtered_walk_puts_a_cursor_and_a_compiled_fragment_in_one_statement(adapter, namespace) -> None:
+    """The only place a cursor and a pushdown fragment share a statement.
+
+    This store's compiler emits positional binds for a qmark driver, which are
+    rewritten to ``:kf0`` … ``:kfN`` before the fragment can join a SQLAlchemy
+    statement — while the keyset predicate and the namespace scope carry
+    SQLAlchemy's own generated names (``param_N``, ``namespace_id_1``). The
+    ``kf`` prefix is what keeps the two families apart, and nothing proves it
+    unless both appear in the same ``SELECT``.
+
+    The filter is a two-leaf disjunction on purpose: it compiles to two
+    positional binds rather than one, so a rewrite that collided or dropped a
+    name would show up as a wrong row set rather than as a lucky pass.
+    """
+    seed = scan_seed(6)
+    await _seed_varied(adapter, namespace.id, seed)
+
+    full = await adapter.scan_documents(namespace.id, scan_limit=10)
+    wire = {"$or": [{"source_type": {"$eq": "report"}}, {"title": {"$eq": "doc-1"}}]}
+    expected = [d.id for d in full.documents if d.source_type == "report" or d.title == "doc-1"]
+    assert 1 < len(expected) < len(full.documents), "the filter must narrow, but not to a single row"
+
+    steps = await walk_scan(
+        adapter.scan_documents,
+        namespace.id,
+        scan_limit=1,
+        filter_ast=_filter_ast(wire),
+    )
+    seen = [d.id for step in steps for d in step.documents]
+
+    assert len(seen) == len(set(seen))
+    assert seen == expected
+    assert steps[-1].exhausted is True
+
+
+async def test_off_type_cursor_operands_are_rejected(adapter, namespace) -> None:
+    """A position must be the pair of values a row yielded, not a rendering of it.
+
+    Binding each operand through its ORM column type turns the two ways a caller
+    could hand-render a position into an immediate failure instead of a silent
+    mis-ordering: the id's type processor wants a ``UUID`` (it reads ``.hex``)
+    and the timestamp's wants a ``datetime``. SQLAlchemy raises during bind
+    processing, so the error surfaces wrapped rather than as the driver-level
+    ``AttributeError`` / ``TypeError`` underneath.
+
+    This has no PostgreSQL counterpart — no bind processor runs on that dialect,
+    so the same operands reach asyncpg untouched and a dashed id string decodes
+    to the very same bytes. The contract is enforced here and documented there.
+    """
+    seed = scan_seed(6)
+    await _seed(adapter, namespace.id, seed)
+    row = (await adapter.scan_documents(namespace.id, scan_limit=1)).documents[0]
+
+    with pytest.raises(sqlalchemy.exc.StatementError) as rendered_id:
+        await adapter.scan_documents(namespace.id, after=(row.created_at, str(row.id)))
+    assert isinstance(rendered_id.value.orig, AttributeError)
+
+    with pytest.raises(sqlalchemy.exc.StatementError) as rendered_ts:
+        await adapter.scan_documents(namespace.id, after=(str(row.created_at), row.id))
+    assert isinstance(rendered_ts.value.orig, TypeError)
+
+
 async def test_empty_window_reports_exhausted_without_a_position(adapter, namespace) -> None:
     """Both the never-seeded namespace and the tail past the last row."""
     empty = await adapter.scan_documents(namespace.id, scan_limit=5)
@@ -276,6 +367,70 @@ async def test_split_reports_only_the_leaves_sql_enforced(adapter, namespace) ->
     # The pushed leaf really did narrow the window; the unpushed one did not.
     assert {d.source_type for d in step.documents} == {"report"}
     assert len(step.documents) == 3
+
+
+# The pushdown must never reject a row the full filter would keep. Shapes are
+# chosen for the ways a compiler can get that wrong, not for operator coverage:
+# the three wrapping an unpushable leaf in a disjunction or a negation are the
+# ones that matter, because a match-all placeholder left inside a negation
+# inverts into a match-nothing and excludes rows.
+_SUPERSET_SHAPES: dict[str, dict[str, Any]] = {
+    "pushable_eq": {"source_type": {"$eq": "report"}},
+    "pushable_ne": {"source_type": {"$ne": "report"}},
+    "pushable_nin": {"source_type": {"$nin": ["report"]}},
+    "pushable_exists": {"source_url": {"$exists": False}},
+    "metadata_eq": {"metadata.tier": {"$eq": "gold"}},
+    "unpushable_date": {"created_at": {"$gte": "2026-01-31T12:30:00+00:00"}},
+    "or_over_unpushable": {
+        "$or": [
+            {"created_at": {"$gte": "2026-01-31T12:30:00+00:00"}},
+            {"source_type": {"$eq": "report"}},
+        ]
+    },
+    "not_over_pushable": {"$not": {"source_type": {"$eq": "report"}}},
+    "not_over_unpushable": {"$not": {"created_at": {"$gte": "2026-01-31T12:30:00+00:00"}}},
+    "and_of_in_and_not": {
+        "$and": [
+            {"source_type": {"$in": ["report", "library"]}},
+            {"$not": {"title": {"$eq": "doc-0"}}},
+        ]
+    },
+}
+
+
+@pytest.mark.parametrize("wire", _SUPERSET_SHAPES.values(), ids=_SUPERSET_SHAPES.keys())
+async def test_pushdown_never_rejects_a_row_the_full_filter_would_keep(adapter, namespace, wire) -> None:
+    """The superset property the resume contract depends on.
+
+    Resuming past the rows a pushdown rejected is sound only because a rejected
+    row could not have satisfied the full filter either. Both ``scan_documents``
+    docstrings name that as an assumption about the *compilers*; this checks the
+    consequence where it actually lands, by comparing the scan's window against
+    the in-process ``compile_python`` evaluation of the same AST over the same
+    corpus. If it ever fails, a walk is silently and permanently dropping
+    documents — a post-filter can only narrow, never recover a row the window
+    never returned.
+
+    Scope, so a green run is not read as more than it is: ten shapes on one
+    store is a tripwire, not a proof over the operator space. The general
+    property belongs to the compilers and to the forced-residual conformance
+    corpus.
+    """
+    seed = scan_seed(6)
+    await _seed_varied(adapter, namespace.id, seed)
+    ast = _filter_ast(wire)
+
+    step = await adapter.scan_documents(namespace.id, filter_ast=ast, scan_limit=100)
+    # Precondition: the comparison below is only meaningful if this one window
+    # covered the whole namespace. Without it, growing the corpus past the bound
+    # would fail the test for a reason that has nothing to do with the pushdown.
+    assert step.exhausted is True
+
+    all_docs = (await adapter.scan_documents(namespace.id, scan_limit=100)).documents
+    matches = compile_python(ast, _documents_compile_context()).predicate
+    oracle = {d.id for d in all_docs if matches(d)}
+
+    assert oracle <= {d.id for d in step.documents}
 
 
 # --------------------------------------------------------------------------- #

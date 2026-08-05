@@ -116,6 +116,24 @@ async def _seed(backend: PostgreSQLBackend, namespace_id: UUID, seed: ScanSeed) 
         await _write(backend, namespace_id, doc_id, created_at)
 
 
+async def _seed_varied(backend: PostgreSQLBackend, namespace_id: UUID, seed: ScanSeed) -> None:
+    """Seed the same corpus with attribute variety, so a filter can split it.
+
+    Attributes are assigned by *write* index, which is deliberately not the
+    enumeration order — every expectation below is therefore derived from the
+    rows a scan actually returns, never from this loop's counter.
+    """
+    for i, (doc_id, created_at) in enumerate(seed.writes):
+        await _write(
+            backend,
+            namespace_id,
+            doc_id,
+            created_at,
+            title=f"doc-{i}",
+            source_type="report" if i % 2 == 0 else "library",
+        )
+
+
 @skip_no_pg
 class TestScanDocumentsWindowPg:
     async def test_scan_limit_bounds_the_window(self, backend: PostgreSQLBackend, namespace) -> None:
@@ -240,6 +258,43 @@ class TestScanDocumentsCursorPg:
         assert cursor_doc.id not in ids, "the cursor's own row came back — a resumed walk would never advance"
         assert seed.tied_ids[1] in ids, "the cursor's tie-mate was skipped — a resumed walk would lose rows"
         assert ids == seed.expected[seed.expected.index(cursor_doc.id) + 1 :]
+
+    async def test_filtered_walk_puts_a_cursor_and_a_compiled_fragment_in_one_statement(
+        self, backend: PostgreSQLBackend, namespace
+    ) -> None:
+        """A cursor and a pushdown fragment in the same ``SELECT``, walked to the end.
+
+        Every other test here passes ``after`` or ``filter_ast``, never both.
+        This store's compiler emits a SQLAlchemy expression, so its operands are
+        named by the same machinery that names the keyset's — there is no
+        hand-written bind splice to collide, unlike the embedded store. What is
+        worth proving is the rest of it: that the fragment's ``literal_column``
+        references add no second FROM entry, and that a filtered walk still
+        enumerates exactly once, in order, and terminates.
+        """
+        seed = scan_seed(6)
+        await _seed_varied(backend, namespace.id, seed)
+
+        full = await backend.scan_documents(namespace.id, scan_limit=10)
+        wire = {"$or": [{"source_type": {"$eq": "report"}}, {"title": {"$eq": "doc-1"}}]}
+        expected = [d.id for d in full.documents if d.source_type == "report" or d.title == "doc-1"]
+        assert 1 < len(expected) < len(full.documents), "the filter must narrow, but not to a single row"
+
+        steps = await walk_scan(
+            backend.scan_documents,
+            namespace.id,
+            scan_limit=1,
+            filter_ast=_filter_ast(wire),
+        )
+        seen = [d.id for step in steps for d in step.documents]
+
+        assert len(seen) == len(set(seen))
+        assert seen == expected
+        assert steps[-1].exhausted is True
+        # Both leaves are real columns here, so this store pushes the whole
+        # disjunction — the embedded sibling reports the same filter differently
+        # only when a leaf is one it cannot back.
+        assert steps[0].consumed_keys == frozenset({"source_type", "title"})
 
     async def test_cursor_read_off_a_row_is_timezone_aware(self, backend: PostgreSQLBackend, namespace) -> None:
         """This store's position is an aware instant, and the round trip is exact.

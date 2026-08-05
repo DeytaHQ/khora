@@ -16,6 +16,15 @@ park them at exactly the wrong ends and could not reproduce
 :attr:`ScanSeed.expected`. This half is borrowed wholesale from the
 ``list_documents`` ordering seed; see :mod:`tests.test_helpers.document_order`.
 
+The ladder does a second job here that it was not written for, and it is worth
+knowing before anyone "simplifies" it to plain ``uuid4``: its ids share a 24-hex
+prefix, and ``str(uuid)`` puts its first dash *inside* that prefix. Since ``-``
+(0x2D) sorts below every hex digit, a cursor rendered as a dashed string sorts
+below the whole tie block — measured, the tie-mate assertion in the cursor test
+drops from four rows to one. With random ids the comparison is decided before
+the first dash and that mistake is invisible (it needs two ids agreeing on all
+eight leading hex characters). The shared prefix is what makes it catchable.
+
 **The whole second.** :data:`WHOLE_SECOND` pins ``microsecond=0`` and every
 stamp derives from it by whole seconds, which is *not* incidental. The embedded
 store holds ``created_at`` as TEXT and compares it lexicographically, and at
