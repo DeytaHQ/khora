@@ -89,12 +89,61 @@ DEFINE FIELD IF NOT EXISTS processed_at ON document TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS source_timestamp ON document TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS external_id ON document TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS session_id ON document TYPE option<string>;
-DEFINE INDEX IF NOT EXISTS idx_document_namespace ON document FIELDS namespace_id;
 DEFINE INDEX IF NOT EXISTS idx_document_ns_session ON document FIELDS namespace_id, session_id;
 -- Note: SurrealDB does not support partial indexes; full index used for dedup queries
 DEFINE INDEX IF NOT EXISTS idx_document_ns_checksum ON document FIELDS namespace_id, checksum;
 DEFINE INDEX IF NOT EXISTS idx_document_ns_status ON document FIELDS namespace_id, status;
 DEFINE INDEX IF NOT EXISTS idx_document_ns_external_id ON document FIELDS namespace_id, external_id;
+-- Sort index backing ``list_documents``' pinned ``ORDER BY created_at DESC,
+-- id DESC``, mirroring the relational backends' index from
+-- ``db/migrations/versions/054_documents_namespace_created_at_id.py``.
+-- Four things a future editor should not undo:
+-- 1. Two fields, not three. ``id`` is the record identifier rather than an
+--    ordinary field, so naming it in ``FIELDS`` fails to define on this
+--    SCHEMAFULL table. Adding a ``DEFINE FIELD id`` to make it legal is
+--    worse: ``DEFINE FIELD IF NOT EXISTS`` is append-only, so it would type
+--    ``id`` on fresh databases only and diverge them permanently from
+--    existing ones.
+-- 2. Omitting ``id`` rests on a non-unique index carrying the record id as
+--    its trailing key component. That holds on embedded 2.0.0, where the
+--    scan order matches ``ORDER BY id`` across a tie block — but the row
+--    order of an unsorted scan is not a contractual ordering, and it is
+--    unverified on 3.x, the engine that would actually rely on it. If the
+--    two orders ever diverge, a planner that drops the sort returns ties in
+--    index-key order and ``START`` paging silently drops or repeats rows.
+--    Gate this behind a ``ws://`` pagination test before anything depends
+--    on it.
+-- 3. Not ``CONCURRENTLY``. That build is asynchronous and the planner
+--    routes queries through the index before it is populated, so counts
+--    come back short for the length of the build with no error. A one-time
+--    upgrade stall beats a window of silently wrong reads.
+-- 4. This index is NOT selected on any engine khora can currently reach.
+--    2.6.5 and embedded 2.0.0 sort in memory unconditionally; 3.0.5 / 3.2.0
+--    do push LIMIT/START into a backward index scan, but the ``FLEXIBLE
+--    TYPE`` clauses elsewhere in this DDL do not parse there, so schema
+--    init cannot reach such a server at all (#1584). Treat the 3.x read win
+--    as unconfirmed under the real index set until #1584 lands: on the
+--    engines that can be measured, the planner picks among equally eligible
+--    ``(namespace_id, …)`` composites by index NAME, and
+--    ``idx_document_ns_checksum`` sorts ahead of this one.
+DEFINE INDEX IF NOT EXISTS idx_document_ns_created ON document FIELDS namespace_id, created_at;
+-- ``idx_document_namespace``, this blob's former one-field namespace index,
+-- is a strict prefix of the index just created. Its ``DEFINE`` is gone from
+-- the block above and existing databases drop it here — the two had to move
+-- together, since side by side they would rebuild and destroy the index on
+-- every ``connect()``. Created before dropped, so a connect dying between
+-- the two leaves more index coverage than needed rather than less. Same
+-- ordering rationale as the raw-SQLite blob's ``idx_docs_ns`` drop.
+-- The drop is safe but does NOT promote the index above: the planner
+-- prefix-matches a bare ``WHERE namespace_id = $ns`` onto a two-field
+-- composite, so no query shape falls back to a table scan, but the one it
+-- picks is ``idx_document_ns_checksum`` (see 4). This drop stands on write
+-- cost alone — it returns inserts to parity with today rather than making
+-- them cheaper. Checked for row loss rather than assumed safe, because the
+-- composite that takes over has a nullable second column and SurrealDB does
+-- index NONE: rows with and without a checksum all come back under every
+-- index set.
+REMOVE INDEX IF EXISTS idx_document_namespace ON document;
 
 -- Chunk (with HNSW vector index and BM25 full-text index)
 DEFINE TABLE IF NOT EXISTS chunk SCHEMAFULL;

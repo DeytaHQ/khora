@@ -87,11 +87,55 @@ CREATE TABLE IF NOT EXISTS documents (
     source_timestamp TEXT,
     external_id TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_docs_ns ON documents(namespace_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_docs_checksum
     ON documents(namespace_id, checksum) WHERE checksum != '';
 CREATE INDEX IF NOT EXISTS idx_docs_ns_external_id
     ON documents(namespace_id, external_id) WHERE external_id IS NOT NULL;
+-- Sort index for ``list_documents``, which pins the total order
+-- ``ORDER BY created_at DESC, id DESC``. All three keys are ASC, which a
+-- backward scan reads as that DESC order. Without the trailing ``id`` key
+-- SQLite satisfies the leading term off the index and adds a per-page
+-- ``USE TEMP B-TREE FOR LAST TERM OF ORDER BY`` for the tiebreak — invisible
+-- on a first page, dominant on a full drain. The legacy 1-key index cannot
+-- satisfy either term and spells it ``USE TEMP B-TREE FOR ORDER BY``. The
+-- ``status`` / ``updated_at`` predicates are residual filters on top of the
+-- scan and do not defeat it. Mirrors
+-- ``db/migrations/versions/054_documents_namespace_created_at_id.py``, which
+-- does not reach this store and carries the full argument.
+--
+-- ``idx_docs_ns`` is dropped as a now-redundant strict prefix, mirroring the
+-- other half of that migration. The namespace aggregates all re-plan onto this
+-- index as covering scans: ``MAX(created_at)`` stops reading the table
+-- altogether and ``get_document_stats`` follows it down, while bare
+-- ``count_documents`` pays for the wider entries — roughly 1.3-1.7x, climbing
+-- with namespace size, still a covering scan and never a table scan. The
+-- partial ``idx_docs_checksum`` / ``idx_docs_ns_external_id`` also lead with
+-- ``namespace_id`` but are NOT redundant — their ``WHERE`` clauses make them a
+-- different index.
+--
+-- Created before the drop so no connect ever observes the table with neither
+-- index. Both re-run on every ``connect()`` and are a no-op once converged, so
+-- an existing database converts on its next open, paying one inline index build
+-- of order 60-110 ms per 100k rows depending on row width. Two consequences of
+-- putting real work in this blob, both new:
+-- 1. That converting connect is the first real writer the blob has ever
+--    contained, and ``_create_schema`` catches ``OperationalError`` only around
+--    the ``ALTER TABLE``. A writer holding the lock past sqlite3's default 5000
+--    ms ``busy_timeout`` therefore makes the build raise ``database is locked``
+--    out of ``connect()``, where it previously could not fail. A retry once the
+--    lock clears heals it.
+-- 2. The ``DROP`` is the first destructive statement here. While the blob was
+--    purely additive, mixed khora versions sharing one file converged. They no
+--    longer do — an older version re-creates ``idx_docs_ns`` and this one drops
+--    it again, a full index build per old-version connect. Self-correcting once
+--    every process on the file is on this version.
+--
+-- Keep this comment free of semicolons — ``_create_schema`` splits this blob
+-- on the semicolon, so one inside a ``--`` comment would cut the comment in
+-- half and feed the remainder to SQLite as a statement.
+CREATE INDEX IF NOT EXISTS idx_docs_ns_created_id
+    ON documents(namespace_id, created_at, id);
+DROP INDEX IF EXISTS idx_docs_ns;
 
 CREATE TABLE IF NOT EXISTS chunks (
     id TEXT PRIMARY KEY,
