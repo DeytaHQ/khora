@@ -108,45 +108,76 @@ ROWS_PER_TIMESTAMP = 50
 
 # WARNING - the seed's INSERT ORDER is load-bearing, not incidental.
 #
-# ``_rows`` writes ``i`` ascending while ``created_at`` descends, so physical
-# heap order is almost exactly the reverse of index order and
-# ``pg_stats.correlation`` lands near -1. PG interpolates an index scan's
-# heap-access cost between its random and sequential bounds by that
-# correlation, so a near-perfect value collapses the cost of the ~100 (or, at
-# depth, ~2900) heap fetches these queries perform. Without it, default
-# ``random_page_cost = 4.0`` makes an index scan roughly 2.5x more expensive
-# than a seq scan plus top-N heapsort at this table size, and the Seq Scan
-# guard below fires - for a reason that has nothing to do with the index being
-# wrong.
+# ``_rows`` writes ``i`` ascending while ``created_at`` descends, so within one
+# namespace's block the physical heap order is the reverse of index order. The
+# table is not one such block, though: ``DECOY_NAMESPACES`` below seeds four
+# more over the SAME timestamp range, so the heap is a 5-tooth sawtooth rather
+# than one descending ramp, and ``pg_stats.correlation`` for the ``created_at``
+# COLUMN lands near **-0.2**. That figure is computed on this fixture's own
+# numbers - 5 blocks of 3000 rows at 50 rows per timestamp - not estimated.
+#
+# Read that number narrowly. ``btcostestimate`` derives an index scan's
+# heap-access discount from the correlation of the index's LEADING column, so
+# -0.2 prices a ``created_at``-leading index and nothing else. Every index this
+# module's assertions actually depend on - ``ix_documents_namespace_created_at_id``
+# and ``ix_documents_namespace_id`` - leads on ``namespace_id``, whose
+# correlation the decoy layout makes essentially arbitrary: five contiguous
+# blocks whose order is five random UUIDs.
+#
+# The safe conclusion, and the only one anything here relies on: no assertion in
+# this module rests on a well-correlated heap. The offset-0 test passes because
+# it performs only ~100 heap fetches, which is cheap at any correlation. The
+# deep-offset test pays ~2900, does not win unaided, and asserts CAPABILITY
+# under ``enable_sort = off`` for exactly that reason.
 #
 # So: do NOT "tidy" this fixture by shuffling the seed or inserting in id
-# order. If you need to change the write order, expect to raise the row counts
-# to compensate, and re-run against real Postgres rather than reasoning about
-# it - the cost model here is not intuitive.
+# order. Write order sets the within-block ordering, and the row counts below
+# are what keep a seq scan from beating the ~100-fetch first page. If you
+# change either, re-run against real Postgres rather than reasoning about it -
+# the cost model here is not intuitive.
 
 # Documents seeded into OTHER namespaces, so the namespace filter is selective.
 #
-# These are the only thing that makes ``namespace_id`` a DISCRIMINATING key, and
-# without that there is no cost reason for PG to prefer a 3-column index over a
-# 1-column one on the same leading sort column. Not realism dressing - the
-# assertions below are meaningless without them. Learned from a CI failure, so
-# the reasoning is recorded rather than left to be rediscovered:
+# Present-tense reason, independent of any single index: without them the one
+# namespace under test IS the table - 3000 rows of 3000. ``namespace_id`` then
+# discriminates nothing, ``WHERE namespace_id = ?`` matches every row, and the
+# real competitor to an index scan becomes a sequential scan plus a top-N
+# heapsort - which trips the Seq Scan guard in
+# ``test_query_is_a_sort_free_backward_index_scan`` for a reason that has
+# nothing to do with the index being wrong. With the decoys the table holds
+# 15000 rows while the namespace under test still holds 3000, so the filter is
+# genuinely selective. That reasoning is scale-robust and survives any change
+# to the index set. Khora is multi-tenant, so it is also the production regime.
 #
-# ``documents`` also carries a single-column ``ix_documents_created_at`` (from an
-# earlier temporal-search migration). Both it and the 3-column index lead on
-# ``created_at``, so the near-perfect heap correlation described above discounts
-# BOTH equally - heap access stops being the discriminator, and the tiebreak
-# becomes index entry width: one timestamptz (~8 bytes) against
-# uuid + timestamptz + uuid (~40). At ``OFFSET 2800`` the scan traverses ~2900
-# entries, so that 3-4x page difference decides it and the narrower index wins.
-# This is why the failure appeared at depth and not on the first page.
+# HISTORICAL - why the decoys were introduced. This describes a tie that the
+# decoys ALREADY RESOLVED; it is not a live hazard in this fixture, and it was
+# not a live hazard here even before migration 057:
 #
-# Decoy rows break that tie. ``ix_documents_created_at`` carries no
-# ``namespace_id``, so every tuple it returns needs a recheck - free when one
-# namespace is 100% of the table, but real work once the table holds rows the
-# scan must read and discard, while the 3-column index seeks straight to the
-# namespace's range. Khora is multi-tenant, so that is also the production
-# regime.
+#   Before migration 057, ``documents`` also carried a single-column
+#   ``ix_documents_created_at`` (from an earlier temporal-search migration).
+#   What was OBSERVED is narrow: on the initial commit of the change that
+#   introduced this file - BEFORE ``DECOY_NAMESPACES`` existed - the planner
+#   chose that narrow index over the 3-column one at ``OFFSET 2800`` and the
+#   test failed. It appeared in a losing plan exactly once, in that one CI run.
+#   Adding the decoys removed it as a competitor, and it never appeared again;
+#   every later failure named ``ix_documents_namespace_id`` instead.
+#
+#   Why the decoys removed it is inference, not a measured mechanism - nobody
+#   instrumented ``btcostestimate``. The plausible account: the single-column
+#   index carries no ``namespace_id``, so every tuple it returns needs a
+#   recheck - free when one namespace is 100% of the table, real work once the
+#   table holds rows the scan must read and discard, while the 3-column index
+#   seeks straight to the namespace's range. Index entry width (one timestamptz
+#   at ~8 bytes against uuid + timestamptz + uuid at ~40, over ~2900 entries at
+#   depth) is the companion candidate for why it won at depth and not on the
+#   first page.
+#
+#   Read the causality carefully, because it is easy to state backwards: THE
+#   DECOYS killed this competitor, in this fixture, three hours before that
+#   change merged. Migration 057 removes the same index from PRODUCTION, where
+#   the hazard is inferred from this one run rather than measured. 057 changes
+#   nothing about what this fixture does, which is why no assertion in this
+#   file moved when it landed.
 #
 # Seed the decoys across the SAME timestamp range as the namespace under test
 # (see ``seeded_namespace``): decoys bunched at one end would let a
@@ -345,11 +376,12 @@ def _render(root: dict) -> str:
     """Compact one-line-per-node rendering of a plan tree, for failure output.
 
     Every assertion below reports this rather than just the node it tripped on.
-    A plan-shape test that fails with only ``{'ix_documents_created_at'}`` tells
-    you which index lost but not what the planner did instead - and since these
-    tests only ever run in CI, a failure that needs a follow-up run to diagnose
-    costs a whole cycle. The interesting attributes are the ones that explain a
-    choice: which index, which direction, and what any sort is sorting on.
+    A plan-shape test that fails with only ``{'ix_documents_namespace_id'}``
+    tells you which index lost but not what the planner did instead - and
+    since these tests only ever run in CI, a failure that needs a follow-up
+    run to diagnose costs a whole cycle. The interesting attributes are the
+    ones that explain a choice: which index, which direction, and what any
+    sort is sorting on.
     """
     lines: list[str] = []
 
@@ -420,11 +452,35 @@ class TestListDocumentsIndexPlanPg:
         an ordered scan: sorting 3000 rows costs almost nothing, while an
         ordered scan pays ~2900 heap fetches to reach the same place. That is
         the cost model working correctly, not the index failing, and it flips at
-        production scale where the sort is the expensive half. Pinning the
-        planner's unaided choice here pins an artifact of the seed size - CI
-        demonstrated that three separate ways, choosing the single-column
-        ``ix_documents_created_at``, then a bitmap heap scan, then
-        ``ix_documents_namespace_id`` with a sort on top.
+        production scale where the sort is the expensive half.
+
+        The decisive reason is stronger than seed size, and it is worth stating
+        precisely because it CANNOT be fixed by tuning the fixture: an unaided
+        deep-offset assertion is nondeterministic BY CONSTRUCTION.
+
+        Both surviving candidates - ``ix_documents_namespace_created_at_id``
+        and ``ix_documents_namespace_id`` - lead on ``namespace_id``, and
+        ``btcostestimate`` prices an index scan's heap access off the LEADING
+        column's correlation. The seeded namespaces are fresh ``uuid4`` values
+        written in contiguous physical blocks, so that correlation is the rank
+        correlation of a random permutation of five blocks: a fresh draw every
+        run, expectation 0, sd ~0.5, then scaled by ``btcostestimate``'s 0.75
+        multi-key factor. The planner is therefore choosing between these two
+        under a cost input that is re-randomized on every CI run. Pinning its
+        unaided choice would pin a coin flip.
+
+        The observed history agrees. CI produced three distinct losing plans at
+        depth: a bitmap heap scan, ``ix_documents_namespace_id`` with a sort on
+        top, and - on one run, before ``DECOY_NAMESPACES`` existed - the
+        single-column ``ix_documents_created_at``. Note the causality, which is
+        easy to state backwards: the decoys eliminated that third plan, not
+        migration 057. By the time 057 landed it had not appeared in a losing
+        plan for the life of the fixture, and the two survivors are untouched.
+        So 057 moves nothing here, and this test stays on the capability form.
+
+        Do not carry the fixture comment's -0.2 into this reasoning either:
+        that is ``created_at``'s column correlation, which prices a
+        ``created_at``-leading index and describes neither survivor.
 
         Disabling scan types does not settle it either, because every one of
         those plans is really "gather the rows, then sort" and some other index

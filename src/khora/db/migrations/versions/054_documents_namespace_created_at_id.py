@@ -63,13 +63,17 @@ enough for the first build to have failed. Both directions therefore probe
 follows migration 022, which solved the same problem on this same table; its
 ``_drop_invalid_index`` helper is reproduced here.
 
-Planner precondition — the sort-free plan assumes ``namespace_id`` is selective
-against the table. Where a single namespace holds most of ``documents``,
-Postgres may instead prefer the single-column ``ix_documents_created_at``
-(migration 009) and reintroduce the Incremental Sort, because walking that index
-directly can beat a lookup that matches most of the table anyway. Operators
-sizing this change on a heavily single-tenant ``documents`` table should measure
-rather than assume the win.
+Planner precondition — **superseded by ``057_drop_documents_created_at_index``,
+which drops the single-column index this paragraph was about.** As written when
+054 landed: the sort-free plan assumes ``namespace_id`` is selective against the
+table, and where a single namespace held most of ``documents``, Postgres could
+instead prefer the single-column ``ix_documents_created_at`` (migration 009) and
+reintroduce the Incremental Sort, because walking that index directly can beat a
+lookup that matches most of the table anyway. Operators sizing 054 on a heavily
+single-tenant ``documents`` table were told to measure rather than assume the
+win. That competitor no longer exists at head; the advice is kept on the record
+because operators who acted on it are precisely why 057's drop passes
+``if_exists=True``.
 """
 
 from collections.abc import Sequence

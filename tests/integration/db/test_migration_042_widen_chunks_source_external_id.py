@@ -69,7 +69,7 @@ pytestmark = pytest.mark.integration
 
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "src" / "khora" / "db" / "migrations"
-_HEAD = "056_documents_created_at_not_null"
+_HEAD = "057_drop_documents_created_at_index"
 _PREV = "041_khora_chunks_denormalized_columns"
 
 
