@@ -21,9 +21,11 @@ from khora.khora import Khora
 # Derive migrations directory from the installed package — not relative to this test file
 _MIGRATIONS_DIR = Path(khora.db.migrations.__file__).parent
 
-#: Lower bound on the number of migration files the chain ships. Never bumped
-#: when a migration is added — raise it only to deliberately tighten the floor.
-_MIGRATION_COUNT_FLOOR = 56
+#: A revision the chain must still reach. Anchors the walk to a known point so
+#: a stray revision chained onto head cannot pass unnoticed. Bumped only
+#: deliberately — never as part of adding a migration — so it does not
+#: reintroduce the per-PR edit an exact file count used to require.
+_ANCHOR_REVISION = "055_documents_source_type_alignment"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -451,57 +453,74 @@ class TestMigrationPackageStructure:
     def test_versions_dir_is_fully_bundled(self):
         """No migration file goes missing from the chain the package ships.
 
-        The floor catches a versions directory that ships nothing, or fewer
-        files than the chain had when the floor was last raised, at any time.
-        It catches a *truncated tail* only while the file count still equals
-        the floor. Once a migration lands beyond it — 57 files against a floor
-        of 56 — deleting the newest revision passes here, and passes every
-        other gate too: ``test_migration_chain_is_contiguous`` is invariant
-        under truncation (the survivors are still a contiguous chain starting
-        at ``down_revision=None``), and the walk below shrinks in step with the
-        file list. That decay is the deliberate price of a floor that is never
-        bumped when a migration is added; an exact count held the stronger
-        property but had to be edited on every migration PR and conflicted with
-        every other one in flight. Raise the floor when tightening is worth an
-        edit.
+        A packaging tripwire first of all: ``_MIGRATIONS_DIR`` resolves through
+        ``khora.db.migrations.__file__``, i.e. the *installed* package rather
+        than the repo tree, so this fails if a build config ever stops shipping
+        ``versions/*.py`` — which would leave ``run_migrations()`` silently
+        building a partial schema. Keep it reading the installed package.
 
-        Do not lean on "each migration's own test pins its revision id" as the
-        backstop — several revisions in the chain have no dedicated test module
-        and are referenced nowhere in ``tests/``.
+        No file count is asserted. An exact count had to be edited on every
+        migration PR and conflicted with every other one in flight, and a floor
+        decays into uselessness: once a migration lands beyond it, deleting the
+        newest revision passes the floor, passes the walk below (both sides
+        shrink together), and passes ``test_migration_chain_is_contiguous``,
+        which is invariant under truncation — the survivors are still a
+        contiguous chain starting at ``down_revision=None``.
 
-        Resolving the chain covers a different failure than the floor, and does
-        not backfill what the floor loses. Alembic skips a file its filename
-        filter excludes — an editor lockfile such as ``.#zz.py`` is skipped
-        while still being globbed here — so a file can exist, count toward the
-        floor, and belong to no chain; the walk count is what rejects it.
-        Anything else unreadable raises outright rather than being skipped: a
-        syntax error raises ``SyntaxError``, and a file with no ``revision``
-        raises ``CommandError``. Resolving the head additionally rejects a stray
-        revision nothing points at, which reads as a second head.
+        Truncation is instead caught by the ORM drift gate in
+        ``tests/unit/test_migration_drift.py``: deleting a revision leaves the
+        objects it created missing from the live schema and absent from the
+        baseline ledger, so the ratchet fails. That covers any migration with
+        an ORM-visible footprint — most of them — and genuinely misses
+        data-only backfills and Postgres-only objects with no ORM counterpart.
+        Do not lean on "each migration's own test pins its revision id" as a
+        second backstop: nearly half the revisions in the chain have no
+        dedicated test module and are referenced nowhere in ``tests/``.
 
-        Both sides of that count come from this one directory, so it is a
-        self-consistency check: it sees a file that is present and unreachable,
-        and is blind to a file that is simply absent — delete one and the walk
-        shrinks with it.
+        The anchor pins the walk to a known revision, so a chain re-pointed to
+        bypass it, or truncated at or below it, fails here rather than reading
+        as a healthy shorter chain. It is bumped only deliberately, never as
+        part of adding a migration. Note what it does *not* catch: a stray
+        revision chained onto head leaves the anchor reachable, and only the
+        head literals this module stopped asserting would have caught that.
+
+        Resolving the chain covers a different failure again. Alembic skips a
+        file its filename filter excludes — an editor lockfile such as
+        ``.#zz.py`` is skipped while still being globbed here — so a file can
+        exist and belong to no chain; the walk is what rejects it. Anything
+        else unreadable raises outright rather than being skipped: a syntax
+        error raises ``SyntaxError``, and a file with no ``revision`` raises
+        ``CommandError``. A branched chain — a shipped revision nothing points
+        at — is rejected by ``get_current_head()`` alone: neither
+        ``from_config`` nor ``walk_revisions`` raises on two heads, so that call
+        is made for its raise rather than its value.
         """
         versions_dir = _MIGRATIONS_DIR / "versions"
         migration_files = sorted(versions_dir.glob("*.py"))
-        # Filter out __pycache__ and __init__
+        # ``__init__.py`` is globbed but is not a revision.
         migration_files = [f for f in migration_files if not f.name.startswith("__")]
-        assert len(migration_files) >= _MIGRATION_COUNT_FLOOR, (
-            f"Expected at least {_MIGRATION_COUNT_FLOOR} migration files, "
-            f"found {len(migration_files)}: {[f.name for f in migration_files]}"
-        )
+        assert migration_files, f"No migration files shipped in {versions_dir}"
 
         cfg = Config()
         cfg.set_main_option("script_location", str(_MIGRATIONS_DIR))
         script = ScriptDirectory.from_config(cfg)
-        # Raises on a branched chain — a shipped revision the chain never reaches.
-        assert script.get_current_head() is not None, f"Shipped migrations have no head: {versions_dir}"
         walked = list(script.walk_revisions())
-        assert len(walked) == len(migration_files), (
-            f"Chain resolves {len(walked)} revisions but {len(migration_files)} migration "
-            f"files are shipped: {[f.name for f in migration_files]}"
+        # Called for its raise, not its value: this is the only call here that
+        # rejects a branched chain. Neither ``from_config`` nor
+        # ``walk_revisions`` raises — both happily traverse two heads.
+        head = script.get_current_head()
+
+        walked_paths = {Path(str(rev.path)) for rev in walked}
+        orphans = sorted(f.name for f in migration_files if f not in walked_paths)
+        assert not orphans, (
+            f"Shipped migration files that belong to no chain: {orphans}. "
+            f"Chain resolves {len(walked)} revisions from {len(migration_files)} files."
+        )
+
+        revisions = {rev.revision for rev in walked}
+        assert _ANCHOR_REVISION in revisions, (
+            f"Chain no longer reaches the anchor revision {_ANCHOR_REVISION!r}; "
+            f"head is {head!r}. Truncated or re-pointed below the anchor?"
         )
 
     @pytest.mark.unit

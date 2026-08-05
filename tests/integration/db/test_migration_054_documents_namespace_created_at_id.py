@@ -78,7 +78,7 @@ skip_no_pg = pytest.mark.skipif(
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "src" / "khora" / "db" / "migrations"
 
-_HEAD = "054_documents_namespace_created_at_id"
+_TARGET = "054_documents_namespace_created_at_id"
 _PREV = "053_khora_chunks_bookkeeping_to_chunker_info"
 
 # The revision that first added the 2-column index, and the one immediately

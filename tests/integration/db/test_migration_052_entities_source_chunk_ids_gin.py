@@ -64,7 +64,7 @@ pytestmark = pytest.mark.integration
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "src" / "khora" / "db" / "migrations"
 
-_HEAD = "052_entities_source_chunk_ids_gin"
+_TARGET = "052_entities_source_chunk_ids_gin"
 _PREV = "051_documents_graph_mirror_pending"
 
 _INDEX_NAME = "ix_entities_source_chunk_ids_gin"
@@ -100,7 +100,7 @@ class TestMigration052GinIndex:
 
         # Migration 052 builds the GIN index. Idempotent when the shared dev
         # DB is already at head.
-        command.upgrade(cfg, _HEAD)
+        command.upgrade(cfg, _TARGET)
         rows = asyncio.run(_index_rows(DATABASE_URL))
         assert len(rows) == 1, f"expected the GIN index at head, found {rows}"
         assert rows[0][0] == _INDEX_NAME
@@ -112,7 +112,7 @@ class TestMigration052GinIndex:
             assert asyncio.run(_index_rows(DATABASE_URL)) == []
         finally:
             # Always restore the true chain head so the shared dev DB is never
-            # left rewound — "head" (not the pinned _HEAD) stays correct once a
+            # left rewound — "head" (not the pinned _TARGET) stays correct once a
             # future migration lands on top of 052.
             command.upgrade(cfg, "head")
 

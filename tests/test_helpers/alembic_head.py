@@ -5,19 +5,18 @@ Migration tests that run ``upgrade head`` and then assert what landed in
 migration therefore had to bump the same literal in six files, and those bumps
 collided with any other migration PR in flight.
 
-How much the resulting assertion is worth depends on where the compared value
-came from, and the split is not by dialect:
-
-* Where the test body has no upgrade of its own and the version table was
-  written by the fixture's ``run_migrations()`` — only the hook-subscriptions
-  case today — the comparison carries real signal. That call returns
-  ``success=True, skipped=True`` without running anything when the database is
-  ahead, and the fixture checks only ``success``, so the assertion is the one
-  thing standing between a skipped migration and a green test.
-* Everywhere else, on both dialects, a ``command.upgrade(cfg, "head")`` a few
-  lines above wrote the value moments earlier and any real failure raises out
-  of that call first. The comparison is close to decoration there — kept
-  because it costs nothing, not because it is load-bearing.
+Every one of those assertions is decoration today. A ``command.upgrade(cfg,
+"head")`` a few lines above wrote the value moments earlier and any real
+failure raises out of that call first, so the comparison is kept because it
+costs nothing, not because it is load-bearing. The hook-subscriptions case
+reads like the exception — its version row is written by the fixture's
+``run_migrations()``, which returns ``success=True, skipped=True`` without
+running anything when the database is ahead, and the fixture checks only
+``success`` — but that skip is unreachable as the fixture stands: it drops and
+recreates ``public`` first, so the version table is empty, ahead-detection
+cannot fire, and every other failure sets ``success=False``. The assertion
+*would* become load-bearing if that reset ever stopped clearing the version
+table.
 
 This is only for *head* references. An explicit upgrade or downgrade target — a
 migration's own revision, or its predecessor — stays a literal, because those
@@ -27,12 +26,21 @@ migration lands.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
-from tests.test_helpers.schema_drift import MIGRATIONS_DIR
+import khora.db.migrations
 
 __all__ = ["current_head"]
+
+#: Derive the migrations directory from the installed package — not relative to
+#: this file — so the head is read from the same chain ``run_migrations()``
+#: walks. The two are identical under an editable install and diverge under a
+#: wheel, which is exactly the case ``test_versions_dir_is_fully_bundled``
+#: exists to guard.
+MIGRATIONS_DIR = Path(khora.db.migrations.__file__).parent
 
 
 def current_head() -> str:
@@ -48,5 +56,6 @@ def current_head() -> str:
     cfg = Config()
     cfg.set_main_option("script_location", str(MIGRATIONS_DIR))
     head = ScriptDirectory.from_config(cfg).get_current_head()
-    assert head is not None, f"no head revision found in {MIGRATIONS_DIR / 'versions'}"
+    if head is None:
+        raise AssertionError(f"no head revision found in {MIGRATIONS_DIR / 'versions'}")
     return head
