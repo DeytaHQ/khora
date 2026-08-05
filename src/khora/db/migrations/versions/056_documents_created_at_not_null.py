@@ -106,8 +106,10 @@ carries an explicit ``$1::TIMESTAMP WITH TIME ZONE`` cast and the value never
 enters the SQL text, so a session ``TimeZone`` hazard is structurally
 unreachable; the ORM column type and this bindparam resolve to the *same*
 asyncpg dialect impl class, so the migration binds through the exact type every
-document INSERT already uses. (The end-to-end round-trip still first executes in
-CI — there is no PostgreSQL in the development container.)
+document INSERT already uses. (The end-to-end round-trip was verified on the CI
+Postgres legs; there was no PostgreSQL in the development container where this
+was written, so the reasoning above was derived by compiling the statement
+against the asyncpg dialect offline.)
 
 Locking — this migration blocks ``documents`` on Postgres
 ----------------------------------------------------------

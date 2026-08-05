@@ -166,7 +166,12 @@ def do_run_migrations(connection: Connection) -> None:
         connection=connection,
         target_metadata=target_metadata,
         version_table=VERSION_TABLE,
-        # SQLite requires batch mode for ALTER operations that involve FKs/constraints
+        # Autogenerate only: this makes `alembic revision --autogenerate` RENDER
+        # alter operations in batch form. It has no effect at upgrade time and
+        # does not drive the table rebuilds — those come from explicit
+        # `op.batch_alter_table(...)` calls in the revision bodies. See the FK
+        # pragma comment in run_async_migrations() for why that distinction
+        # matters.
         render_as_batch=is_sqlite,
         # Commit each migration's DDL and version stamp atomically so a mid-chain
         # failure never leaves the recorded revision ahead of the applied schema.
@@ -352,6 +357,30 @@ async def run_async_migrations() -> None:
             # clean ``PRAGMA foreign_key_check`` after upgrading to head) is what
             # keeps it that way. The constraints themselves are unaffected: they
             # remain in the schema and are enforced on application connections.
+            #
+            # BEFORE YOU TURN THIS BACK ON — two things that look like reasons
+            # to, and are not:
+            #
+            # 1. "Add a PRAGMA foreign_key_check guard and re-enable it." The
+            #    check does not detect this bug. Measured: it returns **clean on
+            #    the damaged database**, because a cascade deletes children
+            #    precisely so that no violation remains — the result is a
+            #    consistent database that is merely empty. Only row counts catch
+            #    it, which is why the test asserts those. As a runtime gate it
+            #    would be worse than useless: it would still miss the cascade
+            #    while newly wedging the chain for anyone carrying a pre-existing
+            #    orphan, including one created by this very bug in 016/037/055,
+            #    who would have no remedy. The check earns its place in the test
+            #    only as a control for the inverse risk named above.
+            #
+            # 2. "Enforcement during migrations sounds safer." It was tried. The
+            #    ON setting arrived in #411 alongside render_as_batch, with a
+            #    comment claiming it made batch ALTER behave "consistently with
+            #    Postgres" — the rationale was backwards, since SQLite's own
+            #    rebuild procedure requires enforcement OFF. No bug report and no
+            #    test motivated it, and because every gate built the chain on an
+            #    empty database it survived three further revisions. Re-enabling
+            #    repeats #411.
             #
             # Set explicitly rather than relying on SQLite's default — the
             # default is overridable at compile time (SQLITE_DEFAULT_FOREIGN_KEYS),
