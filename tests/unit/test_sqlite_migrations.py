@@ -14,6 +14,8 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from tests.test_helpers.alembic_head import current_head
+
 
 def _make_config(url: str) -> Config:
     """Build a programmatic Alembic Config pointing at the bundled migrations."""
@@ -84,7 +86,7 @@ class TestSqliteMigrations:
                     # Version table must point at head.
                     result = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
                     version = result.scalar()
-                    assert version == "057_drop_documents_created_at_index"
+                    assert version == current_head()
             finally:
                 await engine.dispose()
 

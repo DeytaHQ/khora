@@ -35,7 +35,6 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from tests.test_helpers.documents_source_type import (
     BACKFILL_VALUE,
     DECLARED_INDEX_COLUMNS,
-    HEAD_REVISION,
     ID_EMPTY_STRING,
     ID_NULL,
     ID_REAL_VALUE,
@@ -43,6 +42,7 @@ from tests.test_helpers.documents_source_type import (
     NS,
     PREV_REVISION,
     REAL_VALUE,
+    TARGET_REVISION,
     make_config,
     read_source_types,
     seed_rows,
@@ -157,7 +157,7 @@ class TestMigration055OnPostgres:
         before = asyncio.run(read_source_types(pg_url, [ID_NULL]))
         assert before[ID_NULL] is None
 
-        command.upgrade(make_config(pg_url), HEAD_REVISION)
+        command.upgrade(make_config(pg_url), TARGET_REVISION)
 
         after = asyncio.run(read_source_types(pg_url, [ID_NULL, ID_REAL_VALUE, ID_EMPTY_STRING]))
         assert after[ID_NULL] == BACKFILL_VALUE, "the NULL row was not backfilled"
@@ -169,13 +169,13 @@ class TestMigration055OnPostgres:
             f"precondition: source_type must be NULLABLE at revision {PREV_REVISION}"
         )
 
-        command.upgrade(make_config(pg_url), HEAD_REVISION)
+        command.upgrade(make_config(pg_url), TARGET_REVISION)
 
         assert asyncio.run(_pg_source_type_is_nullable(pg_url)) is False
         assert asyncio.run(_pg_index_columns(pg_url)) == DECLARED_INDEX_COLUMNS
 
     def test_pre_existing_index_does_not_wedge_the_backfill(self, pg_url_preindexed: str) -> None:
-        command.upgrade(make_config(pg_url_preindexed), HEAD_REVISION)
+        command.upgrade(make_config(pg_url_preindexed), TARGET_REVISION)
 
         after = asyncio.run(read_source_types(pg_url_preindexed, [ID_NULL]))
         assert after[ID_NULL] == BACKFILL_VALUE
@@ -184,7 +184,7 @@ class TestMigration055OnPostgres:
 
     def test_downgrade_drops_the_constraint_and_index_but_not_the_backfill(self, pg_url: str) -> None:
         cfg = make_config(pg_url)
-        command.upgrade(cfg, HEAD_REVISION)
+        command.upgrade(cfg, TARGET_REVISION)
 
         command.downgrade(cfg, PREV_REVISION)
 

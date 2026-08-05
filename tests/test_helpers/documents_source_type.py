@@ -41,7 +41,6 @@ from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 __all__ = [
     "BACKFILL_VALUE",
     "DECLARED_INDEX_COLUMNS",
-    "HEAD_REVISION",
     "ID_EMPTY_STRING",
     "ID_NULL",
     "ID_REAL_VALUE",
@@ -50,6 +49,7 @@ __all__ = [
     "OPTIMIZE_CREATE_INDEX",
     "PREV_REVISION",
     "REAL_VALUE",
+    "TARGET_REVISION",
     "bind_id",
     "insert_document",
     "insert_namespace",
@@ -60,7 +60,7 @@ __all__ = [
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "src" / "khora" / "db" / "migrations"
 
-HEAD_REVISION = "055_documents_source_type_alignment"
+TARGET_REVISION = "055_documents_source_type_alignment"
 PREV_REVISION = "054_documents_namespace_created_at_id"
 
 INDEX_NAME = "ix_documents_namespace_source_type"
