@@ -45,6 +45,7 @@ from khora.db.session import run_migrations
 from khora.hooks.dispatcher import HookDispatcher
 from khora.hooks.models import SemanticFilter
 from khora.hooks.subscription_store import HookSubscriptionStore, PersistentSubscription
+from tests.test_helpers.alembic_head import current_head
 
 DATABASE_URL = os.environ.get(
     "KHORA_DATABASE_URL",
@@ -71,7 +72,6 @@ pytestmark = pytest.mark.integration
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "src" / "khora" / "db" / "migrations"
 
-_HEAD = "057_drop_documents_created_at_index"
 _PREV = "048_dream_conflicts_reconcile"
 
 
@@ -174,7 +174,7 @@ class TestMigration049Schema:
                     assert "ix_khora_hook_subscriptions_ns_event" in idx_names
 
                     ver = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
-                    assert ver.scalar() == _HEAD
+                    assert ver.scalar() == current_head()
             finally:
                 await engine.dispose()
 

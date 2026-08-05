@@ -11,6 +11,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 
 import khora.db.migrations
 from khora.db.session import MigrationResult, _DatabaseAheadError, _run_migrations_sync, run_migrations
@@ -19,10 +21,14 @@ from khora.khora import Khora
 # Derive migrations directory from the installed package — not relative to this test file
 _MIGRATIONS_DIR = Path(khora.db.migrations.__file__).parent
 
-#: Number of migration files the chain is expected to ship. Bump this by one
-#: whenever a revision is added — see ``test_versions_dir_is_fully_bundled``
-#: for why the count is declared rather than derived.
-_EXPECTED_MIGRATION_COUNT = 58
+#: A revision the chain must still reach, pinning the walk to a known point.
+#: Not bumped as part of adding a migration — that is the per-PR edit an exact
+#: file count used to require. Bump it when a migration lands that the ORM
+#: drift ratchet cannot back up: one that only *drops* things, backfills data,
+#: or creates Postgres-only objects with no ORM counterpart. Deleting such a
+#: revision leaves nothing missing from the live schema, so the ratchet stays
+#: green and this anchor is the only thing left that would notice.
+_ANCHOR_REVISION = "057_drop_documents_created_at_index"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -448,24 +454,81 @@ class TestMigrationPackageStructure:
 
     @pytest.mark.unit
     def test_versions_dir_is_fully_bundled(self):
-        """Every migration in the chain is present in the installed package.
+        """No migration file goes missing from the chain the package ships.
 
-        ``_MIGRATIONS_DIR`` resolves through ``khora.db.migrations.__file__``,
-        i.e. the *installed* package rather than the repo tree, so this is a
-        packaging tripwire: it fails if a build config ever stops shipping
-        ``versions/*.py``, which would leave ``run_migrations()`` silently
-        building a partial schema. Deriving the expected count from the very
-        directory it checks would make the assertion vacuous, so the number is
-        declared. Bump ``_EXPECTED_MIGRATION_COUNT`` when you add a migration;
-        it is deliberately the only place the number appears.
+        A packaging tripwire first of all: ``_MIGRATIONS_DIR`` resolves through
+        ``khora.db.migrations.__file__``, i.e. the *installed* package rather
+        than the repo tree, so this fails if a build config ever stops shipping
+        ``versions/*.py`` — which would leave ``run_migrations()`` silently
+        building a partial schema. Keep it reading the installed package.
+
+        No file count is asserted. An exact count had to be edited on every
+        migration PR and conflicted with every other one in flight, and a floor
+        decays into uselessness: once a migration lands beyond it, deleting the
+        newest revision passes the floor, passes the walk below (both sides
+        shrink together), and passes ``test_migration_chain_is_contiguous``,
+        which is invariant under truncation — the survivors are still a
+        contiguous chain starting at ``down_revision=None``.
+
+        Truncation is instead caught by the ORM drift gate in
+        ``tests/unit/test_migration_drift.py``: deleting a revision leaves the
+        objects it created missing from the live schema and absent from the
+        baseline ledger, so the ratchet fails. That covers any migration with an
+        ORM-visible footprint — most of them, verified by deleting
+        ``056_documents_created_at_not_null`` and watching the ratchet go red.
+        It is blind to a migration that leaves nothing missing: one that only
+        *drops* an object, backfills data, or creates a Postgres-only object
+        with no ORM counterpart. Deleting ``057_drop_documents_created_at_index``
+        keeps the whole drift module green, which is why the anchor below sits
+        on it. Do not lean on "each migration's own test pins its revision id"
+        as a second backstop either: nearly half the revisions in the chain have
+        no dedicated test module and are referenced nowhere in ``tests/``.
+
+        The anchor pins the walk to a known revision, so a chain re-pointed to
+        bypass it, or truncated at or below it, fails here rather than reading
+        as a healthy shorter chain. Note what it does *not* catch: a stray
+        revision chained onto head leaves the anchor reachable, and only the
+        head literals this module stopped asserting would have caught that —
+        restoring them would reinstate the per-migration edit this change
+        exists to remove.
+
+        Resolving the chain covers a different failure again. Alembic skips a
+        file its filename filter excludes — an editor lockfile such as
+        ``.#zz.py`` is skipped while still being globbed here — so a file can
+        exist and belong to no chain; the walk is what rejects it. Anything
+        else unreadable raises outright rather than being skipped: a syntax
+        error raises ``SyntaxError``, and a file with no ``revision`` raises
+        ``CommandError``. A branched chain — a shipped revision nothing points
+        at — is rejected by ``get_current_head()`` alone: neither
+        ``from_config`` nor ``walk_revisions`` raises on two heads, so that call
+        is made for its raise rather than its value.
         """
         versions_dir = _MIGRATIONS_DIR / "versions"
         migration_files = sorted(versions_dir.glob("*.py"))
-        # Filter out __pycache__ and __init__
+        # ``__init__.py`` is globbed but is not a revision.
         migration_files = [f for f in migration_files if not f.name.startswith("__")]
-        assert len(migration_files) == _EXPECTED_MIGRATION_COUNT, (
-            f"Expected {_EXPECTED_MIGRATION_COUNT} migration files, "
-            f"found {len(migration_files)}: {[f.name for f in migration_files]}"
+        assert migration_files, f"No migration files shipped in {versions_dir}"
+
+        cfg = Config()
+        cfg.set_main_option("script_location", str(_MIGRATIONS_DIR))
+        script = ScriptDirectory.from_config(cfg)
+        walked = list(script.walk_revisions())
+        # Called for its raise, not its value: this is the only call here that
+        # rejects a branched chain. Neither ``from_config`` nor
+        # ``walk_revisions`` raises — both happily traverse two heads.
+        head = script.get_current_head()
+
+        walked_paths = {Path(str(rev.path)) for rev in walked}
+        orphans = sorted(f.name for f in migration_files if f not in walked_paths)
+        assert not orphans, (
+            f"Shipped migration files that belong to no chain: {orphans}. "
+            f"Chain resolves {len(walked)} revisions from {len(migration_files)} files."
+        )
+
+        revisions = {rev.revision for rev in walked}
+        assert _ANCHOR_REVISION in revisions, (
+            f"Chain no longer reaches the anchor revision {_ANCHOR_REVISION!r}; "
+            f"head is {head!r}. Truncated or re-pointed below the anchor?"
         )
 
     @pytest.mark.unit

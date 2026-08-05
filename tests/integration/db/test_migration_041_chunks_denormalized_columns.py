@@ -41,6 +41,7 @@ from alembic.config import Config
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from khora.db.session import run_migrations
+from tests.test_helpers.alembic_head import current_head
 
 DATABASE_URL = os.environ.get(
     "KHORA_DATABASE_URL",
@@ -322,7 +323,7 @@ class TestMigration041OnPostgres:
                 async with engine.connect() as conn:
                     # Chain reached head.
                     result = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
-                    assert result.scalar() == "057_drop_documents_created_at_index"
+                    assert result.scalar() == current_head()
 
                     # The migration did not create the table.
                     result = await conn.execute(
@@ -353,7 +354,7 @@ class TestMigration041OnSqlite:
             try:
                 async with engine.connect() as conn:
                     result = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
-                    assert result.scalar() == "057_drop_documents_created_at_index"
+                    assert result.scalar() == current_head()
             finally:
                 await engine.dispose()
 

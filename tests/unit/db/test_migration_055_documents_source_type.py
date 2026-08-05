@@ -40,7 +40,6 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from tests.test_helpers.documents_source_type import (
     BACKFILL_VALUE,
     DECLARED_INDEX_COLUMNS,
-    HEAD_REVISION,
     ID_EMPTY_STRING,
     ID_NULL,
     ID_REAL_VALUE,
@@ -48,6 +47,7 @@ from tests.test_helpers.documents_source_type import (
     NS,
     PREV_REVISION,
     REAL_VALUE,
+    TARGET_REVISION,
     insert_document,
     make_config,
     read_source_types,
@@ -104,7 +104,7 @@ class TestMigration055OnSqlite:
         before = asyncio.run(read_source_types(sqlite_url, [ID_NULL]))
         assert before[ID_NULL] is None
 
-        command.upgrade(make_config(sqlite_url), HEAD_REVISION)
+        command.upgrade(make_config(sqlite_url), TARGET_REVISION)
 
         after = asyncio.run(read_source_types(sqlite_url, [ID_NULL, ID_REAL_VALUE, ID_EMPTY_STRING]))
         assert after[ID_NULL] == BACKFILL_VALUE, "the NULL row was not backfilled"
@@ -118,13 +118,13 @@ class TestMigration055OnSqlite:
             f"precondition: source_type must be NULLABLE at revision {PREV_REVISION}"
         )
 
-        command.upgrade(make_config(sqlite_url), HEAD_REVISION)
+        command.upgrade(make_config(sqlite_url), TARGET_REVISION)
 
         assert asyncio.run(_sqlite_source_type_is_nullable(sqlite_url)) is False
 
     def test_index_is_created_over_the_declared_columns(self, sqlite_url: str) -> None:
         _seed_sqlite(sqlite_url)
-        command.upgrade(make_config(sqlite_url), HEAD_REVISION)
+        command.upgrade(make_config(sqlite_url), TARGET_REVISION)
 
         assert _documents_indexes(sqlite_url).get(INDEX_NAME) == DECLARED_INDEX_COLUMNS
 
@@ -137,7 +137,7 @@ class TestMigration055OnSqlite:
         """
         _seed_sqlite(sqlite_url, pre_create_index=True)
 
-        command.upgrade(make_config(sqlite_url), HEAD_REVISION)
+        command.upgrade(make_config(sqlite_url), TARGET_REVISION)
 
         after = asyncio.run(read_source_types(sqlite_url, [ID_NULL]))
         assert after[ID_NULL] == BACKFILL_VALUE
@@ -149,7 +149,7 @@ class TestMigration055OnSqlite:
     def test_downgrade_drops_the_constraint_and_index_but_not_the_backfill(self, sqlite_url: str) -> None:
         _seed_sqlite(sqlite_url)
         cfg = make_config(sqlite_url)
-        command.upgrade(cfg, HEAD_REVISION)
+        command.upgrade(cfg, TARGET_REVISION)
 
         command.downgrade(cfg, PREV_REVISION)
 

@@ -65,6 +65,7 @@ from alembic.config import Config
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from khora.db.session import run_migrations
+from tests.test_helpers.alembic_head import current_head
 
 DATABASE_URL = os.environ.get(
     "KHORA_DATABASE_URL",
@@ -93,7 +94,6 @@ pytestmark = pytest.mark.integration
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "src" / "khora" / "db" / "migrations"
 
 _PREV_REVISION = "043_khora_chunks_metadata_backfill"
-_HEAD_REVISION = "057_drop_documents_created_at_index"
 
 _TSV_TRIGGER = "khora_chunks_content_tsv_update"
 
@@ -781,7 +781,7 @@ class TestMigration044OnPostgres:
             try:
                 async with engine.connect() as conn:
                     result = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
-                    assert result.scalar() == _HEAD_REVISION
+                    assert result.scalar() == current_head()
 
                     result = await conn.execute(
                         sa.text(
@@ -811,7 +811,7 @@ class TestMigration044OnSqlite:
             try:
                 async with engine.connect() as conn:
                     result = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
-                    assert result.scalar() == _HEAD_REVISION
+                    assert result.scalar() == current_head()
             finally:
                 await engine.dispose()
 
