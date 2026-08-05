@@ -84,7 +84,6 @@ DEFINE FIELD IF NOT EXISTS processed_at ON document TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS source_timestamp ON document TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS external_id ON document TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS session_id ON document TYPE option<string>;
-DEFINE INDEX IF NOT EXISTS idx_document_namespace ON document FIELDS namespace_id;
 DEFINE INDEX IF NOT EXISTS idx_document_ns_session ON document FIELDS namespace_id, session_id;
 -- Note: SurrealDB does not support partial indexes; full index used for dedup queries
 DEFINE INDEX IF NOT EXISTS idx_document_ns_checksum ON document FIELDS namespace_id, checksum;
@@ -93,30 +92,53 @@ DEFINE INDEX IF NOT EXISTS idx_document_ns_external_id ON document FIELDS namesp
 -- Sort index backing ``list_documents``' pinned ``ORDER BY created_at DESC,
 -- id DESC``, mirroring the relational backends' index from
 -- ``db/migrations/versions/054_documents_namespace_created_at_id.py``.
--- Two fields, not three: ``id`` is the record identifier rather than an
--- ordinary field, so naming it in ``FIELDS`` fails to define on this
--- SCHEMAFULL table unless a ``DEFINE FIELD id`` is added first — and since
--- ``DEFINE FIELD IF NOT EXISTS`` is append-only that would type ``id`` on
--- fresh databases only, diverging them permanently from existing ones.
--- It is also unnecessary: a non-unique index carries the record id as its
--- trailing key component, so a backward scan of ``(namespace_id,
--- created_at)`` already yields exactly ``created_at DESC, id DESC``.
--- Measured over ``ws://``, on the exact versions named — nothing between
--- 2.6.5 and 3.0.5 was run, so treat the boundary as unknown rather than
--- assuming it is the major bump. Servers 3.0.5 and 3.2.0 drop the sort
--- entirely and push LIMIT/START into a backward index scan (first page
--- 8-23x faster at 4k rows, full drain 1.6-5.1x). Server 2.6.5 does not:
--- the plan is byte-identical with and without this index because that
--- engine sorts in memory unconditionally, so there the index buys nothing
--- and costs only write-side maintenance (~6% on a batched 4k-row insert).
--- The embedded engine (``memory://`` / ``surrealkv://``) reports
--- ``surrealdb-2.0.0`` and behaves like 2.6.5 — embedded gets the write cost
--- and none of the benefit. The benefit is also latent everywhere for now:
--- the ``FLEXIBLE TYPE`` clauses elsewhere in this DDL do not parse on either
--- 3.x server (they require ``TYPE ... FLEXIBLE``, and reject FLEXIBLE on
--- non-object types), so schema init cannot currently reach a server that
--- would use this index.
+-- Four things a future editor should not undo:
+-- 1. Two fields, not three. ``id`` is the record identifier rather than an
+--    ordinary field, so naming it in ``FIELDS`` fails to define on this
+--    SCHEMAFULL table. Adding a ``DEFINE FIELD id`` to make it legal is
+--    worse: ``DEFINE FIELD IF NOT EXISTS`` is append-only, so it would type
+--    ``id`` on fresh databases only and diverge them permanently from
+--    existing ones.
+-- 2. Omitting ``id`` rests on a non-unique index carrying the record id as
+--    its trailing key component. That holds on embedded 2.0.0, where the
+--    scan order matches ``ORDER BY id`` across a tie block — but the row
+--    order of an unsorted scan is not a contractual ordering, and it is
+--    unverified on 3.x, the engine that would actually rely on it. If the
+--    two orders ever diverge, a planner that drops the sort returns ties in
+--    index-key order and ``START`` paging silently drops or repeats rows.
+--    Gate this behind a ``ws://`` pagination test before anything depends
+--    on it.
+-- 3. Not ``CONCURRENTLY``. That build is asynchronous and the planner
+--    routes queries through the index before it is populated, so counts
+--    come back short for the length of the build with no error. A one-time
+--    upgrade stall beats a window of silently wrong reads.
+-- 4. This index is NOT selected on any engine khora can currently reach.
+--    2.6.5 and embedded 2.0.0 sort in memory unconditionally; 3.0.5 / 3.2.0
+--    do push LIMIT/START into a backward index scan, but the ``FLEXIBLE
+--    TYPE`` clauses elsewhere in this DDL do not parse there, so schema
+--    init cannot reach such a server at all (#1584). Treat the 3.x read win
+--    as unconfirmed under the real index set until #1584 lands: on the
+--    engines that can be measured, the planner picks among equally eligible
+--    ``(namespace_id, …)`` composites by index NAME, and
+--    ``idx_document_ns_checksum`` sorts ahead of this one.
 DEFINE INDEX IF NOT EXISTS idx_document_ns_created ON document FIELDS namespace_id, created_at;
+-- ``idx_document_namespace``, this blob's former one-field namespace index,
+-- is a strict prefix of the index just created. Its ``DEFINE`` is gone from
+-- the block above and existing databases drop it here — the two had to move
+-- together, since side by side they would rebuild and destroy the index on
+-- every ``connect()``. Created before dropped, so a connect dying between
+-- the two leaves more index coverage than needed rather than less. Same
+-- ordering rationale as the raw-SQLite blob's ``idx_docs_ns`` drop.
+-- The drop is safe but does NOT promote the index above: the planner
+-- prefix-matches a bare ``WHERE namespace_id = $ns`` onto a two-field
+-- composite, so no query shape falls back to a table scan, but the one it
+-- picks is ``idx_document_ns_checksum`` (see 4). This drop stands on write
+-- cost alone — it returns inserts to parity with today rather than making
+-- them cheaper. Checked for row loss rather than assumed safe, because the
+-- composite that takes over has a nullable second column and SurrealDB does
+-- index NONE: rows with and without a checksum all come back under every
+-- index set.
+REMOVE INDEX IF EXISTS idx_document_namespace ON document;
 
 -- Chunk (with HNSW vector index and BM25 full-text index)
 DEFINE TABLE IF NOT EXISTS chunk SCHEMAFULL;

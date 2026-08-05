@@ -195,6 +195,24 @@ def _sorts(plan: list[str]) -> list[str]:
     return [line for line in plan if "TEMP B-TREE" in line.upper()]
 
 
+# ``SEARCH documents USING COVERING INDEX idx_docs_ns_created_id (namespace_id=?)``
+# and the non-covering ``SCAN``/``SEARCH ... USING INDEX <name>`` spellings. An
+# unnamed automatic index does not match, which is intended: it is not one of
+# this table's indexes.
+PLAN_INDEX_RE = re.compile(r"USING\s+(?:COVERING\s+)?INDEX\s+(\w+)")
+
+
+def _indexes_used(plan: list[str]) -> set[str]:
+    """The index names a plan reads, extracted whole.
+
+    Matching an index name as a naked substring of a plan line is unsound here:
+    ``idx_docs_ns`` is a strict prefix of both ``idx_docs_ns_created_id`` and
+    ``idx_docs_ns_external_id``, and every one of those lines occurs in this
+    schema's plans. Same hazard the blob regexes above guard with ``\\b``.
+    """
+    return {match.group(1) for line in plan for match in PLAN_INDEX_RE.finditer(line)}
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -285,7 +303,13 @@ class TestSchemaBlobStructure:
                     continue
                 try:
                     con.execute(statement)
-                except sqlite3.OperationalError as exc:
+                # ``sqlite3.Error``, not ``OperationalError``: a cut comment
+                # whose remainder parses on its own raises something else -
+                # ``-- note; SELECT ?;`` leaves ``SELECT ?``, which prepares
+                # cleanly and then raises ``ProgrammingError`` on the missing
+                # binding. A narrow catch lets that escape as a bare traceback
+                # with no chunk index and no chunk text.
+                except sqlite3.Error as exc:
                     first_line = statement.splitlines()[0]
                     pytest.fail(
                         f"chunk {index} of _SCHEMA_SQL is not executable once the blob is split on "
@@ -457,7 +481,7 @@ class TestListDocumentsPlanShape:
 
         plan = _query_plan(seeded.db_path, statement, parameters)
 
-        assert any(SORT_INDEX in line for line in plan), (
+        assert SORT_INDEX in _indexes_used(plan), (
             f"{SORT_INDEX} is not used for shape {shape} - a listing that falls back to a table "
             f"scan reads the whole namespace to return one page. Plan: {plan}"
         )
@@ -473,7 +497,7 @@ class TestListDocumentsPlanShape:
         _use_legacy_indexes(seeded.db_path)
         plan = _query_plan(seeded.db_path, statement, parameters)
 
-        assert any(LEGACY_INDEX in line for line in plan), f"expected the narrow index to be used: {plan}"
+        assert LEGACY_INDEX in _indexes_used(plan), f"expected the narrow index to be used: {plan}"
         assert _sorts(plan), (
             f"the narrow index was expected to leave SQLite sorting for shape {shape}; if it does "
             f"not, the premise of this module is wrong and the assertions above prove nothing. Plan: {plan}"
@@ -511,7 +535,7 @@ class TestNamespaceAggregatePlans:
 
         plan = _query_plan(seeded.db_path, statement, parameters)
 
-        assert any(SORT_INDEX in line for line in plan), (
+        assert SORT_INDEX in _indexes_used(plan), (
             f"{method} does not read {SORT_INDEX} - with the narrow namespace index dropped, "
             f"that leaves it scanning the table. Plan: {plan}"
         )
@@ -521,6 +545,14 @@ class TestNamespaceAggregatePlans:
 
         Without this contrast, the assertion above could not tell a real
         re-plan from an aggregate that would name the sort index either way.
+
+        Asserted as the whole index set, not as a membership test: the sort
+        index is gone from this database, so "the plan does not name the sort
+        index" cannot fail and proves nothing. What can fail - and is the
+        regression worth catching - is the aggregate reading some *other*
+        surviving index (``idx_docs_checksum``, ``idx_docs_ns_external_id``) or
+        no index at all, either of which would make the pre-change state a
+        different comparison than the one this class claims to draw.
         """
         _, (statement, parameters) = await _capture_sql(
             seeded.backend, lambda: getattr(seeded.backend, method)(seeded.namespace_id)
@@ -529,10 +561,8 @@ class TestNamespaceAggregatePlans:
         _use_legacy_indexes(seeded.db_path)
         plan = _query_plan(seeded.db_path, statement, parameters)
 
-        assert any(LEGACY_INDEX in line for line in plan), (
-            f"{method} was expected to read the narrow index while it exists; if it did not, "
-            f"the assertion above proves nothing about the swap. Plan: {plan}"
-        )
-        assert not any(SORT_INDEX in line for line in plan), (
-            f"{method} named {SORT_INDEX} even with the narrow index in place: {plan}"
+        assert _indexes_used(plan) == {LEGACY_INDEX}, (
+            f"{method} was expected to read {LEGACY_INDEX} and nothing else while that index "
+            f"exists; if it did not, the assertion above proves nothing about the swap. "
+            f"Plan: {plan}"
         )
