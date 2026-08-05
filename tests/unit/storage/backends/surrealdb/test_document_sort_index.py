@@ -50,6 +50,23 @@ async def _document_indexes(conn: SurrealDBConnection) -> dict[str, str]:
     return dict(info["indexes"])
 
 
+async def _document_fields(conn: SurrealDBConnection) -> dict[str, str]:
+    """Return ``{field_name: definition}`` for the ``document`` table."""
+    info: Any = await conn.query_one("INFO FOR TABLE document")
+    return dict(info["fields"])
+
+
+def _index_fields(definition: str) -> list[str]:
+    """The ordered key list of a ``DEFINE INDEX ... FIELDS a, b`` definition.
+
+    Order is the whole point: ``(created_at, namespace_id)`` would satisfy a
+    membership check and be useless for a ``namespace_id``-equality lookup.
+    """
+    match = re.search(r"\bFIELDS\s+(.+?)(?:\s+(?:UNIQUE|SEARCH|MTREE|HNSW|COMMENT|CONCURRENTLY)\b|$)", definition)
+    assert match, f"could not parse FIELDS out of {definition!r}"
+    return [f.strip() for f in match.group(1).split(",")]
+
+
 async def _connected() -> SurrealDBConnection:
     """A ``memory://`` connection with khora's real schema applied."""
     conn = SurrealDBConnection(mode="memory", sync_data=False)
@@ -58,7 +75,7 @@ async def _connected() -> SurrealDBConnection:
 
 
 async def test_sort_index_is_actually_defined() -> None:
-    """``idx_document_ns_created`` exists on ``(namespace_id, created_at)``."""
+    """``idx_document_ns_created`` exists on exactly ``(namespace_id, created_at)``."""
     conn = await _connected()
     try:
         indexes = await _document_indexes(conn)
@@ -68,7 +85,46 @@ async def test_sort_index_is_actually_defined() -> None:
             "errors, so a non-parsing DEFINE looks like success in the log."
         )
         definition = indexes[SORT_INDEX]
-        assert "namespace_id" in definition and "created_at" in definition, definition
+        assert _index_fields(definition) == ["namespace_id", "created_at"], (
+            f"{SORT_INDEX} must be keyed on (namespace_id, created_at) in that order, got {definition!r}"
+        )
+    finally:
+        await conn.disconnect()
+
+
+async def test_flexible_fields_survive_schema_init() -> None:
+    """Every ``FLEXIBLE``-declared ``document`` field actually materializes.
+
+    ``FLEXIBLE TYPE x`` is the 2.x clause order and is what the engine echoes
+    back in ``INFO FOR TABLE`` even when handed ``TYPE x FLEXIBLE``, so both
+    spellings parse on the pinned SDK. This test does not encode a preference
+    between them — it pins the outcome: because ``initialize_schema`` submits
+    the whole blob through one ``execute`` and per-statement DDL errors are
+    swallowed, a ``DEFINE FIELD`` of this family that stopped parsing would
+    otherwise leave nothing but a success line in the log. That is exactly the
+    failure mode 3.x exhibits today (#1584), where these clauses do not parse.
+
+    The expected set is derived from the DDL rather than hardcoded, so a new
+    ``FLEXIBLE`` field on ``document`` is covered the moment it is added.
+    """
+    from khora.storage.backends.surrealdb.schema import _TABLE_DEFINITIONS
+
+    declared = set(re.findall(r"DEFINE FIELD (?:IF NOT EXISTS )?(\w+) ON document [^\n]*FLEXIBLE", _TABLE_DEFINITIONS))
+    assert declared, "no FLEXIBLE-declared document fields found in _TABLE_DEFINITIONS — has the DDL moved?"
+
+    conn = await _connected()
+    try:
+        fields = await _document_fields(conn)
+        missing = sorted(declared - fields.keys())
+        assert not missing, (
+            f"FLEXIBLE-declared document field(s) {missing} absent after schema init. "
+            "initialize_schema swallows per-statement DDL errors, so this is what a "
+            "silently non-parsing DEFINE FIELD looks like."
+        )
+        not_flexible = sorted(name for name in declared if "FLEXIBLE" not in fields[name])
+        assert not not_flexible, (
+            f"field(s) {not_flexible} lost their FLEXIBLE clause: {[fields[n] for n in not_flexible]}"
+        )
     finally:
         await conn.disconnect()
 
@@ -104,12 +160,25 @@ async def test_existing_database_drops_the_legacy_index_on_connect() -> None:
     The blob re-executes on every ``connect()``, so an upgrade path is the
     normal path here: the pre-existing index must be removed, and the rows it
     used to serve must all still be reachable afterwards.
+
+    The pre-state is reconstructed as *legacy-only* — the sort index is
+    removed before the legacy one is added. ``_connected()`` has already run
+    the current DDL, so leaving the sort index in place would let an
+    initializer that never creates it pass the assertion below on residue from
+    setup rather than on anything the upgrade did.
     """
     conn = await _connected()
     try:
-        # Recreate the pre-#1581 state on a database that already holds rows.
+        # Recreate the pre-change state on a database that already holds rows:
+        # legacy index present, sort index absent.
+        await conn.execute(f"REMOVE INDEX IF EXISTS {SORT_INDEX} ON document")
         await conn.execute(f"DEFINE INDEX IF NOT EXISTS {LEGACY_INDEX} ON document FIELDS namespace_id")
-        assert LEGACY_INDEX in await _document_indexes(conn)
+        before = await _document_indexes(conn)
+        assert LEGACY_INDEX in before, sorted(before)
+        assert SORT_INDEX not in before, (
+            f"pre-state is not legacy-only — {SORT_INDEX} survived setup, so this test "
+            f"could pass without the upgrade creating it: {sorted(before)}"
+        )
         for i in range(20):
             await conn.execute(
                 "CREATE type::thing('document', $id) SET namespace_id = $ns, title = $t, created_at = time::now()",
