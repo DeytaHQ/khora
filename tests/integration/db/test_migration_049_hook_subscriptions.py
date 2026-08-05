@@ -71,7 +71,7 @@ pytestmark = pytest.mark.integration
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "src" / "khora" / "db" / "migrations"
 
-_HEAD = "055_documents_source_type_alignment"
+_HEAD = "056_documents_created_at_not_null"
 _PREV = "048_dream_conflicts_reconcile"
 
 

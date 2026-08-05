@@ -78,6 +78,11 @@ DEFINE FIELD IF NOT EXISTS error_message ON document TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS extraction_config_hash ON document TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS extraction_params ON document FLEXIBLE TYPE option<object>;
 DEFINE FIELD IF NOT EXISTS metadata_ ON document FLEXIBLE TYPE option<object>;
+-- ``created_at`` is TYPE datetime, not option<datetime>, so SurrealDB already
+-- rejects NONE -- the same invariant migration 056 installs on the relational
+-- schema. No ASSERT is added: it would be redundant with the type, and
+-- ``DEFINE FIELD IF NOT EXISTS`` is append-only, so a changed clause would not
+-- reach an existing database anyway.
 DEFINE FIELD IF NOT EXISTS created_at ON document TYPE datetime DEFAULT time::now();
 DEFINE FIELD IF NOT EXISTS updated_at ON document TYPE datetime DEFAULT time::now();
 DEFINE FIELD IF NOT EXISTS processed_at ON document TYPE option<datetime>;

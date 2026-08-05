@@ -316,8 +316,11 @@ PG_ONLY_INDEX_BASELINE = frozenset(
 # Overwhelmingly columns carrying a Python-side ``default=`` and no explicit
 # ``nullable`` argument: the declarative layer infers NOT NULL from the
 # non-Optional annotation, ``op.create_table`` in the migration did not.
-# ``documents.source_type`` is deliberately absent for the same reason as the
-# index above.
+# ``documents.source_type`` (migration 055) and ``documents.created_at``
+# (migration 056) are deliberately absent for the same reason as the index
+# above: both are now built NOT NULL by the chain, so ledgering either would
+# make the gate green whether or not its migration exists. Note
+# ``documents.updated_at`` below stays — 056 flips ``created_at`` only.
 NULLABILITY_BASELINE = frozenset(
     {
         "chronicle_events.created_at",
@@ -329,7 +332,6 @@ NULLABILITY_BASELINE = frozenset(
         "chunks.start_char",
         "chunks.token_count",
         "documents.chunk_count",
-        "documents.created_at",
         "documents.entity_count",
         "documents.metadata",
         "documents.size_bytes",
