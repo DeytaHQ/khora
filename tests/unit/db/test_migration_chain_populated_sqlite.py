@@ -75,6 +75,7 @@ pytestmark = pytest.mark.unit
 #: is the shortest walk, crossing 055 and 056 only.
 _START_REVISIONS = [
     "000_initial_schema",
+    "007_hnsw_parameter_tuning",
     "009_temporal_search_indexes",
     "013_drop_previous_version_id",
     "016_widen_extraction_config_hash",
@@ -133,12 +134,30 @@ def _insert_row(engine: sa.Engine, table: str, **explicit: Any) -> dict[str, Any
     written five times and would break whenever an early revision changed.
     Only columns that are NOT NULL and carry no default need a value; anything
     else is left to the schema.
+
+    **Every required foreign-key column must be passed explicitly.** The
+    ``*_id`` fallback below would otherwise invent a random UUID for it,
+    fabricating a reference to a row that does not exist — and this test
+    asserts ``PRAGMA foreign_key_check`` is clean, so that dangling reference
+    would surface as a confident red naming the wrong cause. Rather than let
+    the heuristic reach an FK column, this raises at seed time with the column
+    named. No current caller trips it; the guard is here so that adding a table
+    to ``_seed`` fails loudly instead of subtly.
     """
+    inspector = sa.inspect(engine)
+    fk_columns = {column for fk in inspector.get_foreign_keys(table) for column in fk["constrained_columns"]}
+
     values = dict(explicit)
-    for column in sa.inspect(engine).get_columns(table):
+    for column in inspector.get_columns(table):
         name = column["name"]
         if name in values or column["nullable"] or column["default"] is not None:
             continue
+        if name in fk_columns:
+            raise AssertionError(
+                f"{table}.{name} is a required foreign key and was not passed explicitly. "
+                f"Inventing a value would create a dangling reference and make the "
+                f"foreign_key_check assertion fail for the wrong reason."
+            )
         type_name = str(column["type"]).upper()
         if "INT" in type_name:
             values[name] = 1
@@ -180,13 +199,20 @@ def _seed(url: str) -> None:
     * ``keyword_chunks`` and ``chronicle_events`` — cascade off ``chunks``,
       not off ``documents``. They are the *transitive* leg, and they are what
       makes the test assert transitivity rather than assume it.
-    * ``entities`` — cascades off ``memory_namespaces``, covering the 008
-      rebuild family rather than the ``documents`` one.
+    * ``entities`` — a cascade child of ``memory_namespaces``, so it is one of
+      the rows the 001 / 010 / 011 / 012 / 013 rebuilds would destroy.
+    * ``relationships``, ``temporal_edges``, ``time_edge_links`` — cascade off
+      ``entities``. These are what give the **008** rebuild teeth. Seeding
+      ``entities`` alone does not: 008 rebuilds ``entities`` itself, and the
+      rebuilt table is precisely the one that always survives. Without its
+      children populated, the 008 leg asserts nothing.
 
     Seeding is defensive because the schema differs by starting revision:
-    ``keyword_chunks`` arrives in 050 and ``chronicle_events`` in 024, so from
-    an early start they simply do not exist yet and the walk covers them from
-    the revision that creates them onward.
+    ``chronicle_events`` arrives in 024, ``keyword_chunks`` in 050, and
+    ``temporal_edges`` / ``time_edge_links`` / ``time_nodes`` in the 004 family
+    (present from 009 onward among the revisions probed here). From an earlier
+    start they simply do not exist yet, and the walk covers them from the
+    revision that creates them onward.
     """
     engine = sa.create_engine(url)
     try:
@@ -201,11 +227,26 @@ def _seed(url: str) -> None:
         namespace = _insert_row(engine, "memory_namespaces", **namespace_parent)
         document = _insert_row(engine, "documents", namespace_id=namespace["id"])
         chunk = _insert_row(engine, "chunks", namespace_id=namespace["id"], document_id=document["id"])
-        _insert_row(engine, "entities", namespace_id=namespace["id"])
+        entity = _insert_row(engine, "entities", namespace_id=namespace["id"])
 
         for table in ("keyword_chunks", "chronicle_events"):
             if table in tables:
                 _insert_row(engine, table, namespace_id=namespace["id"], chunk_id=chunk["id"])
+
+        # entities' cascade children — what makes the 008 rebuild observable.
+        # A self-edge is fine here: the test counts rows, and one entity
+        # satisfies both endpoints of the FK.
+        endpoints: dict[str, Any] = {
+            "namespace_id": namespace["id"],
+            "source_entity_id": entity["id"],
+            "target_entity_id": entity["id"],
+        }
+        if "relationships" in tables:
+            _insert_row(engine, "relationships", **endpoints)
+        if {"temporal_edges", "time_nodes", "time_edge_links"} <= tables:
+            edge = _insert_row(engine, "temporal_edges", **endpoints)
+            time_node = _insert_row(engine, "time_nodes", namespace_id=namespace["id"])
+            _insert_row(engine, "time_edge_links", time_node_id=time_node["id"], edge_id=edge["id"])
     finally:
         engine.dispose()
 

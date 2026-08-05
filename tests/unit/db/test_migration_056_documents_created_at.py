@@ -43,6 +43,7 @@ import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -52,7 +53,7 @@ from alembic import command
 from alembic.script import ScriptDirectory
 from loguru import logger
 from sqlalchemy.dialects import postgresql
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from tests.test_helpers.documents_created_at import (
@@ -421,6 +422,84 @@ class TestMigration056OnSqlite:
         assert after[ID_UNTOUCHED] == EXISTING_CREATED_AT.replace(tzinfo=None)
 
 
+def _revision_module() -> Any:
+    """The loaded 056 revision module, via alembic's own script directory."""
+    return ScriptDirectory.from_config(make_config("sqlite://")).get_revision(HEAD_REVISION).module
+
+
+class TestLockTimeoutClassificationAndErrorPath:
+    """The failure branch of ``upgrade()``, which no lifecycle test reaches.
+
+    Both halves are pure logic and need no server, but neither is exercised by
+    a successful migration — so without this class the ``except DBAPIError``
+    handler and every branch of ``_is_lock_timeout`` ship untested.
+
+    The asyncpg case is the one that matters. ``_is_lock_timeout`` reads
+    ``sqlstate`` *and* ``pgcode`` because the two drivers disagree: asyncpg
+    carries the code on ``sqlstate`` and leaves ``pgcode`` as ``None``, while
+    psycopg uses ``pgcode``. ``env.py`` normalizes Postgres URLs to
+    ``postgresql+asyncpg``, so a ``pgcode``-only check would be dead on the
+    only driver khora actually runs — the exact regression the asyncpg case
+    below pins.
+    """
+
+    @staticmethod
+    def _dbapi_error(*, sqlstate: Any = None, pgcode: Any = None) -> DBAPIError:
+        return DBAPIError("ALTER TABLE documents ...", {}, SimpleNamespace(sqlstate=sqlstate, pgcode=pgcode))
+
+    def test_asyncpg_shape_is_recognised(self) -> None:
+        """asyncpg: code on ``sqlstate``, ``pgcode`` left None."""
+        module = _revision_module()
+        assert module._is_lock_timeout(self._dbapi_error(sqlstate="55P03", pgcode=None)) is True
+
+    def test_psycopg_shape_is_recognised(self) -> None:
+        module = _revision_module()
+        assert module._is_lock_timeout(self._dbapi_error(pgcode="55P03")) is True
+
+    def test_a_different_sqlstate_is_not_a_lock_timeout(self) -> None:
+        """A unique violation must not be misreported as a lock timeout."""
+        module = _revision_module()
+        assert module._is_lock_timeout(self._dbapi_error(sqlstate="23505")) is False
+
+    def test_missing_orig_is_not_a_lock_timeout(self) -> None:
+        module = _revision_module()
+        error = DBAPIError("stmt", {}, None)
+        assert module._is_lock_timeout(error) is False
+
+    def test_upgrade_logs_at_error_and_reraises(self) -> None:
+        """Nothing is swallowed: the handler logs and bare-``raise``s.
+
+        Also pins that the error event carries the same field set as the
+        success path — the counts are initialized before the try block
+        precisely so a failure does not emit a differently-shaped event.
+        """
+        module = _revision_module()
+        failure = self._dbapi_error(sqlstate="55P03", pgcode=None)
+
+        def _boom() -> tuple[int, int]:
+            raise failure
+
+        original = module._upgrade_impl
+        module._upgrade_impl = _boom
+        try:
+            with _capture_migration_events() as records:
+                with pytest.raises(DBAPIError) as caught:
+                    module.upgrade()
+        finally:
+            module._upgrade_impl = original
+
+        assert caught.value is failure, "the original exception must propagate, not a wrapped one"
+
+        applied = [r for r in records if r["message"] == "khora.migration.applied"]
+        assert len(applied) == 1
+        assert applied[0]["level"].name == "ERROR"
+        extra = applied[0]["extra"]
+        assert extra["lock_timeout_tripped"] is True
+        assert extra["migration_id"] == HEAD_REVISION
+        assert extra["rows_backfilled_from_updated_at"] == 0
+        assert extra["rows_epoch_stamped"] == 0
+
+
 class TestEpochIsBoundNotInlined:
     """Pin the epoch's binding without needing a Postgres server.
 
@@ -431,7 +510,7 @@ class TestEpochIsBoundNotInlined:
 
     @staticmethod
     def _revision_module() -> Any:
-        return ScriptDirectory.from_config(make_config("sqlite://")).get_revision(HEAD_REVISION).module
+        return _revision_module()
 
     @staticmethod
     def _compiled_epoch_update(epoch: Any, *, typed: bool = True) -> Any:
