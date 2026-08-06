@@ -539,9 +539,15 @@ class SQLiteRelationalBackend:
         (``compile_lance`` self-parenthesizes every shape it emits), which is why
         it is enforced rather than assumed. Nothing else from the sqlite_lance
         splice is ported: that store's ``:`` and ``?``-count guards protect a
-        rewrite into SQLAlchemy named binds, and this driver is natively qmark —
-        ``:`` is not bind syntax here, and a count mismatch is already a loud
-        ``sqlite3.ProgrammingError``. No ``CompileError`` mapping is wrapped
+        rewrite into SQLAlchemy named binds, and this driver is natively qmark, so
+        a count mismatch is already a loud ``sqlite3.ProgrammingError`` in both
+        directions. **The count check is the whole of the protection — do not read
+        this as "``:`` is inert here".** ``sqlite3`` does treat ``:name`` as a
+        parameter and binds it positionally from a sequence, so a stray ``:`` in a
+        spliced fragment shifts the binds exactly as it would under
+        ``text()``; it merely cannot do so *silently*, because the count stops
+        agreeing. Today it warns (``DeprecationWarning``) and from Python 3.14 it
+        raises ``sqlite3.ProgrammingError`` outright. No ``CompileError`` mapping is wrapped
         around the compile call either, unlike the SurrealDB store; that
         asymmetry is genuine, since ``compile_lance`` has no ``raise
         CompileError`` site and raises :class:`RecallFilterUnsupportedError` only

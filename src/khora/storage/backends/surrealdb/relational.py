@@ -426,10 +426,19 @@ class SurrealDBRelationalAdapter:
         single comparison**, and there are two such sites at different
         severities. This one is **live**: we write the ``OR`` rather than
         inheriting it from a self-parenthesizing compiler, and it is reached on
-        every resumed step. Ungrouped, ``AND`` binds tighter, so the namespace /
-        status / filter conjuncts all land inside the left disjunct and the right
-        one returns every tenant's rows tied on the cursor instant — measured, 3
-        rows grouped against 7 ungrouped, 4 of them foreign. The compiled
+        every resumed step. Ungrouped, ``AND`` binds tighter, so the disjunction
+        splits the conjunct list at its own position: everything appended *before*
+        it (namespace, status, ``updated_before``) lands inside the left disjunct,
+        and the right one carries only the tie clause plus whatever is appended
+        *after* — today just the compiled fragment. Either way the right disjunct
+        has no namespace scope, so it returns other tenants' rows tied on the
+        cursor instant. Measured with no ``filter_ast``, where the right disjunct
+        is bare: 3 rows grouped against 7 ungrouped, 4 of them foreign. With a
+        fragment the leak is narrowed by that fragment rather than removed, so
+        the magnitude drops but the cross-tenant read does not. **The order of
+        the appends is therefore load-bearing to this paragraph, not to the
+        defect** — regrouping the list changes which conjuncts leak, never
+        whether they do. The compiled
         fragment splice is the second site, a tripwire rather than a live hazard
         (``compile_surrealdb`` self-groups every boolean node today) with an
         identical failure mode, measured at 6 rows becoming 12. The inner
@@ -441,7 +450,7 @@ class SurrealDBRelationalAdapter:
         Cursor and bound operands bind as native objects — ``datetime`` for the
         timestamps, ``RecordID`` for the id — matching the write path. **That
         makes ``updated_before`` diverge from :meth:`list_documents`,
-        deliberately and with the team lead's written authorisation.** ``updated_at`` is a ``TYPE
+        deliberately.** ``updated_at`` is a ``TYPE
         datetime`` field and an ISO string compares against no row at all:
         measured on one corpus, no bound 6 rows, ``datetime`` bind 6, string bind
         0. Mirroring that ``.isoformat()`` would ship an ``updated_before``
@@ -459,9 +468,35 @@ class SurrealDBRelationalAdapter:
 
         ``scan_limit`` bounds rows **returned**, not rows **examined**: a
         selective fragment can still make one call read the whole namespace, so
-        it is no latency bound. It bounds total work — because ``last_scanned``
-        is the last *raw* row, a resumed step never re-examines the rejected gap,
-        so a full walk is O(namespace) whatever the selectivity.
+        it is no latency bound. Because ``last_scanned`` is the last *raw* row, a
+        resumed step never re-*returns* the rejected gap.
+
+        **It does not follow that a walk is O(namespace) on this store, and it
+        is not.** Any top-level ``OR`` in the ``WHERE`` collapses SurrealDB's
+        planner to a full table scan — measured on 2.x, the keyset disjunction
+        loses not only the ``created_at`` range but the ``namespace_id`` prefix,
+        so ``EXPLAIN`` reports ``Iterate Table`` where the same statement without
+        the disjunction reports ``Iterate Index`` on ``idx_document_ns_created``.
+        Every resumed step therefore re-examines every ``document`` row in the
+        database, **all namespaces included**, and sorts in memory. A full walk
+        is O(rows-in-table x steps), not O(namespace): measured 3.5x wall time
+        for a 2x namespace, and 13x per step from 5k foreign rows the caller can
+        never see. Cost tracks total corpus *bytes*, since a table scan
+        materializes whole records.
+
+        Two workarounds do not help, so do not re-try them: a ``WITH INDEX``
+        hint still plans ``Iterate Table``, and so does a redundant
+        ``created_at <= $ts`` guard alongside the disjunction. Restoring the
+        index means getting the ``OR`` out of the ``WHERE`` — two
+        index-eligible queries (the tie block by equality, then the strictly
+        below range) merged client-side and capped at ``scan_limit``. That buys
+        namespace scoping, not an O(scan_limit) step: 2.x still sorts the
+        qualifying set in memory (see :mod:`.schema`). Tracked as a follow-up;
+        this is a shipped-and-measured limitation, not an unknown.
+
+        The raw-SQLite sibling has no such problem — its row-value keyset is
+        consumed as an index range constraint, so there the total-work bound
+        holds as stated.
 
         Raises ``ValueError`` when ``scan_limit`` is below 1, before anything is
         compiled or executed, so a bad bound is never masked by a compile error.
@@ -482,8 +517,9 @@ class SurrealDBRelationalAdapter:
             params["status"] = status
         if updated_before is not None:
             # Binds the datetime OBJECT, not ``.isoformat()`` — see the docstring
-            # for the measurement and the team lead's authorisation of the
-            # divergence from ``list_documents``. Do not "correct" it back.
+            # for the measurement behind the deliberate divergence from
+            # ``list_documents``, whose string bind matches no row. Do not
+            # "correct" it back to match that method.
             conditions.append("updated_at < $updated_before")
             params["updated_before"] = updated_before
         if after is not None:
