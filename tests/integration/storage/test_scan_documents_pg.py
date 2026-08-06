@@ -413,3 +413,35 @@ class TestScanDocumentsSplitPg:
 
         last_match = step.documents[1]
         assert step.last_scanned != (last_match.created_at, last_match.id)
+
+
+@skip_no_pg
+class TestScanDocumentsNamespaceIsolationPg:
+    """The scan's namespace scope, asserted rather than inherited.
+
+    Every other class here runs against a fresh single-namespace fixture, so
+    none of it can notice a scan that ignores its scope — on the shared CI
+    database that failure would surface only as nondeterministic contamination
+    from other tests' residue. This seeds a second namespace with the same
+    varied corpus (every row a guaranteed filter hit) and walks the first at
+    ``scan_limit=1``, so both the scope predicate and its AND-composition with
+    the keyset predicate are load-bearing on every page. Deleting the
+    namespace predicate from ``build_documents_scan_query`` must fail here.
+    """
+
+    async def test_scan_never_returns_another_namespaces_rows(self, backend: PostgreSQLBackend, namespace) -> None:
+        seed = scan_seed(6)
+        await _seed_varied(backend, namespace.id, seed)
+        other = await backend.create_namespace(MemoryNamespace())
+        await _seed_varied(backend, other.id, scan_seed(6))
+
+        wire = {"$or": [{"source_type": {"$eq": "report"}}, {"title": {"$eq": "doc-1"}}]}
+        steps = await walk_scan(backend.scan_documents, namespace.id, scan_limit=1, filter_ast=_filter_ast(wire))
+        seen = [d for step in steps for d in step.documents]
+
+        assert seen, "the filter must match rows in the scanned namespace for this test to bite"
+        assert all(d.namespace_id == namespace.id for d in seen)
+
+        unfiltered = await backend.scan_documents(namespace.id, scan_limit=50)
+        assert len(unfiltered.documents) == 6
+        assert all(d.namespace_id == namespace.id for d in unfiltered.documents)

@@ -508,3 +508,80 @@ async def test_status_and_updated_before_narrow_the_window(adapter, namespace) -
 
     by_updated = await adapter.scan_documents(namespace.id, updated_before=cutoff, scan_limit=10)
     assert {d.id for d in by_updated.documents} == {doc_id for i, (doc_id, _) in enumerate(seed.writes) if i < 4}
+
+
+# ---------------------------------------------------------------------------
+# Namespace isolation
+# ---------------------------------------------------------------------------
+#
+# Everything above runs in a single-namespace fixture, so no assertion up there
+# can notice a scan that ignores its namespace scope — deleting the namespace
+# predicate from ``build_documents_scan_query`` left the whole module green
+# (found by two reviewers independently, by mutation). These two tests exist to
+# make that mutant, and the fragment-grouping mutant, fail.
+
+
+async def test_scan_never_returns_another_namespaces_rows(adapter, namespace) -> None:
+    """A filtered walk over one namespace must not see a byte of the other.
+
+    The second namespace is seeded with the SAME varied corpus, so every row in
+    it matches the same filter — if the namespace predicate is dropped (or
+    stops AND-composing with the fragment), the foreign rows are not merely
+    reachable, they are guaranteed hits. Walked at ``scan_limit=1`` so the
+    keyset predicate is exercised across pages too: the cursor is namespace-
+    blind on its own, and only the scope predicate keeps a resume inside its
+    tenant.
+    """
+    seed = scan_seed(6)
+    await _seed_varied(adapter, namespace.id, seed)
+
+    other_id = uuid4()
+    other = await adapter.create_namespace(
+        MemoryNamespace(id=other_id, namespace_id=other_id, tenancy_mode=TenancyMode.SHARED)
+    )
+    await _seed_varied(adapter, other.id, scan_seed(6))
+
+    wire = {"$or": [{"source_type": {"$eq": "report"}}, {"title": {"$eq": "doc-1"}}]}
+    steps = await walk_scan(adapter.scan_documents, namespace.id, scan_limit=1, filter_ast=_filter_ast(wire))
+    seen = [d for step in steps for d in step.documents]
+
+    assert seen, "the filter must match rows in the scanned namespace for this test to bite"
+    assert all(d.namespace_id == namespace.id for d in seen)
+
+    unfiltered = await adapter.scan_documents(namespace.id, scan_limit=50)
+    assert len(unfiltered.documents) == 6
+    assert all(d.namespace_id == namespace.id for d in unfiltered.documents)
+
+
+async def test_ungrouped_or_fragment_cannot_absorb_the_namespace_scope(adapter, namespace) -> None:
+    """The splice's parentheses are load-bearing — proven on rows, not prose.
+
+    No compiler emits an ungrouped fragment today (``compile_lance``
+    self-parenthesizes every boolean node), so no compiled-filter test can
+    catch ``_lance_fragment_to_text`` losing its grouping. This drives the
+    splice directly with a top-level ``OR`` — the shape that, ungrouped,
+    absorbs the namespace predicate into its left disjunct
+    (``ns = ? AND a = 1 OR b = 2``) and returns the other tenant's rows.
+    Removing the parentheses from ``_lance_fragment_to_text`` must fail here.
+    """
+    from khora.storage.backends._documents_scan import build_documents_scan_query
+    from khora.storage.backends.sqlite_lance.relational import _lance_fragment_to_text
+
+    seed = scan_seed(6)
+    await _seed_varied(adapter, namespace.id, seed)
+    other_id = uuid4()
+    other = await adapter.create_namespace(
+        MemoryNamespace(id=other_id, namespace_id=other_id, tenancy_mode=TenancyMode.SHARED)
+    )
+    await _seed_varied(adapter, other.id, scan_seed(6))
+
+    # Every row in BOTH namespaces satisfies the right disjunct, so an absorbed
+    # namespace predicate yields foreign rows deterministically.
+    fragment = _lance_fragment_to_text("documents.title = ? OR documents.content = ?", ["doc-0", "scanned content"])
+    query = build_documents_scan_query(namespace.id, scan_limit=50).where(fragment)
+
+    async with adapter._get_session() as session:  # noqa: SLF001 — the splice has no public executor yet
+        rows = (await session.execute(query)).scalars().all()
+
+    assert rows, "the fragment must match rows in the scanned namespace for this test to bite"
+    assert all(row.namespace_id == namespace.id for row in rows)

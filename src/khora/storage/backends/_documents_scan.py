@@ -70,8 +70,10 @@ def build_documents_scan_query(
     space-separated form, so the cursor's own row compares less than itself and a
     resumed walk returns it forever; while a space-separated form that omits the
     ``.000000`` microseconds sorts *below* its tie-mates, silently skipping them.
-    Passing a bare ``datetime`` through an untyped textual bind picks the second
-    of those, via a deprecated driver-level adapter that warns and continues.
+    (An *untyped* ``sa.literal(a_datetime)`` is not one of the wrong forms —
+    SQLAlchemy infers ``DateTime`` from the value and emits the stored form
+    correctly, measured. The explicit type guards the one-step-off operands the
+    paragraph above names, not the well-typed ``datetime`` itself.)
 
     **Naming the type is a SQLite-side guard only — it is not what makes a cursor
     correct.** On PostgreSQL no bind processor runs, so a *well-typed* operand
@@ -81,15 +83,16 @@ def build_documents_scan_query(
     typed, and a ``str`` id renders ``$2::VARCHAR`` bare against ``$2::UUID``.
     Neither spelling rescues the ``date`` — those two forms resolve midnight in
     the server's zone and the client host's respectively. A ``str`` id diverges
-    the other way and is the sharpest asymmetry here: the typed spelling raises on
-    this store, because the column type's processor asks the operand for ``.hex``,
-    while asyncpg's uuid encoder takes the ``PyUnicode`` branch and its parser
-    skips ``-`` outright, so a dashed cursor decodes to the identical sixteen
-    bytes and is silently *correct* on PostgreSQL. The same bad input is loud on
-    one store and harmless on the other; neither store's behaviour predicts the
-    other's, which is the whole reason this rule lives here rather than in either
-    backend. That store has the same hazard by a different route, on two
-    different evidence standards. Its ``timestamptz`` encoder converts with
+    the other way and is the sharpest asymmetry here: the typed spelling raises
+    on either store, because the ``Uuid`` column type's processor asks the
+    operand for ``.hex``, while asyncpg's uuid encoder takes the ``PyUnicode``
+    branch and its parser skips ``-`` outright, so a dashed cursor decodes to
+    the identical sixteen bytes and is silently *correct* on PostgreSQL. The
+    same bad input is loud on one store and harmless on the other; neither
+    store's behaviour predicts the other's, which is the whole reason this rule
+    lives here rather than in either backend. PostgreSQL has the same
+    naive-``datetime`` hazard by a different route, on two different evidence
+    standards. asyncpg's ``timestamptz`` encoder converts with
     ``obj.astimezone(utc)``, so a naive cursor resolves against whatever zone the
     process happens to run in — that is plain-Python arithmetic, run across four
     zones, and the shift is the host's UTC offset, hence zero and invisible on a
@@ -120,14 +123,25 @@ def build_documents_scan_query(
         namespace_id: Row-level namespace scope. Always applied — a scan is never
             cross-namespace.
         status: Optional document-status narrowing, matching ``list_documents``.
-        updated_before: Optional half-open ``updated_at <`` bound.
+        updated_before: Optional half-open ``updated_at <`` bound. ``updated_at``
+            is physically nullable, and ``updated_at < :bound`` is NULL for a
+            NULL row — such rows are excluded from the raw window entirely:
+            never scanned, never resumed past, absent from the whole walk with
+            no signal. Inherited verbatim from ``list_documents``; whether the
+            caller-facing contract keeps, documents, or coalesces that is the
+            facade tier's decision, not this builder's.
         after: Resume position — the ``(created_at, id)`` of the last row a
             previous step scanned. ``None`` starts from the newest row. Must have
             come from this same store (the key is store-local; see
             :data:`~khora.storage.backends.base.DocumentScanKey`).
         scan_limit: Maximum rows the window returns. Bounds rows *returned*, not
             rows *examined* — a selective pushdown fragment can still make one
-            call read the whole namespace.
+            call read the whole namespace, a latency cliff of ~3 orders of
+            magnitude at 200k rows. It is NOT a per-call latency bound. What it
+            does bound is total work: because ``last_scanned`` is the last *raw*
+            row, a resumed step never re-examines the rejected gap, so a full
+            walk is O(namespace) regardless of selectivity. Callers must not
+            document it as a latency guarantee.
 
     Raises:
         ValueError: ``scan_limit`` below 1. A zero bound would return an empty

@@ -512,7 +512,8 @@ class PostgreSQLBackend(AsyncSessionMixin):
         the ``scan_limit`` floor — is built by
         :func:`~khora.storage.backends._documents_scan.build_documents_scan_query`
         and shared with the embedded store; see it for the keyset's typed-bind
-        requirement and the ``created_at`` NOT NULL dependency. Only the
+        requirement, the ``created_at`` NOT NULL dependency, and the
+        ``updated_before`` NULL-``updated_at`` exclusion. Only the
         attachment below is dialect-specific: this store's compiler emits a
         SQLAlchemy expression, so it AND-s straight on.
 

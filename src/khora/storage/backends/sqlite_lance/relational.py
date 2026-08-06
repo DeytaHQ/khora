@@ -501,9 +501,10 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
         namespace scope, the optional ``status`` / ``updated_before`` narrowing,
         the keyset predicate, the enumeration order, the row bound, and the
         ``scan_limit`` floor — is built by
-        :func:`~khora.storage.backends._documents_scan.build_documents_scan_query`.
-        Only the pushdown fragment's attachment is dialect-specific, and it is the
-        one thing below.
+        :func:`~khora.storage.backends._documents_scan.build_documents_scan_query`;
+        see it for the ``updated_before`` NULL-``updated_at`` exclusion. Only the
+        pushdown fragment's attachment is dialect-specific, and it is the one
+        thing below.
 
         **What this store makes hazardous is the cursor's serialization, and the
         remedy is to write none.** The shared builder binds both operands through
@@ -1309,6 +1310,17 @@ def _lance_fragment_to_text(fragment: str, args: list[Any]) -> TextClause:
     ``?`` would silently shift every later bind by one position; a stray ``:``
     would be parsed as the start of a bind name, so the fragment would either
     reference a parameter nobody supplied or swallow the ``:kfN`` that follows.
+
+    The returned clause is wrapped in parentheses — the third tripwire, and the
+    only one whose failure mode is silent. ``TextClause.self_group()`` returns
+    ``self``, so ``.where()`` does NOT parenthesize a text fragment the way it
+    does its own expressions: a fragment with a top-level ``OR`` would absorb
+    the namespace predicate into its left disjunct (``ns = ? AND a = 1 OR
+    b = 2``), returning another tenant's rows. ``compile_lance``
+    self-parenthesizes every boolean node and every OR-emitting leaf today, so
+    no reachable fragment is ungrouped — but unlike the two loud guards above,
+    an ungrouped fragment fails as a cross-namespace read, not a
+    ``ValueError``, so the grouping is enforced here rather than assumed.
     """
     if ":" in fragment:
         raise ValueError(f"compiled filter fragment contains a colon, which text() parses as a bind name: {fragment!r}")
@@ -1318,7 +1330,7 @@ def _lance_fragment_to_text(fragment: str, args: list[Any]) -> TextClause:
             f"compiled filter fragment has {len(parts) - 1} positional binds but {len(args)} bind values were supplied"
         )
     rewritten = parts[0] + "".join(f":kf{i}{part}" for i, part in enumerate(parts[1:]))
-    return text(rewritten).bindparams(**{f"kf{i}": value for i, value in enumerate(args)})
+    return text("(" + rewritten + ")").bindparams(**{f"kf{i}": value for i, value in enumerate(args)})
 
 
 # Register the deterministic recall-filter compiler for this store/target at
