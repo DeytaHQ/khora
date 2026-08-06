@@ -48,10 +48,12 @@ if TYPE_CHECKING:
 #   a datetime`` — and the whole statement is discarded: a multi-field ``UPDATE``
 #   leaves every field untouched, not just the rejected one.
 #
-# Measured with python SDK 2.0.0 against SurrealDB 2.x engines, identical on all
-# three modes: ``memory://`` and ``surrealkv://`` (file-backed embedded, both on
-# the SDK-bundled core 2.0.0) and ``ws://`` (standalone server 2.3.7). NOT
-# measured against a SurrealDB 3.x engine.
+# Measured with python SDK 2.0.0, identical on all three modes: ``memory://``
+# and ``surrealkv://`` (file-backed embedded, both on the SDK-bundled core
+# 2.3.10 — read off the extension binary, not inferred from the Python package
+# version) and ``ws://`` (standalone server 2.3.7). Every leg is therefore
+# 2.3.x: the behaviour is measured on 2.3.x only. NOT measured below 2.3, and
+# NOT measured against a SurrealDB 3.x engine.
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -656,6 +658,11 @@ class SurrealDBRelationalAdapter:
                 },
             )
             doc.status = DocumentStatus.PROCESSING
+            # Mirror the stamp the UPDATE just wrote. Without it a returned doc
+            # reads PROCESSING with its pre-claim ``updated_at`` — an object
+            # that matches no stored row. The SQLAlchemy adapter refreshes the
+            # instances it returns; this is the equivalent for this store.
+            doc.updated_at = now
         return docs
 
     async def update_document(self, document: Document) -> Document:

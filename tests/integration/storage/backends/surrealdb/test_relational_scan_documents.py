@@ -20,10 +20,14 @@ below:
   unknown; :func:`test_walk_visits_every_document_exactly_once_in_total_order`
   is the answer, and it is kept as a regression guard now that the answer is
   known.
-* **Cursor and ``updated_before`` operands bind as Python objects.** A
-  stringified datetime does not compare against a ``TYPE datetime`` field at
-  all on this store — it matches nothing rather than mis-ordering. Measured:
-  no bound = 6 rows, ``datetime`` bind = 6 rows, ``.isoformat()`` bind = 0 rows.
+* **Cursor and ``updated_before`` operands bind as Python objects.** Under the
+  ``<`` compare both predicates here use, a stringified datetime matches
+  nothing against a ``TYPE datetime`` field rather than mis-ordering. That is a
+  property of the *operator*, not of the type pair — ``>=`` against the same
+  pair is unconditionally true, so it pins the opposite way; see the
+  datetime-binds note atop ``khora/storage/backends/surrealdb/relational.py``
+  for all six operators. Measured: no bound = 6 rows, ``datetime`` bind = 6
+  rows, ``.isoformat()`` bind = 0 rows.
 
 Seeding goes through ``create_document``, the production write API, so every row
 is serialized by the same path production writes take. Timestamps are pinned to
@@ -692,10 +696,12 @@ async def test_a_hyphenated_metadata_key_in_a_deferred_subtree_does_not_raise(ad
 async def test_status_and_updated_before_narrow_the_window(adapter, namespace) -> None:
     """``updated_before`` binds a ``datetime`` OBJECT, and that is why it narrows.
 
-    This store's ``updated_at`` is ``TYPE datetime``. A stringified operand does
-    not compare against it at all — it matches no row, so a walk reports itself
+    This store's ``updated_at`` is ``TYPE datetime``. Under the ``<`` this
+    bound uses, a stringified operand matches no row — so a walk reports itself
     exhausted at the first step and the caller sees an empty namespace rather
-    than an error. Measured on an in-memory instance over this exact corpus: no
+    than an error. Direction-specific: the same string under ``>=`` is
+    unconditionally true and would pin the bound wide open instead of shut (see
+    the module docstring). Measured on an in-memory instance over this corpus: no
     bound = 6 rows, ``datetime`` bind = 6 rows, ``.isoformat()`` bind = 0 rows.
 
     That is why the assertion below is on *which* rows came back, not merely on

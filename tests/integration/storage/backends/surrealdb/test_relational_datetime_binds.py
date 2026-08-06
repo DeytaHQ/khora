@@ -30,6 +30,15 @@ that pins the other side. FAILED (always re-ingestable) and COMPLETED (always a
 dedup hit) ride along as status controls, so a failure localises to the cutoff
 rather than to the clause as a whole.
 
+Both statements also carry a ``namespace_id`` predicate that nothing pinned:
+neutralising either one to a tautology left all 89 SurrealDB integration tests
+green. Two tests below seed a SECOND namespace to close that, and the claim one
+asserts the write half as well — a scope leak there is not a stale read but a
+cross-tenant write (status overwritten, ``updated_at`` re-stamped) plus one LLM
+extraction per row it hands the recovery loop. That path is also the one this
+fix *activates*: while both ``<`` compares were pinned false it returned
+nothing, so its scope predicate never decided anything.
+
 Seeding goes through ``create_document``, the production write API. Timestamps
 are pinned to a whole second and anchored on ``datetime.now(UTC)`` rather than a
 fixed calendar instant: ``claim_orphaned_documents`` stamps claimed rows with
@@ -74,6 +83,18 @@ async def adapter():
 
 @pytest.fixture
 async def namespace(adapter):
+    nid = uuid4()
+    return await adapter.create_namespace(MemoryNamespace(id=nid, namespace_id=nid, tenancy_mode=TenancyMode.SHARED))
+
+
+@pytest.fixture
+async def foreign_namespace(adapter):
+    """A second tenant, seeded with a corpus that neither path may reach.
+
+    Both queries covered here carry a ``namespace_id`` predicate that no test
+    exercised: neutralising either one to a tautology left all 89 SurrealDB
+    integration tests green. The tests taking this fixture are that coverage.
+    """
     nid = uuid4()
     return await adapter.create_namespace(MemoryNamespace(id=nid, namespace_id=nid, tenancy_mode=TenancyMode.SHARED))
 
@@ -139,6 +160,14 @@ CS_STALE_PENDING = "cs-stale-pending"
 CS_FRESH_PENDING = "cs-fresh-pending"
 CS_FAILED = "cs-failed"
 CS_COMPLETED = "cs-completed"
+
+#: Written into the foreign namespace ONLY. A checksum that exists nowhere in
+#: the queried namespace is the deterministic probe for the scope predicate:
+#: correctly scoped it is a miss, unscoped it is a hit. Asking for a checksum
+#: that exists in *both* namespaces cannot serve — the statement is
+#: ``LIMIT 1`` with no ``ORDER BY``, so an unscoped read would pick one of the
+#: two rows arbitrarily and the assertion would only fail half the time.
+CS_FOREIGN_ONLY = "cs-foreign-only"
 
 
 async def _seed_checksum_corpus(adapter: Any, namespace_id: UUID, anchor: datetime) -> dict[str, UUID]:
@@ -253,6 +282,56 @@ async def test_batch_checksum_lookup_drops_exactly_the_stale_pending_row(adapter
     assert reclaiming[CS_FRESH_PENDING].checksum == CS_FRESH_PENDING
 
 
+async def test_checksum_lookup_does_not_reach_into_another_namespace(
+    adapter, namespace, foreign_namespace, anchor
+) -> None:
+    """The ``namespace_id`` predicate on the dedup read, which nothing pinned.
+
+    A leak here is a cross-tenant *read*: content one tenant never uploaded
+    comes back as their dedup hit, so their ingest is silently dropped as a
+    duplicate and they get another tenant's document id.
+
+    Both namespaces carry the same four checksums, so the scope is the only
+    thing separating the two corpora, and :data:`CS_FOREIGN_ONLY` supplies the
+    deterministic probe (see its note). The exact-id assertions on the shared
+    checksums are the second half: not merely *a* row, but this tenant's row.
+
+    The batch form rides along at the end. It is a second statement with its own
+    copy of the scope predicate, equally unpinned — mutating it to a tautology
+    left the whole file green as well — and the corpus for it is already seeded.
+    """
+    mine = await _seed_checksum_corpus(adapter, namespace.id, anchor)
+    await _seed_checksum_corpus(adapter, foreign_namespace.id, anchor)
+    await _write(
+        adapter,
+        foreign_namespace.id,
+        checksum=CS_FOREIGN_ONLY,
+        status=DocumentStatus.COMPLETED,
+        updated_at=anchor - STALE,
+    )
+    cutoff = anchor - PENDING_CUTOFF
+
+    # Under both cutoff forms: the neighbour's checksum is not our dedup hit.
+    for stale_before in (None, cutoff):
+        leaked = await adapter.get_document_by_checksum(
+            namespace.id, CS_FOREIGN_ONLY, pending_stale_before=stale_before
+        )
+        assert leaked is None, f"read reached into another namespace (pending_stale_before={stale_before!r})"
+
+    # And a checksum held by both resolves to OUR row, not merely to some row.
+    for checksum in (CS_FRESH_PENDING, CS_COMPLETED):
+        hit = await adapter.get_document_by_checksum(namespace.id, checksum, pending_stale_before=cutoff)
+        assert hit is not None, f"{checksum} must still dedup within its own namespace"
+        assert hit.id == mine[checksum], f"{checksum} resolved to the foreign namespace's row"
+        assert hit.namespace_id == namespace.id
+
+    batch = await adapter.get_documents_by_checksums(
+        namespace.id, [CS_FRESH_PENDING, CS_COMPLETED, CS_FOREIGN_ONLY], pending_stale_before=cutoff
+    )
+    assert set(batch) == {CS_FRESH_PENDING, CS_COMPLETED}, "batch read reached into another namespace"
+    assert {c: d.id for c, d in batch.items()} == {c: mine[c] for c in (CS_FRESH_PENDING, CS_COMPLETED)}
+
+
 # --------------------------------------------------------------------------- #
 # Orphan claim — the query that returned nothing
 # --------------------------------------------------------------------------- #
@@ -339,8 +418,11 @@ async def test_claim_takes_the_stale_rows_and_leaves_the_fresh_ones(adapter, nam
     assert prior[ids[D_STALE_PROCESSING]] == DocumentStatus.PROCESSING.value
 
 
-async def test_claim_leaves_untouched_rows_byte_for_byte(adapter, namespace, anchor) -> None:
+async def test_claim_leaves_untouched_rows_unmodified(adapter, namespace, anchor) -> None:
     """The three non-claimed rows keep both their status and their stamp.
+
+    Named for what it checks: ``status`` and ``updated_at``, the two fields the
+    claim's ``UPDATE`` writes — not the whole row.
 
     Separate from the selection assertion above: a claim that returned the right
     two documents could still have written over the others.
@@ -401,3 +483,43 @@ async def test_second_claim_immediately_after_the_first_returns_nothing(adapter,
 
     assert len(first) == 2
     assert second == []
+
+
+async def test_claim_does_not_reach_into_another_namespace(adapter, namespace, foreign_namespace, anchor) -> None:
+    """The ``namespace_id`` predicate on the claim, which nothing pinned.
+
+    This is the path the datetime fix *activates*: before it, both ``<``
+    compares were pinned false, so the statement returned nothing and its scope
+    predicate never decided anything. It now runs, and it WRITES — a leak sets
+    another tenant's rows to PROCESSING, re-stamps their ``updated_at``, and
+    hands them to the recovery loop, which spends one LLM extraction per row.
+    So both halves are asserted: foreign rows are neither *returned* nor
+    *written*.
+
+    Both namespaces get the identical five-row corpus, so an unscoped claim
+    comes back with four rows rather than two — the default ``limit`` of 100 is
+    far above either count, so nothing masks the extra rows.
+
+    Read back raw rather than through ``get_document``: the write half is a
+    persisted-state claim, and it should not depend on the conversion layer.
+    """
+    mine = await _seed_orphan_corpus(adapter, namespace.id, anchor)
+    theirs = await _seed_orphan_corpus(adapter, foreign_namespace.id, anchor)
+    seeded = {
+        D_STALE_PENDING: (DocumentStatus.PENDING, anchor - STALE),
+        D_STALE_PROCESSING: (DocumentStatus.PROCESSING, anchor - STALE),
+        D_FRESH_PENDING: (DocumentStatus.PENDING, anchor - FRESH),
+        D_FRESH_PROCESSING: (DocumentStatus.PROCESSING, anchor - FRESH),
+        D_STALE_COMPLETED: (DocumentStatus.COMPLETED, anchor - STALE),
+    }
+
+    claimed = await _claim(adapter, namespace.id, anchor)
+
+    assert {d.id for d in claimed} == {mine[D_STALE_PENDING], mine[D_STALE_PROCESSING]}
+
+    # Every foreign row still reads exactly as seeded — including the two that
+    # would have been claimable had they been in scope.
+    for key, (status, stamp) in seeded.items():
+        row = await _raw_row(adapter, theirs[key])
+        assert row["status"] == status.value, f"foreign {key} was claimed"
+        assert row["updated_at"] == stamp, f"foreign {key} was re-stamped"
