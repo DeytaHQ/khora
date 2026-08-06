@@ -24,7 +24,7 @@ from khora.core.models.entity import Entity
 from khora.core.models.recall import DocumentProjection
 from khora.core.models.tenancy import TenancyMode
 from khora.storage.backends._fts5 import escape_fts5_query
-from khora.storage.backends.base import PaginatedResult
+from khora.storage.backends.base import DocumentScanKey, DocumentScanStep, PaginatedResult
 
 if TYPE_CHECKING:
     from khora.filter.ast import FilterNode
@@ -506,6 +506,144 @@ class SQLiteRelationalBackend:
         )
         rows = await cursor.fetchall()
         return [self._row_to_document(r) for r in rows]
+
+    async def scan_documents(
+        self,
+        namespace_id: UUID,
+        *,
+        filter_ast: FilterNode | None = None,
+        status: str | None = None,
+        updated_before: datetime | None = None,
+        after: DocumentScanKey | None = None,
+        scan_limit: int = 100,
+    ) -> DocumentScanStep:
+        """Scan one bounded keyset window of a namespace's documents.
+
+        ``@internal``. Not part of the public storage API — the offset-based
+        :meth:`list_documents` is unchanged. One ``SELECT`` on this backend's own
+        connection; no transaction spans steps and no consistent snapshot is
+        claimed. A caller walks the namespace by chaining
+        :attr:`DocumentScanStep.last_scanned` back in as ``after`` until the step
+        reports ``exhausted``.
+
+        The same scan the two SQLAlchemy stores run (khora #1586), written out
+        here rather than shared: this store has no ORM, builds SQL text and a
+        positional bind list by hand, and owns its own ``documents`` DDL. Binds
+        being positional, conjunct order *is* bind order — namespace, ``status``,
+        ``updated_before``, the two cursor operands, the fragment's ``args``, the
+        row bound — and appending out of order shifts every later bind by one.
+
+        **The compiled fragment is spliced in parentheses, a cross-tenant
+        tripwire.** Measured, two namespaces of 6 rows each: grouped returns 6
+        rows, ungrouped returns 12, no error and no warning. Latent today
+        (``compile_lance`` self-parenthesizes every shape it emits), which is why
+        it is enforced rather than assumed. Nothing else from the sqlite_lance
+        splice is ported: that store's ``:`` and ``?``-count guards protect a
+        rewrite into SQLAlchemy named binds, and this driver is natively qmark —
+        ``:`` is not bind syntax here, and a count mismatch is already a loud
+        ``sqlite3.ProgrammingError``. No ``CompileError`` mapping is wrapped
+        around the compile call either, unlike the SurrealDB store; that
+        asymmetry is genuine, since ``compile_lance`` has no ``raise
+        CompileError`` site and raises :class:`RecallFilterUnsupportedError` only
+        under ``on_unsupported="raise"``, which this context never selects.
+
+        **Cursor serialization inverts from sqlite_lance.** ``created_at`` binds
+        through :func:`_dt_to_str` (``datetime.isoformat()``), byte-for-byte what
+        :meth:`create_document` wrote into a TEXT column SQLite compares
+        lexicographically; ``id`` binds as ``str(uuid)``, the **dashed** 36
+        characters that same writer stored. sqlite_lance holds 32 *undashed* hex
+        characters, so a dashed cursor is the bug there and the only correct form
+        here. An undashed cursor sorts *above* every stored id it shares leading
+        hex with — the stored form carries ``-`` (0x2D) at index 8 where the
+        undashed form carries a hex digit — so ``id < :cursor`` matches strictly
+        more rows, including the cursor's own. Measured from mid-tie ``…0003``:
+        dashed yields ``[…0002, …0001, …0005]``, ``.hex`` yields ``[…0004, …0003,
+        …0002, …0001, …0005]``, so the walk runs backwards and never terminates.
+        Positions are store-local: build one from a row this store returned.
+
+        This store therefore enumerates in **stored-text order — a deterministic
+        total order, but not an instant order**, since :func:`_dt_to_str`
+        preserves the writer's offset with no UTC coercion. Pre-existing, and the
+        same property that keeps the date keys out of ``_PUSHABLE_SYSTEM_KEYS``.
+        It does not threaten the walk: keyset correctness needs the cursor
+        predicate to agree with ``ORDER BY``, not with chronology, and both are
+        lexicographic over the same column. Callers must not read this order as
+        chronological.
+
+        ``created_at`` cannot be NULL, belt and braces: ``_SCHEMA_SQL`` declares
+        it ``NOT NULL`` independently of and predating the Alembic chain this
+        store does not have, *and* :meth:`create_document` is the only INSERT and
+        coalesces a missing timestamp to now. A NULL key would make the row-value
+        comparison evaluate to NULL and drop the row from every page.
+        ``updated_before`` narrows with ``updated_at < ?``, the same shape #1586
+        ships; the NULL-``updated_at`` exclusion that tier documents does not
+        arise here, because ``updated_at`` is ``TEXT NOT NULL``.
+
+        ``scan_limit`` bounds rows **returned**, not rows **examined** — a
+        selective fragment can still make one call read the whole namespace, so
+        it is a total-work bound, never a per-call latency bound. What it buys is
+        that a full walk stays O(namespace): ``last_scanned`` is the last *raw*
+        row, so a resumed step never re-examines the rejected gap. Resuming past
+        those rows skips nothing **only because the pushdown is a superset
+        filter** — a property of the compiler and this store's compile context,
+        not of this method.
+
+        ``consumed_keys`` is reported verbatim from the compiler: the leaves the
+        SQL already enforced. It is a reporting signal and **never** permission to
+        skip them — the post-filter must evaluate the whole AST unconditionally.
+        The date-valued system keys are deliberately unpushable here (see
+        :func:`_documents_compile_context`), so they stay out of it by design.
+
+        Raises:
+            ValueError: ``scan_limit`` below 1, matching the shared SQLAlchemy
+                builder. Raised before anything is compiled or executed, so a bad
+                bound is never masked by a compile error.
+        """
+        if scan_limit < 1:
+            raise ValueError(f"scan_limit must be >= 1, got {scan_limit}")
+
+        conditions = ["namespace_id = ?"]
+        params: list[Any] = [str(namespace_id)]
+        if status:
+            conditions.append("status = ?")
+            params.append(status)
+        if updated_before is not None:
+            conditions.append("updated_at < ?")
+            params.append(updated_before.isoformat())
+        if after is not None:
+            cursor_created_at, cursor_id = after
+            conditions.append("(created_at, id) < (?, ?)")
+            params.extend([_dt_to_str(cursor_created_at), str(cursor_id)])
+
+        consumed_keys: frozenset[str] = frozenset()
+        if filter_ast is not None:
+            compiler = CompilerRegistry.get("relational.sqlite", "documents")
+            compiled = compiler(filter_ast, _documents_compile_context())
+            consumed_keys = compiled.consumed_keys
+            # Parenthesized — see the docstring. Ungrouped, a top-level OR in the
+            # fragment absorbs the namespace predicate and leaks other tenants.
+            conditions.append(f"({compiled.predicate})")
+            params.extend(compiled.params["args"])
+
+        where = " AND ".join(conditions)
+        params.append(scan_limit)
+        cursor = await self._conn.execute(
+            f"SELECT * FROM documents WHERE {where} ORDER BY created_at DESC, id DESC LIMIT ?",  # noqa: S608
+            params,
+        )
+        rows = await cursor.fetchall()
+
+        # ``last_scanned`` and ``exhausted`` both describe the RAW window: the
+        # final row scanned, and whether SQL ran out of rows filling it. Neither
+        # may be derived from a post-filtered subset — that would re-scan the
+        # rejected gap on resume, and would call a full window exhausted.
+        documents = [self._row_to_document(r) for r in rows]
+        return DocumentScanStep(
+            documents=documents,
+            last_scanned=(documents[-1].created_at, documents[-1].id) if documents else None,
+            exhausted=len(rows) < scan_limit,
+            consumed_keys=consumed_keys,
+        )
 
     async def claim_orphaned_documents(
         self,
