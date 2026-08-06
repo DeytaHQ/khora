@@ -24,11 +24,12 @@ from khora.db.models import (
     SyncCheckpointModel,
 )
 from khora.db.schema import sync_enum_values
-from khora.storage.backends.base import PaginatedResult
+from khora.storage.backends._documents_scan import build_documents_scan_query
+from khora.storage.backends.base import DocumentScanKey, DocumentScanStep, PaginatedResult
 from khora.storage.backends.mixins import AsyncSessionMixin, retry_on_deadlock
 
 if TYPE_CHECKING:
-    pass
+    from khora.filter.ast import FilterNode
 
 
 def _none_if_empty(v: str | None) -> str | None:
@@ -487,6 +488,87 @@ class PostgreSQLBackend(AsyncSessionMixin):
             query = query.limit(limit).offset(offset).order_by(DocumentModel.created_at.desc(), DocumentModel.id.desc())
             result = await session.execute(query)
             return [self._document_model_to_domain(m) for m in result.scalars().all()]
+
+    async def scan_documents(
+        self,
+        namespace_id: UUID,
+        *,
+        filter_ast: FilterNode | None = None,
+        status: str | None = None,
+        updated_before: datetime | None = None,
+        after: DocumentScanKey | None = None,
+        scan_limit: int = 100,
+    ) -> DocumentScanStep:
+        """Scan one bounded window of a namespace's documents by keyset.
+
+        ``@internal``. Not part of the public storage API — the offset-based
+        :meth:`list_documents` is. One ``SELECT`` in its own session; a walk is
+        the caller's job, chaining :attr:`DocumentScanStep.last_scanned` back in
+        as ``after`` until the step reports ``exhausted``. No transaction spans
+        steps and no consistent snapshot is claimed.
+
+        Everything but the pushdown fragment — the namespace scope, ``status`` /
+        ``updated_before``, the keyset predicate, the order, the row bound, and
+        the ``scan_limit`` floor — is built by
+        :func:`~khora.storage.backends._documents_scan.build_documents_scan_query`
+        and shared with the embedded store; see it for the keyset's typed-bind
+        requirement, the ``created_at`` NOT NULL dependency, and the
+        ``updated_before`` NULL-``updated_at`` exclusion. Only the
+        attachment below is dialect-specific: this store's compiler emits a
+        SQLAlchemy expression, so it AND-s straight on.
+
+        ``filter_ast`` is compiled by the compiler registered for this store's
+        ``documents`` target. Only the leaves reported in ``consumed_keys`` were
+        pushed; **the caller must still evaluate the full filter over the
+        returned rows.** Re-running a pushed leaf can only narrow, because
+        everything the compiler pushes is a superset filter — which is why
+        resuming past the rows the pushdown rejected skips nothing. That property
+        belongs to the compilers, not to this method: it holds because their
+        ``$or`` / ``$not`` gate defers a whole subtree it cannot fully express
+        rather than leaving a match-all placeholder that would invert under
+        negation and wrongly exclude rows.
+
+        One store-specific note on the cursor: a position taken from a row here
+        is timezone-aware, since it comes off a ``timestamptz`` column. A
+        hand-built naive one is not rejected — the driver resolves it against the
+        host's local zone — so build positions from rows rather than by hand. The
+        damage is signed by that zone's offset: east of UTC the cursor lands
+        early and rows in the gap are silently skipped, west of UTC it lands late
+        and already-returned rows come back, which can stall a walk. On a UTC
+        host it is an exact no-op, so a test cannot see it.
+
+        Raises ``ValueError`` when ``scan_limit`` is below 1. It comes from the
+        shared builder, before anything is compiled or executed, so a bad bound
+        is never masked by a compile error.
+        """
+        consumed_keys: frozenset[str] = frozenset()
+        query = build_documents_scan_query(
+            namespace_id,
+            status=status,
+            updated_before=updated_before,
+            after=after,
+            scan_limit=scan_limit,
+        )
+        if filter_ast is not None:
+            compiler = CompilerRegistry.get("relational.postgresql", "documents")
+            compiled = compiler(filter_ast, _documents_compile_context())
+            consumed_keys = compiled.consumed_keys
+            query = query.where(compiled.predicate)
+
+        async with self._get_session() as session:
+            result = await session.execute(query)
+            rows = list(result.scalars().all())
+
+        # ``last_scanned`` and ``exhausted`` both describe the RAW window: the
+        # final row scanned, and whether SQL ran out of rows filling it. Neither
+        # may be derived from a post-filtered subset — that would re-scan the
+        # rejected gap on resume, and would call a full window exhausted.
+        return DocumentScanStep(
+            documents=[self._document_model_to_domain(m) for m in rows],
+            last_scanned=(rows[-1].created_at, rows[-1].id) if rows else None,
+            exhausted=len(rows) < scan_limit,
+            consumed_keys=consumed_keys,
+        )
 
     async def claim_orphaned_documents(
         self,

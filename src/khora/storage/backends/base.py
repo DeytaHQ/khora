@@ -43,6 +43,77 @@ class PaginatedResult(Generic[T]):
     offset: int
 
 
+# The keyset position of a single document in the enumeration order, as
+# ``(created_at, id)``. ``@internal``.
+#
+# Deliberately a bare tuple rather than a named cursor type: it has exactly one
+# producer (a scan step) and one consumer (the next scan step's ``after``), both
+# in-tree, and no wire form. A cursor *class* belongs wherever an opaque,
+# caller-facing encoding is first needed, and would pin an encoding this tier has
+# no use for.
+#
+# **The position is store-local, not a normalized instant.** It is read off a
+# document row and bound back through the same column type, so the round-trip is
+# exact by construction on each backend — but the two backends do not agree on
+# its shape. A PostgreSQL ``timestamptz`` yields an aware datetime; the embedded
+# SQLite store's ``DATETIME`` column is TEXT holding writer wall clock with the
+# offset discarded at write, so it yields a *naive* datetime. Never format this
+# into a string, and never carry a position from one store to another.
+DocumentScanKey = tuple[datetime, UUID]
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentScanStep:
+    """One bounded step of a keyset walk over a namespace's documents.
+
+    ``@internal``. Produced by a relational backend's ``scan_documents``; not part
+    of the public storage API and not re-exported from :mod:`khora.storage`.
+
+    A step is one ``SELECT`` in the backend's own session — no transaction spans
+    steps, and no consistent snapshot is claimed. A walk chains steps by feeding
+    :attr:`last_scanned` back as the next call's ``after`` until
+    :attr:`exhausted`.
+
+    * ``documents`` — the window's rows in ``(created_at DESC, id DESC)`` order
+      (the total order all four relational stores share since khora #1576),
+      already narrowed by whatever the dialect compiler pushed down. **Not
+      necessarily the final matches**: a caller with a filter must still evaluate
+      the full filter over these rows (see :attr:`consumed_keys`).
+    * ``last_scanned`` — the keyset position of the window's **final row**, or
+      ``None`` when the window was empty. Resume from this rather than from the
+      last row that survived post-filtering, so a resumed walk does not re-scan
+      the gap of rows that were scanned and rejected.
+    * ``exhausted`` — the window returned fewer rows than the requested bound, so
+      nothing remains after :attr:`last_scanned`. This is the **only** sound
+      termination signal; a short — or empty — ``documents`` list means nothing on
+      its own, because post-filtering can reject an entire window.
+    * ``consumed_keys`` — the dotted filter paths the backend pushed into SQL, as
+      reported by the compiler. A **reporting signal only**: it exists so a caller
+      can tell users which predicate leaves cost a post-filter. It is *not*
+      permission to skip those leaves in the post-filter — the compile contexts on
+      both stores require the full filter to be re-evaluated in memory
+      unconditionally, and everything pushed down is a superset filter, so
+      re-running a pushed leaf can only narrow.
+
+    There is deliberately **no residual-AST field.** The compilers report the
+    split as a key set, not as a pruned tree, and the caller already holds the
+    filter it passed in — so a residual field could only duplicate the caller's
+    own input, while inviting the one mistake the compile contexts warn against
+    (post-filtering the residual alone). A caller that wants to report which
+    predicate leaves cost a post-filter differences its own leaf keys against
+    :attr:`consumed_keys`; :func:`khora.filter.execute.filter_leaf_keys` is the
+    left-hand side.
+
+    Distinct from :class:`PaginatedResult`, which is offset-shaped and carries a
+    total. A keyset walk has neither an offset nor a total.
+    """
+
+    documents: list[Document]
+    last_scanned: DocumentScanKey | None
+    exhausted: bool
+    consumed_keys: frozenset[str]
+
+
 @runtime_checkable
 class RelationalBackendProtocol(Protocol):
     """Protocol for relational database backends (PostgreSQL).
