@@ -76,6 +76,32 @@ Every NULL-producing leaf coalesces to ``0`` (excludes only on a true mismatch),
 and any op whose SQL semantics risk over-narrowing is left unconsumed (emits
 ``"1"``) so the post-filter decides.
 
+**Splice safety — every returned fragment is self-delimiting.** A named contract,
+not an accident of the current emission: the ``predicate`` string contains no
+boolean operator at parenthesis depth 0. Every boolean node parenthesizes itself
+(``AND`` / ``OR`` joins are wrapped, ``NOT`` emits ``(NOT (...))``), and so does
+every leaf whose emission contains an ``OR`` (the polarity forms ``(col IS NULL OR
+col <> ?)`` / ``(col IS NULL OR NOT col IN (...))``). This matters because callers
+splice the fragment into a conjunction **as text**, where ``AND`` binds tighter
+than ``OR`` — an ungrouped top-level ``OR`` would absorb the caller's namespace
+predicate into its left disjunct and return another tenant's rows. Verified in
+SQLite: with one row per namespace, ``WHERE ns = 'mine' AND a = 1 OR b = 2``
+returns the other namespace's row that ``WHERE ns = 'mine' AND (a = 1 OR b = 2)``
+correctly excludes.
+
+Three of the five splice sites do **not** re-parenthesize, so there the invariant
+is the only defense — all three in ``khora.storage.temporal.sqlite_lance``, which
+appends ``f"AND {ast_sql}"`` onto a host ``WHERE`` that carries the tenant
+restriction (``namespace_id = ?``, or the id set from the vector pass). The other
+two do wrap it (``SQLiteRelationalBackend.scan_documents``, and
+``_lance_fragment_to_text`` for the ``sqlite_lance`` store — whose docstring
+explains why it re-groups a ``TextClause`` SQLAlchemy will not group for it); that
+belt does not license loosening this brace. Pinned statically by
+``tests/unit/filter/test_fragment_splice_safety.py`` (both compilers that emit a
+text fragment, over the conformance corpus, in both ``on_unsupported`` modes).
+Deliberately **no** runtime assertion: the property is static, and a per-recall
+check would pay continuously for what a unit test settles once.
+
 ``@internal``. Reachable as ``khora.filter.compilers.lance.compile_lance`` for
 khora's own engines; not re-exported from :mod:`khora.__init__`. Registration
 against the ``("skeleton.sqlite_lance", "khora_chunks")`` key lives at the bottom

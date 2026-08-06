@@ -27,7 +27,25 @@ from sqlalchemy import Select
 from khora.db.models import DocumentModel
 from khora.storage.backends.base import DocumentScanKey
 
-__all__ = ["build_documents_scan_query"]
+__all__ = ["build_documents_scan_query", "orm_scan_key"]
+
+
+def orm_scan_key(model: DocumentModel) -> DocumentScanKey:
+    """The keyset position of one ORM document row. ``@internal``.
+
+    The ``key`` callable both SQLAlchemy stores hand to
+    :func:`~khora.storage.backends.base.build_scan_step`. It lives here rather
+    than in ``base.py`` because it is ORM-coupled by argument type, which is the
+    one thing that helper deliberately is not.
+
+    No parsing and no defaulting: the ORM has already typed both columns, and
+    both are ``NOT NULL`` (``created_at`` since migration
+    ``056_documents_created_at_not_null``). The two raw stores'
+    ``_scan_key`` equivalents have to parse a stored representation and therefore
+    have to decide what to do with a value they cannot read — this one has no
+    such decision to make, which is why it is three lines and they are not.
+    """
+    return (model.created_at, model.id)
 
 
 def build_documents_scan_query(

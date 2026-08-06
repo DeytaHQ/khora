@@ -1147,3 +1147,110 @@ def test_field_mapping_is_a_plain_string_to_string_mapping(
     mapping = builder().field_mapping
     assert isinstance(mapping, Mapping)
     assert all(isinstance(key, str) and isinstance(value, str) for key, value in mapping.items())
+
+
+# --------------------------------------------------------------------------- #
+# Ticket §8 — a non-identifier metadata segment is an unpushable leaf, not an error
+# --------------------------------------------------------------------------- #
+
+# A hyphenated metadata key in the three positions that behave differently, so
+# the gate is not pinned in one position and assumed in the others. Conjunctive
+# is the position §8 is *about* — it is the one that used to raise on SurrealDB
+# while the same key inside a wholesale-deferred ``$or`` returned rows.
+_HYPHENATED_POSITIONS: Mapping[str, dict[str, Any]] = {
+    "conjunctive": {"metadata.foo-bar": {"$eq": "x"}, "source_type": {"$eq": "library"}},
+    "bare": {"metadata.foo-bar": {"$eq": "x"}},
+    "in_or": {"$or": [{"metadata.foo-bar": {"$eq": "x"}}, {"source_type": {"$eq": "library"}}]},
+}
+
+# Measured in this tree on this branch: the exact ``consumed_keys`` each context
+# reports, per position. The asymmetry is real and permanent — SurrealQL has no
+# bind form for a field *name*, so the segment would have to be interpolated,
+# while JSON1 / JSONB take the path as a bound *value*.
+#
+# Note what the ``in_or`` row costs SurrealDB: the all-or-nothing gate defers the
+# WHOLE subtree, so it loses the pushable ``source_type`` sibling too and its
+# window is the entire namespace. That is a real efficiency difference between the
+# stores, not just a bookkeeping one, and it is pinned here so a future change to
+# the gate cannot alter it silently.
+_SQL_STORES = ("postgresql", "sqlite", "sqlite_lance")
+_EXPECTED_CONSUMED: Mapping[str, Mapping[str, frozenset[str]]] = {
+    "conjunctive": {
+        **dict.fromkeys(_SQL_STORES, frozenset({"metadata.foo-bar", "source_type"})),
+        "surrealdb": frozenset({"source_type"}),
+    },
+    "bare": {
+        **dict.fromkeys(_SQL_STORES, frozenset({"metadata.foo-bar"})),
+        "surrealdb": frozenset(),
+    },
+    "in_or": {
+        **dict.fromkeys(_SQL_STORES, frozenset({"metadata.foo-bar", "source_type"})),
+        "surrealdb": frozenset(),
+    },
+}
+
+
+@pytest.mark.parametrize("position", sorted(_HYPHENATED_POSITIONS), ids=sorted(_HYPHENATED_POSITIONS))
+@pytest.mark.parametrize("name,builder,_target,_column", _ALL_CONTEXTS, ids=[entry[0] for entry in _ALL_CONTEXTS])
+def test_a_hyphenated_metadata_segment_compiles_on_every_documents_context(
+    name: str,
+    builder: Callable[[], CompileContext],
+    _target: str,
+    _column: str,
+    position: str,
+) -> None:
+    """No documents context raises on an unrenderable metadata segment (§8).
+
+    Before §8, ``compile_surrealdb`` raised ``CompileError`` here while the three
+    SQL contexts returned rows, so the same well-formed filter succeeded or failed
+    depending on which store the caller happened to be on. §8 ruled that a
+    segment the backend cannot render as an identifier is **caller input and an
+    unpushable leaf**, not a compiler fault: it takes the residual route like any
+    other unpushable key. This is the four-store half of that claim.
+
+    **What this pins and what it deliberately does not.** It is a *compile-level*
+    gate — it proves every context produces a fragment rather than an exception,
+    and it records which side of the push/defer asymmetry each store is on. It
+    does NOT prove the four stores return the same ROWS; that needs live stores,
+    and it is asserted on the two that actually differ in
+    ``tests/integration/storage/backends/surrealdb/test_relational_scan_documents.py::test_a_hyphenated_metadata_key_matches_the_oracle_and_raw_sqlite``,
+    which runs raw-SQLite and embedded SurrealDB in one process and compares row
+    sets after the residual. The other two stores share ``compile_lance`` and
+    ``compile_postgres`` with that raw-SQLite leg and land in the same
+    push-the-leaf equivalence class, so a row-level test for them would be
+    re-asserting the same compiler on a different connection.
+
+    The push/defer expectation is asserted rather than merely documented because
+    it is the load-bearing asymmetry: a future change that made SurrealDB *push*
+    this leaf would be an injection regression, and one that made a SQL store
+    *defer* it would silently move work to the caller's post-filter. Either
+    direction should fail here.
+
+    **Three positions, because the gate behaves differently in each and pinning
+    one would leave the others assumed.** Conjunctive is the position §8 is about;
+    ``bare`` is the degenerate single-leaf case; ``in_or`` is the one where
+    SurrealDB's all-or-nothing gate defers the whole subtree and loses the
+    pushable sibling with it. Only ``conjunctive`` has a row-level counterpart in
+    the integration test — see that test's own scope note.
+    """
+    ctx = builder()
+    if name in {"sqlite", "sqlite_lance"}:
+        ctx = _json1_variant(ctx)
+
+    compiler = {
+        "postgresql": compile_postgres,
+        "sqlite": compile_lance,
+        "sqlite_lance": compile_lance,
+        "surrealdb": compile_surrealdb,
+    }[name]
+
+    # The whole point of §8: no exception, on any store, in any position.
+    compiled = compiler(_ast(_HYPHENATED_POSITIONS[position]), ctx)
+
+    assert compiled.consumed_keys == _EXPECTED_CONSUMED[position][name]
+
+    # And the segment is never interpolated, whichever route the leaf took. This
+    # is the security property that has to survive the reclassification, and it
+    # is asserted on the rendered string rather than inferred from the route.
+    if name != "postgresql":  # a SQLAlchemy expression, not a string to inspect
+        assert "foo-bar" not in compiled.predicate

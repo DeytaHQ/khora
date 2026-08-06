@@ -212,18 +212,65 @@ class SurrealDBConnection:
         return await _do_query()
 
     async def query(self, sql: str, bindings: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        """Execute a statement and flatten the driver result into a row list.
+
+        **A shape this method cannot flatten is dropped, and the drop is LOGGED
+        rather than silent.** A dropped result is indistinguishable from "the
+        statement matched nothing" at every call site, which is what makes it feed
+        a false :attr:`~khora.storage.backends.base.DocumentScanStep.exhausted`
+        (contract documented there, not restated here). The two drop sites differ
+        in severity: the unflattenable-result branch always yields ZERO rows, so a
+        keyset walk stops on step one; the per-item branch yields a SHORT window,
+        which also reads as exhausted *and* hands the caller rows it will treat as
+        a complete final page. The second is the worse outcome.
+
+        Both are reachable with the real SDK — measured on embedded
+        (``mode="memory"``), not reasoned about. ``RETURN 7`` hands back the ``int``
+        ``7`` → zero rows. ``RETURN [{'a': 1}, 2]`` hands back a mixed list and
+        keeps 1 of 2 → a short window; a wholly non-row list (``RETURN [1, 2, 3]``)
+        empties it instead. No khora call site is known to issue such a statement
+        through this method, but that was not audited across all of them, so read
+        these as tripwires with demonstrated reach rather than as either live
+        defects or dead code.
+
+        **Logged, not raised.** This is the shared read path for every SurrealDB
+        adapter and many callers treat an empty list as a legitimate answer, so
+        raising would convert a driver-shape surprise into a hard failure on paths
+        that are not wrong today. WARNING per the ADR-001 convention (a
+        degradation, not an unrecoverable fault), with no ``exc_info`` — no
+        exception was caught, the isinstance chain simply did not match. There is
+        no result object to carry a structured ``Degradation``: this method returns
+        a bare row list, so the log IS the observability surface.
+
+        **Payload discipline: type names and a count, nothing else.** ``sql`` and
+        ``bindings`` are deliberately excluded — bindings on this path carry
+        document content and user filter values, and free text belongs in a
+        ``bounded_text_hash`` or nowhere.
+        """
         result = await self._execute_raw(sql, bindings)
         if isinstance(result, list):
             # SurrealDB returns list of statement results; flatten
             flat: list[dict[str, Any]] = []
+            dropped: list[str] = []
             for item in result:
                 if isinstance(item, dict):
                     flat.append(item)
                 elif isinstance(item, list):
                     flat.extend(item)
+                else:
+                    dropped.append(type(item).__name__)
+            if dropped:
+                # One log per call, not per item: a wholly unflattenable list
+                # would otherwise emit a line per row.
+                logger.warning(
+                    f"SurrealDB query dropped {len(dropped)} of {len(result)} result item(s) of "
+                    f"unexpected shape ({', '.join(sorted(set(dropped)))}); returned row list is "
+                    "short"
+                )
             return flat
         if isinstance(result, dict):
             return [result]
+        logger.warning(f"SurrealDB query returned an unexpected result shape ({type(result).__name__}); zero rows")
         return []
 
     async def query_one(self, sql: str, bindings: dict[str, Any] | None = None) -> dict[str, Any] | None:

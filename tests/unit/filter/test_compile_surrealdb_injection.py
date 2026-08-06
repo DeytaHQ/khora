@@ -4,8 +4,12 @@ The recall-filter validator only checks that a folded metadata key
 ``startswith("metadata.")`` — it does NOT restrict the characters of the
 sub-path segments. The SurrealDB compiler interpolates those segments into the
 predicate string (SurrealQL cannot bind a field name as a parameter), so it MUST
-validate each segment as a safe identifier and raise a controlled compiler fault
-on anything else. This pins that guard.
+validate each segment as a safe identifier and never interpolate anything else.
+This pins that guard, in both of the shapes it takes: a controlled ``CompileError``
+under ``on_unsupported="raise"``, and a deferral to the caller's residual under
+``"split"`` (the §8 ruling on this ticket — an unrenderable field name is caller
+input, not a
+compiler fault, wherever there is a post-filter to hand it to).
 
 (The exhaustive emitted-string assertions live in the QA-owned
 ``test_compile_surrealdb.py``; this module isolates the security-critical case so
@@ -13,6 +17,8 @@ it cannot regress unnoticed.)
 """
 
 from __future__ import annotations
+
+import dataclasses
 
 import pytest
 
@@ -41,12 +47,59 @@ _CTX = CompileContext(backend_target="temporal_chunk", field_mapping={"metadata"
 def test_unsafe_metadata_segment_raises_compile_error(hostile_key: str) -> None:
     """An unsafe metadata path segment is a controlled CompileError, not a query.
 
-    The fault is raised regardless of ``on_unsupported`` mode — it is an injection
-    guard, not a capability gap.
+    ``_CTX`` is an ``on_unsupported="raise"`` context — the mode both temporal
+    SurrealDB contexts use and the mode any direct compile gets by default. That
+    is the only mode the raise belongs to now; see
+    :func:`test_the_guard_is_mode_aware_raise_interpolates_nothing_split_defers`
+    for the other half and for why the distinction is deliberate.
     """
     ast = parse_to_ast(RecallFilter.model_validate({hostile_key: "v"}))
     with pytest.raises(CompileError):
         compile_surrealdb(ast, _CTX)
+
+
+def test_the_guard_is_mode_aware_raise_interpolates_nothing_split_defers() -> None:
+    """The guard survives ``"raise"``; under ``"split"`` the leaf defers instead.
+
+    This ticket's §8 ruling made a non-identifier metadata segment **caller input,
+    not a compiler fault**: a hyphenated key like ``metadata.a.due-date`` is legal,
+    common JSON, and SurrealQL has no bind form for a field *name*, so the leaf is
+    simply unpushable on this backend. Under ``"split"`` it therefore takes the
+    same route as any other unpushable leaf — a match-all placeholder, left out of
+    ``consumed_keys``, evaluated by the caller's ``compile_python`` residual, which
+    handles hyphenated keys correctly. That is what makes all four document stores
+    return the same rows for the same filter
+    (``tests/integration/storage/backends/surrealdb/test_relational_scan_documents.py::test_a_hyphenated_metadata_key_matches_the_oracle_and_raw_sqlite``).
+
+    **Both halves are asserted here because the two conditions must stay in sync.**
+    The compiler gates the leaf in ``_clause_consumable`` *and* diverts it in
+    ``compile_clause``, on deliberately identical conditions; changing one alone
+    resurrects the pre-§8 position-dependence, where the same key raised in
+    conjunctive position and deferred inside an ``$or``. Pinning only the
+    ``"split"`` half would let the raise be deleted as dead code — it is not dead,
+    it is the injection protection on every path that has no residual to defer to.
+
+    Measured in this tree on this branch, for all seven hostile keys the
+    parametrization above carries: ``"raise"`` raises ``CompileError`` naming the
+    offending segment, ``"split"`` compiles to exactly ``(true)`` with empty
+    ``consumed_keys``. Neither mode interpolates the segment.
+    """
+    ast = parse_to_ast(RecallFilter.model_validate({"metadata.a.due-date": "v"}))
+
+    with pytest.raises(CompileError) as excinfo:
+        compile_surrealdb(ast, dataclasses.replace(_CTX, on_unsupported="raise"))
+    # The segment, not the physical field: this context remaps ``metadata`` to
+    # ``metadata_``, and a message echoing that would name a column the caller
+    # never wrote.
+    assert "due-date" in str(excinfo.value)
+    assert "metadata_" not in str(excinfo.value)
+
+    compiled = compile_surrealdb(ast, dataclasses.replace(_CTX, on_unsupported="split"))
+    assert compiled.consumed_keys == frozenset()
+    # The match-all placeholder, so nothing narrows and the residual decides —
+    # and, critically, the unrenderable segment appears nowhere in the fragment.
+    assert compiled.predicate == "(true)"
+    assert "due-date" not in compiled.predicate
 
 
 def test_safe_nested_segment_compiles() -> None:

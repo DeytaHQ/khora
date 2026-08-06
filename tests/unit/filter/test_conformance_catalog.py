@@ -5,7 +5,10 @@ generators in :mod:`khora.filter.conformance` produce through the in-suite Pytho
 oracle and the Chronicle plan/run seam, and asserts each backend agrees with the
 case's **hand-declared** ``expected_ids``. It complements
 :mod:`tests.unit.filter.test_conformance_harness` (which guards the *machinery* on
-a handful of in-file smoke cases) by exercising the full ~263-case corpus.
+a handful of in-file smoke cases) by exercising the full corpus, **209 cases** as
+counted by summing the 14 family generators in this tree on this branch (the
+"~263" this docstring used to claim was never measured; re-count with
+``len(_all_cases())`` rather than trusting either number).
 
 The contract this gate pins, per family:
 

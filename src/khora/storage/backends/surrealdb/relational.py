@@ -17,7 +17,7 @@ from loguru import logger
 from khora.core.models import Document, MemoryNamespace, TenancyMode
 from khora.core.models.document import DocumentSource, DocumentStatus
 from khora.core.models.recall import DocumentProjection
-from khora.storage.backends.base import DocumentScanKey, DocumentScanStep, PaginatedResult
+from khora.storage.backends.base import DocumentScanKey, DocumentScanStep, PaginatedResult, build_scan_step
 from khora.storage.backends.surrealdb._helpers import (
     _parse_dt,
     _parse_uuid,
@@ -50,6 +50,144 @@ def _checksum_reingestable_clause(pending_stale_before: datetime | None) -> tupl
         return "status != 'failed'", {}
     clause = "status != 'failed' AND (status != 'pending' OR updated_at >= $pending_stale_before)"
     return clause, {"pending_stale_before": pending_stale_before.isoformat()}
+
+
+# Every named bind ``scan_documents`` builds for itself. A compiled filter's
+# binds are merged over these, so any overlap is a silent substitution rather
+# than an error — see the guard at the merge site. Reserved as a SET (not checked
+# against the live keys) so the rejection does not depend on which step of a walk
+# it happens on. Keep in sync with ``_documents_where`` + ``scan_documents``.
+_SCAN_BIND_NAMES: frozenset[str] = frozenset({"ns", "lim", "status", "updated_before", "after_created_at", "after_id"})
+
+
+def _documents_where(
+    namespace_id: UUID,
+    *,
+    status: str | None,
+    updated_before: datetime | str | None,
+) -> tuple[list[str], dict[str, Any]]:
+    """The ``document`` narrowing shared by ``list_documents`` and ``scan_documents``.
+
+    Returns SurrealQL conjuncts and their named binds. Extracted because the
+    namespace scope was written out verbatim in two methods 124 lines apart, and
+    khora #1586's incident was *a deleted namespace predicate that tests did not
+    catch*; #1587's response wrote that predicate into two more places. Callers
+    append their own further conjuncts (the keyset disjunction, a compiled
+    fragment) and their own ``lim`` / ``off`` binds.
+
+    **``updated_before`` is taken already-serialized, and the union in its type is
+    deliberate.** The two callers bind it differently on purpose:
+    :meth:`~SurrealDBRelationalAdapter.list_documents` passes ``.isoformat()`` and
+    :meth:`~SurrealDBRelationalAdapter.scan_documents` passes the ``datetime``
+    object. ``updated_at`` is a ``TYPE datetime`` field, so the string form matches
+    **no row at all.** Re-measured on a 6-row namespace with a bound every row is
+    strictly before: no bound 6 rows, ``datetime`` bind 6, string bind **0** — and
+    ``list_documents(updated_before=…)`` itself returns **0** for that same bound.
+    So the scan's object bind is the correct one and ``list_documents``' string
+    bind is a pre-existing bug in a *public* method.
+
+    Normalizing it here would silently change what ``list_documents`` returns, so
+    this helper binds whatever it is handed and the divergence stays visible at the
+    two call sites. Fixing ``list_documents`` is a separate, caller-visible change
+    and deliberately out of scope.
+    """
+    conditions = ["namespace_id = $ns"]
+    params: dict[str, Any] = {"ns": str(namespace_id)}
+    if status:
+        conditions.append("status = $status")
+        params["status"] = status
+    if updated_before is not None:
+        conditions.append("updated_at < $updated_before")
+        params["updated_before"] = updated_before
+    return conditions, params
+
+
+def _scan_key(row: dict[str, Any]) -> DocumentScanKey:
+    """The keyset position of one raw ``document`` row. ``@internal``.
+
+    Strict on purpose, and **split between the two halves** — that split is the
+    whole design, not an inconsistency:
+
+    * ``created_at`` is taken **raw**. The row already carries a real
+      ``datetime`` (``TYPE datetime``, returned tz-aware UTC by the SDK), so there
+      is nothing to parse. It deliberately does NOT go through ``_parse_dt``,
+      which returns ``None`` for a shape it cannot read; that ``None`` then
+      coalesces to ``datetime.now(UTC)`` upstream, producing a cursor above every
+      row and a walk that re-matches the same window instead of advancing.
+    * ``id`` **must** be converted. ``DocumentScanKey`` is
+      ``tuple[datetime, UUID]`` and the raw ``id`` is a ``RecordID``.
+
+    **Do not "simplify" this by deriving both halves from the raw row wholesale.**
+    Measured, seating the ``RecordID`` in the key with no conversion: **7 of the 33
+    tests** in
+    ``tests/integration/storage/backends/surrealdb/test_relational_scan_documents.py``
+    fail, by **two different mechanisms** — and the second is the one that matters:
+
+    * six walk/cursor tests die inside the SDK, ``ValueError: Failed to decode CBOR
+      request: Error: Expected a CBOR integer, text, array or map``
+      (``surrealdb/connections/async_embedded.py:119``), when the ``RecordID`` is
+      bound back in as a cursor operand;
+    * ``test_a_non_uuid_record_id_raises_instead_of_inventing_a_position`` fails
+      with ``DID NOT RAISE``, because the wholesale form **defeats the strict
+      conversion below entirely** rather than merely breaking the driver. That is
+      the stronger argument for this function's shape: the failure is not "the SDK
+      rejects it" but "the guard stops existing".
+
+    Both counts are re-runnable rather than trustworthy — the denominator moves
+    whenever that module grows (it was 6 of 30 before the QA lane added three
+    tests). Re-run the mutant rather than citing these numbers second-hand.
+
+    Nor may the id half be taken from the converted ``Document`` instead — that is
+    what this function replaced, and it reintroduces the ``created_at`` coalesce
+    above.
+
+    The conversion is done locally rather than through ``_helpers._parse_uuid``
+    because that helper's documented ``uuid5(NAMESPACE_URL, raw)`` fallback
+    **invents** a UUID for a non-UUID record id — the same class of fault as the
+    ``now()`` coalesce, and just as silent: the invented key round-trips into this
+    same store and compares against nothing real. A non-UUID record id must raise
+    here instead. ``_parse_uuid`` itself is left alone; its fallback is
+    load-bearing for auto-generated RELATE ids and it has many other callers.
+
+    ``ValueError`` for a malformed stored row: a data-integrity fault, not a
+    filter-capability outcome, and deliberately a different class from the
+    bind-collision guard's ``RuntimeError`` (an in-tree contract violation).
+
+    **What the id raise does and does not cover — say both halves, because it is
+    tempting to over-claim.** It closes the case where the window's **last** row
+    (the only row a cursor is ever built from) has a non-UUID record id. It does
+    **not** close the record-id homogeneity hazard generally: a foreign-shaped id
+    anywhere else in the table still desynchronises ``id < $after_id`` from
+    ``ORDER BY id DESC`` without this extractor ever seeing it. So the
+    homogeneity precondition in :meth:`SurrealDBRelationalAdapter.scan_documents`
+    stays, rescoped to that residue.
+    """
+    created_at = row.get("created_at")
+    if not isinstance(created_at, datetime):
+        raise ValueError(
+            f"document row {row.get('id')!r} has a non-datetime created_at "
+            f"({type(created_at).__name__}); cannot build a scan cursor from it"
+        )
+
+    raw_id = row.get("id")
+    # A ``RecordID`` exposes the identifier half as ``.id`` — already a ``UUID``
+    # for the ids this store writes. The ``getattr`` fallback also accepts the
+    # bare ``table:⟨uuid⟩`` string form, whose delimiters and table prefix are
+    # stripped below.
+    inner = getattr(raw_id, "id", raw_id)
+    if isinstance(inner, UUID):
+        return (created_at, inner)
+
+    text = str(inner)
+    if ":" in text:
+        text = text.split(":", 1)[1]
+    text = text.strip("⟨⟩")
+    try:
+        return (created_at, UUID(text))
+    except ValueError as exc:
+        raise ValueError(
+            f"document record id {raw_id!r} is not a UUID; refusing to invent a scan cursor position for it"
+        ) from exc
 
 
 class SurrealDBRelationalAdapter:
@@ -385,15 +523,15 @@ class SurrealDBRelationalAdapter:
         offset: int = 0,
     ) -> list[Document]:
         """List documents in a namespace, newest first, ties broken by descending id."""
-        ns_str = str(namespace_id)
-        conditions = ["namespace_id = $ns"]
-        params: dict = {"ns": ns_str, "lim": limit, "off": offset}
-        if status:
-            conditions.append("status = $status")
-            params["status"] = status
-        if updated_before is not None:
-            conditions.append("updated_at < $updated_before")
-            params["updated_before"] = updated_before.isoformat()
+        # ``.isoformat()`` is preserved verbatim, bug and all — see
+        # ``_documents_where``'s docstring for why it is not "corrected" here.
+        conditions, params = _documents_where(
+            namespace_id,
+            status=status,
+            updated_before=updated_before.isoformat() if updated_before is not None else None,
+        )
+        params["lim"] = limit
+        params["off"] = offset
         where = " AND ".join(conditions)
         rows = await self._conn.query(
             f"SELECT * FROM document WHERE {where} ORDER BY created_at DESC, id DESC LIMIT $lim START $off",  # noqa: S608
@@ -498,30 +636,89 @@ class SurrealDBRelationalAdapter:
         consumed as an index range constraint, so there the total-work bound
         holds as stated.
 
+        **Two preconditions on the stored data, neither reachable through khora's
+        own writes, both reachable by a user — SurrealDB is a backend people write
+        to directly.**
+
+        *Record ids must be homogeneous.* This scan's tie-break leans on ``id <
+        $after_id`` agreeing with ``ORDER BY id DESC``, and SurrealDB record ids
+        are a tagged union (``Id::Uuid``, ``Id::String``, ``Id::Number``, …) whose
+        variants order relative to one another rather than by content. A
+        ``document`` table mixing variants is outside what this method is built
+        for. **No magnitude is quoted here on purpose:** reproducing the reported
+        cursor-vs-``ORDER BY`` disagreement means seeding record-id variants that
+        this store's own write path cannot emit (``create_document`` routes every
+        id through ``_record_id``), and the shapes reachable from raw DDL bind
+        back differently from the shapes khora writes — so a bench number
+        collected that way describes the bench, not this store. What IS verified
+        is narrower and more useful: :func:`_scan_key` now **raises**
+        ``ValueError`` on a non-UUID record id, so such a row fails the scan
+        loudly at the cursor instead of being handed to ``_parse_uuid``, which
+        would invent a UUID5 for it and produce a cursor pointing at no row at
+        all. The silent-wrong-answer form of this hazard is gone; the precondition
+        remains because a mixed table is still not something this ordering is
+        defined over.
+
+        *Sub-microsecond ``created_at`` values drop rows.* **Measured on the
+        embedded engine in this tree:** ``time::now()`` stores nanoseconds — the
+        engine's own string rendering of one such value is
+        ``'2026-08-06T12:19:03.565752412Z'``, nine fractional digits — while the
+        Python SDK hands back ``datetime(..., microsecond=565752)``, truncating
+        the trailing ``412``. A cursor built from that row therefore binds an
+        instant strictly *below* the value actually stored, so the row's own tie
+        block matches **neither** disjunct: ``created_at < $after_created_at`` is
+        false (stored is larger) and ``created_at = $after_created_at`` is false
+        (stored is not equal). Those rows are skipped with no error. Unreachable
+        through khora today because every write sets ``created_at`` from a Python
+        ``datetime``, which is microsecond-precision by construction — but a
+        ``DEFAULT time::now()`` on the field, or any direct write, produces ns
+        immediately.
+
+        **The compiled filter's binds are merged over this method's, and the merge
+        is guarded.** ``params.update(compiled.params)`` lets the compiled side
+        win, so an overlapping name is not a clash but a silent substitution —
+        a compiled bind called ``ns`` replaces the tenant scope in
+        ``namespace_id = $ns`` and the statement still executes normally, with a
+        plausible row count and a valid ``last_scanned``, so a walk carries on
+        over another tenant's rows. The names this method reserves are
+        ``_SCAN_BIND_NAMES``, checked as a set rather than against the live keys so
+        the rejection cannot depend on which step of a walk it lands on. See the
+        guard's own comment for what it does and does not defend against (short
+        version: not ``param_namespace``, which structurally cannot produce a
+        reserved name; a compiler that does not follow the ``{prefix}_{n}``
+        convention at all). Raw-SQLite needs no counterpart — its binds are
+        positional.
+
+        The cursor comes from :func:`_scan_key` over the **raw row**, which is
+        strict where ``_row_to_document`` is forgiving: the latter coalesces an
+        unreadable ``created_at`` to ``datetime.now(UTC)`` and routes the id
+        through ``_parse_uuid``'s UUID5 fallback, either of which yields a
+        *plausible but fictional* position rather than an error. Only the id half
+        is converted; ``created_at`` is taken as-is.
+
         Raises ``ValueError`` when ``scan_limit`` is below 1, before anything is
-        compiled or executed, so a bad bound is never masked by a compile error.
-        Raises ``RecallFilterUnsupportedError`` when the compiler rejects a
-        metadata path segment it cannot render as an identifier. **That mapping
-        is best-effort and sibling-dependent:** the guard fires only when the emit
-        walk reaches the leaf, so a hyphenated key in conjunctive position raises
-        while the same key inside an ``$or`` the all-or-nothing gate defers does
-        not — it reaches the caller's post-filter instead. Both are correct.
+        compiled or executed, so a bad bound is never masked by a compile error;
+        also from :func:`_scan_key` on a malformed stored row, and from the bind
+        guard above.
+
+        **It does not raise on a metadata path this backend cannot render as an
+        identifier** (ticket §8). ``metadata.foo-bar`` is legal, common JSON; it
+        is treated as an unpushable leaf, deferred to the caller's residual
+        filter, and never reported as a capability failure. The old behaviour —
+        raise in conjunctive position, work inside a deferred ``$or`` — was
+        position-dependent and made this the only one of four stores that could
+        fail a filter the other three answered. That split is gone, not
+        documented; see :class:`~khora.storage.backends.base.DocumentScanStep`.
         """
         if scan_limit < 1:
             raise ValueError(f"scan_limit must be >= 1, got {scan_limit}")
 
-        conditions = ["namespace_id = $ns"]
-        params: dict[str, Any] = {"ns": str(namespace_id), "lim": scan_limit}
-        if status:
-            conditions.append("status = $status")
-            params["status"] = status
-        if updated_before is not None:
-            # Binds the datetime OBJECT, not ``.isoformat()`` — see the docstring
-            # for the measurement behind the deliberate divergence from
-            # ``list_documents``, whose string bind matches no row. Do not
-            # "correct" it back to match that method.
-            conditions.append("updated_at < $updated_before")
-            params["updated_before"] = updated_before
+        # Binds the datetime OBJECT, not ``.isoformat()`` — see the docstring for
+        # the measurement behind the deliberate divergence from
+        # ``list_documents``, whose string bind matches no row. Do not "correct"
+        # it back to match that method.
+        conditions, params = _documents_where(namespace_id, status=status, updated_before=updated_before)
+        params["lim"] = scan_limit
         if after is not None:
             cursor_created_at, cursor_id = after
             conditions.append("(created_at < $after_created_at OR (created_at = $after_created_at AND id < $after_id))")
@@ -531,38 +728,90 @@ class SurrealDBRelationalAdapter:
         consumed_keys: frozenset[str] = frozenset()
         if filter_ast is not None:
             compiler = CompilerRegistry.get("relational.surrealdb", "documents")
-            # The catch is narrowed two ways, and both are load-bearing. By
-            # SCOPE: this ``try`` holds the compile call and nothing else, so it
-            # cannot swallow anything raised by the splice, the bind merge or the
-            # driver. And by DISCRIMINATOR: only the guard's own message maps.
+            # No ``CompileError`` mapping here, deliberately (ticket §8 ruling).
+            # A metadata leaf whose path segment is not a SurrealQL identifier —
+            # ``metadata.foo-bar``, legal and common JSON — is an **unpushable
+            # leaf, not an error**: under this context's ``"split"`` mode the
+            # compiler leaves it unconsumed and emits the match-all placeholder,
+            # so it never reaches the emit walk that would raise. The compiler's
+            # own injection guard in ``_Builder._metadata_path`` still exists and
+            # still fires under ``"raise"`` mode, but is unreachable through this
+            # context — defense in depth, not the live path.
             #
-            # The mapped case is ``compile_surrealdb``'s sole ``raise
-            # CompileError`` — the ``_SAFE_SEGMENT_RE`` injection guard in
-            # ``_Builder._metadata_path`` (``filter/compilers/surrealdb.py:260``),
-            # which fires under both ``on_unsupported`` modes because it is a
-            # guard rather than a capability gap. ``_documents_compile_context``
-            # states this obligation on the scan path; the compiler-side fix it
-            # also describes is deliberately out of scope.
+            # The leaf is then the CALLER's to evaluate, like every other
+            # unconsumed leaf: it is absent from ``consumed_keys``, which is
+            # exactly the signal that says so. Note there is no caller yet —
+            # ``scan_documents`` has none in-tree — so this is an obligation the
+            # contract places on a future one, not a post-filter that runs today.
             #
-            # Scope alone would blanket-swallow the class: every future genuine
-            # compiler bug would be relabelled a caller input problem and hidden
-            # behind a structured rejection forever. Matching the message
-            # coarsens if the guard is reworded, but it fails SAFE — the mapping
-            # stops firing and ``CompileError`` escapes loudly, the direction
-            # that surfaces bugs rather than burying them. The guard has no error
-            # subclass to key on, and adding one means editing a compiler this
-            # scan does not own.
-            try:
-                compiled = compiler(filter_ast, _documents_compile_context())
-            except CompileError as exc:
-                if _UNSAFE_METADATA_SEGMENT_MARKER not in str(exc):
-                    raise
-                raise RecallFilterUnsupportedError("metadata", str(exc)) from exc
+            # What that buys is the thing a mapping could not: all four backends
+            # return the same ROWS for the same filter, and the old
+            # position-dependence (raises in conjunctive position, works inside a
+            # deferred ``$or``) is gone rather than merely relabelled.
+            #
+            # **Rows, not pushdown.** The three other stores push this leaf into
+            # SQL — measured, ``consumed_keys == {"metadata.foo-bar"}`` on
+            # raw-sqlite, sqlite_lance and postgresql — while this one defers it
+            # and reports ``consumed_keys == set()``. Same answer, reached
+            # differently, and the difference is visible in the signal that exists
+            # to report it. Do not read the parity as "the backends agree".
+            compiled = compiler(filter_ast, _documents_compile_context())
             consumed_keys = compiled.consumed_keys
             conditions.append(f"({compiled.predicate})")
-            # Compiled binds are ``{param_namespace}_{n}`` — ``f_0``, ``f_1``, …
-            # — disjoint from this method's names, so no merge guard is needed.
-            # Never name a scan bind ``f_<n>``.
+
+            # The bind namespaces must stay disjoint, and the invariant runs in
+            # BOTH directions: (a) never name a scan bind ``f_<n>``, which is the
+            # compiler's family (``{param_namespace}_{n}``), and (b) never give a
+            # compiler a ``param_namespace`` that could collide with a scan bind.
+            #
+            # ``params.update`` lets the compiled side WIN the merge, so a
+            # collision is not a clash but a silent substitution: a compiled bind
+            # named ``ns`` replaces the tenant scope in ``namespace_id = $ns`` and
+            # the query still executes normally — plausible row count, valid
+            # ``last_scanned``, so a walk continues over foreign data. Reproduced:
+            # a compiler returning ``params={"f_0": ..., "ns": str(other_ns)}``
+            # made a scan of namespace A return namespace B's row, with no error
+            # and nothing in the logs.
+            #
+            # **This is a tripwire, not a fix for a reachable configuration, and
+            # the distinction must not be blurred.** ``param_namespace`` cannot
+            # produce a collision at any setting: ``compile_surrealdb._bind`` has
+            # a single assignment site and names every bind
+            # ``f"{param_namespace}_{counter}"``, so every compiled bind ends in
+            # ``_<digits>`` and none of the six reserved names has that shape.
+            # Swept over ten values including ``"ns"`` and ``"after_id"`` (which
+            # yield ``ns_0`` and ``after_id_0``), the intersection is empty every
+            # time. The hazard this catches is a compiler that **hand-writes** a
+            # bind name outside that convention — the same severity class as the
+            # fragment-paren tripwire one line earlier, which was likewise
+            # enforced rather than assumed. ``_documents_compile_context`` pins
+            # ``param_namespace`` explicitly as the construction-time half.
+            #
+            # Reserved names rather than live keys, and this is the only correct
+            # justification for that choice: against a compiler hand-writing a
+            # bare ``{"after_id": ...}``, the live-key form misses when
+            # ``after=None`` (the key is simply absent) and fires only on the
+            # first RESUMED step. Rejecting the configuration beats a guard whose
+            # firing depends on which step of a walk you happen to be on.
+            #
+            # ``RuntimeError``, matching this file's precedent for an internal
+            # invariant failure (``create_document``'s "Failed to create
+            # document"). Deliberately NOT ``ValueError`` — nothing the caller
+            # passed is invalid, an in-tree compiler/context contract was
+            # violated, and ``ValueError`` already means "caller passed a bad
+            # bound" in this method and "a stored value is malformed" in
+            # ``_scan_key``. Deliberately NOT ``CompileError`` either: that is
+            # defined as an error raised *inside the compile step* and is
+            # catchable as a filter-capability outcome, so a future caller could
+            # downgrade a potential cross-tenant read into a post-filter
+            # fallback. A cross-tenant tripwire must not look recoverable, and it
+            # is never mapped onto ``RecallFilterUnsupportedError``.
+            #
+            # Names only in the message, never values — the binds carry document
+            # content and user filter values.
+            collisions = compiled.params.keys() & (params.keys() | _SCAN_BIND_NAMES)
+            if collisions:
+                raise RuntimeError(f"compiled filter binds collide with scan binds: {sorted(collisions)}")
             params.update(compiled.params)
 
         where = " AND ".join(conditions)
@@ -570,21 +819,18 @@ class SurrealDBRelationalAdapter:
             f"SELECT * FROM document WHERE {where} ORDER BY created_at DESC, id DESC LIMIT $lim",  # noqa: S608
             params,
         )
-        # ``last_scanned`` and ``exhausted`` both describe the RAW window: the
-        # final row scanned, and whether SurrealQL ran out of rows filling it.
-        # Neither may be derived from a post-filtered subset — that would re-scan
-        # the rejected gap on resume, and would call a full window exhausted.
-        # The key is built from the converted ``Document`` because
-        # ``_row_to_document`` runs the ``RecordID`` -> ``UUID`` conversion that
-        # ``DocumentScanKey`` requires; the raw row's ``id`` would seat a
-        # ``RecordID`` in that tuple and still round-trip into this same store,
-        # i.e. silently green.
-        docs = [self._row_to_document(r) for r in rows]
-        return DocumentScanStep(
-            documents=docs,
-            last_scanned=(docs[-1].created_at, docs[-1].id) if docs else None,
-            exhausted=len(rows) < scan_limit,
+        # The cursor comes from ``_scan_key`` over the RAW row, which takes
+        # ``created_at`` raw and converts only the ``id``. Still worth stating
+        # what makes the id half easy to get wrong: a ``RecordID`` seated in a
+        # ``DocumentScanKey`` round-trips into this same store, so a type error
+        # there is not loud on every path — it is silently green on some. See
+        # ``_scan_key`` for what each half does and why they differ.
+        return build_scan_step(
+            rows,
+            scan_limit=scan_limit,
             consumed_keys=consumed_keys,
+            key=_scan_key,
+            document=self._row_to_document,
         )
 
     async def claim_orphaned_documents(
@@ -1331,18 +1577,9 @@ def _row_to_memory_fact(row: dict[str, Any]) -> _MemoryFactRow:
 # --------------------------------------------------------------------------- #
 from khora.filter import (  # noqa: E402
     CompileContext,
-    CompileError,
     CompilerRegistry,
-    RecallFilterUnsupportedError,
 )
 from khora.filter.compilers.surrealdb import compile_surrealdb  # noqa: E402
-
-# The message of the one ``CompileError`` a well-formed filter can provoke:
-# ``compile_surrealdb._metadata_path``'s injection guard, which raises
-# ``CompileError(f"unsafe metadata path segment {seg!r} (not a SurrealQL
-# identifier)")``. ``scan_documents`` keys its re-raise on this so that mapping
-# the caller-provoked case does not also swallow genuine compiler faults.
-_UNSAFE_METADATA_SEGMENT_MARKER = "unsafe metadata path segment"
 
 # The system keys this table backs with a real field — the single source of
 # truth for the documents tier. Nine of the ten ``SYSTEM_KEYS``; ``occurred_at``
@@ -1401,22 +1638,46 @@ def _documents_compile_context() -> CompileContext:
     relaxing it re-opens the zero-row defect above.
     ``tests/unit/filter/test_documents_compile_contexts.py`` pins the behaviour.
 
-    **A separate gap survives both modes.** ``compile_surrealdb`` raises the
-    internal ``CompileError`` on an unsafe (non-identifier) metadata path
-    segment — a hyphenated key such as ``metadata.due-date`` is legal JSON and
-    common in the wild — and it does so regardless of ``on_unsupported``, since
-    that is a guard rather than a capability gap. ``CompileError`` is documented
-    as "a bug, not a capability gap", so it would escape as an internal error;
-    the documents scan path is obliged to catch it and re-raise it as
-    ``RecallFilterUnsupportedError`` so it surfaces as a structured rejection.
-    That mapping belongs to the scan path and cannot be implemented from here.
-    The cleaner long-term remedy is compiler-side and deliberately not done in
-    this change: under ``"split"``, "I cannot render this segment as a SurrealQL
-    identifier" is a capability gap, not an internal fault, so the leaf belongs
-    on the unsupported path (placeholder, unconsumed, post-filtered) with
-    ``CompileError`` reserved for ``"raise"``. That has to move the emit path and
-    the gate predicate together — changing only one would make them disagree —
-    which is why it is a follow-up rather than a line here.
+    **Non-identifier metadata segments defer; they do not raise** (ticket §8).
+    A hyphenated key such as ``metadata.due-date`` is legal, common JSON, and
+    ``compile_surrealdb``'s ``_Builder._metadata_path`` cannot interpolate it as
+    a SurrealQL identifier — the backend has no bind form for a field *name*. It
+    is therefore an unpushable leaf, exactly like an undeclared system key: under
+    this context's ``"split"`` mode the compiler leaves it unconsumed and emits
+    the match-all placeholder instead of raising. It stays out of
+    ``consumed_keys``, which is the signal telling the caller to evaluate it in
+    memory.
+
+    **Stated as an obligation, not as a running mechanism:** ``compile_python``
+    does handle hyphenated keys correctly (verified), but nothing wires it to
+    this scan today — ``scan_documents`` has no caller in-tree. The rows are only
+    equal to the other stores' *after* some future caller applies the full filter
+    to the window. Until then this context has made the leaf deferrable, not
+    deferred.
+
+    The compiler's emit-time injection guard is deliberately **left in place and
+    untouched**. It becomes defense-in-depth: unreachable through this context,
+    because the gate defers the leaf before the emit walk runs, but still firing
+    on direct compiles that do not go through a documents context. Do NOT loosen
+    ``_SAFE_SEGMENT_RE`` — nothing here relaxes what counts as a safe identifier;
+    the change is only about *which path* an unsafe one takes.
+
+    This removes the *raise* and the *row* divergence: all four backends return
+    the same rows for the same filter, and the old position-dependence (raise in
+    conjunctive position, work inside a deferred ``$or``) is gone. Previously the
+    same hyphenated key returned rows on raw-SQLite, whose ``compile_lance`` has
+    no such guard, and raised here.
+
+    **The pushdown split remains, and is now visible in ``consumed_keys``.**
+    Measured on the same filter: the other three documents contexts push the leaf
+    into SQL (``consumed_keys == {"metadata.foo-bar"}`` on raw-sqlite,
+    sqlite_lance and postgresql) while this one defers it
+    (``consumed_keys == set()``). Two consequences worth knowing rather than
+    rediscovering: a caller differencing its own leaf keys against
+    ``consumed_keys`` to report "what cost a post-filter" gets a different answer
+    per store for the same filter; and under a bounded ``scan_limit`` this store
+    fills its window with rows the residual will reject, so the same filter costs
+    more steps here than on a store that narrowed in SQL.
 
     **The enumeration post-filter must evaluate the FULL filter AST
     unconditionally.** Everything the compiler pushes is a superset filter, but
@@ -1441,6 +1702,22 @@ def _documents_compile_context() -> CompileContext:
     return CompileContext(
         backend_target="document",
         field_mapping=field_mapping,
+        # Stated rather than inherited, and it is the construction-time half of
+        # the scan's bind-disjointness invariant. ``CompileContext`` documents
+        # this field as existing precisely "so compiled params cannot collide with
+        # the engine's own query parameters", and ``"f"`` is also its default — so
+        # naming it changes nothing today and makes the choice deliberate and
+        # local instead of silently inherited from another module.
+        #
+        # The disjointness argument: ``compile_surrealdb._bind`` names every bind
+        # ``f"{param_namespace}_{counter}"``, so every compiled bind ends in
+        # ``_<digits>``, and no bind ``scan_documents`` builds for itself has that
+        # shape (``ns``, ``lim``, ``status``, ``updated_before``,
+        # ``after_created_at``, ``after_id`` — see ``_SCAN_BIND_NAMES``). That
+        # holds for ANY value of this field, which is why the runtime guard at the
+        # merge site is a tripwire against a compiler abandoning the convention
+        # rather than a check on this setting.
+        param_namespace="f",
         # The enumeration contract's mode. Safe only because ``compile_surrealdb``
         # keeps an ``OR`` / ``NOT`` node all-or-nothing — see the docstring; a bare
         # ``true`` placeholder inside a negated subtree would otherwise match zero

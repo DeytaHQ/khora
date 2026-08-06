@@ -79,10 +79,48 @@ chronological order for the UTC-normalized values the validator produces.
 
 **Injection guard.** User-supplied metadata path segments are interpolated into
 the predicate string (SurrealQL cannot bind a field name as a parameter), so each
-segment is validated against a strict identifier regex before interpolation; an
-unsafe segment raises :class:`~khora.filter.context.CompileError`. System keys
-come from the closed :data:`~khora.filter.model.SYSTEM_KEYS` whitelist and are
-safe. User *values* always bind via ``$params``, never interpolate.
+segment is validated against a strict identifier regex before interpolation.
+Under ``on_unsupported="split"`` such a leaf never reaches the interpolation at
+all: it is an **unpushable leaf**, left out of ``consumed_keys`` for the caller
+to post-filter like any other key this backend cannot express (a non-identifier
+segment is caller input, not a compiler fault). Read that as the ``"split"``
+contract's standing obligation on the caller, not as a promise that some residual
+is running — this compiler's half ends at declining to consume the key. Under ``"raise"`` the interpolation guard still fires and
+raises :class:`~khora.filter.context.CompileError` — and that is **not** a
+test-only path: :func:`khora.storage.temporal.surrealdb._filter_compile_context`
+is raise-mode and is the shared context for both live recall paths (vector
+``_search_inner`` and BM25 ``search_fulltext``), so the injection protection stays
+on where user filters actually arrive. Pre-existing and NOT addressed here: on
+those paths a merely hyphenated key surfaces to the caller as a raw
+``CompileError``, whose own docstring calls itself "a bug, not a capability gap".
+That is a wart, not a design — do not read this paragraph as endorsing it.
+System keys come from the closed
+:data:`~khora.filter.model.SYSTEM_KEYS` whitelist and are safe. User *values*
+always bind via ``$params``, never interpolate.
+
+**Splice safety — every returned fragment is self-delimiting.** A named contract,
+not an accident of the current emission: the ``predicate`` string contains no
+boolean operator at parenthesis depth 0. Every boolean node parenthesizes itself
+(:meth:`_Builder.compile_node` wraps its ``AND`` / ``OR`` joins and emits
+``!(...)`` for ``NOT``), and so does every leaf whose emission contains an ``OR``
+(the array-aware ``$eq``, the ``{k: null}`` match). This matters because callers
+splice the fragment into a conjunction **as text**, where ``AND`` binds tighter
+than ``OR`` — an ungrouped top-level ``OR`` would absorb the caller's namespace
+predicate into its left disjunct and return another tenant's rows. Verified on
+embedded SurrealDB: with one row per namespace, ``WHERE ns = 'mine' AND a = 1 OR
+b = 2`` returns the other namespace's row that ``WHERE ns = 'mine' AND (a = 1 OR
+b = 2)`` correctly excludes.
+
+Two of the three splice sites do **not** re-parenthesize, so there the invariant
+is the only defense: ``khora.storage.temporal.surrealdb``'s
+``_build_filter_clauses`` seeds its clause list with the namespace predicate and
+both call sites append ``compiled.predicate`` bare before joining on ``" AND "``.
+``SurrealDBRelationalAdapter.scan_documents`` does wrap it — that belt does not
+license loosening this brace. Pinned statically by
+``tests/unit/filter/test_fragment_splice_safety.py`` (both compilers that emit a
+text fragment, over the conformance corpus, in both ``on_unsupported`` modes).
+Deliberately **no** runtime assertion: the property is static, and a per-recall
+check would pay continuously for what a unit test settles once.
 
 ``@internal``. Reachable as ``khora.filter.compilers.surrealdb.compile_surrealdb``
 for khora's own engines; not re-exported from :mod:`khora.__init__`.
@@ -133,6 +171,18 @@ _RANGE_OP = {
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
+def _segments_safe(segs: tuple[str, ...]) -> bool:
+    """True iff every metadata sub-segment is interpolable as a SurrealQL identifier.
+
+    The read-only mirror of :meth:`_Builder._metadata_path`'s guard, reading the
+    SAME :data:`_SAFE_SEGMENT_RE` rather than a second spelling of it — the gate
+    and the emit path must never disagree about what "safe" means, and the regex
+    itself is deliberately NOT loosened. An empty ``segs`` (the bare ``metadata``
+    blob, whose path has no sub-segments) is vacuously safe.
+    """
+    return all(_SAFE_SEGMENT_RE.match(seg) for seg in segs)
+
+
 def compile_surrealdb(ast: FilterNode, ctx: CompileContext) -> CompiledFilter[str]:
     """Compile a canonical AST to a SurrealQL ``WHERE`` fragment + bind dict.
 
@@ -151,8 +201,9 @@ def compile_surrealdb(ast: FilterNode, ctx: CompileContext) -> CompiledFilter[st
     cannot express, ``"raise"`` raises :class:`RecallFilterUnsupportedError`;
     ``"split"`` omits it from ``consumed_keys`` and emits a non-constraining
     ``"true"`` placeholder. A metadata path segment that is not a safe SurrealQL
-    identifier raises :class:`CompileError` regardless of mode (an injection
-    guard, not a capability gap).
+    identifier is treated as unsupported under ``"split"`` (deferred to the
+    caller's residual) and raises :class:`CompileError` under ``"raise"`` (the
+    injection guard, on the path that has no residual to defer to).
     """
     consumed: set[str] = set()
     builder = _Builder(ctx=ctx, consumed=consumed)
@@ -252,6 +303,21 @@ class _Builder:
         the path string — an unsafe segment raises :class:`CompileError` (the
         injection guard). SurrealQL has no field-name bind, so interpolation is
         unavoidable; the regex is the defense.
+
+        **Defense in depth, and no longer the first line of it.** Under
+        ``on_unsupported="split"`` :meth:`compile_clause` diverts an unsafe leaf to
+        :meth:`_unsupported` before calling here, so the raise is unreachable on
+        every split-mode path — today that is the ``documents`` scan, the only
+        split-mode SurrealDB context in the tree.
+
+        It stays live under ``"raise"``, and specifically on the **live recall
+        paths**: :func:`khora.storage.temporal.surrealdb._filter_compile_context`
+        is raise-mode and backs both vector ``_search_inner`` and BM25
+        ``search_fulltext`` (verified by execution — a hyphenated key raises
+        there). Say that rather than the weaker "direct compiles": this is where
+        user-supplied filters actually reach the interpolation. That is also why
+        the check stays a real raise rather than becoming an assertion — the
+        method is reachable from callers that do not gate, and must fail closed.
         """
         root = (self._ctx.field_mapping or {}).get("metadata", "metadata")
         parts = [root]
@@ -331,33 +397,28 @@ class _Builder:
         absent-compare (``NONE = x`` → ``false``) would silently drop every row. A
         backend that cannot fail loud must fail closed.
 
-        It deliberately does NOT consider :data:`_SAFE_SEGMENT_RE` safety, because
-        it mirrors the emit path and the emit path is not mode-dependent there:
-        :meth:`_metadata_path` raises :class:`CompileError` on an unsafe segment
-        under BOTH modes (it is an injection guard, not a capability gap).
-        Reporting such a leaf unconsumable *here alone* would desynchronize the
-        gate from emission — the enclosing subtree would defer,
-        :meth:`_metadata_path` would never run, and the guard would not fire at
-        all. If the guard is ever turned into a real split-mode capability gap
-        (routing to :meth:`_unsupported` instead of raising), this branch must
-        become mode-aware in the same change.
+        **The** :data:`_SAFE_SEGMENT_RE` **branch is mode-aware, and must stay
+        exactly as mode-aware as emission.** Under ``"split"`` a metadata leaf with
+        a non-identifier segment is reported unconsumable here AND diverted to
+        :meth:`_unsupported` in :meth:`compile_clause`; the two conditions are
+        deliberately identical, so the gate and the emit walk agree and
+        :meth:`_metadata_path` is never reached. Under ``"raise"`` neither fires
+        and the leaf descends to :meth:`_metadata_path`, which raises
+        :class:`CompileError` — the injection guard, preserved for direct compiles.
 
-        **The guard's firing is nevertheless sibling-dependent, and a caller must
-        not assume otherwise.** An unsafe segment raises when the emit walk reaches
-        it, which it does not when the leaf sits inside an ``$or`` / ``$not`` that
-        the all-or-nothing gate defers for an *unrelated* reason — say an
-        undeclared system key elsewhere in the same disjunction. That subtree emits
-        the placeholder and the leaf reaches ``compile_python`` instead, which
-        handles hyphenated keys correctly, so the rows are right either way and
-        nothing unsafe is interpolated. But a scan path that maps
-        :class:`CompileError` onto the public unsupported-filter error MUST treat
-        that mapping as best-effort: the same filter can raise or not depending on
-        what else is in the enclosing subtree.
+        Changing one of the two conditions without the other reintroduces exactly
+        the desynchronization this pairing exists to prevent: an ``$or`` subtree
+        would defer while a conjunctive sibling still reached the interpolation
+        guard, which is the pre-rework behavior (a hyphenated key raised in
+        conjunctive position and deferred inside an ``$or``, i.e. the same filter
+        raised or not depending on what else shared its subtree).
         """
         path = clause.path
         if len(path) == 1 and path[0] in SYSTEM_KEYS:
             return path[0] in self._declared
         if path and path[0] == "metadata":
+            if self._ctx.on_unsupported == "split" and not _segments_safe(path[1:]):
+                return False
             return len(path) > 1 or clause.op == Op.EQ
         return False
 
@@ -383,6 +444,21 @@ class _Builder:
                 )
             expr = self._compile_system_clause(clause)
         elif path and path[0] == "metadata":
+            # A non-identifier sub-segment is CALLER INPUT, not a compiler fault, so
+            # under ``"split"`` it is an unpushable leaf rather than an error: left
+            # out of ``consumed_keys`` for the caller to post-filter, exactly like
+            # every other key this backend cannot express. That makes the rows
+            # correct only if the caller honors the ``"split"`` contract — an
+            # OBLIGATION on the caller, not a mechanism running here.
+            # ``compile_python`` was measured to evaluate such a leaf correctly, so
+            # a caller that post-filters through it gets the right answer.
+            # Routed BEFORE ``_compile_metadata_clause``, which is the only
+            # caller of :meth:`_metadata_path` — so the interpolation guard is never
+            # reached on this path and nothing unsafe is built. Under ``"raise"``
+            # this is deliberately skipped and the guard still fires: see
+            # :meth:`_metadata_path`.
+            if self._ctx.on_unsupported == "split" and not _segments_safe(path[1:]):
+                return self._unsupported(clause, "metadata path segment is not a SurrealQL identifier")
             compiled = self._compile_metadata_clause(clause)
             if compiled is None:
                 # Unsupported metadata shape — route it BEFORE the ``consumed`` add

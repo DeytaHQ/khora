@@ -1,9 +1,24 @@
 """Seed + walk helpers for the bounded ``scan_documents`` tests.
 
-Shared by the two SQLAlchemy-backed relational stores (the embedded sqlite_lance
-adapter and PostgreSQL), which run the same keyset scan over the same
-``DocumentModel``. The seed reasoning is subtle enough to be worth stating once
-here rather than twice in the two test modules.
+Shared by all four ``scan_documents`` test modules: the two SQLAlchemy-backed
+relational stores (the embedded sqlite_lance adapter and PostgreSQL), which run
+the same keyset scan over the same ``DocumentModel``, and the two raw-SQL ones
+(``SQLiteRelationalBackend`` and the SurrealDB relational adapter). The seed
+reasoning is subtle enough to be worth stating once here rather than four times
+over.
+
+**What deliberately stays per store, so nobody "finishes the job" by lifting
+it.** Each module's ``_SUPERSET_SHAPES`` table encodes that store's *capability*,
+not a shared corpus: SurrealDB pushes ``created_at`` (``pushable_date``) where
+the two SQLite-family modules defer it (``unpushable_date``), and the
+``occurred_at`` shape whose oracle is empty by construction
+(``unpushable_key``) exists on raw SQLite and SurrealDB but not on sqlite_lance
+— 11 shapes, 11 shapes and 10. A shared dict would need per-store overrides and
+would imply a uniformity that does not exist. Same for the two
+``_two_namespace_ladders`` helpers (their fixed id arrangement is load-bearing
+on SurrealDB and determinism-only on raw SQLite, and each says so at length) and
+for PostgreSQL's ``_seed_varied``, which seeds no ``metadata`` because that
+module has no shape that reads one.
 
 Two properties of the seed are load-bearing:
 
@@ -44,6 +59,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
+from khora.core.models import Document
+from khora.filter import RecallFilter
+from khora.filter.ast import parse_to_ast
 from tests.test_helpers.document_order import id_ladder, seed_order
 
 # Whole second, zero microseconds — see the module docstring for why this is
@@ -74,12 +92,22 @@ class ScanSeed:
     """The ``created_at`` every row in :attr:`tied_ids` was written with."""
 
 
-def scan_seed(total: int = 6, *, instant: datetime = WHOLE_SECOND) -> ScanSeed:
-    """Build a tie-heavy seed of ``total`` documents pinning both sort keys."""
-    if total < 5:
-        raise ValueError(f"total must leave a tie block of at least 3 rows to resume from the middle of, got {total}")
+def scan_seed(total: int = 6, *, instant: datetime = WHOLE_SECOND, ids: list[UUID] | None = None) -> ScanSeed:
+    """Build a tie-heavy seed of ``total`` documents pinning both sort keys.
 
-    ids = id_ladder(total)
+    Pass ``ids`` to supply the ascending id ladder instead of drawing a fresh
+    random one (``total`` is then ignored). The two-namespace tests need that:
+    they seed both namespaces at the same tie instant from two ladders whose
+    relative order is pinned by construction, which two independent
+    :func:`~tests.test_helpers.document_order.id_ladder` draws would decide by
+    coin flip. Nothing else about the seed changes.
+    """
+    ids = list(ids) if ids is not None else id_ladder(total)
+    if len(ids) < 5:
+        raise ValueError(
+            f"the seed must leave a tie block of at least 3 rows to resume from the middle of, got {len(ids)}"
+        )
+
     newest_id, oldest_id = ids[0], ids[-1]
     tied = ids[1:-1]
 
@@ -95,6 +123,51 @@ def scan_seed(total: int = 6, *, instant: datetime = WHOLE_SECOND) -> ScanSeed:
         oldest_id=oldest_id,
         tie_instant=instant,
     )
+
+
+async def write_document(store: Any, namespace_id: UUID, doc_id: UUID, created_at: datetime, **fields: Any) -> None:
+    """Insert one document through the production write API."""
+    await store.create_document(
+        Document(
+            id=doc_id,
+            namespace_id=namespace_id,
+            content="scanned content",
+            checksum=f"scan-{doc_id.hex}",
+            created_at=created_at,
+            updated_at=fields.pop("updated_at", created_at),
+            **fields,
+        )
+    )
+
+
+async def seed_documents(store: Any, namespace_id: UUID, seed: ScanSeed) -> None:
+    for doc_id, created_at in seed.writes:
+        await write_document(store, namespace_id, doc_id, created_at)
+
+
+async def seed_varied(store: Any, namespace_id: UUID, seed: ScanSeed) -> None:
+    """Seed the same corpus with attribute variety, so a filter can split it.
+
+    Attributes are assigned by *write* index, which is deliberately not the
+    enumeration order — every expectation in the calling module is therefore
+    derived from the rows a scan actually returns, never from this loop's
+    counter.
+    """
+    for i, (doc_id, created_at) in enumerate(seed.writes):
+        await write_document(
+            store,
+            namespace_id,
+            doc_id,
+            created_at,
+            title=f"doc-{i}",
+            source_type="report" if i % 2 == 0 else "library",
+            metadata={"tier": "gold"} if i < 2 else {},
+        )
+
+
+def wire_to_ast(wire: dict[str, Any]) -> Any:
+    """Lower a wire-form filter to the AST ``scan_documents`` takes."""
+    return parse_to_ast(RecallFilter.model_validate(wire))
 
 
 def as_utc(value: datetime) -> datetime:
@@ -148,4 +221,14 @@ async def walk_scan(
     raise AssertionError(f"scan did not report exhausted within {max_steps} steps of scan_limit={scan_limit}")
 
 
-__all__ = ["WHOLE_SECOND", "ScanSeed", "as_utc", "scan_seed", "walk_scan"]
+__all__ = [
+    "WHOLE_SECOND",
+    "ScanSeed",
+    "as_utc",
+    "scan_seed",
+    "seed_documents",
+    "seed_varied",
+    "walk_scan",
+    "wire_to_ast",
+    "write_document",
+]

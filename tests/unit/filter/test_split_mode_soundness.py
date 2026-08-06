@@ -1391,28 +1391,49 @@ def test_the_two_segment_patterns_have_not_drifted() -> None:
 
 
 @pytest.mark.parametrize("mode", ("split", "raise"))
-def test_an_unsafe_metadata_segment_raises_in_both_modes(mode: str) -> None:
-    """KNOWN GAP, pinned as it behaves — the guard is not a split-mode capability gap.
+def test_an_unsafe_metadata_segment_is_mode_aware(mode: str) -> None:
+    """The guard IS a capability gap under ``"split"`` now, and still a guard under ``"raise"``.
 
-    ``compile_surrealdb`` raises :class:`CompileError` on a non-identifier
-    metadata segment under BOTH modes, rather than routing it to the
-    unsupported-leaf path where ``"split"`` would defer it. That is deliberate
-    today: it is an injection guard, and ``_clause_consumable`` therefore does
-    NOT consider segment safety — reporting such a leaf unconsumable would let
-    the enclosing subtree defer, the guard would never run, and the error would
-    vanish rather than surface.
+    **This test previously pinned the opposite, and the change is the ticket.**
+    Its earlier form asserted a raise under BOTH modes and called it a "KNOWN GAP,
+    pinned as it behaves, not endorsed", with a standing instruction: *"If the
+    guard is ever turned into a real capability gap, ``_clause_consumable`` must
+    become mode-aware in the same change."* This ticket's §8 ruling did exactly
+    that, and
+    the implementation did make both halves move together, so the prediction held
+    and the pin has been inverted rather than deleted.
 
-    Pinned as current behaviour, not endorsed. If the guard is ever turned into a
-    real capability gap, ``_clause_consumable`` must become mode-aware in the
-    same change or the mirror above will start failing.
+    Why the split is the right shape rather than a weakening. A metadata key like
+    ``metadata.$ref`` or ``metadata.due-date`` is legal, common JSON — caller
+    input, not a malformed AST — and SurrealQL has no bind form for a field
+    *name*, so the segment is simply unpushable on this backend. Where there is a
+    residual to hand it to (``"split"``) it takes the unpushable-leaf route like
+    any other undeclared key: a match-all placeholder, absent from
+    ``consumed_keys``, evaluated by the caller's ``compile_python``. Where there
+    is not (``"raise"`` — every temporal/recall context) the injection guard still
+    fires, because there is nowhere safe for the leaf to go.
+
+    Neither mode interpolates the segment, which is the security property that
+    must survive both. The ``"split"`` branch asserts that positively rather than
+    trusting the placeholder: the rendered predicate must not contain the segment
+    text at all.
     """
     ctx = CompileContext(
         backend_target="document",
         field_mapping={"title": "title", "metadata": "metadata_"},
         on_unsupported=mode,
     )
-    with pytest.raises(CompileError):
-        compile_surrealdb(_ast({"metadata.$ref": "x"}), ctx)
+    ast = _ast({"metadata.$ref": "x"})
+
+    if mode == "raise":
+        with pytest.raises(CompileError):
+            compile_surrealdb(ast, ctx)
+        return
+
+    compiled = compile_surrealdb(ast, ctx)
+    assert compiled.consumed_keys == frozenset()
+    assert "$ref" not in compiled.predicate, "the unrenderable segment reached the predicate string"
+    assert "metadata_" not in compiled.predicate
 
 
 # ===========================================================================

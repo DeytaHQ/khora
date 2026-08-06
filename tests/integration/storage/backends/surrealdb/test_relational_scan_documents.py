@@ -33,24 +33,30 @@ a whole second on purpose; see :mod:`tests.test_helpers.document_scan`.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, NamedTuple
 from uuid import UUID, uuid4
 
 import pytest
 
 pytest.importorskip("surrealdb")
 
-from khora.core.models import Document, MemoryNamespace, TenancyMode  # noqa: E402
+from khora.core.models import MemoryNamespace, TenancyMode  # noqa: E402
 from khora.core.models.document import DocumentStatus  # noqa: E402
 from khora.filter import (  # noqa: E402
     CompiledFilter,
     CompileError,
     CompilerRegistry,
-    RecallFilter,
     RecallFilterUnsupportedError,
 )
-from khora.filter.ast import parse_to_ast  # noqa: E402
 from khora.filter.compilers.python import compile_python  # noqa: E402
+
+# The raw-SQLite store, imported into this SurrealDB module on purpose: §8's
+# parity checkbox is a claim about two stores agreeing, and a claim about two
+# stores cannot be checked from inside one of them. Both run in-process with no
+# container (``:memory:`` and ``mode="memory"``), so this costs a fixture, not a
+# lane.
+from khora.storage.backends.sqlite import SQLiteRelationalBackend  # noqa: E402
+from khora.storage.backends.sqlite import _documents_compile_context as _sqlite_documents_context  # noqa: E402
 from khora.storage.backends.surrealdb.connection import SurrealDBConnection  # noqa: E402
 
 # ``_documents_compile_context`` is private, and imported on purpose: the
@@ -60,8 +66,17 @@ from khora.storage.backends.surrealdb.relational import (  # noqa: E402
     SurrealDBRelationalAdapter,
     _documents_compile_context,
 )
-from tests.test_helpers.document_order import seed_order  # noqa: E402
-from tests.test_helpers.document_scan import WHOLE_SECOND, ScanSeed, as_utc, walk_scan  # noqa: E402
+from tests.test_helpers.document_scan import (  # noqa: E402
+    WHOLE_SECOND,
+    ScanSeed,
+    as_utc,
+    scan_seed,
+    seed_documents,
+    seed_varied,
+    walk_scan,
+    wire_to_ast,
+    write_document,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -89,43 +104,9 @@ async def namespace(adapter):
     return await _make_namespace(adapter)
 
 
-def _filter_ast(wire: dict[str, Any]) -> Any:
-    return parse_to_ast(RecallFilter.model_validate(wire))
-
-
 # --------------------------------------------------------------------------- #
 # Seeding
 # --------------------------------------------------------------------------- #
-
-
-def _seed_from_ladder(ids: list[UUID], *, instant: datetime = WHOLE_SECOND) -> ScanSeed:
-    """Build a :class:`ScanSeed` over a caller-supplied ascending id ladder.
-
-    Identical in construction to :func:`tests.test_helpers.document_scan.scan_seed`
-    — ``total - 2`` rows share ``instant`` so only the ``id DESC`` leg can order
-    them, and the two rows outside that block carry timestamp and id in
-    deliberate conflict. The one difference is that the ids come from the
-    caller instead of from a fresh random ladder, which is what
-    :func:`_two_namespace_ladders` needs to pin the relative order of two
-    namespaces' ids. See that function for why that matters.
-    """
-    if len(ids) < 5:
-        raise ValueError(f"need a tie block of at least 3 rows to resume from the middle of, got {len(ids)}")
-
-    newest_id, oldest_id = ids[0], ids[-1]
-    tied = ids[1:-1]
-    stamps = dict.fromkeys(tied, instant)
-    stamps[newest_id] = instant + timedelta(seconds=1)
-    stamps[oldest_id] = instant - timedelta(seconds=1)
-
-    return ScanSeed(
-        writes=[(doc_id, stamps[doc_id]) for doc_id in seed_order(ids)],
-        expected=[newest_id, *reversed(tied), oldest_id],
-        tied_ids=list(reversed(tied)),
-        newest_id=newest_id,
-        oldest_id=oldest_id,
-        tie_instant=instant,
-    )
 
 
 def _ladder(prefix: str, discriminator: str, n: int) -> list[UUID]:
@@ -166,49 +147,10 @@ def _two_namespace_ladders(n: int = 6) -> tuple[list[UUID], list[UUID]]:
     return _ladder(prefix, "1", n), _ladder(prefix, "0", n)
 
 
-async def _write(adapter: Any, namespace_id: UUID, doc_id: UUID, created_at: datetime, **fields: Any) -> None:
-    """Insert one document through the production write API."""
-    await adapter.create_document(
-        Document(
-            id=doc_id,
-            namespace_id=namespace_id,
-            content="scanned content",
-            checksum=f"scan-{doc_id.hex}",
-            created_at=created_at,
-            updated_at=fields.pop("updated_at", created_at),
-            **fields,
-        )
-    )
-
-
-async def _seed(adapter: Any, namespace_id: UUID, seed: ScanSeed) -> None:
-    for doc_id, created_at in seed.writes:
-        await _write(adapter, namespace_id, doc_id, created_at)
-
-
-async def _seed_varied(adapter: Any, namespace_id: UUID, seed: ScanSeed) -> None:
-    """Seed the same corpus with attribute variety, so a filter can split it.
-
-    Attributes are assigned by *write* index, which is deliberately not the
-    enumeration order — every expectation below is therefore derived from the
-    rows a scan actually returns, never from this loop's counter.
-    """
-    for i, (doc_id, created_at) in enumerate(seed.writes):
-        await _write(
-            adapter,
-            namespace_id,
-            doc_id,
-            created_at,
-            title=f"doc-{i}",
-            source_type="report" if i % 2 == 0 else "library",
-            metadata={"tier": "gold"} if i < 2 else {},
-        )
-
-
 def _seeded(n: int = 6) -> ScanSeed:
     """A single-namespace seed; ids may be random because nothing compares across
     namespaces."""
-    return _seed_from_ladder(_ladder(uuid4().hex[:23], "1", n))
+    return scan_seed(ids=_ladder(uuid4().hex[:23], "1", n))
 
 
 # --------------------------------------------------------------------------- #
@@ -218,7 +160,7 @@ def _seeded(n: int = 6) -> ScanSeed:
 
 async def test_scan_limit_bounds_the_window(adapter, namespace) -> None:
     seed = _seeded()
-    await _seed(adapter, namespace.id, seed)
+    await seed_documents(adapter, namespace.id, seed)
 
     step = await adapter.scan_documents(namespace.id, scan_limit=2)
 
@@ -237,7 +179,7 @@ async def test_a_full_window_is_not_yet_exhausted(adapter, namespace) -> None:
     short window is the other half of the same contract.
     """
     seed = _seeded()
-    await _seed(adapter, namespace.id, seed)
+    await seed_documents(adapter, namespace.id, seed)
 
     exact = await adapter.scan_documents(namespace.id, scan_limit=6)
     assert len(exact.documents) == 6
@@ -273,7 +215,7 @@ async def test_exhausted_describes_the_raw_window_not_what_survives_a_post_filte
     future refactor that moved post-filtering inside it — not today's arithmetic.
     """
     seed = _seeded()
-    await _seed_varied(adapter, namespace.id, seed)
+    await seed_varied(adapter, namespace.id, seed)
 
     wire = {
         "$or": [
@@ -281,7 +223,7 @@ async def test_exhausted_describes_the_raw_window_not_what_survives_a_post_filte
             {"occurred_at": {"$gte": "2999-01-01T00:00:00+00:00"}},
         ]
     }
-    ast = _filter_ast(wire)
+    ast = wire_to_ast(wire)
     step = await adapter.scan_documents(namespace.id, filter_ast=ast, scan_limit=6)
 
     # Nothing pushed, so the raw window is the whole namespace, filled to the bound.
@@ -316,7 +258,7 @@ async def test_scan_limit_below_one_is_rejected_before_anything_is_compiled(adap
     with pytest.raises(ValueError, match="scan_limit"):
         await adapter.scan_documents(
             namespace.id,
-            filter_ast=_filter_ast({"source_type": {"$eq": "report"}}),
+            filter_ast=wire_to_ast({"source_type": {"$eq": "report"}}),
             scan_limit=0,
         )
 
@@ -348,7 +290,7 @@ async def test_walk_visits_every_document_exactly_once_in_total_order(adapter, n
     comparison: a wrong-but-complete order has to fail too.
     """
     seed = _seeded()
-    await _seed(adapter, namespace.id, seed)
+    await seed_documents(adapter, namespace.id, seed)
 
     steps = await walk_scan(adapter.scan_documents, namespace.id, scan_limit=1)
     seen = [d.id for step in steps for d in step.documents]
@@ -373,7 +315,7 @@ async def test_cursor_excludes_its_own_row_and_keeps_its_tie_mates(adapter, name
     asserted, plus the exact remaining suffix.
     """
     seed = _seeded()
-    await _seed(adapter, namespace.id, seed)
+    await seed_documents(adapter, namespace.id, seed)
 
     full = await adapter.scan_documents(namespace.id, scan_limit=10)
     assert [d.id for d in full.documents] == seed.expected
@@ -410,7 +352,7 @@ async def test_filtered_walk_puts_a_cursor_and_a_compiled_fragment_in_one_statem
     first carries both families at once.
     """
     seed = _seeded()
-    await _seed_varied(adapter, namespace.id, seed)
+    await seed_varied(adapter, namespace.id, seed)
 
     full = await adapter.scan_documents(namespace.id, scan_limit=10)
     wire = {"$or": [{"source_type": {"$eq": "report"}}, {"title": {"$eq": "doc-1"}}]}
@@ -421,7 +363,7 @@ async def test_filtered_walk_puts_a_cursor_and_a_compiled_fragment_in_one_statem
         adapter.scan_documents,
         namespace.id,
         scan_limit=1,
-        filter_ast=_filter_ast(wire),
+        filter_ast=wire_to_ast(wire),
     )
     seen = [d.id for step in steps for d in step.documents]
 
@@ -438,7 +380,7 @@ async def test_empty_window_reports_exhausted_without_a_position(adapter, namesp
     assert empty.exhausted is True
 
     seed = _seeded()
-    await _seed(adapter, namespace.id, seed)
+    await seed_documents(adapter, namespace.id, seed)
     full = await adapter.scan_documents(namespace.id, scan_limit=10)
     oldest = full.documents[-1]
 
@@ -472,11 +414,13 @@ async def test_split_reports_only_the_leaves_surrealql_enforced(adapter, namespa
     """
     seed = _seeded()
     for i, (doc_id, created_at) in enumerate(seed.writes):
-        await _write(adapter, namespace.id, doc_id, created_at, source_type="report" if i % 2 == 0 else "library")
+        await write_document(
+            adapter, namespace.id, doc_id, created_at, source_type="report" if i % 2 == 0 else "library"
+        )
 
     step = await adapter.scan_documents(
         namespace.id,
-        filter_ast=_filter_ast(
+        filter_ast=wire_to_ast(
             {"source_type": {"$eq": "report"}, "occurred_at": {"$gte": "2999-01-01T00:00:00+00:00"}}
         ),
         scan_limit=10,
@@ -487,38 +431,116 @@ async def test_split_reports_only_the_leaves_surrealql_enforced(adapter, namespa
     assert len(step.documents) == 3
 
 
+class _Shape(NamedTuple):
+    """One superset-property parametrization, with what it is expected to exercise.
+
+    ``consumed`` is the exact ``consumed_keys`` this shape is expected to produce,
+    measured on this store (see the table below). It is not a convenience field: a
+    shape that consumes NOTHING cannot fail the superset comparison at all, so
+    which side of that line a shape sits on has to be pinned separately from the
+    comparison itself — see the test's docstring on mode B.
+
+    **The exact set rather than a non-empty/empty category, deliberately.** The
+    plan specified a category assertion, and a category would be enough for the
+    mode-B purpose. This is the stronger form, chosen for cross-module consistency:
+    the two sibling scan modules (``tests/unit/test_sqlite_scan_documents.py`` and
+    ``tests/unit/storage/backends/sqlite_lance/test_relational_scan_documents.py``)
+    landed the exact-set form independently, and three near-identical records with
+    three different shapes is exactly the drift this ticket is about. The exact set
+    strictly implies the category, so nothing is lost. What it costs: a deliberate
+    compiler improvement that starts pushing one more key fails here — which is
+    the correct place to notice a pushdown change, and the failure names the shape.
+
+    ``oracle_empty`` marks a shape whose oracle is empty *by construction* on this
+    store, so it is asserted empty rather than being exempted from the
+    anti-vacuity check.
+    """
+
+    wire: dict[str, Any]
+    consumed: frozenset[str]
+    oracle_empty: bool = False
+
+
 # The pushdown must never reject a row the full filter would keep. Shapes are
 # chosen for the ways a compiler can get that wrong, not for operator coverage:
 # the ones wrapping an unpushable leaf in a disjunction or a negation matter
 # most, because a match-all placeholder left inside a negation inverts into a
 # match-nothing and excludes rows.
-_SUPERSET_SHAPES: dict[str, dict[str, Any]] = {
-    "pushable_eq": {"source_type": {"$eq": "report"}},
-    "pushable_ne": {"source_type": {"$ne": "report"}},
-    "pushable_nin": {"source_type": {"$nin": ["report"]}},
-    "pushable_exists": {"source_url": {"$exists": False}},
-    "metadata_eq": {"metadata.tier": {"$eq": "gold"}},
-    "pushable_date": {"created_at": {"$gte": "2026-01-31T12:30:00+00:00"}},
-    "unpushable_key": {"occurred_at": {"$gte": "2026-01-01T00:00:00+00:00"}},
-    "or_over_unpushable": {
-        "$or": [
-            {"occurred_at": {"$gte": "2026-01-01T00:00:00+00:00"}},
-            {"source_type": {"$eq": "report"}},
-        ]
-    },
-    "not_over_pushable": {"$not": {"source_type": {"$eq": "report"}}},
-    "not_over_unpushable": {"$not": {"occurred_at": {"$gte": "2026-01-01T00:00:00+00:00"}}},
-    "and_of_in_and_not": {
-        "$and": [
-            {"source_type": {"$in": ["report", "library"]}},
-            {"$not": {"title": {"$eq": "doc-0"}}},
-        ]
-    },
+#
+# ``pushable_exists`` was ``{"source_url": {"$exists": False}}`` and was VACUOUS.
+# ``$exists: False`` on a system key is constant-false — system keys are
+# documented always-present — so the oracle was empty for any seed and
+# ``oracle <= window`` could not fail. It was blind precisely where it looked
+# strongest, being one of the few shapes that both consumes a key and returns an
+# empty window, i.e. the "the pushdown rejected every row" direction this test
+# exists to catch. The replacement asks the same question of a metadata path,
+# where absence is a real property of the corpus rather than a tautology.
+#
+# EVERY figure below was measured on **embedded SurrealDB** (``mode="memory"``,
+# the module's own fixture — no container, no compose stack) over
+# ``seed_varied``'s 6-row corpus, in this tree on this branch. That provenance is
+# stated rather than left implicit: this is an integration lane, so "measured on
+# this store" otherwise invites the fair question of whether the lane ran. It did,
+# embedded. A remote (``ws://``) instance is NOT covered by these numbers.
+#
+# | shape               | oracle | window | consumed_keys      |
+# | ---                 | ---    | ---    | ---                |
+# | pushable_eq         | 3      | 3      | source_type        |
+# | pushable_ne         | 3      | 3      | source_type        |
+# | pushable_nin        | 3      | 3      | source_type        |
+# | pushable_exists     | 4      | 4      | metadata.tier      |  (was 0 / 0)
+# | metadata_eq         | 2      | 2      | metadata.tier      |
+# | pushable_date       | 5      | 5      | created_at         |
+# | unpushable_key      | 0      | 6      | (none)             |
+# | or_over_unpushable  | 3      | 6      | (none)             |
+# | not_over_pushable   | 3      | 3      | source_type        |
+# | not_over_unpushable | 6      | 6      | (none)             |
+# | and_of_in_and_not   | 5      | 5      | source_type, title |
+_SUPERSET_SHAPES: dict[str, _Shape] = {
+    "pushable_eq": _Shape({"source_type": {"$eq": "report"}}, consumed=frozenset({"source_type"})),
+    "pushable_ne": _Shape({"source_type": {"$ne": "report"}}, consumed=frozenset({"source_type"})),
+    "pushable_nin": _Shape({"source_type": {"$nin": ["report"]}}, consumed=frozenset({"source_type"})),
+    "pushable_exists": _Shape({"metadata.tier": {"$exists": False}}, consumed=frozenset({"metadata.tier"})),
+    "metadata_eq": _Shape({"metadata.tier": {"$eq": "gold"}}, consumed=frozenset({"metadata.tier"})),
+    "pushable_date": _Shape(
+        {"created_at": {"$gte": "2026-01-31T12:30:00+00:00"}},
+        consumed=frozenset({"created_at"}),
+    ),
+    # ``occurred_at`` has no ``document`` field behind it, so the oracle drops
+    # every row: empty by construction, not by seed.
+    "unpushable_key": _Shape(
+        {"occurred_at": {"$gte": "2026-01-01T00:00:00+00:00"}},
+        consumed=frozenset(),
+        oracle_empty=True,
+    ),
+    "or_over_unpushable": _Shape(
+        {
+            "$or": [
+                {"occurred_at": {"$gte": "2026-01-01T00:00:00+00:00"}},
+                {"source_type": {"$eq": "report"}},
+            ]
+        },
+        consumed=frozenset(),
+    ),
+    "not_over_pushable": _Shape({"$not": {"source_type": {"$eq": "report"}}}, consumed=frozenset({"source_type"})),
+    "not_over_unpushable": _Shape(
+        {"$not": {"occurred_at": {"$gte": "2026-01-01T00:00:00+00:00"}}},
+        consumed=frozenset(),
+    ),
+    "and_of_in_and_not": _Shape(
+        {
+            "$and": [
+                {"source_type": {"$in": ["report", "library"]}},
+                {"$not": {"title": {"$eq": "doc-0"}}},
+            ]
+        },
+        consumed=frozenset({"source_type", "title"}),
+    ),
 }
 
 
-@pytest.mark.parametrize("wire", _SUPERSET_SHAPES.values(), ids=_SUPERSET_SHAPES.keys())
-async def test_pushdown_never_rejects_a_row_the_full_filter_would_keep(adapter, namespace, wire) -> None:
+@pytest.mark.parametrize("shape", _SUPERSET_SHAPES.values(), ids=_SUPERSET_SHAPES.keys())
+async def test_pushdown_never_rejects_a_row_the_full_filter_would_keep(adapter, namespace, shape: _Shape) -> None:
     """The superset property the resume contract depends on.
 
     Resuming past the rows a pushdown rejected is sound only because a rejected
@@ -530,14 +552,44 @@ async def test_pushdown_never_rejects_a_row_the_full_filter_would_keep(adapter, 
     documents — a post-filter can only narrow, never recover a row the window
     never returned.
 
-    Scope, so a green run is not read as more than it is: eleven shapes on one
-    store is a tripwire, not a proof over the operator space. The general
-    property belongs to the compilers and to the forced-residual conformance
-    corpus.
+    **Scope, counted from a run on this store rather than asserted.** Eleven
+    shapes are parametrized, but they do not all exercise the property, and the
+    docstring this replaced claimed they did. Measured ``consumed_keys`` per
+    shape (embedded ``memory://``, see the table above the shape dict): **eight**
+    put a fragment into the SurrealQL ``WHERE`` and are therefore capable of
+    failing the comparison; **three** — ``unpushable_key``, ``or_over_unpushable``,
+    ``not_over_unpushable`` — consume nothing, because ``compile_surrealdb``'s
+    all-or-nothing gate defers the whole node.
+
+    **Those three are structurally unfailable for the superset property, and no
+    seed fixes that.** When nothing is pushed, the window IS the namespace, and
+    ``oracle`` is computed by filtering that same window — so ``oracle <= window``
+    holds for every possible oracle value. What they still pin is their
+    ``consumed_keys``: asserting it is empty catches a compile-context or
+    ``field_mapping`` edit that starts pushing one of them, which is the change
+    that would make the deferral silently stop happening. That is the whole of
+    their value here; the superset property for deferred subtrees belongs to the
+    compilers and to the forced-residual conformance corpus.
+
+    Note the mode-B discriminator is ``consumed_keys``, **not**
+    ``window == corpus``. Those are not the same test: a pushdown bug that wrongly
+    *rejects* rows shrinks the window below the corpus while still consuming a
+    key, and ``oracle <= window`` then does fire — which is the whole point.
+
+    **Two anti-vacuity checks, because they cover different modes.**
+    ``assert oracle`` catches an oracle that went empty — an empty set is a
+    subset of anything. Mutation-verified, and reverted afterwards: hollowing out
+    ``seed_varied`` so every row is written ``source_type="library"`` fails
+    **2 of these 11 parametrizations** (``pushable_eq`` and
+    ``or_over_unpushable``, whose oracles both drop from 3 rows to 0) on the
+    ``assert oracle`` line rather than passing green. The ``consumed_keys``
+    assertion catches the other mode, above. Neither subsumes the other, and
+    ``assert oracle`` alone would have left all three of the deferring shapes
+    looking tested.
     """
     seed = _seeded()
-    await _seed_varied(adapter, namespace.id, seed)
-    ast = _filter_ast(wire)
+    await seed_varied(adapter, namespace.id, seed)
+    ast = wire_to_ast(shape.wire)
 
     step = await adapter.scan_documents(namespace.id, filter_ast=ast, scan_limit=100)
     # Precondition: the comparison below is only meaningful if this one window
@@ -548,6 +600,18 @@ async def test_pushdown_never_rejects_a_row_the_full_filter_would_keep(adapter, 
     all_docs = (await adapter.scan_documents(namespace.id, scan_limit=100)).documents
     matches = compile_python(ast, _documents_compile_context()).predicate
     oracle = {d.id for d in all_docs if matches(d)}
+
+    # Anti-vacuity, mode A: an empty oracle is a subset of anything.
+    if shape.oracle_empty:
+        assert not oracle, "declared empty-by-construction, but the oracle kept rows — reclassify the shape"
+    else:
+        assert oracle, "the oracle kept no rows, so the comparison below cannot fail — the corpus stopped feeding it"
+
+    # Anti-vacuity, mode B: a shape that pushes nothing cannot reject anything, so
+    # the comparison is unfailable for it. Pinning the EXACT measured set (not
+    # merely non-empty vs empty) also catches a shape drifting across that line,
+    # and matches the two sibling scan modules — see ``_Shape``.
+    assert step.consumed_keys == shape.consumed
 
     assert oracle <= {d.id for d in step.documents}
 
@@ -576,13 +640,13 @@ async def test_last_scanned_is_the_final_raw_row_not_the_last_match(adapter, nam
     """
     newest, middle, oldest = (uuid4() for _ in range(3))
     base = WHOLE_SECOND
-    await _write(adapter, namespace.id, newest, base + timedelta(seconds=2), source_type="report")
-    await _write(adapter, namespace.id, middle, base + timedelta(seconds=1), source_type="report")
-    await _write(adapter, namespace.id, oldest, base, source_type="library")
+    await write_document(adapter, namespace.id, newest, base + timedelta(seconds=2), source_type="report")
+    await write_document(adapter, namespace.id, middle, base + timedelta(seconds=1), source_type="report")
+    await write_document(adapter, namespace.id, oldest, base, source_type="library")
 
     step = await adapter.scan_documents(
         namespace.id,
-        filter_ast=_filter_ast(
+        filter_ast=wire_to_ast(
             {
                 "$or": [
                     {"source_type": {"$eq": "report"}},
@@ -610,34 +674,56 @@ async def test_last_scanned_carries_a_uuid_not_a_record_id(adapter, namespace) -
     """``DocumentScanKey`` declares ``tuple[datetime, UUID]``, and the id half is
     the easy one to get wrong.
 
-    ``id`` on this store is a ``RecordID`` (``document:<uuid>``) in the raw row,
-    and the implementation builds the key from the converted ``Document`` — where
-    ``_row_to_document`` has already run the ``RecordID`` -> ``UUID`` conversion —
-    rather than off ``rows[-1]["id"]``. This asserts the declared type directly,
-    on both a mid-walk key and one taken under a filter.
+    **The derivation is SPLIT, and that split is the contract this pins.**
+    :func:`~khora.storage.backends.surrealdb.relational._scan_key` takes
+    ``created_at`` off the **raw row** — the row already carries a real
+    ``datetime`` (``TYPE datetime``), so parsing it would only introduce the
+    ``_parse_dt`` -> ``None`` -> ``datetime.now(UTC)`` coalesce that puts the
+    cursor above every row — while the ``id`` half is **strictly converted**,
+    because the raw ``id`` is a ``RecordID`` and the declared key type is a
+    ``UUID``. Neither half may be taken the other's way. An earlier revision
+    built the whole key from the converted ``Document``, which is what
+    reintroduces the coalesce.
 
-    Scope note, because it was proposed to me as a mutant that "stays green
-    across every walk test": on this store it does not. Building the key from the
-    raw row instead fails five tests in this module, the walks dying inside the
-    SDK with ``ValueError: Failed to decode CBOR request`` when the ``RecordID``
-    is bound back in as a cursor operand, and the raw-window test above failing
-    on the tuple compare. So this test is a *clearer* statement of the contract,
-    not the only thing standing between a ``RecordID`` key and a green suite.
-    Keep it for the former reason.
+    **What makes the id half worth its own test even so.** A ``RecordID`` seated
+    in a ``DocumentScanKey`` round-trips back into *this same store* — it is the
+    shape the write path binds — so a type error there is not loud on every path;
+    it is silently green on some, and only a direct type assertion states the
+    contract.
+
+    Scope note, re-measured on this branch rather than inherited. The mutant that
+    derives BOTH halves from the raw row wholesale
+    (``return (row["created_at"], row["id"])``) does not stay green here: it fails
+    **7 of the 33 tests in this module**, the walks dying inside the SDK at
+    ``surrealdb/connections/async_embedded.py:119`` with ``ValueError: Failed to
+    decode CBOR request`` when the ``RecordID`` is bound back in as a cursor
+    operand. So this test is a *clearer* statement of the contract, not the only
+    thing standing between a ``RecordID`` key and a green suite — keep it for the
+    former reason.
+
+    Two prior versions of this count were wrong and the corrections are recorded
+    so nobody re-derives them: the original said "five" (never measured, and it
+    described a whole-``Document`` derivation the code no longer uses), and the
+    "6 of 30" that replaced it was measured against the module BEFORE this
+    branch added three tests. The seventh failure is
+    :func:`test_a_non_uuid_record_id_raises_instead_of_inventing_a_position`,
+    which the wholesale form fails for a different reason than the walks do — it
+    seats the ``RecordID`` in the key without raising at all. Re-run the mutant
+    rather than trusting this number; the denominator moves whenever the module
+    grows.
     """
     seed = _seeded()
-    await _seed_varied(adapter, namespace.id, seed)
+    await seed_varied(adapter, namespace.id, seed)
 
     step = await adapter.scan_documents(namespace.id, scan_limit=3)
     assert step.last_scanned is not None
     created_at, doc_id = step.last_scanned
     assert isinstance(doc_id, UUID)
-    assert not isinstance(doc_id, bool)  # UUID has no bool subclass; guards a stub returning a truthy sentinel
     assert isinstance(created_at, datetime)
 
     filtered = await adapter.scan_documents(
         namespace.id,
-        filter_ast=_filter_ast({"source_type": {"$eq": "report"}}),
+        filter_ast=wire_to_ast({"source_type": {"$eq": "report"}}),
         scan_limit=2,
     )
     assert filtered.last_scanned is not None
@@ -645,30 +731,40 @@ async def test_last_scanned_carries_a_uuid_not_a_record_id(adapter, namespace) -
 
 
 async def test_a_hyphenated_metadata_key_in_a_deferred_subtree_does_not_raise(adapter, namespace) -> None:
-    """The ``RecallFilterUnsupportedError`` mapping is sibling-dependent, by design.
+    """A hyphenated key inside a wholesale-deferred ``$or`` also just works.
 
-    The injection guard fires only when the emit walk *reaches* the offending
-    leaf. Inside an ``$or`` that ``compile_surrealdb``'s all-or-nothing gate
-    defers wholesale for an unrelated reason — here the unbacked ``occurred_at``
-    sibling — the subtree never emits, the hyphenated segment is never rendered,
-    and the whole filter goes to the caller's post-filter, which handles
-    hyphenated keys correctly. Rows are right either way.
+    **Position-independence is now the whole point, and this test is what shows
+    the two positions agree.** Before §8 the mapping was sibling-dependent: the
+    injection guard fired only when the emit walk *reached* the offending leaf, so
+    the same key raised in conjunctive position while working inside an ``$or``
+    that the all-or-nothing gate deferred for an unrelated reason (here the
+    unbacked ``occurred_at`` sibling). §8 removed that split by making the leaf
+    non-consumable, so both positions now take the residual route. Its conjunctive
+    counterpart is
+    :func:`test_a_hyphenated_metadata_key_matches_the_oracle_and_raw_sqlite`.
 
-    This is asserted **positively**, as a non-raise, on purpose. The tempting
-    assertion is the unconditional one — "a hyphenated metadata key always
-    raises" — and it would be wrong: it would pin behaviour the compiler does not
-    promise and would block the documented future improvement of routing an
-    unrenderable segment onto the unsupported path under ``"split"`` instead of
-    raising. Its conjunctive sibling
-    (:func:`test_unsafe_metadata_segment_raises_the_public_error`) pins the case
-    that *is* promised.
+    **Scope, stated rather than implied: row-level parity is checked in the
+    CONJUNCTIVE position only.** That is the position §8 rules on, and it is the
+    one that changed. This ``$or`` test asserts only that the filter does not
+    raise and consumes nothing — it deliberately does NOT compare rows against an
+    oracle or against another store, so do not read the pair as establishing
+    parity "in every position". Position coverage at the *compile* level (three
+    positions × four stores, exact ``consumed_keys``) lives in
+    :mod:`tests.unit.filter.test_documents_compile_contexts`.
+
+    This one stays a deliberately weak assertion for a structural reason: the gate
+    defers the whole node for the ``occurred_at`` sibling regardless of the
+    metadata leaf, so it cannot distinguish "deferred because unrenderable" from
+    "deferred because of the sibling". Measured, that deferral also costs
+    SurrealDB the pushable sibling — in ``$or`` position it consumes nothing at
+    all and scans the whole namespace. The conjunctive test is the one with teeth.
     """
     seed = _seeded()
-    await _seed_varied(adapter, namespace.id, seed)
+    await seed_varied(adapter, namespace.id, seed)
 
     step = await adapter.scan_documents(
         namespace.id,
-        filter_ast=_filter_ast(
+        filter_ast=wire_to_ast(
             {
                 "$or": [
                     {"metadata.due-date": {"$eq": "2026-01-01"}},
@@ -709,7 +805,7 @@ async def test_status_and_updated_before_narrow_the_window(adapter, namespace) -
     seed = _seeded()
     cutoff = seed.tie_instant + timedelta(hours=1)
     for i, (doc_id, created_at) in enumerate(seed.writes):
-        await _write(
+        await write_document(
             adapter,
             namespace.id,
             doc_id,
@@ -745,7 +841,7 @@ async def test_every_narrowing_leg_composes_in_one_statement(adapter, namespace)
     seed = _seeded()
     cutoff = seed.tie_instant + timedelta(hours=1)
     for i, (doc_id, created_at) in enumerate(seed.writes):
-        await _write(
+        await write_document(
             adapter,
             namespace.id,
             doc_id,
@@ -779,7 +875,7 @@ async def test_every_narrowing_leg_composes_in_one_statement(adapter, namespace)
 
     step = await adapter.scan_documents(
         namespace.id,
-        filter_ast=_filter_ast({"source_type": {"$eq": "report"}}),
+        filter_ast=wire_to_ast({"source_type": {"$eq": "report"}}),
         status=DocumentStatus.COMPLETED.value,
         updated_before=cutoff,
         after=(cursor_doc.created_at, cursor_doc.id),
@@ -791,60 +887,142 @@ async def test_every_narrowing_leg_composes_in_one_statement(adapter, namespace)
 
 
 # --------------------------------------------------------------------------- #
-# The CompileError mapping
+# Cross-store parity on a hyphenated metadata key (ticket §8)
 # --------------------------------------------------------------------------- #
 
 
-async def test_unsafe_metadata_segment_raises_the_public_error(adapter, namespace) -> None:
-    """A hyphenated metadata key is a caller mistake, not an internal fault.
+@pytest.fixture
+async def sqlite_backend():
+    """An in-memory raw-SQLite store, for the two-store half of the §8 parity claim."""
+    store = SQLiteRelationalBackend(":memory:")
+    await store.connect()
+    try:
+        yield store
+    finally:
+        await store.disconnect()
 
-    ``compile_surrealdb``'s injection guard raises the internal ``CompileError``
-    on a metadata path segment it cannot render as a SurrealQL identifier — and
-    ``metadata.due-date`` is legal JSON and common in the wild, so a caller can
-    provoke it with a perfectly well-formed filter. ``CompileError`` is
-    documented as "a bug, not a capability gap", so letting it escape would
-    present a user-input problem as an internal error. ``scan_documents`` maps it
-    to the public ``RecallFilterUnsupportedError``.
 
-    The reported path is the ``metadata`` root rather than the offending dotted
-    path, because the guard reports only the segment — asserted, so a later
-    change that starts reporting the full path is a visible decision rather than
-    a silent one.
+# One row per outcome, so the filter's two leaves are each load-bearing and each
+# in a different direction. ``discriminator`` is the row that separates a real
+# parity check from a vacuous one: the metadata leaf rejects it while the
+# ``source_type`` sibling admits it, so it is in SurrealDB's raw window and must
+# be removed by the residual.
+_PARITY_ROWS: dict[str, dict[str, Any]] = {
+    "match": {"source_type": "library", "metadata": {"foo-bar": "x"}},
+    "discriminator": {"source_type": "library", "metadata": {"foo-bar": "y"}},
+    "wrong_source_type": {"source_type": "report", "metadata": {"foo-bar": "x"}},
+    "metadata_absent": {"source_type": "library", "metadata": {}},
+}
+_PARITY_WIRE: dict[str, Any] = {"metadata.foo-bar": {"$eq": "x"}, "source_type": {"$eq": "library"}}
+
+
+async def _seed_parity(store: Any, namespace_id: UUID) -> dict[str, UUID]:
+    """Write :data:`_PARITY_ROWS` to ``store``; return name -> id."""
+    ids: dict[str, UUID] = {}
+    for offset, (name, fields) in enumerate(_PARITY_ROWS.items()):
+        doc_id = uuid4()
+        ids[name] = doc_id
+        await write_document(store, namespace_id, doc_id, WHOLE_SECOND + timedelta(seconds=offset), **fields)
+    return ids
+
+
+async def test_a_hyphenated_metadata_key_matches_the_oracle_and_raw_sqlite(adapter, namespace, sqlite_backend) -> None:
+    """A hyphenated metadata key returns the SAME ROWS on both stores (ticket §8).
+
+    ``metadata.foo-bar`` is legal, common JSON, and SurrealQL has no bind form for
+    a field *name*, so the leaf is simply unpushable on SurrealDB. §8 ruled that
+    this makes it an **unpushable leaf, not an error**: it defers to the caller's
+    ``compile_python`` residual like any other, and the pre-§8 behaviour this test
+    replaces — ``RecallFilterUnsupportedError`` in conjunctive position, working
+    rows inside a deferred ``$or`` — is gone rather than relabelled.
+
+    **What "parity" does and does not mean, because the tempting assertion is
+    wrong.** The two stores do NOT agree step-for-step and never will: measured in
+    this tree, raw-sqlite / sqlite_lance / postgresql all compile this filter with
+    ``consumed_keys == {"metadata.foo-bar", "source_type"}`` while SurrealDB
+    reports ``{"source_type"}``. So SurrealDB's raw window is a **superset** of
+    raw-sqlite's, and ``assert surreal_rows == sqlite_rows`` on the raw windows
+    would be asserting something false. Parity holds one tier up — *after the
+    residual the caller is contractually required to apply* — and that is what is
+    asserted here. The ``consumed_keys`` asymmetry is asserted too, in both
+    directions, because it is real, permanent, and the thing a future reader is
+    most likely to "fix".
+
+    **Anti-vacuity, in the shape §4 of this ticket demands elsewhere.** If the
+    residual removed nothing, SurrealDB's raw window would already equal the
+    oracle and this test would pass without exercising the deferral at all — the
+    same defect as the ``pushable_exists`` parametrization §4 replaced. So the
+    seed carries ``discriminator`` (``foo-bar = "y"``, ``source_type =
+    "library"``): admitted by the pushed leaf, rejected by the deferred one. Both
+    facts are asserted rather than assumed — the oracle is non-empty, and the raw
+    window is strictly larger than it.
     """
-    with pytest.raises(RecallFilterUnsupportedError) as excinfo:
-        await adapter.scan_documents(
-            namespace.id,
-            filter_ast=_filter_ast({"metadata.foo-bar": {"$eq": "x"}}),
-            scan_limit=10,
-        )
+    surreal_ids = await _seed_parity(adapter, namespace.id)
+    sqlite_ns = await sqlite_backend.create_namespace(
+        MemoryNamespace(id=(sid := uuid4()), namespace_id=sid, tenancy_mode=TenancyMode.SHARED)
+    )
+    sqlite_ids = await _seed_parity(sqlite_backend, sqlite_ns.id)
 
-    assert not isinstance(excinfo.value, CompileError)
-    assert "foo-bar" in str(excinfo.value)
-    assert excinfo.value.__cause__ is not None
-    assert isinstance(excinfo.value.__cause__, CompileError)
+    ast = wire_to_ast(_PARITY_WIRE)
+    surreal_step = await adapter.scan_documents(namespace.id, filter_ast=ast, scan_limit=50)
+    sqlite_step = await sqlite_backend.scan_documents(sqlite_ns.id, filter_ast=ast, scan_limit=50)
+
+    # The asymmetry, both directions. SurrealDB defers the unrenderable leaf…
+    assert "metadata.foo-bar" not in surreal_step.consumed_keys
+    assert surreal_step.consumed_keys == frozenset({"source_type"})
+    # …while raw-sqlite pushes it into SQL via JSON1.
+    assert "metadata.foo-bar" in sqlite_step.consumed_keys
+    assert _sqlite_documents_context().schema_capabilities.sqlite_json1, (
+        "raw-sqlite deferred the metadata leaf too — this build lacks JSON1, so the "
+        "asymmetry this test documents is not the one being exercised"
+    )
+
+    # The residual every caller of scan_documents is required to apply.
+    matches = compile_python(ast, _documents_compile_context()).predicate
+    surreal_raw = {d.id for d in surreal_step.documents}
+    surreal_rows = {d.id for d in surreal_step.documents if matches(d)}
+    sqlite_rows = {d.id for d in sqlite_step.documents if matches(d)}
+
+    # Anti-vacuity FIRST, so a hollowed-out seed reports the property it broke
+    # rather than a downstream bookkeeping mismatch.
+    assert surreal_rows, "the oracle kept no row — the comparison below cannot fail"
+    assert surreal_raw > surreal_rows, "the residual removed nothing — the deferral is not being exercised"
+    assert surreal_rows == {surreal_ids["match"]}
+    assert surreal_ids["discriminator"] in surreal_raw
+
+    # The parity itself, named by row rather than by count so a wrong-but-equal-sized
+    # answer fails too.
+    assert sqlite_rows == {sqlite_ids["match"]}
+    assert {n for n, i in surreal_ids.items() if i in surreal_rows} == {
+        n for n, i in sqlite_ids.items() if i in sqlite_rows
+    }
 
 
 async def test_an_unrelated_compile_error_still_propagates(adapter, namespace, monkeypatch) -> None:
-    """The catch is narrow — it maps ONE message, it does not swallow the class.
+    """There is NO mapping layer, so a compiler fault escapes as itself.
 
-    ``scan_documents`` discriminates on the guard's message substring because the
-    guard has no error subclass of its own. The hazard in that design is the
-    obvious widening: an ``except CompileError: raise RecallFilterUnsupportedError``
-    with no discriminator would relabel every genuine compiler bug as a user
-    input problem and hide it behind a 4xx-shaped error forever. Nothing in the
-    filter language can provoke a second ``CompileError`` on this path today —
-    ``grep -rn "raise CompileError" src/khora/filter/`` returns exactly one hit —
-    so the only way to test the other branch is to inject one through the
-    registry, which is also how the real lookup reaches its compiler.
+    **This test was rewritten because §8 made its previous subject disappear, and
+    the rewrite is the point.** It used to assert that the ``try/except`` in
+    ``scan_documents`` was *narrow* — that it mapped one exception subclass and let
+    the base class through. §8 deleted that ``try/except`` entirely, which left the
+    test passing for a reason its docstring no longer described: nothing catches
+    anything, so of course the error propagates. A test that passes trivially while
+    documenting a mechanism that no longer exists is precisely the stale artifact
+    this ticket was opened over, so it asserts the post-§8 property instead.
 
-    **This is not hypothetical.** An intermediate revision of ``scan_documents``
-    dropped the discriminator and kept only the scope narrowing, on the (true)
-    reasoning that the compiler has a single raise site. This test failed against
-    it: the injected bug came back as ``RecallFilterUnsupportedError: metadata:
-    internal compiler invariant violated…`` — relabelled as a caller input
-    problem and attributed to a ``metadata`` path it had nothing to do with. The
-    discriminator was restored. Do not re-widen the catch without deleting this
-    test on purpose.
+    That property is still worth pinning, and it is not vacuous. Re-adding any
+    ``except CompileError: raise RecallFilterUnsupportedError`` here would relabel
+    every genuine compiler bug as a caller-input problem and bury it behind a
+    4xx-shaped error — the inversion §8 removed. This fails against that
+    regression, because the two classes are siblings under ``KhoraError`` rather
+    than parent and child, so a mapped error would not satisfy ``pytest.raises``
+    below. The explicit ``not isinstance`` assertion states the direction that
+    matters rather than leaving it implicit in the match.
+
+    Nothing in the filter language provokes a ``CompileError`` on this path any
+    more (§8 routes the one caller-reachable guard to the residual instead), so the
+    only way to reach the branch is to inject a fault through the registry — which
+    is also how the real lookup finds its compiler.
     """
 
     def broken_compiler(ast, ctx):
@@ -852,11 +1030,208 @@ async def test_an_unrelated_compile_error_still_propagates(adapter, namespace, m
 
     monkeypatch.setitem(CompilerRegistry._registry, _COMPILER_KEY, broken_compiler)  # noqa: SLF001
 
-    with pytest.raises(CompileError, match="internal compiler invariant"):
+    with pytest.raises(CompileError, match="internal compiler invariant") as excinfo:
         await adapter.scan_documents(
             namespace.id,
-            filter_ast=_filter_ast({"source_type": {"$eq": "report"}}),
+            filter_ast=wire_to_ast({"source_type": {"$eq": "report"}}),
             scan_limit=10,
+        )
+
+    # The direction that matters: a compiler fault must NOT arrive dressed as a
+    # caller-input problem. Siblings under ``KhoraError``, not parent and child.
+    assert not isinstance(excinfo.value, RecallFilterUnsupportedError)
+
+
+# --------------------------------------------------------------------------- #
+# The strict cursor extractor
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_non_uuid_record_id_raises_instead_of_inventing_a_position(adapter, namespace) -> None:
+    """A foreign-shaped record id fails the scan loudly rather than yielding a UUID5.
+
+    ``DocumentScanKey`` is ``tuple[datetime, UUID]``, and SurrealDB record ids are
+    a tagged union — ``document:⟨uuid⟩`` is what this store writes, but
+    ``document:not-a-uuid`` is a legal row that a user can create directly, and
+    SurrealDB *is* a backend people write to directly. The obvious conversion
+    routes through ``_helpers._parse_uuid``, whose documented
+    ``uuid5(NAMESPACE_URL, raw)`` fallback returns a perfectly well-formed UUID
+    for such an id: measured, ``_parse_uuid("not-a-uuid")`` yields
+    ``6892d5c5-a618-5b00-a8f6-5e57b68e64b9``. That value is a *fictional*
+    position — it corresponds to no row, compares against nothing real, and
+    round-trips into this same store without complaint, so a walk resuming from
+    it silently reads the wrong window. ``_scan_key`` therefore converts strictly
+    and raises.
+
+    The row is seeded with ``CREATE type::thing('document', $sid)`` because
+    ``create_document`` cannot produce this shape at all — it routes every id
+    through ``_record_id`` — which is exactly why the hazard is latent rather
+    than reachable through khora's own writes.
+
+    **What this raise does and does not cover — both halves, because it is
+    tempting to over-claim.** ``_scan_key`` is called on the window's **LAST row
+    only**, the one row a cursor is ever built from. So a foreign-shaped id
+    anywhere *else* in the table is untouched by this guard, and it still
+    desynchronises the resume predicate ``id < $after_id`` from
+    ``ORDER BY id DESC`` — the record-id variants order relative to one another
+    rather than by content — with no error and no trip. That residue is why the
+    record-id homogeneity precondition stays documented on ``scan_documents``
+    rather than being marked closed. This test pins the cursor half; the
+    homogeneity half remains a precondition, not an enforced invariant.
+    """
+    seed = _seeded()
+    await seed_documents(adapter, namespace.id, seed)
+
+    # Oldest instant in the corpus, so this row sorts LAST under
+    # ``ORDER BY created_at DESC`` and is therefore the row the cursor is built
+    # from.
+    await adapter._conn.query(  # noqa: SLF001
+        "CREATE type::thing('document', $sid) CONTENT { namespace_id: $ns, content: 'x', checksum: 'foreign-id', "
+        "created_at: $ca, updated_at: $ca, status: 'pending', source_type: 'library' }",
+        {"sid": "not-a-uuid", "ns": str(namespace.id), "ca": seed.tie_instant - timedelta(hours=1)},
+    )
+
+    with pytest.raises(ValueError, match="not a UUID"):
+        await adapter.scan_documents(namespace.id, scan_limit=50)
+
+    # The message names the offending id and refuses to substitute a position; it
+    # must not have quietly returned the UUID5 instead.
+    with pytest.raises(ValueError) as excinfo:
+        await adapter.scan_documents(namespace.id, scan_limit=50)
+    assert "6892d5c5-a618-5b00-a8f6-5e57b68e64b9" not in str(excinfo.value)
+
+    # A window that stops SHORT of the bad row still works — the guard is about
+    # the cursor, not about the table containing such a row.
+    ok = await adapter.scan_documents(namespace.id, scan_limit=2)
+    assert [d.id for d in ok.documents] == seed.expected[:2]
+
+
+# --------------------------------------------------------------------------- #
+# The bind-merge guard
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_compiled_bind_colliding_with_a_scan_bind_is_rejected(adapter, namespace, monkeypatch) -> None:
+    """A compiled bind named ``ns`` would replace the tenant scope. It must raise.
+
+    ``scan_documents`` merges the compiler's binds over its own with
+    ``params.update(compiled.params)``, so the compiled side WINS. An overlapping
+    name is therefore not a clash but a *silent substitution*: a compiled bind
+    called ``ns`` replaces the value in ``namespace_id = $ns`` and the statement
+    still executes normally, so a walk carries on over another tenant's rows with
+    no error and nothing in the logs.
+
+    **Verified by execution against the pre-guard behaviour.** With the
+    ``collisions`` check deleted, this test and its reserved-name sibling are the
+    only two of the 33 in this module that fail — so they do pin the guard rather
+    than passing for an unrelated reason.
+
+    On the leak's magnitude, stated carefully because the number depends on the
+    stub's own predicate and an earlier version of this docstring conflated two
+    runs. Measured on a two-namespace corpus of 6 rows each, guard deleted:
+
+    * with **this** stub (``(title = $f_0)``, and exactly one row per namespace
+      carries ``title = 'doc-0'``) the scan of namespace A returns **1 row, and it
+      is namespace B's** — 0 of A's own;
+    * with a match-all fragment in place of that predicate, it returns **6 rows,
+      all 6 of them namespace B's** — again 0 of A's.
+
+    So the row COUNT tracks the fragment, but the tenant substitution is **total
+    either way**: the scope predicate is not weakened, it is replaced, and A
+    contributes nothing. Both runs came back with a populated ``last_scanned`` and
+    ``exhausted=True``. A caller walking that has no signal of any kind that it is
+    reading the wrong tenant.
+
+    **What this guard is, stated exactly, because the tempting framing is
+    false.** It is a tripwire against a compiler that **hand-writes** bind names
+    outside the ``{param_namespace}_{counter}`` convention. It is *not* a fix for
+    a reachable configuration: ``compile_surrealdb._bind`` has a single
+    assignment site and names every bind ``f"{param_namespace}_{counter}"``, so
+    every compiled bind ends in ``_<digits>`` and no reserved scan bind has that
+    shape. No value of ``param_namespace`` can collide — ``"ns"`` yields
+    ``ns_0``, not ``ns``. Do not read this test as evidence that the knob is
+    dangerous; it is evidence that the convention is enforced rather than
+    assumed, which is the same posture the fragment parentheses one line earlier
+    already took.
+
+    The stub keeps one bind in the legitimate ``f_N`` family alongside the
+    colliding one, so what is rejected is the collision and not merely "a
+    compiler returned an unexpected bind set".
+    """
+    seed = _seeded()
+    await seed_varied(adapter, namespace.id, seed)
+    other = await _make_namespace(adapter)
+    await seed_varied(adapter, other.id, _seeded())
+
+    def colliding_compiler(ast, ctx):
+        return CompiledFilter(
+            predicate="(title = $f_0)",
+            params={"f_0": "doc-0", "ns": str(other.id)},
+            consumed_keys=frozenset({"title"}),
+            consumed_slice_hash="bind-collision-tripwire",
+        )
+
+    monkeypatch.setitem(CompilerRegistry._registry, _COMPILER_KEY, colliding_compiler)  # noqa: SLF001
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await adapter.scan_documents(
+            namespace.id,
+            filter_ast=wire_to_ast({"title": {"$eq": "doc-0"}}),
+            scan_limit=50,
+        )
+
+    message = str(excinfo.value)
+    assert "ns" in message, "the guard must name the colliding key"
+    # Names only, never values: the binds carry document content and user filter
+    # values, and the foreign namespace id is exactly what must not be echoed.
+    assert str(other.id) not in message
+    assert "doc-0" not in message
+    # And it is not presented as a filter-capability outcome — a cross-tenant
+    # tripwire must not look recoverable to a caller catching the public error.
+    assert not isinstance(excinfo.value, RecallFilterUnsupportedError)
+    assert not isinstance(excinfo.value, CompileError)
+
+
+async def test_a_reserved_bind_is_rejected_even_when_this_step_does_not_use_it(adapter, namespace, monkeypatch) -> None:
+    """``after_id`` is rejected with ``after=None`` — the case a live-key check misses.
+
+    The guard checks the compiled binds against a reserved NAME SET
+    (``_SCAN_BIND_NAMES``) rather than against the binds this particular call
+    happens to have built. That choice is the whole point of this test, and it is
+    the one place the two forms differ observably.
+
+    ``after_id`` is only bound on a *resumed* step. Against a compiler that
+    hand-writes a bare ``{"after_id": ...}``, the live-key form
+    (``params.keys() & compiled.params.keys()``) finds nothing on step one —
+    the key is simply absent from ``params`` — and fires only once a walk
+    resumes. So the same misbehaving compiler would be accepted or rejected
+    depending on which step of a walk you happened to be on, and a first-step
+    smoke test would pass. The reserved-name form rejects the *configuration*,
+    step-independently.
+
+    This test would pass against the narrower live-key form only by accident of
+    never reaching step two, which is why it pins the un-resumed call explicitly:
+    ``after`` is ``None`` here, deliberately.
+    """
+    seed = _seeded()
+    await seed_varied(adapter, namespace.id, seed)
+
+    def hand_written_bind_compiler(ast, ctx):
+        return CompiledFilter(
+            predicate="(title = $after_id)",
+            params={"after_id": "doc-0"},
+            consumed_keys=frozenset({"title"}),
+            consumed_slice_hash="reserved-name-tripwire",
+        )
+
+    monkeypatch.setitem(CompilerRegistry._registry, _COMPILER_KEY, hand_written_bind_compiler)  # noqa: SLF001
+
+    with pytest.raises(RuntimeError, match="after_id"):
+        await adapter.scan_documents(
+            namespace.id,
+            filter_ast=wire_to_ast({"title": {"$eq": "doc-0"}}),
+            after=None,  # explicit: this step builds no ``after_id`` bind of its own
+            scan_limit=50,
         )
 
 
@@ -890,12 +1265,12 @@ async def test_scan_never_returns_another_namespaces_rows(adapter, namespace) ->
     grouping tripwires fail on the same mutant.
     """
     scanned_ids, foreign_ids = _two_namespace_ladders()
-    await _seed_varied(adapter, namespace.id, _seed_from_ladder(scanned_ids))
+    await seed_varied(adapter, namespace.id, scan_seed(ids=scanned_ids))
     other = await _make_namespace(adapter)
-    await _seed_varied(adapter, other.id, _seed_from_ladder(foreign_ids))
+    await seed_varied(adapter, other.id, scan_seed(ids=foreign_ids))
 
     wire = {"$or": [{"source_type": {"$eq": "report"}}, {"title": {"$eq": "doc-1"}}]}
-    steps = await walk_scan(adapter.scan_documents, namespace.id, scan_limit=1, filter_ast=_filter_ast(wire))
+    steps = await walk_scan(adapter.scan_documents, namespace.id, scan_limit=1, filter_ast=wire_to_ast(wire))
     seen = [d for step in steps for d in step.documents]
 
     assert seen, "the filter must match rows in the scanned namespace for this test to bite"
@@ -917,12 +1292,23 @@ async def test_ungrouped_or_fragment_cannot_absorb_the_namespace_scope(adapter, 
     unscoped and returns every tenant's rows. It fails as somebody else's data,
     not as an error.
 
-    No compiler emits an ungrouped fragment today (``compile_surrealdb``
-    self-groups its boolean nodes), so no compiled-filter test can reach this;
-    the registered compiler is therefore replaced with one that emits the bare
-    ungrouped shape, and the real ``scan_documents`` is called. Both namespaces'
-    rows satisfy the right disjunct, so an absorbed scope predicate yields
-    foreign rows deterministically rather than by luck.
+    **Read the scope of this test narrowly: it is the store's half only.** No
+    compiler emits an ungrouped fragment today (``compile_surrealdb`` self-groups
+    its boolean nodes), so no compiled-filter test can reach this; the registered
+    compiler is therefore replaced with one that emits the bare ungrouped shape,
+    and the real ``scan_documents`` is called. Both namespaces' rows satisfy the
+    right disjunct, so an absorbed scope predicate yields foreign rows
+    deterministically rather than by luck.
+
+    What that monkeypatch costs is precisely the realistic regression: a *real*
+    compiler that started emitting ungrouped output would leave this test green,
+    because the fake one is installed over it. So this test pins "**IF** an
+    ungrouped fragment ever arrives, the store's parentheses contain it" and
+    nothing more. The complementary half — "the compilers never emit one" — is
+    :mod:`tests.unit.filter.test_fragment_splice_safety`, which drives the real
+    ``compile_surrealdb`` and ``compile_lance`` over the conformance corpus. Both
+    are needed; neither subsumes the other, and this one is not the one that
+    catches a compiler regression.
 
     **Mutation-verified, and reverted afterwards.** Removing the parentheses at
     the splice — ``conditions.append(f"({compiled.predicate})")`` becoming
@@ -931,9 +1317,9 @@ async def test_ungrouped_or_fragment_cannot_absorb_the_namespace_scope(adapter, 
     namespaces, with no error and nothing in the logs.
     """
     scanned_ids, foreign_ids = _two_namespace_ladders()
-    await _seed_varied(adapter, namespace.id, _seed_from_ladder(scanned_ids))
+    await seed_varied(adapter, namespace.id, scan_seed(ids=scanned_ids))
     other = await _make_namespace(adapter)
-    await _seed_varied(adapter, other.id, _seed_from_ladder(foreign_ids))
+    await seed_varied(adapter, other.id, scan_seed(ids=foreign_ids))
 
     def ungrouped_compiler(ast, ctx):
         # Bind names deliberately in the compiler's own ``f_N`` family so the
@@ -950,7 +1336,7 @@ async def test_ungrouped_or_fragment_cannot_absorb_the_namespace_scope(adapter, 
 
     step = await adapter.scan_documents(
         namespace.id,
-        filter_ast=_filter_ast({"title": {"$eq": "doc-0"}}),
+        filter_ast=wire_to_ast({"title": {"$eq": "doc-0"}}),
         scan_limit=50,
     )
 
@@ -977,19 +1363,26 @@ async def test_ungrouped_keyset_disjunction_cannot_absorb_the_namespace_scope(ad
     while proving nothing; below, it leaks **4**. Read that function's docstring
     before touching the seed.
 
-    **Mutation-verified, and reverted afterwards.** Dropping the outer pair from
-    the ``conditions`` entry — ``"(created_at < $after_created_at OR (created_at
-    = $after_created_at AND id < $after_id))"`` becoming the same string without
-    its enclosing parentheses — fails this test: the resumed window returns **8
-    rows instead of 4**, the four extra being the other tenant's tie block. The
-    same mutant also fails the filtered-walk and namespace-isolation tests above,
-    both of which resume across pages.
+    **Mutation-verified on this branch, and reverted afterwards.** Dropping the
+    outer pair from the ``conditions`` entry — ``"(created_at <
+    $after_created_at OR (created_at = $after_created_at AND id < $after_id))"``
+    becoming the same string without its enclosing parentheses — fails this test:
+    the resumed window returns **8 rows instead of 4**, the four extra being the
+    other tenant's tie block.
+
+    Across the module that mutant fails **4 of the 33 tests**, and all four are
+    named here because an earlier version of this docstring named three and left
+    the fourth to be rediscovered: this test, plus
+    :func:`test_filtered_walk_puts_a_cursor_and_a_compiled_fragment_in_one_statement`,
+    :func:`test_scan_never_returns_another_namespaces_rows` and
+    :func:`test_every_narrowing_leg_composes_in_one_statement` — every test in
+    the module that resumes from a cursor across pages.
     """
     scanned_ids, foreign_ids = _two_namespace_ladders()
-    seed = _seed_from_ladder(scanned_ids)
-    await _seed(adapter, namespace.id, seed)
+    seed = scan_seed(ids=scanned_ids)
+    await seed_documents(adapter, namespace.id, seed)
     other = await _make_namespace(adapter)
-    await _seed(adapter, other.id, _seed_from_ladder(foreign_ids))
+    await seed_documents(adapter, other.id, scan_seed(ids=foreign_ids))
 
     full = await adapter.scan_documents(namespace.id, scan_limit=50)
     assert [d.id for d in full.documents] == seed.expected

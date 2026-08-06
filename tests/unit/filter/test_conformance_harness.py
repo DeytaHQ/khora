@@ -2,7 +2,7 @@
 
 These guard the *machinery* in :mod:`khora.filter.conformance` (the case schema,
 the runner, the executors, the F-OP generator, the oracle-falsifiability
-contract), NOT the ~263-case catalog (a sibling ticket) nor the CI marked job
+contract), NOT the 209-case catalog (a sibling ticket) nor the CI marked job
 (another sibling ticket). A handful of hand-declared in-file smoke cases exercise
 each moving part:
 

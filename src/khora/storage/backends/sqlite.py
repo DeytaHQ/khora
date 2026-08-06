@@ -24,7 +24,7 @@ from khora.core.models.entity import Entity
 from khora.core.models.recall import DocumentProjection
 from khora.core.models.tenancy import TenancyMode
 from khora.storage.backends._fts5 import escape_fts5_query
-from khora.storage.backends.base import DocumentScanKey, DocumentScanStep, PaginatedResult
+from khora.storage.backends.base import DocumentScanKey, DocumentScanStep, PaginatedResult, build_scan_step
 
 if TYPE_CHECKING:
     from khora.filter.ast import FilterNode
@@ -219,6 +219,157 @@ def _parse_dt(val: str | None) -> datetime | None:
     if not val:
         return None
     return datetime.fromisoformat(val)
+
+
+def _documents_where(
+    namespace_id: UUID,
+    *,
+    status: str | None,
+    updated_before: datetime | None,
+) -> tuple[list[str], list[Any]]:
+    """The ``documents`` narrowing shared by ``list_documents`` and ``scan_documents``.
+
+    Returns SQL conjuncts and their positional binds **in lockstep**. The lockstep
+    is the point on this store, not a convenience: binds are positional, so
+    conjunct order *is* bind order, and a caller that appended a condition and its
+    parameter in two separate statements could get them out of step. Here they
+    cannot.
+
+    Extracted because the namespace scope was written out verbatim in two methods
+    118 lines apart. khora #1586's incident was a *deleted namespace predicate
+    that tests did not catch*, and #1587's response wrote that same predicate into
+    two more places. Callers append their own further conjuncts (the keyset
+    cursor, a compiled fragment) after these, and extend ``params`` in the same
+    order.
+
+    ``updated_before`` goes through :func:`_dt_to_str` — see ``scan_documents``'
+    docstring for the wall-clock caveat that applies to the comparison itself,
+    which this extraction does not change.
+    """
+    conditions = ["namespace_id = ?"]
+    params: list[Any] = [str(namespace_id)]
+    if status:
+        conditions.append("status = ?")
+        params.append(status)
+    if updated_before is not None:
+        conditions.append("updated_at < ?")
+        params.append(_dt_to_str(updated_before))
+    return conditions, params
+
+
+def _scan_key(row: Any) -> DocumentScanKey:
+    """The keyset position of one raw ``documents`` row. ``@internal``.
+
+    Strict on purpose, and **deliberately not** :meth:`_row_to_document`'s
+    parsing. That method carries ``created_at=_parse_dt(...) or
+    datetime.now(UTC)``, which is right for a domain object (a ``Document`` must
+    have a timestamp) and wrong for a cursor: if the coalesce fires, the position
+    is ``now()`` — above every row in the table — so the next step re-matches the
+    whole window and the walk stops making progress instead of failing.
+
+    Three checks, and **parsing successfully is NOT the invariant**:
+
+    * ``datetime.fromisoformat`` directly, not ``_parse_dt``, whose ``if not
+      val`` guard maps ``''`` to ``None``. ``''`` satisfies ``TEXT NOT NULL``,
+      so the schema does not exclude it, and it is precisely the value that
+      reproduces the loop. ``fromisoformat('')`` raises ``ValueError`` — loud, on
+      the one row that is malformed, which is the outcome we want.
+    * **The round-trip identity check, which is the half that matters.** The
+      cursor is bound back through :func:`_dt_to_str` against a TEXT column
+      SQLite compares **lexicographically**, so what the walk actually needs is
+      not "the stored text parses" but "the key binds back byte-identical to the
+      stored text". ``fromisoformat`` accepts forms ``.isoformat()`` does not
+      reproduce, and each one breaks the walk in a different direction.
+      Measured, three non-identity forms it accepts happily:
+
+      | stored | round-trips to | effect |
+      | --- | --- | --- |
+      | ``'2026-01-31 12:30:00+00:00'`` (space sep) | ``'…T12:30:00+00:00'`` | cursor sorts **ABOVE** stored, so the cursor's own row re-matches forever — the unbounded walk this function exists to prevent |
+      | ``'2026-01-31T12:30:00.000000+00:00'`` | ``'…T12:30:00+00:00'`` | cursor sorts **BELOW** stored, silently **skipping** the rest of the tie block |
+      | ``'2026-01-31T12:30:00Z'`` | ``'…T12:30:00+00:00'`` | same skip (``Z`` 0x5A > ``+`` 0x2B) |
+
+      The three forms that DO hold identity are ``'…T12:30:00+00:00'``,
+      ``'…T12:30:00'`` and ``'…T12:30:00.123456+00:00'``. These are the same two
+      directions ``_documents_scan.py`` already documents as "wrong in two
+      directions and neither is loud".
+
+      **No false positives on this store's own writes:** every shape reachable
+      through :meth:`create_document` is serialized by ``_dt_to_str`` first, so
+      it round-trips exactly — verified over both microsecond polarities, naive
+      and aware, a non-UTC offset and the epoch (7 shapes, 0 failures). Only an
+      out-of-band write produces a failing value, exactly as with ``''``.
+    * ``UUID(row["id"])`` validates as it converts; the stored form is the dashed
+      36 characters :meth:`create_document` wrote.
+
+    **The parse and the round-trip check are separate guards pinned by disjoint
+    tests, so do not collapse them into one.** Measured on
+    ``tests/unit/test_sqlite_scan_documents.py`` (44 tests), one mutant at a time:
+
+    * coalescing the parse to ``_parse_dt(stored) or datetime.now(UTC)`` — **1
+      failed**, ``test_a_blank_stored_created_at_raises_instead_of_inventing_a_position``;
+    * neutralising the round-trip comparison — **3 failed**, the three
+      ``test_a_stored_created_at_that_does_not_survive_the_round_trip_raises``
+      parametrizations (``space_separator``, ``explicit_zero_micros``,
+      ``z_suffix``).
+
+    Disjoint failure sets, so each guard is doing work no other line does. **But
+    they are not fully orthogonal, and the weaker claim is the honest one:** with
+    the parse coalesced, the round-trip comparison would *still* raise on ``''``
+    (measured — a ``now()`` value does not equal ``''``, so the check fires). What
+    the blank test actually pins is the *diagnostic*, not the safety: it matches on
+    ``"isoformat"``, and the round-trip raise carries a different message. So the
+    store stays safe on ``''`` either way; what a collapse would cost is the
+    specific, obvious error on the one malformed row — which on a data-integrity
+    fault is most of the value.
+
+    ``ValueError`` rather than ``RecallFilterUnsupportedError`` or a ``KhoraError``:
+    a malformed stored row is a data-integrity fault, not a filter-capability
+    outcome. Note it is deliberately a *different* class from the bind-collision
+    guard's ``RuntimeError`` — that one is an in-tree contract violation, this one
+    is bad data.
+
+    **This check is raw-sqlite-only; do not mirror it onto the other three
+    stores.** SurrealDB binds a native ``datetime``, so there is no string
+    serialization to assert (its analogous hazard is sub-microsecond truncation,
+    which stays a documented precondition), and the two SQLAlchemy stores bind
+    through the column type, where ``orm_scan_key`` never touches a string.
+
+    The returned ``created_at`` is **aware or naive depending on what the writer
+    passed** — ``_dt_to_str`` preserves the caller's offset with no UTC coercion
+    and ``fromisoformat`` preserves whatever was stored, so both shapes occur
+    within one table. That is this store's row in the three-shape taxonomy on
+    :data:`~khora.storage.backends.base.DocumentScanKey`, and it is not a defect.
+
+    **What makes leaving it un-normalized safe is the round-trip check above, not
+    any claim that the value passes through untouched.** It does not pass through
+    untouched: the path is TEXT -> ``fromisoformat`` -> ``datetime`` ->
+    ``_dt_to_str`` -> TEXT, a real re-serialization, and the whole reason the check
+    exists is that re-serialization is not identity for every input
+    ``fromisoformat`` accepts. What the check buys is that any row surviving it
+    binds back **byte-identical** to what is stored — so a table mixing aware and
+    naive rows still produces cursors that agree with ``ORDER BY``, each against
+    its own stored text, without needing a common tz shape. Measured on a 6-row
+    namespace alternating naive and aware ``created_at``, walked at
+    ``scan_limit=1`` so that every step is a resumed step and every cursor is
+    exercised: 6 yielded, 6 unique, enumeration order identical to the unpaged
+    ``ORDER BY``, no duplicates and no drops. Normalizing here would *break* that:
+    coercing a naive row to UTC would bind a string the row does not carry.
+
+    (Two such positions are not mutually comparable *in Python* — comparing them
+    raises ``TypeError: can't compare offset-naive and offset-aware datetimes``.
+    That is a constraint on anything that collects positions across rows, not on
+    the walk, which only ever binds one position back against its own column.)
+    """
+    stored = row["created_at"]
+    parsed = datetime.fromisoformat(stored)
+    if _dt_to_str(parsed) != stored:
+        raise ValueError(
+            f"document {row['id']} has a created_at that does not survive the cursor "
+            f"round-trip: stored {stored!r}, binds back as {_dt_to_str(parsed)!r}; "
+            f"the column is compared lexicographically, so this cursor would not "
+            f"agree with ORDER BY"
+        )
+    return (parsed, UUID(row["id"]))
 
 
 def _json_dumps(obj: Any) -> str:
@@ -489,15 +640,7 @@ class SQLiteRelationalBackend:
         limit: int = 100,
         offset: int = 0,
     ) -> list[Document]:
-        ns = str(namespace_id)
-        conditions = ["namespace_id = ?"]
-        params: list = [ns]
-        if status:
-            conditions.append("status = ?")
-            params.append(status)
-        if updated_before is not None:
-            conditions.append("updated_at < ?")
-            params.append(updated_before.isoformat())
+        conditions, params = _documents_where(namespace_id, status=status, updated_before=updated_before)
         where = " AND ".join(conditions)
         params.extend([limit, offset])
         cursor = await self._conn.execute(
@@ -553,6 +696,17 @@ class SQLiteRelationalBackend:
         CompileError`` site and raises :class:`RecallFilterUnsupportedError` only
         under ``on_unsupported="raise"``, which this context never selects.
 
+        There is also **no bind-collision guard here, and none is needed**: these
+        binds are positional, so a compiled fragment's parameters cannot shadow
+        this method's by name. Its SurrealDB sibling merges named binds and does
+        need one.
+
+        That asymmetry is one of two documented, un-fixed cross-store behavioural
+        splits (a hyphenated metadata key returns rows here and raises on
+        SurrealDB). The cross-store contract is stated once, on
+        :class:`~khora.storage.backends.base.DocumentScanStep`, rather than in
+        each store's docstring.
+
         **Cursor serialization inverts from sqlite_lance.** ``created_at`` binds
         through :func:`_dt_to_str` (``datetime.isoformat()``), byte-for-byte what
         :meth:`create_document` wrote into a TEXT column SQLite compares
@@ -562,9 +716,44 @@ class SQLiteRelationalBackend:
         here. An undashed cursor sorts *above* every stored id it shares leading
         hex with — the stored form carries ``-`` (0x2D) at index 8 where the
         undashed form carries a hex digit — so ``id < :cursor`` matches strictly
-        more rows, including the cursor's own. Measured from mid-tie ``…0003``:
-        dashed yields ``[…0002, …0001, …0005]``, ``.hex`` yields ``[…0004, …0003,
-        …0002, …0001, …0005]``, so the walk runs backwards and never terminates.
+        more rows, including the cursor's own. Measured from mid-tie ``…0003`` on
+        a 6-row ladder: dashed yields ``[…0002, …0001, …0005]``, ``.hex`` yields
+        ``[…0004, …0003, …0002, …0001, …0005]`` — the cursor's own row and the one
+        above it, so the walk runs **backwards**.
+
+        **Whether it also fails to terminate depends on ``scan_limit``, and the
+        earlier claim that it simply "never terminates" was wrong.**
+        ``exhausted`` is ``len(rows) < scan_limit`` over the *raw* count, so a
+        backwards window that is merely short still ends the walk. Re-measured on
+        that same 6-row ladder, walking to exhaustion (30-step cap) under the
+        ``.hex`` mutant:
+
+        * ``scan_limit=10`` — walk ends in **1 step**, yielding all 6 rows once,
+          ``exhausted=True``. The defect is **invisible** here, because the first
+          step has no cursor, so the mutant never applies and the window is the
+          full 6 rows. (A *resumed* step from mid-tie at this bound is the 5-row
+          backwards window above — 5 < 10, so it reports exhausted and the walk
+          stops anyway.)
+        * ``scan_limit=6`` — ends in 2 steps, 7 rows yielded for 6 unique: one
+          re-visit, no hang.
+        * ``scan_limit=5`` — the resumed window is full (5 rows) so
+          ``exhausted=False``, yet the walk still ends, in 3 steps: 11 yielded,
+          6 unique.
+        * ``scan_limit=4`` and below — **does not terminate**: capped at 30 steps
+          having yielded 120 rows and reached only 5 of the 6. At
+          ``scan_limit=1`` it yields the same single row 30 times.
+
+        Note the two window sizes are different measurements and must not be
+        conflated: the **first** step of a walk has no cursor operand, so it is
+        never affected; only **resumed** steps are.
+
+        So a full window is necessary for the hang but not sufficient
+        (``scan_limit=5`` fills the window and still finishes), and the symptom
+        degrades from "invisible" through "duplicate rows" to "non-terminating"
+        as ``scan_limit`` falls. A test that fixes a generous ``scan_limit`` can
+        watch this mutant and see nothing at all — which is why the module's
+        cursor tests walk at a small bound.
+
         Positions are store-local: build one from a row this store returned.
 
         This store therefore enumerates in **stored-text order — a deterministic
@@ -581,9 +770,44 @@ class SQLiteRelationalBackend:
         store does not have, *and* :meth:`create_document` is the only INSERT and
         coalesces a missing timestamp to now. A NULL key would make the row-value
         comparison evaluate to NULL and drop the row from every page.
+
+        **``NOT NULL`` is not the whole of the guard, and the gap it leaves fails
+        worse than the one it closes.** The argument above covers *SQL evaluating
+        a NULL key*; it says nothing about *the Python converter firing on a
+        non-NULL value that satisfies the constraint*. ``''`` is such a value, and
+        ``_row_to_document`` maps it to ``datetime.now(UTC)`` — a cursor above
+        every row, so the next step re-matches the whole window. That is why the
+        position comes from :func:`_scan_key` over the **raw row**, not from the
+        converted ``Document``: the strict reader raises on the malformed row
+        instead of inventing a position from it. See :func:`_scan_key`.
+
         ``updated_before`` narrows with ``updated_at < ?``, the same shape #1586
         ships; the NULL-``updated_at`` exclusion that tier documents does not
-        arise here, because ``updated_at`` is ``TEXT NOT NULL``.
+        arise here, because ``updated_at`` is ``TEXT NOT NULL``. The bind goes
+        through :func:`_dt_to_str`, the same helper the cursor uses — one
+        serialization contract, one spelling. (``_dt_to_str(dt)`` **is**
+        ``dt.isoformat()`` for every non-``None`` input, verified across aware,
+        naive, sub-second, offset and epoch shapes, so unifying the two spellings
+        changed no bytes.)
+
+        **The comparison itself is a wall-clock comparison, not an instant one**,
+        and that is this store's own half of a documented divergence.
+        ``updated_at`` is lexicographically-compared TEXT whose writer preserves
+        the caller's offset, so a bound with a different offset from the stored row
+        compares as text rather than as a moment: rows strictly before the bound in
+        real time can sort above it, and a naive ``updated_at`` exactly equal to
+        the bound is wrongly *included*, the bind being a prefix of the stored
+        value. Inherited verbatim from :meth:`list_documents` — identical there, so
+        not a regression — and not fixable here without changing that public
+        method. Unlike a pushdown gap, **no post-filter can recover the dropped
+        rows**, the narrowing having already happened in SQL. The cross-store
+        framing and the un-fixed-by-decision status are on
+        :class:`~khora.storage.backends.base.DocumentScanStep`.
+
+        The namespace / ``status`` / ``updated_before`` conjuncts come from
+        :func:`_documents_where`, shared with :meth:`list_documents` so the
+        namespace scope is written once rather than in two methods 118 lines
+        apart.
 
         ``scan_limit`` bounds rows **returned**, not rows **examined** — a
         selective fragment can still make one call read the whole namespace, so
@@ -608,14 +832,7 @@ class SQLiteRelationalBackend:
         if scan_limit < 1:
             raise ValueError(f"scan_limit must be >= 1, got {scan_limit}")
 
-        conditions = ["namespace_id = ?"]
-        params: list[Any] = [str(namespace_id)]
-        if status:
-            conditions.append("status = ?")
-            params.append(status)
-        if updated_before is not None:
-            conditions.append("updated_at < ?")
-            params.append(updated_before.isoformat())
+        conditions, params = _documents_where(namespace_id, status=status, updated_before=updated_before)
         if after is not None:
             cursor_created_at, cursor_id = after
             conditions.append("(created_at, id) < (?, ?)")
@@ -639,16 +856,12 @@ class SQLiteRelationalBackend:
         )
         rows = await cursor.fetchall()
 
-        # ``last_scanned`` and ``exhausted`` both describe the RAW window: the
-        # final row scanned, and whether SQL ran out of rows filling it. Neither
-        # may be derived from a post-filtered subset — that would re-scan the
-        # rejected gap on resume, and would call a full window exhausted.
-        documents = [self._row_to_document(r) for r in rows]
-        return DocumentScanStep(
-            documents=documents,
-            last_scanned=(documents[-1].created_at, documents[-1].id) if documents else None,
-            exhausted=len(rows) < scan_limit,
+        return build_scan_step(
+            rows,
+            scan_limit=scan_limit,
             consumed_keys=consumed_keys,
+            key=_scan_key,
+            document=self._row_to_document,
         )
 
     async def claim_orphaned_documents(

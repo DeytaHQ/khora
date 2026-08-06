@@ -15,6 +15,8 @@ from uuid import UUID
 T = TypeVar("T")
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from khora.core.models import (
@@ -52,13 +54,36 @@ class PaginatedResult(Generic[T]):
 # caller-facing encoding is first needed, and would pin an encoding this tier has
 # no use for.
 #
-# **The position is store-local, not a normalized instant.** It is read off a
-# document row and bound back through the same column type, so the round-trip is
-# exact by construction on each backend — but the two backends do not agree on
-# its shape. A PostgreSQL ``timestamptz`` yields an aware datetime; the embedded
-# SQLite store's ``DATETIME`` column is TEXT holding writer wall clock with the
-# offset discarded at write, so it yields a *naive* datetime. Never format this
-# into a string, and never carry a position from one store to another.
+# **The position is store-local, not a normalized instant.** The round-trip is
+# exact by construction on each backend, but **four stores implement
+# ``scan_documents`` and they carry three different key shapes.** Never format
+# this into a string, and never carry a position from one store to another.
+#
+# | store | ``created_at`` half | bound back as |
+# | --- | --- | --- |
+# | ``postgresql`` | aware (``timestamptz`` holds an instant) | ``sa.literal(v, col.type)`` |
+# | ``sqlite_lance`` | **naive** — TEXT holding writer wall clock, offset discarded at write | ``sa.literal(v, col.type)`` |
+# | ``sqlite`` (raw) | **aware OR naive**, whichever the writer passed | positional bind, ``_dt_to_str`` / ``str(uuid)`` |
+# | ``surrealdb`` | aware, UTC (``TYPE datetime``) | native ``datetime`` + ``RecordID`` |
+#
+# **Only the two SQLAlchemy stores bind back "through the same column type".**
+# That phrasing described the #1586 pair and does not generalize: raw-sqlite
+# round-trips ``datetime.fromisoformat`` -> ``_dt_to_str`` over a TEXT column
+# with no type object anywhere in the path, and SurrealDB binds native objects,
+# re-wrapping the id half into a ``RecordID`` on the way in. A rule derived from
+# either SQLAlchemy store does not transfer to either raw store.
+#
+# Raw-sqlite's third shape is the one most likely to be got wrong, because the
+# aware-on-PG / naive-on-embedded split above looks like it covers it and does
+# not. That store's writer (``_dt_to_str``) preserves the caller's offset with no
+# UTC coercion, and its reader (``datetime.fromisoformat``) preserves whatever
+# was stored — so the key is aware for a row written from an aware datetime and
+# naive for one written from a naive datetime, **within a single table**. Two
+# positions from the same namespace are therefore not necessarily mutually
+# comparable in Python, even though SQLite orders the underlying TEXT total.
+# Anything that wants to compare, normalize or serialize positions across stores
+# has to handle all three shapes explicitly; there is no store-independent
+# instant here to fall back on.
 DocumentScanKey = tuple[datetime, UUID]
 
 
@@ -106,12 +131,157 @@ class DocumentScanStep:
 
     Distinct from :class:`PaginatedResult`, which is offset-shaped and carries a
     total. A keyset walk has neither an offset nor a total.
+
+    All four stores assemble this through :func:`build_scan_step`, which is what
+    keeps ``last_scanned`` and ``exhausted`` derived from the raw window rather
+    than from ``documents``.
+
+    **No store rejects a filter it cannot fully push.** ``scan_documents`` does
+    not raise :class:`~khora.filter.model.RecallFilterUnsupportedError` on any of
+    the four: all four documents compile contexts select
+    ``on_unsupported="split"``, and these compilers raise that error only under
+    ``"raise"``. (``"raise"`` stops on the first node the backend cannot express;
+    ``"split"`` compiles what it can and defers the rest to the caller's
+    post-filter.) Measured over the 209-case ``khora.filter.conformance`` corpus
+    lowered through each store's own documents context: **209/209 compile with no
+    exception on all four**. An unpushable leaf is a deferral, never a rejection.
+
+    This was not always true, and the history is worth one line because the
+    earlier contract was the opposite: SurrealDB used to raise on a metadata path
+    segment it could not render as an identifier, making it the only store that
+    could fail a filter the other three answered. See split 1 below.
+
+    All four raise ``ValueError`` for ``scan_limit < 1``, and the two raw stores
+    additionally raise ``ValueError`` from their ``_scan_key`` on a stored row
+    they cannot turn into a cursor — a data-integrity fault, not a filter
+    outcome.
+
+    **One cross-store behavioural split remains documented and NOT fixed; a
+    second was closed by ruling rather than by workaround.**
+
+    1. *Hyphenated metadata keys — CLOSED for rows, and the residue is a
+       pushdown difference, not a behavioural one.* ``metadata.foo-bar`` is
+       legal, common JSON. It once returned rows on raw-sqlite and raised
+       ``RecallFilterUnsupportedError`` on SurrealDB — and, worse, the two
+       **agreed** when the same key sat inside an ``$or`` the all-or-nothing gate
+       deferred, so the split was per-store *and* position-dependent. It is now
+       an **unpushable leaf** on SurrealDB rather than an error: the compile
+       context reports it non-consumable and the leaf is left for a post-filter,
+       in every position.
+
+       **Be precise about what "the same rows" means, because it is not true of
+       this method's own return value.** :attr:`documents` is the raw window, and
+       the four stores' windows **differ**: the three pushing stores narrow in
+       SQL, SurrealDB does not, so its window carries rows the leaf excludes.
+       Measured on a 6-document namespace, conjunctive position: SurrealDB
+       ``len(documents) == 6``, the pushing stores 3. Equality holds only for the
+       set that survives the full-filter post-filter every caller already owes
+       (see :attr:`consumed_keys`) — measured against a ``compile_python`` oracle
+       over the same corpus: conjunctive **3 == 3**, inside ``$or`` **4 == 4**,
+       inside ``$not`` **3 == 3**. So: same final answer, different windows,
+       different step counts, different intermediate :attr:`last_scanned` values.
+
+       The ``$not`` row had to be checked rather than assumed — deferring only
+       the *emit* side while leaving the consumable gate alone would have
+       compiled it to ``!(true)``, matching **zero** rows, and no post-filter can
+       recover rows a window never returned.
+
+       **What survives is a pushdown split, and it is visible in
+       :attr:`consumed_keys` rather than hidden.** Measured on that filter: the
+       three other stores push it into SQL (``consumed_keys ==
+       {"metadata.foo-bar"}``) while SurrealDB defers it (``consumed_keys ==
+       set()``).
+
+       **In ``$or`` / ``$not`` position the cost is not marginal — SurrealDB
+       pushes NOTHING**, because the all-or-nothing gate defers the entire
+       enclosing subtree and the pushable sibling goes with it. Measured on
+       ``{"$or": [{"metadata.foo-bar": …}, {"source_type": …}]}`` and on the same
+       filter wrapped in ``$not``:
+
+       ``postgresql`` / ``raw-sqlite`` / ``sqlite_lance``
+       -> ``consumed_keys == {"metadata.foo-bar", "source_type"}``;
+       ``surrealdb`` -> ``consumed_keys == set()``, predicate ``true``.
+
+       So the window there is not "narrowed by one fewer leaf", it is the whole
+       namespace — a namespace-sized walk against a matches-sized one, compounding
+       with the ``Iterate Table`` planner collapse ``scan_documents`` documents
+       separately. **Attribute this correctly:** wholesale subtree deferral is the
+       pre-existing all-or-nothing gate, not something this ruling introduced.
+       What changed is only that a non-identifier metadata segment now *counts* as
+       unconsumable, so the set of filters that push nothing on SurrealDB grew to
+       include them — where they previously raised instead. A fair trade, and the
+       right one, but a caller sizing overfetch off :attr:`consumed_keys` will see
+       ``set()`` and should know why.
+
+       Two consequences for a walking caller: differencing its own leaf keys
+       against :attr:`consumed_keys` to report "which predicates cost a
+       post-filter" yields a different answer per store for the same filter; and
+       under a bounded ``scan_limit`` SurrealDB fills its window with rows the
+       post-filter then rejects. Both are correct-but-different work, not a
+       correctness divergence.
+    2. *``updated_before`` on raw-SQLite.* That store compares a wall-clock
+       string against a lexicographically-ordered TEXT column whose writer
+       preserves the caller's offset, so it drops rows SurrealDB returns, and
+       wrongly includes a naive value exactly equal to the bound (the bind is a
+       prefix of it). Inherited verbatim from ``list_documents`` and not fixable
+       without changing that public method. ``updated_before`` is a direct
+       parameter and **no post-filter can recover the dropped rows**, which is
+       what makes this worse than a pushdown gap.
     """
 
     documents: list[Document]
     last_scanned: DocumentScanKey | None
     exhausted: bool
     consumed_keys: frozenset[str]
+
+
+def build_scan_step[RowT](
+    rows: Sequence[RowT],
+    *,
+    scan_limit: int,
+    consumed_keys: frozenset[str],
+    key: Callable[[RowT], DocumentScanKey],
+    document: Callable[[RowT], Document],
+) -> DocumentScanStep:
+    """Assemble a :class:`DocumentScanStep` from a raw result window. ``@internal``.
+
+    The single home for the one invariant every ``scan_documents`` shares, and the
+    reason this takes ``rows`` plus a ``key`` *callable* rather than a
+    pre-extracted key:
+
+    **``last_scanned`` and ``exhausted`` both describe the RAW window** — the
+    final row the SQL scanned, and whether the store ran out of rows filling the
+    bound. **Neither may be derived from a post-filtered subset.** Deriving
+    ``last_scanned`` from the surviving matches would re-scan the rejected gap on
+    every resume; deriving ``exhausted`` from them would call a full window
+    exhausted and truncate the walk at the first window whose rows all fail the
+    caller's filter.
+
+    A helper taking an already-extracted key could not enforce that: a caller
+    handing it ``documents[-1]``'s key would be silently green, which is exactly
+    the defect this signature exists to make inexpressible. Because the helper
+    builds the documents itself, there is no post-filtered list in scope to pass
+    by mistake.
+
+    Dialect coupling stays in the two callables, where it belongs — this function
+    never sees a datetime format, a hex form, a ``RecordID`` or a column type.
+    ``key`` is expected to be **strict**: it reads the stored value and raises on
+    a row it cannot read, rather than substituting a default. A key extractor
+    that coalesces (``... or datetime.now(UTC)``) turns one malformed row into a
+    cursor above every row, i.e. a non-terminating walk rather than a bad value —
+    see each store's own ``_scan_key`` for the measured shape of that.
+
+    ``scan_limit`` is NOT validated here. It has to be rejected before anything
+    is compiled or executed, and this runs after execution; the two SQLAlchemy
+    stores validate it in ``build_documents_scan_query`` and the two raw stores
+    inline.
+    """
+    return DocumentScanStep(
+        documents=[document(row) for row in rows],
+        last_scanned=key(rows[-1]) if rows else None,
+        exhausted=len(rows) < scan_limit,
+        consumed_keys=consumed_keys,
+    )
 
 
 @runtime_checkable
