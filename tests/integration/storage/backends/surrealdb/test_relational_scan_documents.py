@@ -702,9 +702,9 @@ async def test_status_and_updated_before_narrow_the_window(adapter, namespace) -
     a count: the string form's 0 rows and a correct 4 are both "narrower than 6",
     and only an exact row set separates a working bound from a broken one.
 
-    ``scan_documents`` therefore diverges deliberately from ``list_documents`` on
-    this same adapter, which binds ``.isoformat()`` and is defective for it. That
-    defect is tracked separately and is deliberately not touched or tested here.
+    ``updated_before`` binds a ``datetime`` object here and in
+    :meth:`list_documents`; the string form is measured at 0 rows above and is
+    covered directly in ``test_list_documents_updated_before.py``.
     """
     seed = _seeded()
     cutoff = seed.tie_instant + timedelta(hours=1)

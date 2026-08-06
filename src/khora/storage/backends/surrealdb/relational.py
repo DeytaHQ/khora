@@ -29,6 +29,32 @@ if TYPE_CHECKING:
     from khora.filter.ast import FilterNode
 
 # ---------------------------------------------------------------------------
+# Datetime binds
+#
+# Every ``datetime`` bound into a SurrealQL statement in this module binds as a
+# ``datetime`` OBJECT. Never ``.isoformat()``. The timestamp columns are
+# ``TYPE datetime`` (``schema.py``) and SurrealDB does not coerce a string
+# operand to match one:
+#
+# * In a COMPARISON a string operand never reaches the stored value. Measured
+#   with ``RETURN $dt <op> $str`` over all six operators, the answer is the same
+#   for a past string, a future string and the non-timestamp ``'zzz'``: ``<``,
+#   ``<=`` and ``=`` are always false, ``>``, ``>=`` and ``!=`` always true.
+#   Inference from that value-independence — the engine ranks the two types and
+#   stops there. So a string bind does not misorder a predicate, it PINS it:
+#   ``updated_at < $cutoff`` matches nothing and ``updated_at >= $cutoff``
+#   matches everything. Both directions fail silently; neither raises.
+# * In a WRITE a string is REJECTED, not coerced — ``InternalError: ... expected
+#   a datetime`` — and the whole statement is discarded: a multi-field ``UPDATE``
+#   leaves every field untouched, not just the rejected one.
+#
+# Measured with python SDK 2.0.0 against SurrealDB 2.x engines, identical on all
+# three modes: ``memory://`` and ``surrealkv://`` (file-backed embedded, both on
+# the SDK-bundled core 2.0.0) and ``ws://`` (standalone server 2.3.7). NOT
+# measured against a SurrealDB 3.x engine.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
 # Adapter
 # ---------------------------------------------------------------------------
 
@@ -45,11 +71,16 @@ def _checksum_reingestable_clause(pending_stale_before: datetime | None) -> tupl
     crash-abandoned half-ingest re-ingests; fresh PENDING rows stay a dedup hit,
     preserving the concurrent in-flight guard. When ``None`` only FAILED is
     excluded (legacy behavior).
+
+    The cutoff binds as a ``datetime`` object (see the datetime-binds note at the
+    top of this module). Bound as an ISO string the ``>=`` compare is
+    unconditionally true, which makes the disjunct always hold and silently
+    disables the re-ingest — every PENDING row stays a dedup hit however stale.
     """
     if pending_stale_before is None:
         return "status != 'failed'", {}
     clause = "status != 'failed' AND (status != 'pending' OR updated_at >= $pending_stale_before)"
-    return clause, {"pending_stale_before": pending_stale_before.isoformat()}
+    return clause, {"pending_stale_before": pending_stale_before}
 
 
 class SurrealDBRelationalAdapter:
@@ -393,7 +424,7 @@ class SurrealDBRelationalAdapter:
             params["status"] = status
         if updated_before is not None:
             conditions.append("updated_at < $updated_before")
-            params["updated_before"] = updated_before.isoformat()
+            params["updated_before"] = updated_before
         where = " AND ".join(conditions)
         rows = await self._conn.query(
             f"SELECT * FROM document WHERE {where} ORDER BY created_at DESC, id DESC LIMIT $lim START $off",  # noqa: S608
@@ -448,12 +479,9 @@ class SurrealDBRelationalAdapter:
         engine rejects ``NONE`` by type and the keyset needs no null guard.
 
         Cursor and bound operands bind as native objects — ``datetime`` for the
-        timestamps, ``RecordID`` for the id — matching the write path. **That
-        makes ``updated_before`` diverge from :meth:`list_documents`,
-        deliberately.** ``updated_at`` is a ``TYPE
-        datetime`` field and an ISO string compares against no row at all:
-        measured on one corpus, no bound 6 rows, ``datetime`` bind 6, string bind
-        0. Mirroring that ``.isoformat()`` would ship an ``updated_before``
+        timestamps, ``RecordID`` for the id — matching the write path and
+        :meth:`list_documents`. See the datetime-binds note at the top of this
+        module for why the ISO-string form would ship an ``updated_before``
         returning an empty walk that reports itself exhausted on the first call.
         The narrowing is otherwise the shape #1586 ships; its NULL-``updated_at``
         exclusion does not arise, the field being non-optional here.
@@ -516,10 +544,6 @@ class SurrealDBRelationalAdapter:
             conditions.append("status = $status")
             params["status"] = status
         if updated_before is not None:
-            # Binds the datetime OBJECT, not ``.isoformat()`` — see the docstring
-            # for the measurement behind the deliberate divergence from
-            # ``list_documents``, whose string bind matches no row. Do not
-            # "correct" it back to match that method.
             conditions.append("updated_at < $updated_before")
             params["updated_before"] = updated_before
         if after is not None:
@@ -606,15 +630,21 @@ class SurrealDBRelationalAdapter:
                 "ns": ns_str,
                 "pending": DocumentStatus.PENDING.value,
                 "processing": DocumentStatus.PROCESSING.value,
-                "pending_before": pending_before.isoformat(),
-                "processing_before": processing_before.isoformat(),
+                "pending_before": pending_before,
+                "processing_before": processing_before,
                 "lim": limit,
             },
         )
         docs = [self._row_to_document(r) for r in rows]
         if not docs:
             return []
-        now_iso = datetime.now(UTC).isoformat()
+        # Both cutoffs above and this stamp bind as ``datetime`` objects. As ISO
+        # strings they pinned the SELECT's two ``<`` compares false, so it
+        # returned nothing and this UPDATE was never reached. It could not have
+        # stored a string had it run: SurrealDB rejects a string into a ``TYPE
+        # datetime`` field rather than coercing it. No existing row can hold a
+        # string ``updated_at``, so there is nothing to repair; do not go looking.
+        now = datetime.now(UTC)
         for doc in docs:
             doc.orphan_prior_status = doc.status.value if isinstance(doc.status, DocumentStatus) else doc.status
             await self._conn.query(
@@ -622,7 +652,7 @@ class SurrealDBRelationalAdapter:
                 {
                     "rid": _record_id("document", doc.id),
                     "status": DocumentStatus.PROCESSING.value,
-                    "updated_at": now_iso,
+                    "updated_at": now,
                 },
             )
             doc.status = DocumentStatus.PROCESSING
