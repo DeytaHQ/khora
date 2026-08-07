@@ -4,8 +4,21 @@ The recall-filter validator only checks that a folded metadata key
 ``startswith("metadata.")`` — it does NOT restrict the characters of the
 sub-path segments. The SurrealDB compiler interpolates those segments into the
 predicate string (SurrealQL cannot bind a field name as a parameter), so it MUST
-validate each segment as a safe identifier and raise a controlled compiler fault
-on anything else. This pins that guard.
+validate each segment as a safe identifier and never interpolate an unsafe one.
+This pins that guard.
+
+**The guard's OUTCOME is mode-dependent; the interpolation ban is not.** Under
+``on_unsupported="raise"`` — every context in this module — an unsafe segment
+reaches ``_Builder._metadata_path`` and raises the controlled
+:class:`CompileError`. Under ``"split"`` it is a capability gap instead:
+``compile_clause`` diverts the leaf to the unsupported path, so it compiles to the
+match-all placeholder, stays out of ``consumed_keys``, and is enforced by the
+caller's post-filter, which handles such keys correctly. Either way the segment is
+never rendered into the predicate string, which is the security property. The
+split-mode half is pinned in
+``test_split_mode_soundness.py`` (``test_an_unsafe_metadata_segment_defers_under_split_mode``
+and its five-position sibling); this module deliberately stays on the raise-mode
+contexts, because those are the ones with no post-filter to fall back on.
 
 (The exhaustive emitted-string assertions live in the QA-owned
 ``test_compile_surrealdb.py``; this module isolates the security-critical case so
@@ -23,7 +36,16 @@ from khora.filter.context import CompileContext, CompileError
 
 pytestmark = pytest.mark.unit
 
-_CTX = CompileContext(backend_target="temporal_chunk", field_mapping={"metadata": "metadata_"})
+# ``on_unsupported`` is spelled out rather than left to the dataclass default,
+# which is already ``"raise"``. The mode is the whole reason these cases raise, so
+# depending on a default would make this suite silently test something else if that
+# default ever flipped — and "the injection test went green against split mode"
+# is precisely the regression nobody would notice.
+_CTX = CompileContext(
+    backend_target="temporal_chunk",
+    field_mapping={"metadata": "metadata_"},
+    on_unsupported="raise",
+)
 
 
 @pytest.mark.parametrize(
@@ -41,8 +63,12 @@ _CTX = CompileContext(backend_target="temporal_chunk", field_mapping={"metadata"
 def test_unsafe_metadata_segment_raises_compile_error(hostile_key: str) -> None:
     """An unsafe metadata path segment is a controlled CompileError, not a query.
 
-    The fault is raised regardless of ``on_unsupported`` mode — it is an injection
-    guard, not a capability gap.
+    Under ``on_unsupported="raise"`` (this module's context) the guard raises: there
+    is no post-filter to defer to, so an unrenderable identifier is a fault rather
+    than a capability gap, and the loud internal error is the correct outcome. See
+    the module docstring for the ``"split"`` half, which defers instead — the
+    segment is never interpolated in either mode, which is the property that
+    matters here.
     """
     ast = parse_to_ast(RecallFilter.model_validate({hostile_key: "v"}))
     with pytest.raises(CompileError):

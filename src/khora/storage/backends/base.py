@@ -53,12 +53,29 @@ class PaginatedResult(Generic[T]):
 # no use for.
 #
 # **The position is store-local, not a normalized instant.** It is read off a
-# document row and bound back through the same column type, so the round-trip is
-# exact by construction on each backend — but the two backends do not agree on
-# its shape. A PostgreSQL ``timestamptz`` yields an aware datetime; the embedded
-# SQLite store's ``DATETIME`` column is TEXT holding writer wall clock with the
-# offset discarded at write, so it yields a *naive* datetime. Never format this
-# into a string, and never carry a position from one store to another.
+# document row and bound back the way that store writes the column, so the
+# round-trip is exact by construction on each backend — but the four backends
+# produce three different shapes, and only two of them get there through a
+# declared column type:
+#
+#   1. PostgreSQL's ``timestamptz`` yields an aware datetime, bound back through
+#      the ORM column type. SurrealDB's native ``datetime`` lands in the same
+#      shape by a different route — the SDK binds a Python ``datetime`` (and a
+#      ``RecordID``) directly, with no type declaration in between.
+#   2. The sqlite_lance store's ``DATETIME`` is TEXT holding writer wall clock
+#      with the offset DISCARDED at write, so it yields a *naive* datetime — also
+#      bound back through the ORM column type, which is what makes the six-digit
+#      microsecond field line up.
+#   3. The raw-SQL SQLite store round-trips TEXT by hand
+#      (``datetime.fromisoformat`` out, ``.isoformat()`` back in) with no column
+#      type anywhere. It PRESERVES the writer's offset, so a position from it is
+#      aware or naive depending on who wrote the row, and two rows in one table
+#      can differ.
+#
+# Never format this into a string, never adjust its ``tzinfo``, and never carry a
+# position from one store to another. Shape 3 is the reason the rule is stated as
+# "bind the value you read": there is no column type to catch a wrong operand
+# there, and no single tzinfo convention to normalize to.
 DocumentScanKey = tuple[datetime, UUID]
 
 
@@ -79,14 +96,17 @@ class DocumentScanStep:
       already narrowed by whatever the dialect compiler pushed down. **Not
       necessarily the final matches**: a caller with a filter must still evaluate
       the full filter over these rows (see :attr:`consumed_keys`).
-    * ``last_scanned`` — the keyset position of the window's **final row**, or
+    * ``last_scanned`` — the keyset position of the window's **final raw row**, or
       ``None`` when the window was empty. Resume from this rather than from the
       last row that survived post-filtering, so a resumed walk does not re-scan
-      the gap of rows that were scanned and rejected.
-    * ``exhausted`` — the window returned fewer rows than the requested bound, so
-      nothing remains after :attr:`last_scanned`. This is the **only** sound
-      termination signal; a short — or empty — ``documents`` list means nothing on
-      its own, because post-filtering can reject an entire window.
+      the gap of rows that were scanned and rejected. "Raw row" is literal: the
+      position comes off the row the driver returned, never off the converted
+      :class:`~khora.core.models.Document`, whose row-to-domain step masks a
+      missing key with a value no row ever held.
+    * ``exhausted`` — the window returned fewer **raw** rows than the requested
+      bound, so nothing remains after :attr:`last_scanned`. This is the **only**
+      sound termination signal; a short — or empty — ``documents`` list means
+      nothing on its own, because post-filtering can reject an entire window.
     * ``consumed_keys`` — the dotted filter paths the backend pushed into SQL, as
       reported by the compiler. A **reporting signal only**: it exists so a caller
       can tell users which predicate leaves cost a post-filter. It is *not*
@@ -94,6 +114,55 @@ class DocumentScanStep:
       both stores require the full filter to be re-evaluated in memory
       unconditionally, and everything pushed down is a superset filter, so
       re-running a pushed leaf can only narrow.
+
+    :attr:`last_scanned` and :attr:`exhausted` are assembled by
+    :func:`build_scan_step`, which all four stores call. Key *extraction* is still
+    per store (the raw rows are three different shapes), but the two derivations
+    that are easy to get wrong are written once there — read its docstring before
+    changing either.
+
+    **No store's ``scan_documents`` raises on a filter it cannot fully push.**
+    An unpushable leaf becomes a match-all placeholder, stays out of
+    :attr:`consumed_keys`, and reaches the caller's post-filter. A document
+    enumeration always has a post-filter to fall back on, so refusing would be a
+    worse answer than deferring.
+
+    **That is a property of the four compile contexts, NOT of the compilers, and
+    the distinction is the one a reader will get wrong.** The compilers can and do
+    raise — ``RecallFilterUnsupportedError`` from ``_unsupported`` for any leaf
+    they cannot express, and ``CompileError`` for an unrenderable metadata path
+    segment. Both are reachable under ``on_unsupported="raise"``; what makes them
+    unreachable *here* is that all four ``_documents_compile_context()`` factories
+    select ``"split"``, and that no store wraps its compile call in a handler that
+    could re-raise as something else. Two independent reasons, and the contract
+    needs both: either one alone would be a single edit away from lapsing. So
+    scope any restatement of this to "reached through ``scan_documents``" — as a
+    claim about the compilers it is simply false.
+
+    **Raise mode is live, not vestigial**, which is the concrete reason that
+    scoping matters: the temporal ``khora_chunks`` tier compiles under
+    ``on_unsupported="raise"`` at several call sites in
+    ``storage/temporal/pgvector.py`` and ``storage/temporal/surrealdb.py``, where
+    all-or-nothing is the right answer because that tier has no post-filter to
+    fall back on. Do not read this paragraph as licence to delete a raise site or
+    to narrow ``_unsupported``.
+
+    The ``"split"`` half was checked by calling all four factories rather than by
+    reading the prose beside them, which had drifted before. **Nothing enforces
+    it**: a store flipping its documents context to ``"raise"`` would break this
+    paragraph with no test failing anywhere. A four-line parametrized assertion
+    over the four factories would close that, and is worth adding the next time
+    someone is in here with a reason to touch all four.
+
+    SurrealDB used to be the exception, remapping the internal ``CompileError``
+    to the public ``RecallFilterUnsupportedError`` for that metadata-segment case;
+    khora #1588 moved it into the compiler's deferral path, so the four now agree.
+    A ``CompileError`` reaching a scan today is a compiler fault, not a caller
+    input problem, and must surface as itself.
+
+    Which leaves are deferred is per store and per dialect, and it is not drift:
+    PostgreSQL and SurrealDB push ``created_at``, the two SQLite tiers withhold it
+    because their stored TEXT does not order against a UTC-normalized ISO bind.
 
     There is deliberately **no residual-AST field.** The compilers report the
     split as a key set, not as a pruned tree, and the caller already holds the
@@ -112,6 +181,57 @@ class DocumentScanStep:
     last_scanned: DocumentScanKey | None
     exhausted: bool
     consumed_keys: frozenset[str]
+
+
+def build_scan_step(
+    documents: list[Document],
+    *,
+    last_scanned: DocumentScanKey | None,
+    raw_row_count: int,
+    scan_limit: int,
+    consumed_keys: frozenset[str],
+) -> DocumentScanStep:
+    """Assemble a :class:`DocumentScanStep` from one raw window. ``@internal``.
+
+    All four relational stores end ``scan_documents`` with the same four-field
+    assembly, and two of its fields are wrong in the same way if derived from the
+    obvious place. This exists so that derivation is written once.
+
+    ``exhausted`` is computed from ``raw_row_count`` — how many rows **SQL
+    returned** — and never from ``len(documents)``. Today those agree on every
+    store, because no ``scan_documents`` post-filters. They stop agreeing the
+    moment one does, and the failure is silent: a full window whose rows all get
+    rejected would report ``exhausted=True`` and end the walk at its first step,
+    truncating every namespace whose leading rows happen not to match.
+
+    ``last_scanned`` MUST be extracted from the **raw row** the store read, not
+    from the converted :class:`~khora.core.models.Document`. Extraction stays
+    per-store — an ORM model, an ``aiosqlite`` row and a SurrealDB dict are three
+    different shapes — but the rule is one rule, and it is about the converters:
+    the row-to-domain step masks rather than raises. ``created_at`` coalesces to
+    ``datetime.now(UTC)`` on the two hand-written stores, and SurrealDB's id
+    parser falls back to a derived ``uuid5`` for anything it cannot read as a
+    UUID. Both defaults are right for a domain object and wrong for a cursor,
+    because they invent a position no row ever held: a ``now()`` timestamp sorts
+    above the whole window, so the next step re-reads the rows it just returned
+    and the walk loops instead of advancing.
+
+    Args:
+        documents: The window's converted rows, in enumeration order.
+        last_scanned: Keyset position of the window's final **raw** row, or
+            ``None`` for an empty window.
+        raw_row_count: Rows SQL returned before any conversion or post-filtering.
+        scan_limit: The row bound the window was requested with.
+        consumed_keys: Reported verbatim from the compiler; see
+            :attr:`DocumentScanStep.consumed_keys` for why it is a reporting
+            signal only.
+    """
+    return DocumentScanStep(
+        documents=documents,
+        last_scanned=last_scanned,
+        exhausted=raw_row_count < scan_limit,
+        consumed_keys=consumed_keys,
+    )
 
 
 @runtime_checkable

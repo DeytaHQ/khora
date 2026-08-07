@@ -19,18 +19,22 @@ from __future__ import annotations
 
 import os
 from datetime import UTC, datetime, timedelta
-from typing import Any
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 
-from khora.core.models import Document, MemoryNamespace
+from khora.core.models import MemoryNamespace
 from khora.core.models.document import DocumentStatus
 from khora.db.session import run_migrations
-from khora.filter import RecallFilter
-from khora.filter.ast import parse_to_ast
 from khora.storage.backends.postgresql import PostgreSQLBackend
-from tests.test_helpers.document_scan import ScanSeed, scan_seed, walk_scan
+from tests.test_helpers.document_scan import (
+    scan_seed,
+    seed_documents,
+    seed_varied,
+    to_filter_ast,
+    walk_scan,
+    write_document,
+)
 
 DATABASE_URL = os.environ.get(
     "KHORA_DATABASE_URL",
@@ -90,55 +94,11 @@ async def namespace(backend: PostgreSQLBackend):
     return await backend.create_namespace(MemoryNamespace())
 
 
-def _filter_ast(wire: dict[str, Any]) -> Any:
-    return parse_to_ast(RecallFilter.model_validate(wire))
-
-
-async def _write(
-    backend: PostgreSQLBackend, namespace_id: UUID, doc_id: UUID, created_at: datetime, **fields: Any
-) -> None:
-    """Insert one document through the production write API."""
-    await backend.create_document(
-        Document(
-            id=doc_id,
-            namespace_id=namespace_id,
-            content="scanned content",
-            checksum=f"scan-{doc_id.hex}",
-            created_at=created_at,
-            updated_at=fields.pop("updated_at", created_at),
-            **fields,
-        )
-    )
-
-
-async def _seed(backend: PostgreSQLBackend, namespace_id: UUID, seed: ScanSeed) -> None:
-    for doc_id, created_at in seed.writes:
-        await _write(backend, namespace_id, doc_id, created_at)
-
-
-async def _seed_varied(backend: PostgreSQLBackend, namespace_id: UUID, seed: ScanSeed) -> None:
-    """Seed the same corpus with attribute variety, so a filter can split it.
-
-    Attributes are assigned by *write* index, which is deliberately not the
-    enumeration order — every expectation below is therefore derived from the
-    rows a scan actually returns, never from this loop's counter.
-    """
-    for i, (doc_id, created_at) in enumerate(seed.writes):
-        await _write(
-            backend,
-            namespace_id,
-            doc_id,
-            created_at,
-            title=f"doc-{i}",
-            source_type="report" if i % 2 == 0 else "library",
-        )
-
-
 @skip_no_pg
 class TestScanDocumentsWindowPg:
     async def test_scan_limit_bounds_the_window(self, backend: PostgreSQLBackend, namespace) -> None:
         seed = scan_seed(6)
-        await _seed(backend, namespace.id, seed)
+        await seed_documents(backend, namespace.id, seed)
 
         step = await backend.scan_documents(namespace.id, scan_limit=2)
 
@@ -156,7 +116,7 @@ class TestScanDocumentsWindowPg:
         multiple of the bound.
         """
         seed = scan_seed(6)
-        await _seed(backend, namespace.id, seed)
+        await seed_documents(backend, namespace.id, seed)
 
         exact = await backend.scan_documents(namespace.id, scan_limit=6)
         assert len(exact.documents) == 6
@@ -182,7 +142,7 @@ class TestScanDocumentsWindowPg:
         assert empty.exhausted is True
 
         seed = scan_seed(6)
-        await _seed(backend, namespace.id, seed)
+        await seed_documents(backend, namespace.id, seed)
         full = await backend.scan_documents(namespace.id, scan_limit=10)
         oldest = full.documents[-1]
 
@@ -195,7 +155,7 @@ class TestScanDocumentsWindowPg:
         seed = scan_seed(6)
         cutoff = seed.tie_instant + timedelta(hours=1)
         for i, (doc_id, created_at) in enumerate(seed.writes):
-            await _write(
+            await write_document(
                 backend,
                 namespace.id,
                 doc_id,
@@ -226,7 +186,7 @@ class TestScanDocumentsCursorPg:
         leg decides all of them.
         """
         seed = scan_seed(6)
-        await _seed(backend, namespace.id, seed)
+        await seed_documents(backend, namespace.id, seed)
 
         steps = await walk_scan(backend.scan_documents, namespace.id, scan_limit=1)
         seen = [d.id for step in steps for d in step.documents]
@@ -246,7 +206,7 @@ class TestScanDocumentsCursorPg:
         compared as a ``uuid`` rather than as some rendering of one.
         """
         seed = scan_seed(6)
-        await _seed(backend, namespace.id, seed)
+        await seed_documents(backend, namespace.id, seed)
 
         full = await backend.scan_documents(namespace.id, scan_limit=10)
         assert [d.id for d in full.documents] == seed.expected
@@ -273,7 +233,7 @@ class TestScanDocumentsCursorPg:
         enumerates exactly once, in order, and terminates.
         """
         seed = scan_seed(6)
-        await _seed_varied(backend, namespace.id, seed)
+        await seed_varied(backend, namespace.id, seed)
 
         full = await backend.scan_documents(namespace.id, scan_limit=10)
         wire = {"$or": [{"source_type": {"$eq": "report"}}, {"title": {"$eq": "doc-1"}}]}
@@ -284,7 +244,7 @@ class TestScanDocumentsCursorPg:
             backend.scan_documents,
             namespace.id,
             scan_limit=1,
-            filter_ast=_filter_ast(wire),
+            filter_ast=to_filter_ast(wire),
         )
         seen = [d.id for step in steps for d in step.documents]
 
@@ -306,7 +266,7 @@ class TestScanDocumentsCursorPg:
         store-local and must never be carried across stores.
         """
         seed = scan_seed(6)
-        await _seed(backend, namespace.id, seed)
+        await seed_documents(backend, namespace.id, seed)
 
         step = await backend.scan_documents(namespace.id, scan_limit=10)
         cursor_created_at, _ = step.last_scanned
@@ -329,11 +289,11 @@ class TestScanDocumentsSplitPg:
         sibling test asserts the opposite answer for this same filter.
         """
         seed = scan_seed(6)
-        await _seed(backend, namespace.id, seed)
+        await seed_documents(backend, namespace.id, seed)
 
         step = await backend.scan_documents(
             namespace.id,
-            filter_ast=_filter_ast({"created_at": {"$gte": "2999-01-01T00:00:00+00:00"}}),
+            filter_ast=to_filter_ast({"created_at": {"$gte": "2999-01-01T00:00:00+00:00"}}),
             scan_limit=10,
         )
 
@@ -350,11 +310,13 @@ class TestScanDocumentsSplitPg:
         """
         seed = scan_seed(6)
         for i, (doc_id, created_at) in enumerate(seed.writes):
-            await _write(backend, namespace.id, doc_id, created_at, source_type="report" if i % 2 == 0 else "library")
+            await write_document(
+                backend, namespace.id, doc_id, created_at, source_type="report" if i % 2 == 0 else "library"
+            )
 
         step = await backend.scan_documents(
             namespace.id,
-            filter_ast=_filter_ast(
+            filter_ast=to_filter_ast(
                 {"source_type": {"$eq": "report"}, "occurred_at": {"$gte": "2026-01-01T00:00:00+00:00"}}
             ),
             scan_limit=10,
@@ -385,13 +347,13 @@ class TestScanDocumentsSplitPg:
         """
         newest, middle, oldest = (uuid4() for _ in range(3))
         base = datetime(2026, 1, 31, 12, 30, tzinfo=UTC)
-        await _write(backend, namespace.id, newest, base + timedelta(seconds=2), source_type="report")
-        await _write(backend, namespace.id, middle, base + timedelta(seconds=1), source_type="report")
-        await _write(backend, namespace.id, oldest, base, source_type="library")
+        await write_document(backend, namespace.id, newest, base + timedelta(seconds=2), source_type="report")
+        await write_document(backend, namespace.id, middle, base + timedelta(seconds=1), source_type="report")
+        await write_document(backend, namespace.id, oldest, base, source_type="library")
 
         step = await backend.scan_documents(
             namespace.id,
-            filter_ast=_filter_ast(
+            filter_ast=to_filter_ast(
                 {
                     "$or": [
                         {"source_type": {"$eq": "report"}},
@@ -431,12 +393,12 @@ class TestScanDocumentsNamespaceIsolationPg:
 
     async def test_scan_never_returns_another_namespaces_rows(self, backend: PostgreSQLBackend, namespace) -> None:
         seed = scan_seed(6)
-        await _seed_varied(backend, namespace.id, seed)
+        await seed_varied(backend, namespace.id, seed)
         other = await backend.create_namespace(MemoryNamespace())
-        await _seed_varied(backend, other.id, scan_seed(6))
+        await seed_varied(backend, other.id, scan_seed(6))
 
         wire = {"$or": [{"source_type": {"$eq": "report"}}, {"title": {"$eq": "doc-1"}}]}
-        steps = await walk_scan(backend.scan_documents, namespace.id, scan_limit=1, filter_ast=_filter_ast(wire))
+        steps = await walk_scan(backend.scan_documents, namespace.id, scan_limit=1, filter_ast=to_filter_ast(wire))
         seen = [d for step in steps for d in step.documents]
 
         assert seen, "the filter must match rows in the scanned namespace for this test to bite"

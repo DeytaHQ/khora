@@ -1390,29 +1390,100 @@ def test_the_two_segment_patterns_have_not_drifted() -> None:
     assert surrealdb_module._SAFE_SEGMENT_RE.pattern == _conformance_segment_re().pattern
 
 
-@pytest.mark.parametrize("mode", ("split", "raise"))
-def test_an_unsafe_metadata_segment_raises_in_both_modes(mode: str) -> None:
-    """KNOWN GAP, pinned as it behaves — the guard is not a split-mode capability gap.
-
-    ``compile_surrealdb`` raises :class:`CompileError` on a non-identifier
-    metadata segment under BOTH modes, rather than routing it to the
-    unsupported-leaf path where ``"split"`` would defer it. That is deliberate
-    today: it is an injection guard, and ``_clause_consumable`` therefore does
-    NOT consider segment safety — reporting such a leaf unconsumable would let
-    the enclosing subtree defer, the guard would never run, and the error would
-    vanish rather than surface.
-
-    Pinned as current behaviour, not endorsed. If the guard is ever turned into a
-    real capability gap, ``_clause_consumable`` must become mode-aware in the
-    same change or the mirror above will start failing.
-    """
-    ctx = CompileContext(
+def _unsafe_segment_ctx(mode: str) -> CompileContext:
+    return CompileContext(
         backend_target="document",
         field_mapping={"title": "title", "metadata": "metadata_"},
         on_unsupported=mode,
     )
+
+
+def test_an_unsafe_metadata_segment_still_raises_under_raise_mode() -> None:
+    """The injection guard is intact where it is the only thing standing there.
+
+    ``"raise"`` mode has no post-filter to defer to, so a segment
+    ``compile_surrealdb`` cannot render as an identifier reaches
+    ``_Builder._metadata_path`` and raises the internal :class:`CompileError`, as
+    it always has. This is the mode the temporal chunk tier and the legacy
+    ``TemporalFilter.additional`` entry point compile in, and the error is
+    deliberately the LOUD internal one rather than the capability-shaped
+    ``RecallFilterUnsupportedError``: nothing downstream can do anything useful
+    with an unrenderable identifier, so it must not look like a routine
+    unsupported leaf.
+    """
     with pytest.raises(CompileError):
-        compile_surrealdb(_ast({"metadata.$ref": "x"}), ctx)
+        compile_surrealdb(_ast({"metadata.$ref": "x"}), _unsafe_segment_ctx("raise"))
+
+
+def test_an_unsafe_metadata_segment_defers_under_split_mode() -> None:
+    """Under ``"split"`` it is a capability gap, and gap means DEFER, not raise.
+
+    A non-identifier metadata key (``metadata.$ref``, ``metadata.due-date``) is
+    legal JSON and something a caller can produce with a perfectly well-formed
+    filter. Where a post-filter exists, the right answer is the one every other
+    unsupported leaf gets: emit the non-constraining placeholder, leave the leaf
+    out of ``consumed_keys``, and let ``compile_python`` — which handles such keys
+    correctly — decide the rows.
+
+    The two halves are asserted together on purpose. A ``consumed_keys`` that
+    excluded the leaf while the predicate still narrowed on it would drop rows the
+    post-filter could never recover; a predicate of ``"true"`` with the leaf
+    REPORTED consumed would let a caller skip re-checking it. Only the pair is the
+    contract.
+    """
+    compiled = compile_surrealdb(_ast({"metadata.$ref": "x"}), _unsafe_segment_ctx("split"))
+
+    assert _render(compiled.predicate) == "(true)"
+    assert compiled.consumed_keys == frozenset()
+    assert compiled.params == {}
+    assert "$ref" not in compiled.predicate
+
+
+@pytest.mark.parametrize(
+    ("case", "wire", "expected_consumed"),
+    [
+        ("conjunctive", {"metadata.due-date": "x", "title": "t"}, frozenset({"title"})),
+        ("and", {"$and": [{"metadata.due-date": "x"}, {"title": "t"}]}, frozenset({"title"})),
+        ("or", {"$or": [{"metadata.due-date": "x"}, {"title": "t"}]}, frozenset()),
+        ("not", {"$not": {"metadata.due-date": "x"}}, frozenset()),
+        ("not_over_or", {"$not": {"$or": [{"metadata.due-date": "x"}, {"title": "t"}]}}, frozenset()),
+    ],
+)
+def test_the_unsafe_segment_deferral_holds_in_every_position(
+    case: str, wire: dict, expected_consumed: frozenset
+) -> None:
+    """All five positions, because they reach the deferral through two different doors.
+
+    ``_clause_consumable`` gates the ``$or`` / ``$not`` nodes wholesale, but the
+    ``AND`` branch recurses UNGATED — a conjunctive unsafe leaf reaches
+    ``compile_clause`` directly and is diverted there instead. Two mechanisms, one
+    outcome, and a change that fixed only one of them would leave the other
+    raising a ``CompileError`` out of a split-mode compile. So each position is
+    exercised rather than argued from the two that happen to be easiest to write.
+
+    The ``$or`` / ``$not`` cases carry a pushable ``title`` sibling deliberately:
+    without it they would defer for the trivial reason that every leaf is
+    unpushable, and the test would pass without touching the gate. Here the
+    sibling IS pushable and the whole node must still defer, which is the
+    all-or-nothing property. ``$not`` over ``$or`` is listed separately because it
+    is the shape where a leaked ``"true"`` placeholder inverts to ``false`` and
+    matches zero rows — the silent-wrong-answer case, not merely an under-push.
+
+    ``expected_consumed`` differs between the two doors and that difference is the
+    point rather than an inconvenience: the ``AND`` positions still push their
+    ``title`` sibling (the divert is per-leaf), while the ``$or`` / ``$not``
+    positions consume nothing (the gate defers the node wholesale). The unsafe
+    leaf is absent from both.
+    """
+    compiled = compile_surrealdb(_ast(wire), _unsafe_segment_ctx("split"))
+
+    # Never interpolated, under any spelling.
+    assert "due-date" not in compiled.predicate
+    assert "due_date" not in compiled.predicate
+    assert compiled.consumed_keys == expected_consumed
+    assert not any(key.startswith("metadata") for key in compiled.consumed_keys)
+    # A negated placeholder would have inverted to a match-nothing predicate.
+    assert "false" not in _render(compiled.predicate)
 
 
 # ===========================================================================

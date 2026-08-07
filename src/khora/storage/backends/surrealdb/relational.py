@@ -17,7 +17,12 @@ from loguru import logger
 from khora.core.models import Document, MemoryNamespace, TenancyMode
 from khora.core.models.document import DocumentSource, DocumentStatus
 from khora.core.models.recall import DocumentProjection
-from khora.storage.backends.base import DocumentScanKey, DocumentScanStep, PaginatedResult
+from khora.storage.backends.base import (
+    DocumentScanKey,
+    DocumentScanStep,
+    PaginatedResult,
+    build_scan_step,
+)
 from khora.storage.backends.surrealdb._helpers import (
     _parse_dt,
     _parse_uuid,
@@ -83,6 +88,34 @@ def _checksum_reingestable_clause(pending_stale_before: datetime | None) -> tupl
         return "status != 'failed'", {}
     clause = "status != 'failed' AND (status != 'pending' OR updated_at >= $pending_stale_before)"
     return clause, {"pending_stale_before": pending_stale_before}
+
+
+def _scan_key_from_row(row: dict[str, Any]) -> DocumentScanKey:
+    """Build a keyset position from a RAW ``document`` row, masking nothing.
+
+    ``_row_to_document`` is the wrong source for a cursor even though it is the
+    convenient one: it coalesces a missing ``created_at`` to ``datetime.now(UTC)``
+    for the domain object's sake, and a ``now()`` timestamp sorts above the whole
+    window, so the next step re-reads the rows it just returned and the walk loops
+    instead of advancing. Reading the raw row and raising instead keeps a schema
+    violation loud — ``created_at`` is a non-optional ``TYPE datetime`` on this
+    table (``schema.py``), so a ``None`` here means the row did not come from this
+    schema and there is no position to resume from.
+
+    ``_parse_uuid``'s ``uuid5`` fallback is unreachable on this table through
+    khora's writes: a ``document`` id is always a ``document:⟨uuid⟩`` record id
+    written by ``_record_id``, never one of the auto-generated ids that fallback
+    exists for. It is left as the shared helper's behaviour rather than tightened
+    here — but note it is the exact mechanism behind the record-id homogeneity
+    precondition in :meth:`SurrealDBRelationalAdapter.scan_documents`: reached by a
+    row written outside khora, it derives a position no row holds and the walk
+    cycles. Raising here instead would not help, since the derived UUID is a
+    perfectly well-formed one.
+    """
+    created_at = _parse_dt(row.get("created_at"))
+    if created_at is None:
+        raise ValueError(f"document row has no readable created_at; cannot build a scan cursor: {row.get('id')!r}")
+    return (created_at, _parse_uuid(row["id"]))
 
 
 class SurrealDBRelationalAdapter:
@@ -528,14 +561,48 @@ class SurrealDBRelationalAdapter:
         consumed as an index range constraint, so there the total-work bound
         holds as stated.
 
+        **Two record-shape preconditions this method cannot enforce, and khora's
+        own writes satisfy.** They matter because SurrealDB is writable directly,
+        outside khora, and a user who does so can break a walk that has no way to
+        notice.
+
+        First, every ``document`` record id must be an ``Id::Uuid``. khora writes
+        them all through ``_record_id``, so this holds; a row created directly with
+        a string id (``document:'abc'``) breaks the walk. **Not for the reason it
+        looks like.** ``id < $rid`` and ``ORDER BY id DESC`` do NOT disagree —
+        measured on a table of 4 uuid-id and 4 string-id rows, the set below the
+        cursor by compare matched the set below it by sort at all 8 resume
+        positions. The break is in the round trip instead: ``_parse_uuid`` cannot
+        read a string id as a UUID, so it derives a ``uuid5`` from it, and
+        ``_record_id`` turns that back into a record id no row holds and that sits
+        nowhere near the original's position. Measured over those 8 rows, a walk at
+        ``scan_limit=1`` yielded 5 distinct documents in a cycle, never terminated
+        (stopped at 60 steps), and never reached 3 of the 8 at all.
+
+        Second, ``created_at`` must not carry SUB-MICROSECOND precision. The engine
+        stores nanoseconds; the Python SDK truncates to microseconds on read. So a
+        cursor read back from a row stored at ``.0000015`` is ``.000001`` — below
+        the row's own stored instant — and every row between the two is invisible
+        to both disjuncts at once: not ``created_at < $ts`` (they are above it), not
+        ``created_at = $ts`` (they are not equal to it). Measured on three rows at
+        ``.0000015`` / ``.0000012`` / ``.000001``, resuming from the first returned
+        an EMPTY window: the walk reports itself exhausted and silently drops the
+        entire remainder, rather than dropping one tie-mate. Unreachable through
+        khora's writes, which bind Python ``datetime`` objects and are therefore
+        microsecond-precise at the source.
+
         Raises ``ValueError`` when ``scan_limit`` is below 1, before anything is
-        compiled or executed, so a bad bound is never masked by a compile error.
-        Raises ``RecallFilterUnsupportedError`` when the compiler rejects a
-        metadata path segment it cannot render as an identifier. **That mapping
-        is best-effort and sibling-dependent:** the guard fires only when the emit
-        walk reaches the leaf, so a hyphenated key in conjunctive position raises
-        while the same key inside an ``$or`` the all-or-nothing gate defers does
-        not — it reaches the caller's post-filter instead. Both are correct.
+        compiled or executed, so a bad bound is never masked by a compile error;
+        also when a compiled filter's binds collide with this method's own (see
+        the splice below), and when the final raw row carries no readable
+        ``created_at`` to resume from.
+
+        An unrenderable metadata path segment does NOT raise here. Under this
+        store's ``on_unsupported="split"`` context it is a capability gap the
+        compiler defers: the leaf stays out of ``consumed_keys`` and reaches the
+        caller's post-filter, which handles a hyphenated key correctly. That holds
+        in every position — conjunctive as well as inside a deferred ``$or`` —
+        so it is no longer sibling-dependent.
         """
         if scan_limit < 1:
             raise ValueError(f"scan_limit must be >= 1, got {scan_limit}")
@@ -557,38 +624,28 @@ class SurrealDBRelationalAdapter:
         consumed_keys: frozenset[str] = frozenset()
         if filter_ast is not None:
             compiler = CompilerRegistry.get("relational.surrealdb", "documents")
-            # The catch is narrowed two ways, and both are load-bearing. By
-            # SCOPE: this ``try`` holds the compile call and nothing else, so it
-            # cannot swallow anything raised by the splice, the bind merge or the
-            # driver. And by DISCRIMINATOR: only the guard's own message maps.
-            #
-            # The mapped case is ``compile_surrealdb``'s sole ``raise
-            # CompileError`` — the ``_SAFE_SEGMENT_RE`` injection guard in
-            # ``_Builder._metadata_path`` (``filter/compilers/surrealdb.py:260``),
-            # which fires under both ``on_unsupported`` modes because it is a
-            # guard rather than a capability gap. ``_documents_compile_context``
-            # states this obligation on the scan path; the compiler-side fix it
-            # also describes is deliberately out of scope.
-            #
-            # Scope alone would blanket-swallow the class: every future genuine
-            # compiler bug would be relabelled a caller input problem and hidden
-            # behind a structured rejection forever. Matching the message
-            # coarsens if the guard is reworded, but it fails SAFE — the mapping
-            # stops firing and ``CompileError`` escapes loudly, the direction
-            # that surfaces bugs rather than burying them. The guard has no error
-            # subclass to key on, and adding one means editing a compiler this
-            # scan does not own.
-            try:
-                compiled = compiler(filter_ast, _documents_compile_context())
-            except CompileError as exc:
-                if _UNSAFE_METADATA_SEGMENT_MARKER not in str(exc):
-                    raise
-                raise RecallFilterUnsupportedError("metadata", str(exc)) from exc
+            # No ``CompileError`` mapping here. Under this context's
+            # ``on_unsupported="split"``, an unrenderable metadata segment is a
+            # capability gap the compiler defers (see
+            # ``_documents_compile_context``), so the only ``CompileError`` left
+            # reaching this line would be a genuine compiler fault — which must
+            # escape as itself rather than be relabelled a caller input problem.
+            compiled = compiler(filter_ast, _documents_compile_context())
             consumed_keys = compiled.consumed_keys
             conditions.append(f"({compiled.predicate})")
             # Compiled binds are ``{param_namespace}_{n}`` — ``f_0``, ``f_1``, …
-            # — disjoint from this method's names, so no merge guard is needed.
-            # Never name a scan bind ``f_<n>``.
+            # — and this method's are ``ns`` / ``lim`` / ``status`` /
+            # ``updated_before`` / ``after_*``, so the two families are disjoint
+            # by construction. The invariant runs BOTH ways and neither direction
+            # is safe to break: never name a scan bind ``f_<n>``, and never set
+            # this context's ``param_namespace`` to anything that could produce
+            # ``ns`` / ``lim`` / ``status``. The check below is what stops a
+            # violation from being silent — a compiled ``ns`` bind would overwrite
+            # the tenant scope in ``params`` and return another namespace's rows
+            # with no error anywhere.
+            collisions = params.keys() & compiled.params.keys()
+            if collisions:
+                raise ValueError(f"compiled filter binds collide with scan binds: {sorted(collisions)}")
             params.update(compiled.params)
 
         where = " AND ".join(conditions)
@@ -599,17 +656,18 @@ class SurrealDBRelationalAdapter:
         # ``last_scanned`` and ``exhausted`` both describe the RAW window: the
         # final row scanned, and whether SurrealQL ran out of rows filling it.
         # Neither may be derived from a post-filtered subset — that would re-scan
-        # the rejected gap on resume, and would call a full window exhausted.
-        # The key is built from the converted ``Document`` because
-        # ``_row_to_document`` runs the ``RecordID`` -> ``UUID`` conversion that
-        # ``DocumentScanKey`` requires; the raw row's ``id`` would seat a
-        # ``RecordID`` in that tuple and still round-trip into this same store,
-        # i.e. silently green.
+        # the rejected gap on resume, and would call a full window exhausted. The
+        # key comes from ``rows[-1]``, not from ``docs[-1]``: ``_row_to_document``
+        # masks a missing ``created_at`` with ``now()``, which as a cursor sorts
+        # above the whole window and makes the walk loop. See ``_scan_key_from_row``
+        # (it does the ``RecordID`` -> ``UUID`` conversion ``DocumentScanKey``
+        # requires, so the raw ``id`` never seats a ``RecordID`` in the tuple).
         docs = [self._row_to_document(r) for r in rows]
-        return DocumentScanStep(
+        return build_scan_step(
             documents=docs,
-            last_scanned=(docs[-1].created_at, docs[-1].id) if docs else None,
-            exhausted=len(rows) < scan_limit,
+            last_scanned=_scan_key_from_row(rows[-1]) if rows else None,
+            raw_row_count=len(rows),
+            scan_limit=scan_limit,
             consumed_keys=consumed_keys,
         )
 
@@ -1368,18 +1426,9 @@ def _row_to_memory_fact(row: dict[str, Any]) -> _MemoryFactRow:
 # --------------------------------------------------------------------------- #
 from khora.filter import (  # noqa: E402
     CompileContext,
-    CompileError,
     CompilerRegistry,
-    RecallFilterUnsupportedError,
 )
 from khora.filter.compilers.surrealdb import compile_surrealdb  # noqa: E402
-
-# The message of the one ``CompileError`` a well-formed filter can provoke:
-# ``compile_surrealdb._metadata_path``'s injection guard, which raises
-# ``CompileError(f"unsafe metadata path segment {seg!r} (not a SurrealQL
-# identifier)")``. ``scan_documents`` keys its re-raise on this so that mapping
-# the caller-provoked case does not also swallow genuine compiler faults.
-_UNSAFE_METADATA_SEGMENT_MARKER = "unsafe metadata path segment"
 
 # The system keys this table backs with a real field — the single source of
 # truth for the documents tier. Nine of the ten ``SYSTEM_KEYS``; ``occurred_at``
@@ -1438,22 +1487,18 @@ def _documents_compile_context() -> CompileContext:
     relaxing it re-opens the zero-row defect above.
     ``tests/unit/filter/test_documents_compile_contexts.py`` pins the behaviour.
 
-    **A separate gap survives both modes.** ``compile_surrealdb`` raises the
-    internal ``CompileError`` on an unsafe (non-identifier) metadata path
-    segment — a hyphenated key such as ``metadata.due-date`` is legal JSON and
-    common in the wild — and it does so regardless of ``on_unsupported``, since
-    that is a guard rather than a capability gap. ``CompileError`` is documented
-    as "a bug, not a capability gap", so it would escape as an internal error;
-    the documents scan path is obliged to catch it and re-raise it as
-    ``RecallFilterUnsupportedError`` so it surfaces as a structured rejection.
-    That mapping belongs to the scan path and cannot be implemented from here.
-    The cleaner long-term remedy is compiler-side and deliberately not done in
-    this change: under ``"split"``, "I cannot render this segment as a SurrealQL
-    identifier" is a capability gap, not an internal fault, so the leaf belongs
-    on the unsupported path (placeholder, unconsumed, post-filtered) with
-    ``CompileError`` reserved for ``"raise"``. That has to move the emit path and
-    the gate predicate together — changing only one would make them disagree —
-    which is why it is a follow-up rather than a line here.
+    **An unrenderable metadata segment is a capability gap on this context, not
+    an internal fault.** A hyphenated key such as ``metadata.due-date`` is legal
+    JSON and common in the wild, and ``compile_surrealdb`` cannot interpolate it
+    as a SurrealQL identifier. Under ``"split"`` it therefore routes the leaf to
+    the unsupported path — placeholder, unconsumed, post-filtered — rather than
+    raising the internal ``CompileError`` (which stays the behaviour under
+    ``"raise"``, where it is the injection guard). The emit path and the gate
+    predicate were moved together, sharing one ``_segments_safe`` test, so they
+    cannot disagree: the leaf defers in conjunctive position and inside an
+    ``$or`` / ``$not`` alike. Consequently ``scan_documents`` carries no
+    ``CompileError`` mapping — any ``CompileError`` that reaches it now is a
+    genuine compiler fault and must escape as one.
 
     **The enumeration post-filter must evaluate the FULL filter AST
     unconditionally.** Everything the compiler pushes is a superset filter, but

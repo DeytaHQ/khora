@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 
@@ -33,12 +33,18 @@ except ImportError:
 
 import sqlalchemy.exc
 
-from khora.core.models import Document, MemoryNamespace, TenancyMode
+from khora.core.models import MemoryNamespace, TenancyMode
 from khora.core.models.document import DocumentStatus
-from khora.filter import RecallFilter
-from khora.filter.ast import parse_to_ast
 from khora.filter.compilers.python import compile_python
-from tests.test_helpers.document_scan import ScanSeed, scan_seed, walk_scan
+from tests.test_helpers.document_scan import (
+    SUPERSET_SHAPES,
+    scan_seed,
+    seed_documents,
+    seed_varied,
+    to_filter_ast,
+    walk_scan,
+    write_document,
+)
 
 # Lives in the unit lane next to the rest of this adapter's tests, and also
 # carries the ``embedded`` marker so ``make test-embedded`` — the no-Docker
@@ -83,49 +89,6 @@ async def namespace(adapter):
     return await adapter.create_namespace(MemoryNamespace(id=nid, namespace_id=nid, tenancy_mode=TenancyMode.SHARED))
 
 
-def _filter_ast(wire: dict[str, Any]) -> Any:
-    return parse_to_ast(RecallFilter.model_validate(wire))
-
-
-async def _write(adapter: Any, namespace_id: UUID, doc_id: UUID, created_at: datetime, **fields: Any) -> None:
-    """Insert one document through the production write API."""
-    await adapter.create_document(
-        Document(
-            id=doc_id,
-            namespace_id=namespace_id,
-            content="scanned content",
-            checksum=f"scan-{doc_id.hex}",
-            created_at=created_at,
-            updated_at=fields.pop("updated_at", created_at),
-            **fields,
-        )
-    )
-
-
-async def _seed(adapter: Any, namespace_id: UUID, seed: ScanSeed) -> None:
-    for doc_id, created_at in seed.writes:
-        await _write(adapter, namespace_id, doc_id, created_at)
-
-
-async def _seed_varied(adapter: Any, namespace_id: UUID, seed: ScanSeed) -> None:
-    """Seed the same corpus with attribute variety, so a filter can split it.
-
-    Attributes are assigned by *write* index, which is deliberately not the
-    enumeration order — every expectation below is therefore derived from the
-    rows a scan actually returns, never from this loop's counter.
-    """
-    for i, (doc_id, created_at) in enumerate(seed.writes):
-        await _write(
-            adapter,
-            namespace_id,
-            doc_id,
-            created_at,
-            title=f"doc-{i}",
-            source_type="report" if i % 2 == 0 else "library",
-            metadata={"tier": "gold"} if i < 2 else {},
-        )
-
-
 # --------------------------------------------------------------------------- #
 # The window bound
 # --------------------------------------------------------------------------- #
@@ -133,7 +96,7 @@ async def _seed_varied(adapter: Any, namespace_id: UUID, seed: ScanSeed) -> None
 
 async def test_scan_limit_bounds_the_window(adapter, namespace) -> None:
     seed = scan_seed(6)
-    await _seed(adapter, namespace.id, seed)
+    await seed_documents(adapter, namespace.id, seed)
 
     step = await adapter.scan_documents(namespace.id, scan_limit=2)
 
@@ -151,7 +114,7 @@ async def test_a_full_window_is_not_yet_exhausted(adapter, namespace) -> None:
     silently truncate every namespace whose size is a multiple of the bound.
     """
     seed = scan_seed(6)
-    await _seed(adapter, namespace.id, seed)
+    await seed_documents(adapter, namespace.id, seed)
 
     exact = await adapter.scan_documents(namespace.id, scan_limit=6)
     assert len(exact.documents) == 6
@@ -183,7 +146,7 @@ async def test_walk_visits_every_document_exactly_once_in_total_order(adapter, n
     decides all of them.
     """
     seed = scan_seed(6)
-    await _seed(adapter, namespace.id, seed)
+    await seed_documents(adapter, namespace.id, seed)
 
     steps = await walk_scan(adapter.scan_documents, namespace.id, scan_limit=1)
     seen = [d.id for step in steps for d in step.documents]
@@ -217,7 +180,7 @@ async def test_whole_second_cursor_excludes_its_own_row_and_keeps_its_tie_mates(
     whole second rather than sampling the clock.
     """
     seed = scan_seed(6)
-    await _seed(adapter, namespace.id, seed)
+    await seed_documents(adapter, namespace.id, seed)
 
     full = await adapter.scan_documents(namespace.id, scan_limit=10)
     assert [d.id for d in full.documents] == seed.expected
@@ -255,7 +218,7 @@ async def test_filtered_walk_puts_a_cursor_and_a_compiled_fragment_in_one_statem
     name would show up as a wrong row set rather than as a lucky pass.
     """
     seed = scan_seed(6)
-    await _seed_varied(adapter, namespace.id, seed)
+    await seed_varied(adapter, namespace.id, seed)
 
     full = await adapter.scan_documents(namespace.id, scan_limit=10)
     wire = {"$or": [{"source_type": {"$eq": "report"}}, {"title": {"$eq": "doc-1"}}]}
@@ -266,7 +229,7 @@ async def test_filtered_walk_puts_a_cursor_and_a_compiled_fragment_in_one_statem
         adapter.scan_documents,
         namespace.id,
         scan_limit=1,
-        filter_ast=_filter_ast(wire),
+        filter_ast=to_filter_ast(wire),
     )
     seen = [d.id for step in steps for d in step.documents]
 
@@ -290,7 +253,7 @@ async def test_off_type_cursor_operands_are_rejected(adapter, namespace) -> None
     to the very same bytes. The contract is enforced here and documented there.
     """
     seed = scan_seed(6)
-    await _seed(adapter, namespace.id, seed)
+    await seed_documents(adapter, namespace.id, seed)
     row = (await adapter.scan_documents(namespace.id, scan_limit=1)).documents[0]
 
     with pytest.raises(sqlalchemy.exc.StatementError) as rendered_id:
@@ -310,7 +273,7 @@ async def test_empty_window_reports_exhausted_without_a_position(adapter, namesp
     assert empty.exhausted is True
 
     seed = scan_seed(6)
-    await _seed(adapter, namespace.id, seed)
+    await seed_documents(adapter, namespace.id, seed)
     full = await adapter.scan_documents(namespace.id, scan_limit=10)
     oldest = full.documents[-1]
 
@@ -337,11 +300,11 @@ async def test_date_system_keys_are_not_pushed_down_by_this_store(adapter, names
     two answers differing is the intended split, not drift.
     """
     seed = scan_seed(6)
-    await _seed(adapter, namespace.id, seed)
+    await seed_documents(adapter, namespace.id, seed)
 
     step = await adapter.scan_documents(
         namespace.id,
-        filter_ast=_filter_ast({"created_at": {"$gte": "2999-01-01T00:00:00+00:00"}}),
+        filter_ast=to_filter_ast({"created_at": {"$gte": "2999-01-01T00:00:00+00:00"}}),
         scan_limit=10,
     )
 
@@ -355,11 +318,15 @@ async def test_split_reports_only_the_leaves_sql_enforced(adapter, namespace) ->
     """A mixed filter: one pushable leaf, one that must reach the post-filter."""
     seed = scan_seed(6)
     for i, (doc_id, created_at) in enumerate(seed.writes):
-        await _write(adapter, namespace.id, doc_id, created_at, source_type="report" if i % 2 == 0 else "library")
+        await write_document(
+            adapter, namespace.id, doc_id, created_at, source_type="report" if i % 2 == 0 else "library"
+        )
 
     step = await adapter.scan_documents(
         namespace.id,
-        filter_ast=_filter_ast({"source_type": {"$eq": "report"}, "created_at": {"$gte": "2026-01-01T00:00:00+00:00"}}),
+        filter_ast=to_filter_ast(
+            {"source_type": {"$eq": "report"}, "created_at": {"$gte": "2026-01-01T00:00:00+00:00"}}
+        ),
         scan_limit=10,
     )
 
@@ -369,17 +336,14 @@ async def test_split_reports_only_the_leaves_sql_enforced(adapter, namespace) ->
     assert len(step.documents) == 3
 
 
-# The pushdown must never reject a row the full filter would keep. Shapes are
-# chosen for the ways a compiler can get that wrong, not for operator coverage:
-# the three wrapping an unpushable leaf in a disjunction or a negation are the
-# ones that matter, because a match-all placeholder left inside a negation
-# inverts into a match-nothing and excludes rows.
-_SUPERSET_SHAPES: dict[str, dict[str, Any]] = {
-    "pushable_eq": {"source_type": {"$eq": "report"}},
-    "pushable_ne": {"source_type": {"$ne": "report"}},
-    "pushable_nin": {"source_type": {"$nin": ["report"]}},
-    "pushable_exists": {"source_url": {"$exists": False}},
-    "metadata_eq": {"metadata.tier": {"$eq": "gold"}},
+# The pushdown must never reject a row the full filter would keep. The
+# store-agnostic shapes live in ``SUPERSET_SHAPES``; the three below are the ones
+# that only mean something on THIS store, because they name ``created_at`` as
+# unpushable — PostgreSQL pushes the same leaf, and its sibling module asserts
+# the opposite answer for the identical filter. They are also the ones that
+# matter most, since a match-all placeholder left inside a negation inverts into
+# a match-nothing and excludes rows.
+_SUPERSET_SHAPES: dict[str, dict[str, Any]] = SUPERSET_SHAPES | {
     "unpushable_date": {"created_at": {"$gte": "2026-01-31T12:30:00+00:00"}},
     "or_over_unpushable": {
         "$or": [
@@ -387,14 +351,7 @@ _SUPERSET_SHAPES: dict[str, dict[str, Any]] = {
             {"source_type": {"$eq": "report"}},
         ]
     },
-    "not_over_pushable": {"$not": {"source_type": {"$eq": "report"}}},
     "not_over_unpushable": {"$not": {"created_at": {"$gte": "2026-01-31T12:30:00+00:00"}}},
-    "and_of_in_and_not": {
-        "$and": [
-            {"source_type": {"$in": ["report", "library"]}},
-            {"$not": {"title": {"$eq": "doc-0"}}},
-        ]
-    },
 }
 
 
@@ -417,8 +374,8 @@ async def test_pushdown_never_rejects_a_row_the_full_filter_would_keep(adapter, 
     corpus.
     """
     seed = scan_seed(6)
-    await _seed_varied(adapter, namespace.id, seed)
-    ast = _filter_ast(wire)
+    await seed_varied(adapter, namespace.id, seed)
+    ast = to_filter_ast(wire)
 
     step = await adapter.scan_documents(namespace.id, filter_ast=ast, scan_limit=100)
     # Precondition: the comparison below is only meaningful if this one window
@@ -429,6 +386,15 @@ async def test_pushdown_never_rejects_a_row_the_full_filter_would_keep(adapter, 
     all_docs = (await adapter.scan_documents(namespace.id, scan_limit=100)).documents
     matches = compile_python(ast, _documents_compile_context()).predicate
     oracle = {d.id for d in all_docs if matches(d)}
+
+    # Anti-vacuity, and it is not decoration: ``oracle <= window`` is satisfied
+    # unconditionally by an empty oracle, so a shape that matches nothing in this
+    # corpus is not a weak parametrization — it is a green run that tests nothing,
+    # indistinguishable from a real one. One shape here was exactly that until
+    # khora #1588 (``source_url $exists False``, constant-false on a system key
+    # present on every row). No shape in this dict is deliberately constant-empty,
+    # so this holds for all of them.
+    assert oracle, "the shape matches no row in this corpus — `oracle <= window` cannot fail"
 
     assert oracle <= {d.id for d in step.documents}
 
@@ -455,13 +421,13 @@ async def test_last_scanned_is_the_final_raw_row_not_the_last_match(adapter, nam
     """
     newest, middle, oldest = (uuid4() for _ in range(3))
     base = datetime(2026, 1, 31, 12, 30, tzinfo=UTC)
-    await _write(adapter, namespace.id, newest, base + timedelta(seconds=2), source_type="report")
-    await _write(adapter, namespace.id, middle, base + timedelta(seconds=1), source_type="report")
-    await _write(adapter, namespace.id, oldest, base, source_type="library")
+    await write_document(adapter, namespace.id, newest, base + timedelta(seconds=2), source_type="report")
+    await write_document(adapter, namespace.id, middle, base + timedelta(seconds=1), source_type="report")
+    await write_document(adapter, namespace.id, oldest, base, source_type="library")
 
     step = await adapter.scan_documents(
         namespace.id,
-        filter_ast=_filter_ast(
+        filter_ast=to_filter_ast(
             {
                 "$or": [
                     {"source_type": {"$eq": "report"}},
@@ -494,7 +460,7 @@ async def test_status_and_updated_before_narrow_the_window(adapter, namespace) -
     seed = scan_seed(6)
     cutoff = seed.tie_instant + timedelta(hours=1)
     for i, (doc_id, created_at) in enumerate(seed.writes):
-        await _write(
+        await write_document(
             adapter,
             namespace.id,
             doc_id,
@@ -533,16 +499,16 @@ async def test_scan_never_returns_another_namespaces_rows(adapter, namespace) ->
     tenant.
     """
     seed = scan_seed(6)
-    await _seed_varied(adapter, namespace.id, seed)
+    await seed_varied(adapter, namespace.id, seed)
 
     other_id = uuid4()
     other = await adapter.create_namespace(
         MemoryNamespace(id=other_id, namespace_id=other_id, tenancy_mode=TenancyMode.SHARED)
     )
-    await _seed_varied(adapter, other.id, scan_seed(6))
+    await seed_varied(adapter, other.id, scan_seed(6))
 
     wire = {"$or": [{"source_type": {"$eq": "report"}}, {"title": {"$eq": "doc-1"}}]}
-    steps = await walk_scan(adapter.scan_documents, namespace.id, scan_limit=1, filter_ast=_filter_ast(wire))
+    steps = await walk_scan(adapter.scan_documents, namespace.id, scan_limit=1, filter_ast=to_filter_ast(wire))
     seen = [d for step in steps for d in step.documents]
 
     assert seen, "the filter must match rows in the scanned namespace for this test to bite"
@@ -568,12 +534,12 @@ async def test_ungrouped_or_fragment_cannot_absorb_the_namespace_scope(adapter, 
     from khora.storage.backends.sqlite_lance.relational import _lance_fragment_to_text
 
     seed = scan_seed(6)
-    await _seed_varied(adapter, namespace.id, seed)
+    await seed_varied(adapter, namespace.id, seed)
     other_id = uuid4()
     other = await adapter.create_namespace(
         MemoryNamespace(id=other_id, namespace_id=other_id, tenancy_mode=TenancyMode.SHARED)
     )
-    await _seed_varied(adapter, other.id, scan_seed(6))
+    await seed_varied(adapter, other.id, scan_seed(6))
 
     # Every row in BOTH namespaces satisfies the right disjunct, so an absorbed
     # namespace predicate yields foreign rows deterministically.
