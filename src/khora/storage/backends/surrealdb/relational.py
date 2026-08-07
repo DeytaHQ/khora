@@ -102,20 +102,22 @@ def _scan_key_from_row(row: dict[str, Any]) -> DocumentScanKey:
     table (``schema.py``), so a ``None`` here means the row did not come from this
     schema and there is no position to resume from.
 
-    ``_parse_uuid``'s ``uuid5`` fallback is unreachable on this table through
-    khora's writes: a ``document`` id is always a ``document:⟨uuid⟩`` record id
-    written by ``_record_id``, never one of the auto-generated ids that fallback
-    exists for. It is left as the shared helper's behaviour rather than tightened
-    here — but note it is the exact mechanism behind the record-id homogeneity
-    precondition in :meth:`SurrealDBRelationalAdapter.scan_documents`: reached by a
-    row written outside khora, it derives a position no row holds and the walk
-    cycles. Raising here instead would not help, since the derived UUID is a
-    perfectly well-formed one.
+    The record id is parsed with ``_parse_uuid(..., strict=True)`` for the same
+    reason. khora writes every ``document`` id as a ``document:⟨uuid⟩`` record id
+    through ``_record_id``, so strict mode is a no-op on any row this store
+    produces. On a row written directly outside khora with a non-UUID id, the
+    non-strict fallback would derive a well-formed ``uuid5`` — a position no row
+    holds — and the keyset walk would cycle without terminating (the record-id
+    homogeneity precondition documented on
+    :meth:`SurrealDBRelationalAdapter.scan_documents`). Strict parsing catches it
+    at the raw id, before the derivation, and raises loudly like the ``created_at``
+    guard above: a walk with no resumable position stops rather than repeating a
+    page forever.
     """
     created_at = _parse_dt(row.get("created_at"))
     if created_at is None:
         raise ValueError(f"document row has no readable created_at; cannot build a scan cursor: {row.get('id')!r}")
-    return (created_at, _parse_uuid(row["id"]))
+    return (created_at, _parse_uuid(row["id"], strict=True))
 
 
 class SurrealDBRelationalAdapter:
@@ -561,23 +563,27 @@ class SurrealDBRelationalAdapter:
         consumed as an index range constraint, so there the total-work bound
         holds as stated.
 
-        **Two record-shape preconditions this method cannot enforce, and khora's
-        own writes satisfy.** They matter because SurrealDB is writable directly,
-        outside khora, and a user who does so can break a walk that has no way to
-        notice.
+        **Two record-shape preconditions, both satisfied by khora's own writes.**
+        They matter because SurrealDB is writable directly, outside khora, and a
+        user who does so could otherwise break a walk that has no way to notice.
+        The first is now ENFORCED (``_scan_key_from_row`` raises); the second still
+        cannot be, and is documented so a caller knows to avoid it.
 
         First, every ``document`` record id must be an ``Id::Uuid``. khora writes
-        them all through ``_record_id``, so this holds; a row created directly with
-        a string id (``document:'abc'``) breaks the walk. **Not for the reason it
-        looks like.** ``id < $rid`` and ``ORDER BY id DESC`` do NOT disagree —
-        measured on a table of 4 uuid-id and 4 string-id rows, the set below the
-        cursor by compare matched the set below it by sort at all 8 resume
-        positions. The break is in the round trip instead: ``_parse_uuid`` cannot
-        read a string id as a UUID, so it derives a ``uuid5`` from it, and
-        ``_record_id`` turns that back into a record id no row holds and that sits
-        nowhere near the original's position. Measured over those 8 rows, a walk at
-        ``scan_limit=1`` yielded 5 distinct documents in a cycle, never terminated
-        (stopped at 60 steps), and never reached 3 of the 8 at all.
+        them all through ``_record_id``, so this holds. A row created directly with
+        a string id (``document:'abc'``) is now rejected up front:
+        ``_scan_key_from_row`` parses the raw id with ``_parse_uuid(strict=True)``
+        and raises ``ValueError`` rather than seating a cursor. **The failure it
+        prevents was not the one it looks like.** ``id < $rid`` and
+        ``ORDER BY id DESC`` do NOT disagree — measured on a table of 4 uuid-id and
+        4 string-id rows, the set below the cursor by compare matched the set below
+        it by sort at all 8 resume positions. The break was in the round trip
+        instead: without the guard, ``_parse_uuid`` derives a ``uuid5`` from the
+        string id and ``_record_id`` turns that back into a record id no row holds,
+        sitting nowhere near the original's position — measured over those 8 rows, a
+        walk at ``scan_limit=1`` yielded 5 distinct documents in a cycle, never
+        terminated (stopped at 60 steps), and never reached 3 of the 8 at all.
+        Strict parsing converts that silent cycle into a loud ``ValueError``.
 
         Second, ``created_at`` must not carry SUB-MICROSECOND precision. The engine
         stores nanoseconds; the Python SDK truncates to microseconds on read. So a

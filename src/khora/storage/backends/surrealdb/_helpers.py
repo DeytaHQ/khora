@@ -51,13 +51,19 @@ def _rid(table: str, uid: UUID) -> Any:
 _record_id = _rid
 
 
-def _parse_uuid(record_id: str | dict | UUID | Any) -> UUID:
+def _parse_uuid(record_id: str | dict | UUID | Any, *, strict: bool = False) -> UUID:
     """Extract a UUID from a SurrealDB record ID.
 
     Handles strings like ``chunk:018f...``, ``chunk:⟨018f...⟩``,
     bare UUID strings, and ``uuid.UUID`` objects.  For non-UUID record
     IDs (e.g. SurrealDB auto-generated RELATE IDs), generates a
     deterministic UUID5 from the string so callers always get a valid UUID.
+
+    Pass ``strict=True`` to reject a non-UUID record id with ``ValueError``
+    instead of deriving a UUID5. The derived value is well-formed but identifies
+    no stored row, so a caller that seats it in a keyset cursor (see
+    ``_scan_key_from_row``) would resume from a position no row holds; strict
+    mode exists for those callers.
     """
     if isinstance(record_id, UUID):
         return record_id
@@ -69,6 +75,8 @@ def _parse_uuid(record_id: str | dict | UUID | Any) -> UUID:
     try:
         return UUID(raw)
     except (ValueError, AttributeError):
+        if strict:
+            raise ValueError(f"record id is not a UUID and cannot seat a scan cursor: {raw!r}") from None
         # Non-UUID record ID (e.g. SurrealDB auto-generated RELATE ID).
         # Generate a deterministic UUID5 so the same record always maps
         # to the same UUID.

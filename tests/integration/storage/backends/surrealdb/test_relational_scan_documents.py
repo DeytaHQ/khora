@@ -676,6 +676,32 @@ def test_a_row_with_no_created_at_has_no_position_and_says_so() -> None:
         _scan_key_from_row({"id": f"document:{doc_id}", "created_at": None})
 
 
+def test_a_non_uuid_record_id_has_no_position_and_says_so() -> None:
+    """A ``document`` row with a non-UUID record id cannot seat a cursor either.
+
+    This is the record-id sibling of the ``created_at`` guard above, and it fails
+    the same silent way if left unguarded. khora writes every id as a
+    ``document:⟨uuid⟩`` record id through ``_record_id``, so a legitimate row
+    always parses; but SurrealDB is writable directly, and a row created outside
+    khora can carry a string id (``document:'abc'``). ``_parse_uuid`` would derive
+    a well-formed ``uuid5`` from that string — a position no stored row holds — and
+    a resumed keyset walk would cycle without terminating (measured: 5 distinct
+    docs in a loop over an 8-row table, never reaching 3 of them). Parsing the raw
+    id with ``strict=True`` catches it before the derivation and raises, so the
+    impossible position stops the walk loudly instead of inventing one.
+    """
+    from khora.storage.backends.surrealdb.relational import _scan_key_from_row
+
+    doc_id = uuid4()
+    # A well-formed record id still parses cleanly — strict mode is a no-op here.
+    key = _scan_key_from_row({"id": f"document:{doc_id}", "created_at": WHOLE_SECOND})
+    assert key == (WHOLE_SECOND, doc_id)
+
+    # A non-UUID record id raises rather than deriving a uuid5 position no row holds.
+    with pytest.raises(ValueError, match="not a UUID"):
+        _scan_key_from_row({"id": "document:not-a-uuid", "created_at": WHOLE_SECOND})
+
+
 async def test_a_hyphenated_metadata_key_in_a_deferred_subtree_does_not_raise(adapter, namespace) -> None:
     """The ``$or`` half of the deferral — reached through a different mechanism.
 
