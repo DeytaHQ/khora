@@ -26,14 +26,33 @@ import pytest
 from khora.core.models import MemoryNamespace
 from khora.core.models.document import DocumentStatus
 from khora.db.session import run_migrations
-from khora.storage.backends.postgresql import PostgreSQLBackend
+from khora.filter import CompilerRegistry
+from khora.filter.execute import filter_leaf_keys
+
+# ``_documents_compile_context`` is private, and imported on purpose: the
+# split-equality test below must recompile with the *same* context the scan uses,
+# or it would prove a property of some other context.
+from khora.storage.backends.postgresql import PostgreSQLBackend, _documents_compile_context
+from khora.storage.coordinator import StorageCoordinator
+from tests.test_helpers.document_page_oracle import (
+    assert_page_compliant,
+    assert_walk_compliant,
+    assert_walk_matches_expected,
+)
 from tests.test_helpers.document_scan import (
+    WHOLE_SECOND,
     scan_seed,
     seed_documents,
     seed_varied,
     to_filter_ast,
     walk_scan,
     write_document,
+)
+from tests.test_helpers.document_scan_spy import (
+    PROBE_VALUE,
+    assert_split_honest,
+    force_residual,
+    sqlalchemy_sql_log,
 )
 
 DATABASE_URL = os.environ.get(
@@ -269,6 +288,10 @@ class TestScanDocumentsCursorPg:
         await seed_documents(backend, namespace.id, seed)
 
         step = await backend.scan_documents(namespace.id, scan_limit=10)
+        # Guard before the unpack: ``last_scanned`` is ``DocumentScanKey | None``, so
+        # a regression that returned no position would raise ``TypeError`` from the
+        # tuple unpack rather than failing this test's actual subject.
+        assert step.last_scanned is not None
         cursor_created_at, _ = step.last_scanned
 
         assert cursor_created_at.tzinfo is not None
@@ -375,6 +398,294 @@ class TestScanDocumentsSplitPg:
 
         last_match = step.documents[1]
         assert step.last_scanned != (last_match.created_at, last_match.id)
+
+
+@skip_no_pg
+class TestScanDocumentsSplitHonestyPg:
+    """Is the reported split HONEST? — checked at the driver boundary.
+
+    Every other class here reads ``consumed_keys`` and believes it, which cannot
+    distinguish an honest report from a *perf lie* (leaf reported as pushed, SQL
+    never saw it, the caller's post-filter quietly covering) or a *correctness lie*
+    (leaf reported as pushed and therefore, for any caller that trusted the report,
+    enforced nowhere). Neither is visible on the result surface while the
+    coordinator re-checks the full AST — hence a seam-level check.
+
+    The spy listens on ``before_cursor_execute`` on this backend's
+    ``AsyncEngine``, so the params recorded are the ones asyncpg receives.
+    Assertions are on bound VALUES, never on column names: ``created_at``, ``id``,
+    ``namespace_id`` and ``status`` appear in every statement's ORDER BY / keyset /
+    scope whether or not a filter leaf pushed. See
+    :mod:`tests.test_helpers.document_scan_spy`.
+    """
+
+    async def _seed_probe_corpus(self, backend: PostgreSQLBackend, namespace_id) -> int:
+        """Seed the corpus with the probe literal on half the rows; return that count."""
+        seed = scan_seed(6)
+        for i, (doc_id, created_at) in enumerate(seed.writes):
+            await write_document(
+                backend,
+                namespace_id,
+                doc_id,
+                created_at,
+                source_type=PROBE_VALUE if i % 2 == 0 else "library",
+            )
+        return sum(1 for i in range(len(seed.writes)) if i % 2 == 0)
+
+    async def test_a_pushed_leaf_really_reaches_the_statement(self, backend: PostgreSQLBackend, namespace) -> None:
+        """The perf-lie catch: a leaf reported as pushed must be bound in the SQL."""
+        matching = await self._seed_probe_corpus(backend, namespace.id)
+        ast = to_filter_ast({"source_type": {"$eq": PROBE_VALUE}})
+
+        with sqlalchemy_sql_log(backend._engine) as sql_log:  # noqa: SLF001 — no public driver-seam accessor
+            step = await backend.scan_documents(namespace.id, filter_ast=ast, scan_limit=10)
+
+        assert step.consumed_keys == frozenset({"source_type"})
+        assert_split_honest(sql_log, pushed_values=[PROBE_VALUE])
+        # And the pushdown narrowed for real, rather than leaving the work owed.
+        assert len(step.documents) == matching
+        assert {d.source_type for d in step.documents} == {PROBE_VALUE}
+
+    async def test_a_naturally_deferred_leaf_never_reaches_the_statement(
+        self, backend: PostgreSQLBackend, namespace
+    ) -> None:
+        """The correctness-lie catch WITHOUT monkeypatching anything.
+
+        The stronger of the two residual tests, and the reason it exists separately:
+        it needs no ``force_residual``, so it tests the store as it ships. The
+        unpushable half is ``occurred_at`` (no ``documents`` column backs it) rather
+        than ``created_at``, which is a real ``timestamptz`` here and pushes — and
+        ``compile_postgres``'s all-or-nothing gate defers the whole ``$or`` rather
+        than pushing half a disjunction. So ``source_type``, which this store
+        normally pushes, must NOT be bound.
+
+        ``occurred_at`` reaches the compiler at all only because this is the storage
+        tier: the facade's ``_reject_non_enumerable_keys`` refuses it one level up.
+        The gate is what this store's ``_documents_compile_context`` docstring names
+        as the reason the pushdown is superset-safe — a match-all placeholder left
+        inside a negation inverts into a match-nothing and wrongly EXCLUDES rows.
+        """
+        await self._seed_probe_corpus(backend, namespace.id)
+        ast = to_filter_ast(
+            {"$or": [{"occurred_at": {"$gte": "2026-01-01T00:00:00+00:00"}}, {"source_type": {"$eq": PROBE_VALUE}}]}
+        )
+
+        with sqlalchemy_sql_log(backend._engine) as sql_log:  # noqa: SLF001
+            step = await backend.scan_documents(namespace.id, filter_ast=ast, scan_limit=10)
+
+        assert step.consumed_keys == frozenset()
+        assert_split_honest(sql_log, residual_values=[PROBE_VALUE])
+        # The whole disjunction deferred, so SQL narrowed nothing: the raw window is
+        # the entire corpus and the post-filter owns every leaf.
+        assert len(step.documents) == 6
+
+    async def test_a_residual_leaf_never_reaches_the_statement(
+        self, backend: PostgreSQLBackend, namespace, monkeypatch
+    ) -> None:
+        """The correctness-lie catch, same filter with the leaf forced residual.
+
+        ``force_residual`` drops ``source_type`` from this store's
+        ``field_mapping``, which ``compile_postgres`` reads as the pushdown
+        whitelist, so the identical AST defers. Both halves must hold together: the
+        report says not-consumed, and the operand is absent from the statement.
+
+        This is also the only *uniform* forced-residual lever across the four
+        stores. A ``SchemaCapabilities`` override would not work here — the
+        postgres documents compiler never reads ``schema_capabilities`` at all.
+        """
+        await self._seed_probe_corpus(backend, namespace.id)
+        from khora.storage.backends import postgresql as pg_module
+
+        force_residual(monkeypatch, pg_module)
+        ast = to_filter_ast({"source_type": {"$eq": PROBE_VALUE}})
+
+        with sqlalchemy_sql_log(backend._engine) as sql_log:  # noqa: SLF001
+            step = await backend.scan_documents(namespace.id, filter_ast=ast, scan_limit=10)
+
+        assert step.consumed_keys == frozenset()
+        assert_split_honest(sql_log, residual_values=[PROBE_VALUE])
+        # Deferred means "narrowed nothing here": the raw window is the whole corpus.
+        assert len(step.documents) == 6
+
+    # The split this store reports, per AST shape. PINNED as well as recomputed:
+    # the recompute alone is satisfiable by two compilers agreeing on the wrong
+    # answer, including the degenerate "consumes nothing ever" that would make
+    # every comparison ``frozenset() == frozenset()``. The date shapes are where
+    # this store differs from the two SQLite tiers — ``created_at`` is a real
+    # ``timestamptz`` here so it PUSHES, and ``occurred_at`` is the unbacked key.
+    _SPLIT_SHAPES: dict[str, tuple[dict, frozenset[str]]] = {
+        "pushed_whole": ({"source_type": {"$eq": PROBE_VALUE}}, frozenset({"source_type"})),
+        "date_key_pushes_here": (
+            {"source_type": {"$eq": PROBE_VALUE}, "created_at": {"$gte": "2026-01-01T00:00:00+00:00"}},
+            frozenset({"created_at", "source_type"}),
+        ),
+        "unbacked_key_is_the_residual": (
+            {"source_type": {"$eq": PROBE_VALUE}, "occurred_at": {"$gte": "2026-01-01T00:00:00+00:00"}},
+            frozenset({"source_type"}),
+        ),
+        "or_wholly_pushable": (
+            {"$or": [{"source_type": {"$eq": PROBE_VALUE}}, {"title": {"$eq": "doc-1"}}]},
+            frozenset({"source_type", "title"}),
+        ),
+        "or_wholly_deferred": (
+            {"$or": [{"occurred_at": {"$gte": "2026-01-01T00:00:00+00:00"}}, {"source_type": {"$eq": PROBE_VALUE}}]},
+            frozenset(),
+        ),
+        "metadata_path": ({"metadata.tier": {"$eq": "gold"}}, frozenset({"metadata.tier"})),
+    }
+
+    @pytest.mark.parametrize(("wire", "expected"), _SPLIT_SHAPES.values(), ids=_SPLIT_SHAPES.keys())
+    async def test_reported_split_equals_a_fresh_compile_of_the_same_ast(
+        self, backend: PostgreSQLBackend, namespace, wire, expected
+    ) -> None:
+        """``consumed_keys`` is the compiler's answer, verbatim — no store-side edits.
+
+        The scan may compile once and report; what it must not do is add or drop
+        keys on the way out. A store that unioned in the keys it *hoped* were
+        pushed, or stripped one it found inconvenient, still looks plausible on
+        every row assertion here, because the caller re-checks the full AST
+        regardless. Recomputed with the SAME compiler and context the scan uses.
+
+        This is also how ``created_at`` pushdown is covered: its *value* is out of
+        the spy's scope (asyncpg binds a ``datetime`` object where the SQLite tiers
+        bind their own string serializations, so a value probe is a dialect quiz),
+        but its membership in the split is exactly what the second shape compares —
+        and it is the answer the embedded siblings give the other way round.
+        """
+        await self._seed_probe_corpus(backend, namespace.id)
+        ast = to_filter_ast(wire)
+
+        step = await backend.scan_documents(namespace.id, filter_ast=ast, scan_limit=10)
+
+        assert step.consumed_keys == expected
+        compiler = CompilerRegistry.get("relational.postgresql", "documents")
+        assert step.consumed_keys == compiler(ast, _documents_compile_context()).consumed_keys
+
+
+@skip_no_pg
+class TestScanDocumentsPageSplitPg:
+    """The page-level split: ``DocumentPage.post_filtered_keys`` over a live server.
+
+    The coordinator derives it as ``sorted(filter_leaf_keys(ast) - consumed_keys)``
+    unioned across the steps of a page, and this store's answer is the *opposite* of
+    the embedded tiers' for the shape that matters: ``created_at`` pushes here, so
+    it is NOT a residual, while ``occurred_at`` — which no ``documents`` column
+    backs — is. The embedded sibling
+    (``tests/unit/test_list_documents_enumeration.py``) asserts the mirror image on
+    the same helper, which is what makes this leg worth its own run rather than a
+    transcription.
+
+    ``occurred_at`` reaches the compiler at all only because this is the storage
+    tier: the facade's ``_reject_non_enumerable_keys`` refuses it one level up.
+    """
+
+    @pytest.fixture
+    async def seeded(self, backend: PostgreSQLBackend, namespace):
+        """A coordinator over a varied six-row namespace.
+
+        Returns ``(coordinator, ns_id, rows)``. ``rows`` is the seed as plain dicts
+        — the INDEPENDENT record of what was written, which the completeness
+        matchers evaluate against. Nothing here reads it back out of the store.
+        """
+        seed = scan_seed(6)
+        rows: list[dict] = []
+        for i, (doc_id, created_at) in enumerate(seed.writes):
+            fields = {"title": f"doc-{i}", "source_type": "report" if i % 2 == 0 else "library"}
+            await write_document(backend, namespace.id, doc_id, created_at, **fields)
+            rows.append({"id": doc_id, "created_at": created_at, **fields})
+        return StorageCoordinator(relational=backend), namespace.id, rows
+
+    # Wire filter, the residual the coordinator must REPORT, and an independent
+    # plain-Python matcher over the seeded rows giving the id set it must RETURN.
+    # The matcher is hand-written on purpose: deriving it with ``compile_python``
+    # would reproduce the predicate the coordinator itself applies, so the
+    # comparison could not fail. The residual is pinned as well as recomputed —
+    # a recompute alone is satisfied by two computations agreeing on the wrong
+    # answer, including the all-empty case that makes every comparison ``() == ()``.
+    #
+    # The date bound is ``WHOLE_SECOND`` so it BITES (the seed puts one row a second
+    # below the tie instant, so ``$gte`` there keeps 5 of 6); a bound every row
+    # satisfies would reduce completeness to "returns everything".
+    _PAGE_SPLIT_SHAPES: dict[str, tuple[dict, tuple[str, ...], object]] = {
+        "no_residual": (
+            {"source_type": {"$eq": "report"}},
+            (),
+            lambda r: r["source_type"] == "report",
+        ),
+        "date_key_pushes_here": (
+            {"created_at": {"$gte": WHOLE_SECOND.isoformat()}},
+            (),
+            lambda r: r["created_at"] >= WHOLE_SECOND,
+        ),
+        "unbacked_key_residual": (
+            {"source_type": {"$eq": "report"}, "occurred_at": {"$gte": "2020-01-01T00:00:00+00:00"}},
+            ("occurred_at",),
+            # ``occurred_at`` is absent on every documents row, so a range compare on
+            # it is false for all — but the compiler DEFERS it, leaving the
+            # coordinator's post-filter to reject everything. Expect ZERO matches,
+            # asserted below as a deliberate exception to the narrowing precondition.
+            lambda _r: False,
+        ),
+        "or_wholly_deferred": (
+            {"$or": [{"occurred_at": {"$gte": "2020-01-01T00:00:00+00:00"}}, {"source_type": {"$eq": "report"}}]},
+            ("occurred_at", "source_type"),
+            lambda r: r["source_type"] == "report",
+        ),
+    }
+
+    @pytest.mark.parametrize(
+        ("wire", "expected", "matcher"), _PAGE_SPLIT_SHAPES.values(), ids=_PAGE_SPLIT_SHAPES.keys()
+    )
+    async def test_page_reports_its_residual_and_returns_exactly_the_matches(
+        self, seeded, wire, expected, matcher
+    ) -> None:
+        coordinator, namespace_id, rows = seeded
+        ast = to_filter_ast(wire)
+        expected_ids = [r["id"] for r in rows if matcher(r)]
+        assert len(expected_ids) < len(rows), "the shape must narrow, or completeness proves nothing"
+
+        page = await coordinator.scan_documents_page(namespace_id, filter_ast=ast, limit=100)
+
+        # 1. The reported residual, pinned and recomputed against the compiler.
+        assert page.post_filtered_keys == expected
+        compiler = CompilerRegistry.get("relational.postgresql", "documents")
+        consumed = compiler(ast, _documents_compile_context()).consumed_keys
+        assert page.post_filtered_keys == tuple(sorted(filter_leaf_keys(ast) - consumed))
+        # 2. COMPLETENESS — the assertion that can actually fail. Against the
+        #    hand-written matcher over the seed, never against another enumeration
+        #    call and never against ``compile_python`` (the coordinator's own).
+        assert_walk_matches_expected(page, expected_ids)
+        # 3. Order + the walk-control pair. Soundness rides along and is
+        #    tautological here by construction; see the helper's docstring.
+        assert_page_compliant(page, ast)
+
+    async def test_a_multi_page_walk_loses_no_match_across_cursor_boundaries(self, seeded) -> None:
+        """Completeness across a REAL walk, boundaries landing inside a tie block.
+
+        The single-page cases above cannot see a cursor bug: one page never resumes.
+        ``limit=2`` over a 5-row match set forces three pages whose boundaries fall
+        inside the seed's ``created_at`` tie block — where a cursor that mis-binds
+        its ``timestamptz`` or its ``uuid`` skips a tie-mate. That row simply never
+        appears, so no per-returned-row assertion can notice it; only the comparison
+        against the independently-known match set does.
+        """
+        coordinator, namespace_id, rows = seeded
+        ast = to_filter_ast({"created_at": {"$gte": WHOLE_SECOND.isoformat()}})
+        expected_ids = [r["id"] for r in rows if r["created_at"] >= WHOLE_SECOND]
+        assert len(expected_ids) == 5, "5 of 6 rows sit at or above the tie instant"
+
+        walked = []
+        after = None
+        while True:
+            page = await coordinator.scan_documents_page(namespace_id, filter_ast=ast, limit=2, after=after)
+            walked.append(page)
+            assert len(walked) < 10, "walk did not terminate"
+            if page.exhausted:
+                break
+            after = (page.next_after.created_at, page.next_after.id)
+
+        assert len(walked) >= 3, "limit=2 over 5 matches must span multiple pages"
+        assert_walk_compliant(walked, ast, expected_ids=expected_ids)
 
 
 @skip_no_pg
