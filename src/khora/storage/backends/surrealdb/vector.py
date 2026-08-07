@@ -176,9 +176,7 @@ class SurrealDBVectorAdapter:
 
     async def get_chunk(self, chunk_id: UUID, *, namespace_id: UUID) -> Chunk | None:
         """Fetch a single chunk by primary key, filtered to ``namespace_id``."""
-        sql = (
-            "SELECT * FROM chunk WHERE id = $rid AND (namespace = $ns_rid OR namespace.namespace_id = $ns_str) LIMIT 1"
-        )
+        sql = "SELECT * FROM chunk WHERE id = $rid AND (namespace = $ns_rid OR namespace_id = $ns_str) LIMIT 1"
         row = await self._conn.query_one(
             sql,
             {
@@ -197,7 +195,7 @@ class SurrealDBVectorAdapter:
             return {}
 
         chunk_rids = [_rid("chunk", uid) for uid in chunk_ids]
-        sql = "SELECT * FROM chunk WHERE id IN $ids AND (namespace = $ns_rid OR namespace.namespace_id = $ns_str)"
+        sql = "SELECT * FROM chunk WHERE id IN $ids AND (namespace = $ns_rid OR namespace_id = $ns_str)"
         rows = await self._conn.query(
             sql,
             {
@@ -217,7 +215,7 @@ class SurrealDBVectorAdapter:
         sql = (
             "SELECT * FROM chunk "
             "WHERE document = $doc_rid "
-            "AND (namespace = $ns_rid OR namespace.namespace_id = $ns_str) "
+            "AND (namespace = $ns_rid OR namespace_id = $ns_str) "
             "ORDER BY chunk_index ASC"
         )
         rows = await self._conn.query(
@@ -240,29 +238,28 @@ class SurrealDBVectorAdapter:
         ns_rid = _rid("memory_namespace", namespace_id)
         ns_str = str(namespace_id)
         # Match the compound namespace predicate every sibling read method uses
-        # (scalar `namespace_id` OR the `namespace` record-link), so the delete
-        # works for newly written rows and any pre-#1221 rows that carry only
-        # the record-link.
+        # (the `namespace` record-link OR the scalar `namespace_id`), so the
+        # delete works for newly written rows and any pre-#1221 rows that carry
+        # only the record-link. The scalar leg replaces the former
+        # ``namespace.namespace_id`` record-traversal, which is unservable and
+        # collapsed the whole statement to ``Iterate Table`` (#1595); the
+        # scalar leg is index-eligible (``idx_chunk_namespace_id``) and covers
+        # the same rows.
         bindings = {"doc_rid": doc_rid, "ns_rid": ns_rid, "ns_str": ns_str}
-        # First count so we can report back
-        count_sql = (
-            "SELECT count() AS cnt FROM chunk "
+        # Delete and count what was actually removed via ``RETURN BEFORE`` rather
+        # than a separate ``count() ... GROUP ALL``: SurrealDB's aggregate count
+        # over an OR that unions two index scans double-counts rows matching both
+        # legs (a chunk carrying both namespace forms is counted per leg), so the
+        # old count query would over-report. The row set returned by DELETE is
+        # the real deletion, de-duplicated by id for the same union reason.
+        del_sql = (
+            "DELETE FROM chunk "
             "WHERE document = $doc_rid "
-            "AND (namespace = $ns_rid OR namespace.namespace_id = $ns_str OR namespace_id = $ns_str) "
-            "GROUP ALL"
+            "AND (namespace = $ns_rid OR namespace_id = $ns_str) "
+            "RETURN BEFORE"
         )
-        count_row = await self._conn.query_one(count_sql, bindings)
-        count = int(count_row.get("cnt", 0)) if count_row else 0
-
-        if count > 0:
-            del_sql = (
-                "DELETE FROM chunk "
-                "WHERE document = $doc_rid "
-                "AND (namespace = $ns_rid OR namespace.namespace_id = $ns_str OR namespace_id = $ns_str)"
-            )
-            await self._conn.execute(del_sql, bindings)
-
-        return count
+        deleted = await self._conn.query(del_sql, bindings)
+        return len({str(row.get("id")) for row in deleted if isinstance(row, dict)})
 
     async def update_last_accessed(
         self,
@@ -332,12 +329,15 @@ class SurrealDBVectorAdapter:
         and sorts by descending similarity.  HNSW index accelerates
         the distance computation when available.
         """
-        # Build WHERE predicates
+        # Build the shared narrowing WITHOUT the namespace disjunct. The
+        # namespace scope must be run as two OR-free legs merged in Python
+        # (#1595): a disjunction sitting beside ``embedding IS NOT NULL``
+        # collapses the plan to ``Iterate Table`` over the whole corpus, all
+        # tenants included, and the guard cannot move to Python because
+        # ``vector::dot()`` errors on a NONE embedding. Each leg on its own is a
+        # plain conjunction that plans ``Iterate Index`` on the namespace index.
         ns_rid = _rid("memory_namespace", namespace_id)
-        where_clauses = [
-            "(namespace = $ns_rid OR namespace.namespace_id = $ns_str)",
-            "embedding IS NOT NULL",
-        ]
+        shared_clauses = ["embedding IS NOT NULL"]
         bindings: dict[str, Any] = {
             "ns_rid": ns_rid,
             "ns_str": str(namespace_id),
@@ -348,44 +348,49 @@ class SurrealDBVectorAdapter:
 
         if filter_document_ids:
             doc_rids = [_rid("document", uid) for uid in filter_document_ids]
-            where_clauses.append("document IN $filter_doc_ids")
+            shared_clauses.append("document IN $filter_doc_ids")
             bindings["filter_doc_ids"] = doc_rids
 
         if created_after is not None:
-            where_clauses.append("(source_timestamp ?? created_at) >= $created_after")
+            shared_clauses.append("(source_timestamp ?? created_at) >= $created_after")
             bindings["created_after"] = created_after
 
         if created_before is not None:
-            where_clauses.append("(source_timestamp ?? created_at) <= $created_before")
+            shared_clauses.append("(source_timestamp ?? created_at) <= $created_before")
             bindings["created_before"] = created_before
 
         if metadata_filters:
             for i, (key, value) in enumerate(metadata_filters.items()):
                 safe_key = _sanitize_field_name(key)
                 param = f"mf_{i}"
-                where_clauses.append(f"metadata_.{safe_key} = ${param}")
+                shared_clauses.append(f"metadata_.{safe_key} = ${param}")
                 bindings[param] = value
 
-        where_sql = " AND ".join(where_clauses)
         # Use brute-force similarity + ORDER BY instead of <|K|> KNN operator
         # (KNN is unreliable in embedded mode and rejects parameterised limits).
         # vector::dot() is ~3x faster than vector::similarity::cosine() and
         # produces identical results for L2-normalized embeddings (unit vectors).
-        sql = (
-            "SELECT *, vector::dot(embedding, $query_embedding) AS similarity "  # noqa: S608
-            f"FROM chunk WHERE {where_sql} "
-            f"ORDER BY similarity DESC LIMIT {int(limit)}"
-        )
+        # Both legs cap at ``limit``; the global top-``limit`` by similarity is a
+        # subset of the union of each leg's top-``limit``, so merging then
+        # slicing reproduces the single-statement result. The legs overlap for
+        # rows carrying both namespace forms, so de-duplicate by chunk id.
+        merged: dict[UUID, tuple[Chunk, float]] = {}
+        for leg in ("namespace = $ns_rid", "namespace_id = $ns_str"):
+            where_sql = " AND ".join([leg, *shared_clauses])
+            sql = (
+                "SELECT *, vector::dot(embedding, $query_embedding) AS similarity "  # noqa: S608
+                f"FROM chunk WHERE {where_sql} "
+                f"ORDER BY similarity DESC LIMIT {int(limit)}"
+            )
+            rows = await self._conn.query(sql, bindings)
+            for row in rows:
+                sim = float(row.get("similarity", 0.0))
+                if sim < min_similarity:
+                    continue
+                chunk = self._row_to_chunk(row)
+                merged[chunk.id] = (chunk, sim)
 
-        rows = await self._conn.query(sql, bindings)
-
-        results: list[tuple[Chunk, float]] = []
-        for row in rows:
-            sim = float(row.get("similarity", 0.0))
-            if sim < min_similarity:
-                continue
-            results.append((self._row_to_chunk(row), sim))
-        return results
+        return sorted(merged.values(), key=lambda t: t[1], reverse=True)[:limit]
 
     @trace(
         "khora.surrealdb.search_fulltext",
@@ -413,8 +418,11 @@ class SurrealDBVectorAdapter:
         filter, so it is ignored.
         """
         ns_rid = _rid("memory_namespace", namespace_id)
+        # Scalar ``namespace_id`` leg (not the unservable ``namespace.namespace_id``
+        # record-traversal) so the disjunction unions two index scans; the BM25
+        # ``idx_chunk_content_ft`` anchors the plan (#1595).
         where_clauses = [
-            "(namespace = $ns_rid OR namespace.namespace_id = $ns_str)",
+            "(namespace = $ns_rid OR namespace_id = $ns_str)",
             "content @1@ $query_text",
         ]
         bindings: dict[str, Any] = {
