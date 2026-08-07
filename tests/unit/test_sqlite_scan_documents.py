@@ -32,17 +32,25 @@ is serialized by the same path production writes take.
 :func:`tests.test_helpers.document_scan.scan_seed` draws its ids from
 :func:`tests.test_helpers.document_order.id_ladder`, whose ids share a 24-hex
 prefix and differ only in a trailing 8-hex counter. Do NOT "simplify" this seed
-to plain ``uuid4``. The shared prefix is the only thing that makes the id half of
-the cursor observable on this store: ``str(uuid)`` puts a dash at index 8, inside
-that shared prefix, and ``-`` (0x2D) sorts BELOW every hex digit. So an undashed
-``cursor_id.hex`` sorts ABOVE every stored id it shares leading hex with, and
-``(created_at, id) < (?, ?)`` then matches strictly MORE rows — including the
-cursor's own row and the row above it, so a chained walk runs backwards and never
-terminates. Measured on this store from a mid-tie cursor at ``…0003``: the
-correct dashed form yields ``[…0002, …0001, …0005]``; ``.hex`` yields ``[…0004,
-…0003, …0002, …0001, …0005]``. With ``uuid4`` ids the comparison is decided long
-before index 8 (it would need two ids agreeing on eight leading hex characters),
-and the whole defect is invisible.
+to plain ``uuid4``. ``str(uuid)`` puts a dash at index 8 and ``-`` (0x2D) sorts
+BELOW every hex digit, so an undashed ``cursor_id.hex`` sorts ABOVE every stored
+id it shares leading hex with, and ``(created_at, id) < (?, ?)`` then matches
+strictly MORE rows. Measured from a mid-tie cursor at ``…0003`` (``scan_limit=10``):
+the correct dashed form yields ``[…0002, …0001, …0005]``; ``.hex`` yields
+``[…0004, …0003, …0002, …0001, …0005]`` — the cursor's own row and the row above
+it, so a chained walk runs backwards, re-serving rows it already returned. (It
+does not *hang* on this window: five rows against a bound of ten is short, so the
+step reports ``exhausted`` and ends the walk. Hanging needs the window to stay
+full; ``walk_scan``'s repeat-position guard raises either way.)
+
+The shared prefix is what makes the **rows-above** half of that observable. It is
+NOT what makes the defect observable at all: the own-row re-match survives any
+seed, because ``str(u) < u.hex`` holds for every UUID — index 8 is ``-`` on the
+left and a hex digit on the right — so the cursor's own row comes back however
+the ids were drawn. With ``uuid4`` ids the comparison against a *tie-mate* is
+decided before index 8 by essentially random bytes instead, so which rows above
+the cursor return becomes a coin flip per id. That is the half the ladder pins,
+and a corpus that leaves it to chance proves whichever thing it happened to draw.
 
 **Why both microsecond polarities are seeded.** The cursor binds through the same
 ``dt.isoformat()`` the writer used, and ``isoformat()`` omits the ``.ffffff``
@@ -72,19 +80,36 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from khora.core.models import Document, MemoryNamespace
+from khora.core.models import MemoryNamespace
 from khora.core.models.document import DocumentStatus
 from khora.core.models.tenancy import TenancyMode
-from khora.filter import CompiledFilter, CompilerRegistry, RecallFilter
-from khora.filter.ast import parse_to_ast
+from khora.filter import CompiledFilter, CompilerRegistry
 from khora.filter.compilers.python import compile_python
 
 # ``_documents_compile_context`` is private, and imported on purpose: the
 # superset test below must compile with the *same* context the scan itself uses,
 # or it would prove a property of some other context.
-from khora.storage.backends.sqlite import SQLiteRelationalBackend, _documents_compile_context
-from tests.test_helpers.document_order import seed_order
-from tests.test_helpers.document_scan import WHOLE_SECOND, ScanSeed, scan_seed, walk_scan
+from khora.storage.backends.sqlite import (
+    SQLiteRelationalBackend,
+    _documents_compile_context,
+    _scan_key_from_row,
+)
+from tests.test_helpers.document_scan import (
+    SUPERSET_SHAPES,
+    WHOLE_SECOND,
+    scan_seed,
+    seed_documents,
+    seed_varied,
+    to_filter_ast,
+    walk_scan,
+    write_document,
+)
+
+# This store needs no services and no Alembic chain — it builds its own schema in
+# ``:memory:`` — so the module carries no skip. The marker is declared anyway
+# because both sibling scan modules declare one, and a bare module is the shape
+# that silently drops out of a marker-selected lane.
+pytestmark = [pytest.mark.unit]
 
 _COMPILER_KEY = ("relational.sqlite", "documents")
 
@@ -112,30 +137,6 @@ async def _make_namespace(store: SQLiteRelationalBackend) -> MemoryNamespace:
 @pytest.fixture
 async def namespace(backend):
     return await _make_namespace(backend)
-
-
-def _filter_ast(wire: dict[str, Any]) -> Any:
-    return parse_to_ast(RecallFilter.model_validate(wire))
-
-
-async def _write(store: Any, namespace_id: UUID, doc_id: UUID, created_at: datetime, **fields: Any) -> None:
-    """Insert one document through the production write API."""
-    await store.create_document(
-        Document(
-            id=doc_id,
-            namespace_id=namespace_id,
-            content="scanned content",
-            checksum=f"scan-{doc_id.hex}",
-            created_at=created_at,
-            updated_at=fields.pop("updated_at", created_at),
-            **fields,
-        )
-    )
-
-
-async def _seed(store: Any, namespace_id: UUID, seed: ScanSeed) -> None:
-    for doc_id, created_at in seed.writes:
-        await _write(store, namespace_id, doc_id, created_at)
 
 
 def _two_namespace_ladders(n: int = 6) -> tuple[list[UUID], list[UUID]]:
@@ -169,54 +170,6 @@ def _two_namespace_ladders(n: int = 6) -> tuple[list[UUID], list[UUID]]:
     )
 
 
-def _seed_from_ladder(ids: list[UUID], *, instant: datetime = WHOLE_SECOND) -> ScanSeed:
-    """Build a :class:`ScanSeed` over a caller-supplied ascending id ladder.
-
-    Identical in construction to :func:`tests.test_helpers.document_scan.scan_seed`
-    — ``total - 2`` rows share ``instant`` so only the ``id DESC`` leg can order
-    them, and the two rows outside that block carry timestamp and id in
-    deliberate conflict. The one difference is that the ids come from the caller
-    instead of from a fresh random ladder, so the two namespaces below can be
-    seeded at the same tie instant with a pinned relative id order.
-    """
-    if len(ids) < 5:
-        raise ValueError(f"need a tie block of at least 3 rows to resume from the middle of, got {len(ids)}")
-
-    newest_id, oldest_id = ids[0], ids[-1]
-    tied = ids[1:-1]
-    stamps = dict.fromkeys(tied, instant)
-    stamps[newest_id] = instant + timedelta(seconds=1)
-    stamps[oldest_id] = instant - timedelta(seconds=1)
-
-    return ScanSeed(
-        writes=[(doc_id, stamps[doc_id]) for doc_id in seed_order(ids)],
-        expected=[newest_id, *reversed(tied), oldest_id],
-        tied_ids=list(reversed(tied)),
-        newest_id=newest_id,
-        oldest_id=oldest_id,
-        tie_instant=instant,
-    )
-
-
-async def _seed_varied(store: Any, namespace_id: UUID, seed: ScanSeed) -> None:
-    """Seed the same corpus with attribute variety, so a filter can split it.
-
-    Attributes are assigned by *write* index, which is deliberately not the
-    enumeration order — every expectation below is therefore derived from the
-    rows a scan actually returns, never from this loop's counter.
-    """
-    for i, (doc_id, created_at) in enumerate(seed.writes):
-        await _write(
-            store,
-            namespace_id,
-            doc_id,
-            created_at,
-            title=f"doc-{i}",
-            source_type="report" if i % 2 == 0 else "library",
-            metadata={"tier": "gold"} if i < 2 else {},
-        )
-
-
 # --------------------------------------------------------------------------- #
 # The window bound
 # --------------------------------------------------------------------------- #
@@ -224,7 +177,7 @@ async def _seed_varied(store: Any, namespace_id: UUID, seed: ScanSeed) -> None:
 
 async def test_scan_limit_bounds_the_window(backend, namespace) -> None:
     seed = scan_seed(6)
-    await _seed(backend, namespace.id, seed)
+    await seed_documents(backend, namespace.id, seed)
 
     step = await backend.scan_documents(namespace.id, scan_limit=2)
 
@@ -243,7 +196,7 @@ async def test_a_full_window_is_not_yet_exhausted(backend, namespace) -> None:
     short window is the other half of the same contract.
     """
     seed = scan_seed(6)
-    await _seed(backend, namespace.id, seed)
+    await seed_documents(backend, namespace.id, seed)
 
     exact = await backend.scan_documents(namespace.id, scan_limit=6)
     assert len(exact.documents) == 6
@@ -276,9 +229,9 @@ async def test_exhausted_describes_the_raw_window_not_what_survives_a_post_filte
     raw-window contract rests on.
     """
     seed = scan_seed(6)
-    await _seed_varied(backend, namespace.id, seed)
+    await seed_varied(backend, namespace.id, seed)
 
-    ast = _filter_ast(
+    ast = to_filter_ast(
         {
             "$or": [
                 {"source_type": {"$eq": "no-such-source-type"}},
@@ -320,7 +273,7 @@ async def test_scan_limit_below_one_is_rejected_before_anything_is_compiled(back
     with pytest.raises(ValueError, match="scan_limit"):
         await backend.scan_documents(
             namespace.id,
-            filter_ast=_filter_ast({"source_type": {"$eq": "report"}}),
+            filter_ast=to_filter_ast({"source_type": {"$eq": "report"}}),
             scan_limit=0,
         )
 
@@ -348,7 +301,7 @@ async def test_walk_visits_every_document_exactly_once_in_total_order(backend, n
     to advance, which is the shape both serialization defects take.
     """
     seed = scan_seed(6, instant=instant)
-    await _seed(backend, namespace.id, seed)
+    await seed_documents(backend, namespace.id, seed)
 
     steps = await walk_scan(backend.scan_documents, namespace.id, scan_limit=1)
     seen = [d.id for step in steps for d in step.documents]
@@ -383,8 +336,10 @@ async def test_cursor_excludes_its_own_row_and_keeps_its_tie_mates(backend, name
       at ``whole_second`` the window becomes 5 rows,
       ``[…0004, …0003, …0002, …0001, …0005]``: the cursor's own row and the one
       above it, and ``walk_scan`` raises "scan cursor did not advance". At
-      ``sub_second`` the mutant is byte-identical to the stored form and the
-      whole module stays green.
+      ``sub_second`` the mutant is byte-identical to the stored form and this
+      test passes. Across the module it fails 6 tests: the two
+      ``whole_second`` parametrizations plus the four whole-second-seeded tests
+      that resume from a cursor at all.
     * truncating the microsecond (``.replace(microsecond=0)``) — the exact
       reverse: green at ``whole_second``, and at ``sub_second`` the window drops
       to 1 row, ``[…0005]``, losing the cursor's entire tie block. Across the
@@ -401,7 +356,7 @@ async def test_cursor_excludes_its_own_row_and_keeps_its_tie_mates(backend, name
     makes that visible at all.
     """
     seed = scan_seed(6, instant=instant)
-    await _seed(backend, namespace.id, seed)
+    await seed_documents(backend, namespace.id, seed)
 
     full = await backend.scan_documents(namespace.id, scan_limit=10)
     assert [d.id for d in full.documents] == seed.expected
@@ -443,7 +398,7 @@ async def test_filtered_walk_puts_a_cursor_and_a_compiled_fragment_in_one_statem
     first carries both families at once.
     """
     seed = scan_seed(6)
-    await _seed_varied(backend, namespace.id, seed)
+    await seed_varied(backend, namespace.id, seed)
 
     full = await backend.scan_documents(namespace.id, scan_limit=10)
     wire = {"$or": [{"source_type": {"$eq": "report"}}, {"title": {"$eq": "doc-1"}}]}
@@ -454,7 +409,7 @@ async def test_filtered_walk_puts_a_cursor_and_a_compiled_fragment_in_one_statem
         backend.scan_documents,
         namespace.id,
         scan_limit=1,
-        filter_ast=_filter_ast(wire),
+        filter_ast=to_filter_ast(wire),
     )
     seen = [d.id for step in steps for d in step.documents]
 
@@ -473,7 +428,7 @@ async def test_mid_tie_resume_returns_the_exact_next_row(backend, namespace) -> 
     of the tie block here and still look "sorted".
     """
     seed = scan_seed(6)
-    await _seed(backend, namespace.id, seed)
+    await seed_documents(backend, namespace.id, seed)
 
     full = await backend.scan_documents(namespace.id, scan_limit=10)
     assert [d.id for d in full.documents] == seed.expected
@@ -489,6 +444,46 @@ async def test_mid_tie_resume_returns_the_exact_next_row(backend, namespace) -> 
         assert step.exhausted is False
 
 
+async def test_id_tie_break_is_load_bearing_once_the_sort_index_is_gone(backend, namespace) -> None:
+    """``ORDER BY created_at DESC, id DESC`` — with the index dropped, so the
+    second key has to do its own work.
+
+    **Every other ordering assertion in this module is satisfied by
+    ``ORDER BY created_at DESC`` alone, and none of them can tell.** The store's
+    own ``_SCHEMA_SQL`` builds ``idx_docs_ns_created_id`` over
+    ``(namespace_id, created_at, id)``; with ``namespace_id`` equality-constrained,
+    SQLite reads that index backwards to satisfy the leading term and the trailing
+    ``id`` falls out of the same scan as free residual order. So the tie block
+    comes back in ``id DESC`` whether or not the statement asks for it, and
+    deleting ``, id DESC`` from the ``ORDER BY`` leaves the module green.
+
+    Dropping the index is what separates the two forms. Without it SQLite sorts
+    into a temp b-tree on ``created_at`` only, which resolves the tie block in
+    whatever order the scan produced rows rather than by id. Measured on this
+    seed — correct ``[…0000, …0004, …0003, …0002, …0001, …0005]`` against
+    ``[…0000, …0001, …0004, …0002, …0003, …0005]`` for the one-key form — so this
+    test fails if anyone drops the tie-break, and it is the only one that does.
+
+    The index is dropped on the fixture's own ``:memory:`` connection and nothing
+    outside this test sees it. This is about the ``ORDER BY`` clause, not about
+    the index: the total order is a contract of the scan (the walk's cursor
+    predicate compares both keys, so a one-key order would resume from a position
+    the order does not agree with), and it must not depend on which indexes a
+    given database happens to carry.
+    """
+    seed = scan_seed(6)
+    await seed_documents(backend, namespace.id, seed)
+    assert len(seed.tied_ids) >= 3, "the seed must carry a tie block for the id leg to decide anything"
+
+    # Reaches into the store's connection because there is no public DDL seam and
+    # the fixture's ``:memory:`` database is this test's alone.
+    await backend._conn.execute("DROP INDEX idx_docs_ns_created_id")  # noqa: SLF001
+
+    step = await backend.scan_documents(namespace.id, scan_limit=10)
+
+    assert [d.id for d in step.documents] == seed.expected
+
+
 async def test_empty_window_reports_exhausted_without_a_position(backend, namespace) -> None:
     """Both the never-seeded namespace and the tail past the last row."""
     empty = await backend.scan_documents(namespace.id, scan_limit=5)
@@ -497,7 +492,7 @@ async def test_empty_window_reports_exhausted_without_a_position(backend, namesp
     assert empty.exhausted is True
 
     seed = scan_seed(6)
-    await _seed(backend, namespace.id, seed)
+    await seed_documents(backend, namespace.id, seed)
     full = await backend.scan_documents(namespace.id, scan_limit=10)
     oldest = full.documents[-1]
 
@@ -530,11 +525,13 @@ async def test_split_reports_only_the_leaves_sql_enforced(backend, namespace) ->
     """
     seed = scan_seed(6)
     for i, (doc_id, created_at) in enumerate(seed.writes):
-        await _write(backend, namespace.id, doc_id, created_at, source_type="report" if i % 2 == 0 else "library")
+        await write_document(
+            backend, namespace.id, doc_id, created_at, source_type="report" if i % 2 == 0 else "library"
+        )
 
     step = await backend.scan_documents(
         namespace.id,
-        filter_ast=_filter_ast(
+        filter_ast=to_filter_ast(
             {"source_type": {"$eq": "report"}, "occurred_at": {"$gte": "2999-01-01T00:00:00+00:00"}}
         ),
         scan_limit=10,
@@ -559,11 +556,11 @@ async def test_date_system_keys_are_not_pushed_down_by_this_store(backend, names
     as an error.
     """
     seed = scan_seed(6)
-    await _seed(backend, namespace.id, seed)
+    await seed_documents(backend, namespace.id, seed)
 
     step = await backend.scan_documents(
         namespace.id,
-        filter_ast=_filter_ast({"created_at": {"$gte": "2999-01-01T00:00:00+00:00"}}),
+        filter_ast=to_filter_ast({"created_at": {"$gte": "2999-01-01T00:00:00+00:00"}}),
         scan_limit=10,
     )
 
@@ -573,17 +570,13 @@ async def test_date_system_keys_are_not_pushed_down_by_this_store(backend, names
     assert [d.id for d in step.documents] == seed.expected
 
 
-# The pushdown must never reject a row the full filter would keep. Shapes are
-# chosen for the ways a compiler can get that wrong, not for operator coverage:
-# the ones wrapping an unpushable leaf in a disjunction or a negation matter
-# most, because a match-all placeholder left inside a negation inverts into a
-# match-nothing and excludes rows.
-_SUPERSET_SHAPES: dict[str, dict[str, Any]] = {
-    "pushable_eq": {"source_type": {"$eq": "report"}},
-    "pushable_ne": {"source_type": {"$ne": "report"}},
-    "pushable_nin": {"source_type": {"$nin": ["report"]}},
-    "pushable_exists": {"source_url": {"$exists": False}},
-    "metadata_eq": {"metadata.tier": {"$eq": "gold"}},
+# The pushdown must never reject a row the full filter would keep. The
+# store-agnostic shapes live in ``SUPERSET_SHAPES``; the four below are the ones
+# that only mean something on THIS store, because they name ``created_at`` as
+# unpushable (PostgreSQL pushes the same leaf) or reach for a key no ``documents``
+# column backs. They also matter most, since a match-all placeholder left inside
+# a negation inverts into a match-nothing and excludes rows.
+_SUPERSET_SHAPES: dict[str, dict[str, Any]] = SUPERSET_SHAPES | {
     "unpushable_date": {"created_at": {"$gte": "2026-01-31T12:30:00+00:00"}},
     "unpushable_key": {"occurred_at": {"$gte": "2026-01-01T00:00:00+00:00"}},
     "or_over_unpushable": {
@@ -592,19 +585,20 @@ _SUPERSET_SHAPES: dict[str, dict[str, Any]] = {
             {"source_type": {"$eq": "report"}},
         ]
     },
-    "not_over_pushable": {"$not": {"source_type": {"$eq": "report"}}},
     "not_over_unpushable": {"$not": {"created_at": {"$gte": "2026-01-31T12:30:00+00:00"}}},
-    "and_of_in_and_not": {
-        "$and": [
-            {"source_type": {"$in": ["report", "library"]}},
-            {"$not": {"title": {"$eq": "doc-0"}}},
-        ]
-    },
 }
 
+# Shapes whose oracle is empty over a ``seed_varied`` corpus BY CONSTRUCTION, and
+# that cannot be made non-empty: ``occurred_at`` is a recall-chunk key with no
+# ``documents`` column behind it, so no document can carry a value for it and no
+# seed can make one match. Named explicitly rather than tolerated, because for
+# these the superset assertion is unfalsifiable and the test below substitutes a
+# different one — see its body.
+_CONSTANT_EMPTY_SHAPES = frozenset({"unpushable_key"})
 
-@pytest.mark.parametrize("wire", _SUPERSET_SHAPES.values(), ids=_SUPERSET_SHAPES.keys())
-async def test_pushdown_never_rejects_a_row_the_full_filter_would_keep(backend, namespace, wire) -> None:
+
+@pytest.mark.parametrize(("name", "wire"), _SUPERSET_SHAPES.items(), ids=_SUPERSET_SHAPES.keys())
+async def test_pushdown_never_rejects_a_row_the_full_filter_would_keep(backend, namespace, name, wire) -> None:
     """The superset property the resume contract depends on.
 
     Resuming past the rows a pushdown rejected is sound only because a rejected
@@ -616,14 +610,27 @@ async def test_pushdown_never_rejects_a_row_the_full_filter_would_keep(backend, 
     documents — a post-filter can only narrow, never recover a row the window
     never returned.
 
+    **``oracle <= window`` is satisfied unconditionally by an empty oracle**, so a
+    shape matching nothing in this corpus is not a weak parametrization — it is a
+    green run asserting nothing, and it looks exactly like a real one. Two shapes
+    were in that state before khora #1589: ``pushable_exists`` read
+    ``{"source_url": {"$exists": False}}`` and ``source_url`` is a system key
+    present on every row (oracle 0, now 6 under ``$exists: True``); and
+    ``unpushable_key``, which cannot be fixed the same way because no document can
+    carry an ``occurred_at`` at all. Both legs are therefore asserted:
+    ``_CONSTANT_EMPTY_SHAPES`` gets the dual assertion — the window must be the
+    WHOLE corpus, since the only correct compilation of an unbacked leaf is a
+    match-all placeholder, which a compiler that started pushing it for real would
+    fail — and every other shape must match at least one row.
+
     Scope, so a green run is not read as more than it is: eleven shapes on one
     store is a tripwire, not a proof over the operator space. The general
     property belongs to the compilers and to the forced-residual conformance
     corpus.
     """
     seed = scan_seed(6)
-    await _seed_varied(backend, namespace.id, seed)
-    ast = _filter_ast(wire)
+    await seed_varied(backend, namespace.id, seed)
+    ast = to_filter_ast(wire)
 
     step = await backend.scan_documents(namespace.id, filter_ast=ast, scan_limit=100)
     # Precondition: the comparison below is only meaningful if this one window
@@ -634,6 +641,14 @@ async def test_pushdown_never_rejects_a_row_the_full_filter_would_keep(backend, 
     all_docs = (await backend.scan_documents(namespace.id, scan_limit=100)).documents
     matches = compile_python(ast, _documents_compile_context()).predicate
     oracle = {d.id for d in all_docs if matches(d)}
+
+    if name in _CONSTANT_EMPTY_SHAPES:
+        assert not oracle, "shape is declared constant-empty but matched a row — drop it from the exemption set"
+        assert {d.id for d in step.documents} == {d.id for d in all_docs}, (
+            "an unbacked leaf must compile to a match-all placeholder and narrow nothing"
+        )
+    else:
+        assert oracle, "the shape matches no row in this corpus — `oracle <= window` cannot fail"
 
     assert oracle <= {d.id for d in step.documents}
 
@@ -660,37 +675,40 @@ async def test_last_scanned_is_the_final_raw_row_not_the_last_match(backend, nam
     non-matching rows longer than one window. Taking the position from the raw
     window is what lets ``exhausted`` be the only termination signal.
 
-    **Scope, measured rather than asserted past.** Against the shipped
-    implementation ``last_scanned == documents[-1]`` is true by construction —
-    ``scan_documents`` post-filters nothing — so no single-line edit of the
-    current code can separate the two, and this test cannot be read as covering
-    the current expression. What it does kill is the *plausible wrong
-    implementation* the #1586 comment warns against, and that was verified rather
-    than assumed: re-implementing the tail as ``matching = [d for d in documents
-    if compile_python(filter_ast, …)(d)]`` and keying off ``matching[-1]`` fails
-    this test and **only** this test — the entire rest of the module, walks
-    included, stays green, because on every other seed here the final raw row
-    also matches. That is the whole reason for the deliberately non-matching
-    final row.
+    **Scope, measured rather than asserted past.** The shipped implementation is
+    ``_scan_key_from_row(rows[-1])``, and because ``scan_documents`` post-filters
+    nothing, the position it produces equals the one ``documents[-1]`` would have
+    given on every corpus this module seeds. So this test does not discriminate
+    between those two spellings — see
+    :func:`test_last_scanned_carries_a_datetime_and_a_uuid` for why that gap is
+    structural and where it is closed instead. What this test kills is the
+    *plausible wrong implementation* the #1586 comment warns against, and that was
+    verified rather than assumed: re-implementing the tail as ``matching = [d for
+    d in documents if compile_python(filter_ast, …)(d)]`` and keying off
+    ``matching[-1]`` fails this test and **only** this test — the entire rest of
+    the module, walks included, stays green, because on every other seed here the
+    final raw row also matches. That is the whole reason for the deliberately
+    non-matching final row.
 
     The "only this test" figure is scoped to that exact construction, which
-    post-filters solely when ``filter_ast`` is not ``None``. A variant that
-    post-filters unconditionally moves the key on the *unfiltered* call too, and
-    is therefore caught a second time by the
+    post-filters solely when ``filter_ast`` is not ``None``. A variant that moves
+    the key off the final raw row *unconditionally* moves it on the unfiltered
+    calls too, and is caught twice more — by the
     ``(created_at, doc_id) == (documents[-1].created_at, documents[-1].id)``
-    assertion in :func:`test_last_scanned_carries_a_datetime_and_a_uuid`
-    (independently measured at 2 failures). Treat 1 as the conservative floor for
-    this family of mutant, not as a claim that no other assertion can notice one —
-    a bare "only this test fails" is the kind of figure that later gets quoted as
-    licence to delete whatever looked redundant.
+    assertion in :func:`test_last_scanned_carries_a_datetime_and_a_uuid` and by
+    the same equality in :func:`test_scan_limit_bounds_the_window` (independently
+    measured at 3 failures). Treat 1 as the conservative floor for this family of
+    mutant, not as a claim that no other assertion can notice one — a bare "only
+    this test fails" is the kind of figure that later gets quoted as licence to
+    delete whatever looked redundant.
     """
     newest, middle, oldest = (uuid4() for _ in range(3))
     base = WHOLE_SECOND
-    await _write(backend, namespace.id, newest, base + timedelta(seconds=2), source_type="report")
-    await _write(backend, namespace.id, middle, base + timedelta(seconds=1), source_type="report")
-    await _write(backend, namespace.id, oldest, base, source_type="library")
+    await write_document(backend, namespace.id, newest, base + timedelta(seconds=2), source_type="report")
+    await write_document(backend, namespace.id, middle, base + timedelta(seconds=1), source_type="report")
+    await write_document(backend, namespace.id, oldest, base, source_type="library")
 
-    ast = _filter_ast(
+    ast = to_filter_ast(
         {
             "$or": [
                 {"source_type": {"$eq": "report"}},
@@ -718,22 +736,69 @@ async def test_last_scanned_is_the_final_raw_row_not_the_last_match(backend, nam
     assert step.last_scanned != (surviving[-1].created_at, surviving[-1].id)
 
 
+def test_a_row_with_no_created_at_has_no_position_and_says_so() -> None:
+    """:func:`_scan_key_from_row` raises rather than inventing a position.
+
+    Called directly on a row mapping, because this is the one branch of the
+    keyset contract that ``scan_documents`` cannot reach: ``_SCHEMA_SQL`` declares
+    ``created_at`` ``TEXT NOT NULL`` and :meth:`create_document` is the only
+    INSERT, so no row this store can hold has a NULL there. Going through the
+    public method would prove nothing and could not fail.
+
+    **Raising is the whole point of the function, and the alternative is what the
+    #1589 review caught.** The rest of this store reads ``created_at`` through
+    ``_parse_dt(...) or datetime.now(UTC)`` — right for a domain object, wrong for
+    a cursor, because a ``now()`` position sorts above every row in the window it
+    came from, so the next step re-reads the rows it just returned and the walk
+    loops instead of advancing. A masked cursor fails as a hang, not as an error.
+    This is the only assertion in the module that pins the mask's absence: revert
+    :func:`_scan_key_from_row` to the coalescing form and every *other* test here
+    stays green.
+
+    The happy path is asserted alongside it so the test cannot pass by the
+    function being broken in both directions at once.
+    """
+    doc_id = uuid4()
+    created_at = WHOLE_SECOND
+
+    assert _scan_key_from_row({"created_at": created_at.isoformat(), "id": str(doc_id)}) == (created_at, doc_id)
+
+    with pytest.raises(ValueError, match="created_at"):
+        _scan_key_from_row({"created_at": None, "id": str(doc_id)})
+
+
 async def test_last_scanned_carries_a_datetime_and_a_uuid(backend, namespace) -> None:
     """``DocumentScanKey`` declares ``tuple[datetime, UUID]``, and the timestamp
     half is the one this store can get wrong silently.
 
-    ``created_at`` lives in the raw row as TEXT, and the implementation builds the
-    key from the converted :class:`Document` — where ``_parse_dt`` has already run
-    — rather than off ``rows[-1]["created_at"]``.
+    ``created_at`` lives in the raw row as TEXT, and :func:`_scan_key_from_row`
+    parses it back to a ``datetime`` on the way out. Nothing about the TEXT column
+    reaches this key.
 
-    **Measured, by mutating the implementation to ``rows[-1]["created_at"]`` and
-    reverting it:** that mutant is not silent on this store, contrary to the
-    premise this test was originally written under. It fails 7 tests here — this
-    one on the type assertion, and every walk with ``AttributeError: 'str' object
-    has no attribute 'isoformat'`` when the raw string is bound back in through
-    ``_dt_to_str``. So keep this test as the direct, legible statement of the
-    declared contract, not as the only thing standing between a TEXT key and a
-    green suite.
+    **Measured, by mutating :func:`_scan_key_from_row` to return
+    ``row["created_at"]`` unparsed and reverting it:** that mutant is not silent
+    on this store, contrary to the premise this test was originally written under.
+    It fails 7 tests here — this one on the type assertion, and every walk with
+    ``AttributeError: 'str' object has no attribute 'isoformat'`` when the raw
+    string is bound back in through ``_dt_to_str``. So keep this test as the
+    direct, legible statement of the declared contract, not as the only thing
+    standing between a TEXT key and a green suite.
+
+    **What no test reaching through ``scan_documents`` can catch, stated rather
+    than left to be discovered:** khora #1589 moved this key off ``documents[-1]``
+    and onto the raw row, and that change is invisible to every test in this
+    module that goes through the public method — the mutant reverting it passes
+    all of them, measured. It has to be: the only difference between the two is
+    ``_row_to_document``'s ``or datetime.now(UTC)`` coalesce on a NULL
+    ``created_at``, and ``_SCHEMA_SQL`` declares the column ``NOT NULL``, so no
+    row this store can hold reaches it. Relaxing the DDL to manufacture a failing
+    case is the wrong repair.
+
+    The right one is a direct call, and it is
+    :func:`test_a_row_with_no_created_at_has_no_position_and_says_so` above —
+    which asserts the raise the fix installed, on the branch the public method
+    cannot reach. Read the two together: that test pins the mask's absence, this
+    one pins the key's type and row, and neither substitutes for the other.
 
     Its sibling is :func:`test_last_scanned_is_the_final_raw_row_not_the_last_match`
     above, which pins *which row* the key comes from while this one pins *what
@@ -742,25 +807,25 @@ async def test_last_scanned_carries_a_datetime_and_a_uuid(backend, namespace) ->
     leaves the right type and the wrong row.
 
     The unfiltered assertion below is also what separates the two constructions of
-    that last-match mutant — see that test's docstring for the 1-vs-2 figure. A
-    variant that post-filters unconditionally moves the key on this call too and
-    trips the equality here; one guarded on ``filter_ast is not None`` does not.
-    Do not weaken it to the filtered call alone.
+    that last-match mutant — see that test's docstring for the 1-vs-3 figure. A
+    variant that moves the key off the final raw row unconditionally moves it on
+    this call too and trips the equality here; one guarded on
+    ``filter_ast is not None`` does not. Do not weaken it to the filtered call
+    alone.
     """
     seed = scan_seed(6)
-    await _seed_varied(backend, namespace.id, seed)
+    await seed_varied(backend, namespace.id, seed)
 
     step = await backend.scan_documents(namespace.id, scan_limit=3)
     assert step.last_scanned is not None
     created_at, doc_id = step.last_scanned
     assert isinstance(created_at, datetime)
     assert isinstance(doc_id, UUID)
-    assert not isinstance(doc_id, bool)  # UUID has no bool subclass; guards a stub returning a truthy sentinel
     assert (created_at, doc_id) == (step.documents[-1].created_at, step.documents[-1].id)
 
     filtered = await backend.scan_documents(
         namespace.id,
-        filter_ast=_filter_ast({"source_type": {"$eq": "report"}}),
+        filter_ast=to_filter_ast({"source_type": {"$eq": "report"}}),
         scan_limit=2,
     )
     assert filtered.last_scanned is not None
@@ -783,7 +848,7 @@ async def test_status_and_updated_before_narrow_the_window(backend, namespace) -
     seed = scan_seed(6)
     cutoff = seed.tie_instant + timedelta(hours=1)
     for i, (doc_id, created_at) in enumerate(seed.writes):
-        await _write(
+        await write_document(
             backend,
             namespace.id,
             doc_id,
@@ -819,7 +884,7 @@ async def test_every_narrowing_leg_composes_in_one_statement(backend, namespace)
     seed = scan_seed(6)
     cutoff = seed.tie_instant + timedelta(hours=1)
     for i, (doc_id, created_at) in enumerate(seed.writes):
-        await _write(
+        await write_document(
             backend,
             namespace.id,
             doc_id,
@@ -853,7 +918,7 @@ async def test_every_narrowing_leg_composes_in_one_statement(backend, namespace)
 
     step = await backend.scan_documents(
         namespace.id,
-        filter_ast=_filter_ast({"source_type": {"$eq": "report"}}),
+        filter_ast=to_filter_ast({"source_type": {"$eq": "report"}}),
         status=DocumentStatus.COMPLETED.value,
         updated_before=cutoff,
         after=(cursor_doc.created_at, cursor_doc.id),
@@ -902,15 +967,15 @@ async def test_scan_never_returns_another_namespaces_rows(backend, namespace) ->
     across this module, which is exactly why both of them exist.
     """
     scanned_ids, foreign_ids = _two_namespace_ladders()
-    await _seed_varied(backend, namespace.id, _seed_from_ladder(scanned_ids))
+    await seed_varied(backend, namespace.id, scan_seed(ids=scanned_ids))
     other = await _make_namespace(backend)
     # Same tie instant, same varied corpus: every foreign row is a guaranteed hit
     # for the filter below, so a dropped predicate fails on every run rather than
     # on a lucky arrangement.
-    await _seed_varied(backend, other.id, _seed_from_ladder(foreign_ids))
+    await seed_varied(backend, other.id, scan_seed(ids=foreign_ids))
 
     wire = {"$or": [{"source_type": {"$eq": "report"}}, {"title": {"$eq": "doc-1"}}]}
-    steps = await walk_scan(backend.scan_documents, namespace.id, scan_limit=1, filter_ast=_filter_ast(wire))
+    steps = await walk_scan(backend.scan_documents, namespace.id, scan_limit=1, filter_ast=to_filter_ast(wire))
     seen = [d for step in steps for d in step.documents]
 
     assert seen, "the filter must match rows in the scanned namespace for this test to bite"
@@ -950,9 +1015,9 @@ async def test_ungrouped_or_fragment_cannot_absorb_the_namespace_scope(backend, 
     in the logs. It is the ONLY test in this module that mutant fails.
     """
     scanned_ids, foreign_ids = _two_namespace_ladders()
-    await _seed_varied(backend, namespace.id, _seed_from_ladder(scanned_ids))
+    await seed_varied(backend, namespace.id, scan_seed(ids=scanned_ids))
     other = await _make_namespace(backend)
-    await _seed_varied(backend, other.id, _seed_from_ladder(foreign_ids))
+    await seed_varied(backend, other.id, scan_seed(ids=foreign_ids))
 
     def ungrouped_compiler(ast, ctx):
         # Positional binds, in emit order, exactly as ``compile_lance`` returns
@@ -968,7 +1033,7 @@ async def test_ungrouped_or_fragment_cannot_absorb_the_namespace_scope(backend, 
 
     step = await backend.scan_documents(
         namespace.id,
-        filter_ast=_filter_ast({"title": {"$eq": "doc-0"}}),
+        filter_ast=to_filter_ast({"title": {"$eq": "doc-0"}}),
         scan_limit=50,
     )
 

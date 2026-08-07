@@ -224,6 +224,17 @@ class SurrealDBConnection:
             return flat
         if isinstance(result, dict):
             return [result]
+        # An unexpected driver result shape. Returning ``[]`` is the right
+        # fallback, but it must not be silent: keyset callers derive their only
+        # termination signal from the row COUNT (``len(rows) < scan_limit`` means
+        # exhausted), so a swallowed shape reads as "the namespace ended here" and
+        # truncates the walk with no error anywhere. Log the drop so it is
+        # attributable (ADR-001 degradation observability).
+        logger.warning(
+            "SurrealDB query returned an unexpected result shape; treating it as no rows. "
+            "A row-count-driven caller (e.g. a keyset scan) will read this as exhaustion. "
+            f"type={type(result).__name__} sql={sql[:200]!r}"
+        )
         return []
 
     async def query_one(self, sql: str, bindings: dict[str, Any] | None = None) -> dict[str, Any] | None:

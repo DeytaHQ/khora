@@ -80,9 +80,22 @@ __all__ = [
 
 # A compiler's own leaf-dispatch mirror: ``True`` iff this leaf compiles to a real
 # backend predicate (rather than the match-all placeholder). It must be a pure
-# predicate over the clause, and it must NOT consider guards that raise in both
-# modes (e.g. surrealdb's unsafe-identifier check) — those are injection guards,
-# not capability gaps, and swallowing them here would silently drop the error.
+# predicate over the clause, and it must agree with what the emit path actually
+# does IN THE SAME MODE — that agreement, not any particular rule about guards, is
+# the invariant. A predicate that reports a leaf unconsumable while emission still
+# raises on it would defer the enclosing subtree, the emit walk would never reach
+# the leaf, and the error would vanish instead of surfacing.
+#
+# surrealdb's unsafe-identifier check is the worked example, and it is a
+# SPLIT-MODE CAPABILITY GAP rather than a both-modes guard. Under
+# ``on_unsupported="split"`` its ``compile_clause`` diverts a non-identifier
+# metadata segment to the unsupported path before ``_metadata_path`` runs, so the
+# leaf really is unconsumable and this predicate consults ``_segments_safe`` —
+# correctly, and necessarily, since the two are one paired change. Under
+# ``"raise"`` the divert does not fire, ``_metadata_path`` raises ``CompileError``
+# as the injection guard it is, and this predicate is not consulted at all
+# (``compile_node`` gates its calls on the mode, and ``split_report`` skips the
+# walk under ``"raise"``). Both modes therefore stay consistent.
 ClauseConsumable = Callable[[FilterClause], bool]
 
 # Per-compile-pass memo for :func:`node_consumable`, keyed on ``id(node)``.

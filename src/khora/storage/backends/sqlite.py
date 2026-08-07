@@ -24,7 +24,7 @@ from khora.core.models.entity import Entity
 from khora.core.models.recall import DocumentProjection
 from khora.core.models.tenancy import TenancyMode
 from khora.storage.backends._fts5 import escape_fts5_query
-from khora.storage.backends.base import DocumentScanKey, DocumentScanStep, PaginatedResult
+from khora.storage.backends.base import DocumentScanKey, DocumentScanStep, PaginatedResult, build_scan_step
 
 if TYPE_CHECKING:
     from khora.filter.ast import FilterNode
@@ -239,6 +239,71 @@ def _uuid_list_loads(text: str | None) -> list[UUID]:
     if not text:
         return []
     return [UUID(s) for s in json.loads(text)]
+
+
+def _documents_where(
+    namespace_id: UUID,
+    *,
+    status: str | None = None,
+    updated_before: datetime | None = None,
+) -> tuple[list[str], list[Any]]:
+    """The ``documents`` scope predicate, shared by ``list_documents`` and ``scan_documents``.
+
+    Returns the conjunct list and its positional binds, already in step. Binds are
+    positional on this store, so **conjunct order IS bind order** — a caller
+    appending its own condition appends to both lists together, never to one
+    alone. The caller joins with ``" AND ".join(...)``.
+
+    The two readers had this block byte-identical. Written once because a scope
+    predicate that drifts between them is precisely the defect a single-namespace
+    test cannot see: it fails as another tenant's rows, not as an error.
+
+    ``updated_before`` serializes through :func:`_dt_to_str` — the same function
+    :meth:`SQLiteRelationalBackend.create_document` writes the column with, so the
+    comparison is against the bytes actually stored. That makes the bound exact
+    only up to the writer's offset. This store keeps timestamps as
+    offset-preserving TEXT and SQLite compares TEXT lexicographically, so a cutoff
+    is a **wall-clock** bound, not an instant bound: a row written by a host at a
+    different UTC offset can fall on the wrong side of it in either direction.
+    Pre-existing, shared with ``list_documents``, and the same property that keeps
+    the date-valued system keys out of ``_PUSHABLE_SYSTEM_KEYS`` — not something
+    the caller can correct by normalizing its argument, since the rows themselves
+    are what disagree.
+    """
+    conditions = ["namespace_id = ?"]
+    params: list[Any] = [str(namespace_id)]
+    if status:
+        conditions.append("status = ?")
+        params.append(status)
+    if updated_before is not None:
+        conditions.append("updated_at < ?")
+        params.append(_dt_to_str(updated_before))
+    return conditions, params
+
+
+def _scan_key_from_row(row: Any) -> DocumentScanKey:
+    """The keyset position of one RAW ``documents`` row. ``@internal``.
+
+    Reads the position off the row the driver returned, never off the
+    :class:`~khora.core.models.Document` that
+    :meth:`SQLiteRelationalBackend._row_to_document` builds from it. That
+    converter coalesces a missing ``created_at`` to ``datetime.now(UTC)``, which
+    is the right default for a domain object and the wrong one for a cursor: a
+    ``now()`` position sorts above every row in the window it came from, so the
+    next step re-reads the rows it just returned and the walk loops instead of
+    advancing. Masking is exactly what a resume position must not do.
+
+    ``created_at`` is ``TEXT NOT NULL`` in ``_SCHEMA_SQL`` and
+    :meth:`SQLiteRelationalBackend.create_document` is the only INSERT into the
+    table, so the ``ValueError`` is unreachable through this store's own API. It
+    is here because the only alternative to raising is the mask this function
+    exists to remove — a row with no ``created_at`` cannot be walked past, and
+    saying so is the honest answer.
+    """
+    created_at = _parse_dt(row["created_at"])
+    if created_at is None:
+        raise ValueError(f"document {row['id']} has a NULL created_at; a keyset scan has no position to resume from")
+    return (created_at, UUID(row["id"]))
 
 
 # ---------------------------------------------------------------------------
@@ -489,15 +554,7 @@ class SQLiteRelationalBackend:
         limit: int = 100,
         offset: int = 0,
     ) -> list[Document]:
-        ns = str(namespace_id)
-        conditions = ["namespace_id = ?"]
-        params: list = [ns]
-        if status:
-            conditions.append("status = ?")
-            params.append(status)
-        if updated_before is not None:
-            conditions.append("updated_at < ?")
-            params.append(updated_before.isoformat())
+        conditions, params = _documents_where(namespace_id, status=status, updated_before=updated_before)
         where = " AND ".join(conditions)
         params.extend([limit, offset])
         cursor = await self._conn.execute(
@@ -531,7 +588,11 @@ class SQLiteRelationalBackend:
         positional bind list by hand, and owns its own ``documents`` DDL. Binds
         being positional, conjunct order *is* bind order — namespace, ``status``,
         ``updated_before``, the two cursor operands, the fragment's ``args``, the
-        row bound — and appending out of order shifts every later bind by one.
+        row bound — and appending out of order shifts every later bind by one. The
+        first three of those come from :func:`_documents_where`, which returns the
+        conjuncts and their binds already in step and is shared verbatim with
+        :meth:`list_documents`; everything after them is appended here, to both
+        lists together.
 
         **The compiled fragment is spliced in parentheses, a cross-tenant
         tripwire.** Measured, two namespaces of 6 rows each: grouped returns 6
@@ -562,10 +623,16 @@ class SQLiteRelationalBackend:
         here. An undashed cursor sorts *above* every stored id it shares leading
         hex with — the stored form carries ``-`` (0x2D) at index 8 where the
         undashed form carries a hex digit — so ``id < :cursor`` matches strictly
-        more rows, including the cursor's own. Measured from mid-tie ``…0003``:
-        dashed yields ``[…0002, …0001, …0005]``, ``.hex`` yields ``[…0004, …0003,
-        …0002, …0001, …0005]``, so the walk runs backwards and never terminates.
-        Positions are store-local: build one from a row this store returned.
+        more rows, including the cursor's own. Measured from mid-tie ``…0003`` at
+        ``scan_limit=10``: dashed yields ``[…0002, …0001, …0005]``, ``.hex`` yields
+        ``[…0004, …0003, …0002, …0001, …0005]`` — the walk runs backwards,
+        re-serving rows it has already returned. **That window does terminate**,
+        and the distinction is worth keeping straight: five rows against a bound
+        of ten is a short window, so ``exhausted`` is ``True`` and the step ends
+        the walk (having served duplicates). Non-termination needs the window to
+        stay *full*, which is where a chained walk stalls on the same position
+        forever. Positions are store-local: build one from a row this store
+        returned.
 
         This store therefore enumerates in **stored-text order — a deterministic
         total order, but not an instant order**, since :func:`_dt_to_str`
@@ -581,9 +648,23 @@ class SQLiteRelationalBackend:
         store does not have, *and* :meth:`create_document` is the only INSERT and
         coalesces a missing timestamp to now. A NULL key would make the row-value
         comparison evaluate to NULL and drop the row from every page.
+
         ``updated_before`` narrows with ``updated_at < ?``, the same shape #1586
-        ships; the NULL-``updated_at`` exclusion that tier documents does not
-        arise here, because ``updated_at`` is ``TEXT NOT NULL``.
+        ships, and the bound serializes through :func:`_dt_to_str` — the writer's
+        own function — so it compares against the bytes the column actually holds.
+        Two things about it are NOT the same as the SQLAlchemy tier's, and
+        conflating them loses both. The NULL-``updated_at`` exclusion that tier
+        documents cannot arise here at all: ``updated_at`` is ``TEXT NOT NULL``.
+        What *does* arise, and has no counterpart there, is that the comparison is
+        **wall clock rather than instant** — ``_dt_to_str`` preserves the writer's
+        offset with no UTC coercion and SQLite compares TEXT lexicographically, so
+        a corpus written from hosts at differing offsets puts rows on the wrong
+        side of the cutoff in both directions. Residual and unfixable from the
+        caller's side (normalizing the argument does not normalize the rows); see
+        :func:`_documents_where`. It is the same property that keeps the
+        date-valued system keys out of ``_PUSHABLE_SYSTEM_KEYS``, and unlike a
+        pushed-down filter leaf it is not recoverable by a post-filter, because
+        ``updated_before`` is not part of the caller's AST.
 
         ``scan_limit`` bounds rows **returned**, not rows **examined** — a
         selective fragment can still make one call read the whole namespace, so
@@ -608,14 +689,7 @@ class SQLiteRelationalBackend:
         if scan_limit < 1:
             raise ValueError(f"scan_limit must be >= 1, got {scan_limit}")
 
-        conditions = ["namespace_id = ?"]
-        params: list[Any] = [str(namespace_id)]
-        if status:
-            conditions.append("status = ?")
-            params.append(status)
-        if updated_before is not None:
-            conditions.append("updated_at < ?")
-            params.append(updated_before.isoformat())
+        conditions, params = _documents_where(namespace_id, status=status, updated_before=updated_before)
         if after is not None:
             cursor_created_at, cursor_id = after
             conditions.append("(created_at, id) < (?, ?)")
@@ -639,15 +713,17 @@ class SQLiteRelationalBackend:
         )
         rows = await cursor.fetchall()
 
-        # ``last_scanned`` and ``exhausted`` both describe the RAW window: the
-        # final row scanned, and whether SQL ran out of rows filling it. Neither
-        # may be derived from a post-filtered subset — that would re-scan the
-        # rejected gap on resume, and would call a full window exhausted.
-        documents = [self._row_to_document(r) for r in rows]
-        return DocumentScanStep(
-            documents=documents,
-            last_scanned=(documents[-1].created_at, documents[-1].id) if documents else None,
-            exhausted=len(rows) < scan_limit,
+        # ``last_scanned`` and ``exhausted`` both describe the RAW window — the
+        # final row scanned, and whether SQL ran out of rows filling it. Hence
+        # ``rows[-1]``, the driver row, rather than the converted document whose
+        # ``created_at`` has already passed through a ``or datetime.now(UTC)``
+        # coalesce. See :func:`_scan_key_from_row` and
+        # :func:`~khora.storage.backends.base.build_scan_step`.
+        return build_scan_step(
+            [self._row_to_document(r) for r in rows],
+            last_scanned=_scan_key_from_row(rows[-1]) if rows else None,
+            raw_row_count=len(rows),
+            scan_limit=scan_limit,
             consumed_keys=consumed_keys,
         )
 

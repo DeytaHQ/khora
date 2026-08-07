@@ -25,7 +25,7 @@ from khora.db.models import (
 )
 from khora.db.schema import sync_enum_values
 from khora.storage.backends._documents_scan import build_documents_scan_query
-from khora.storage.backends.base import DocumentScanKey, DocumentScanStep, PaginatedResult
+from khora.storage.backends.base import DocumentScanKey, DocumentScanStep, PaginatedResult, build_scan_step
 from khora.storage.backends.mixins import AsyncSessionMixin, retry_on_deadlock
 
 if TYPE_CHECKING:
@@ -559,14 +559,16 @@ class PostgreSQLBackend(AsyncSessionMixin):
             result = await session.execute(query)
             rows = list(result.scalars().all())
 
-        # ``last_scanned`` and ``exhausted`` both describe the RAW window: the
-        # final row scanned, and whether SQL ran out of rows filling it. Neither
-        # may be derived from a post-filtered subset — that would re-scan the
-        # rejected gap on resume, and would call a full window exhausted.
-        return DocumentScanStep(
-            documents=[self._document_model_to_domain(m) for m in rows],
+        # ``last_scanned`` and ``exhausted`` both describe the RAW window — the
+        # final row scanned, and whether SQL ran out of rows filling it — which is
+        # why the key comes off ``rows[-1]`` (an ORM ``DocumentModel``) rather than
+        # off the converted document, and the count is ``len(rows)``. See
+        # :func:`~khora.storage.backends.base.build_scan_step`.
+        return build_scan_step(
+            [self._document_model_to_domain(m) for m in rows],
             last_scanned=(rows[-1].created_at, rows[-1].id) if rows else None,
-            exhausted=len(rows) < scan_limit,
+            raw_row_count=len(rows),
+            scan_limit=scan_limit,
             consumed_keys=consumed_keys,
         )
 
