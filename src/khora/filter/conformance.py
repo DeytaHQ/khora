@@ -34,6 +34,17 @@ and an ``exercises`` tag tuple the coverage meta-test reads.
   seeded coordinator. The live-Postgres wiring is the CI ticket's concern; this
   module defines only the seam.
 
+**Two targets.** Everything above describes the chunk RECALL surface. The same
+catalog also drives the document ENUMERATION surface, through a parallel and
+deliberately smaller set of pieces: :func:`documents_conformance_cases` (the
+enumerable-key subset of the corpus, plus a re-seeded ``external_id`` family),
+:func:`seed_documents_case` (one Document per :class:`SeedRecord`, no chunks),
+:func:`documents_oracle_survivors` (the oracle over a document-row mapping), and a
+single :class:`DocumentsExecutor` — one, not one per backend, because that read path
+is uniformly split + post-filter everywhere and nothing raises on it. The one system
+key enumeration does NOT accept is ``occurred_at``, encoded as a rejection
+(:data:`_DOCUMENTS_REJECTED_FILTERS`) rather than as a row-set case.
+
 ``@internal``. Reachable as ``khora.filter.conformance`` for khora's own test
 suite; **not** re-exported from :mod:`khora.__init__` or :mod:`khora.filter`.
 """
@@ -77,6 +88,8 @@ __all__ = [
     "ChronicleExecutor",
     "ConformanceCase",
     "CypherExecutor",
+    "DocumentsExecutor",
+    "DocumentsRunner",
     "LanceExecutor",
     "LiveRunner",
     "PostgresExecutor",
@@ -87,6 +100,8 @@ __all__ = [
     "WeaviateExecutor",
     "assert_case",
     "assert_recall_conformance",
+    "documents_conformance_cases",
+    "documents_oracle_survivors",
     "f_array_cases",
     "f_coerce_cases",
     "f_dates_cases",
@@ -97,6 +112,7 @@ __all__ = [
     "f_nullval_cases",
     "f_objeq_cases",
     "f_op_cases",
+    "f_op_documents_cases",
     "f_polarity_cases",
     "f_sel_cases",
     "f_sugar_cases",
@@ -104,6 +120,7 @@ __all__ = [
     "oracle_survivors",
     "run_case_for_backend",
     "seed_case",
+    "seed_documents_case",
 ]
 
 # The backend names a case may target / a runner may dispatch on. ``python`` is
@@ -238,6 +255,32 @@ def _record_mapping(record: SeedRecord) -> dict[str, Any]:
     """
     mapping: dict[str, Any] = {
         "occurred_at": record.occurred_at if record.occurred_at is not None else record.source_timestamp,
+        "created_at": record.created_at,
+        "source_timestamp": record.source_timestamp,
+        "metadata": record.metadata or {},
+    }
+    for key in _DOC_STRING_KEYS:
+        value = getattr(record, key)
+        if value is not None:
+            mapping[key] = value
+    return mapping
+
+
+def _documents_record_mapping(record: SeedRecord) -> dict[str, Any]:
+    """Build the in-memory record mapping the **documents** oracle reads.
+
+    The document-row counterpart to :func:`_record_mapping`. A ``documents`` row
+    carries the two date columns (``created_at`` / ``source_timestamp``), the
+    ``metadata`` blob, and the seven denormalized string keys — but **no**
+    ``occurred_at``: that is the chunk event-time axis and no document column
+    backs it, which is why the enumeration surface rejects the key outright
+    (:data:`_DOCUMENTS_REJECTED_FILTERS`). So this mapping omits the
+    ``COALESCE(occurred_at, source_timestamp)`` synthesis :func:`_record_mapping`
+    performs; every other field resolves identically. A document key left
+    ``None`` stays absent, matching the live row's NULL (``compile_python``
+    resolves an absent system key to ``None``).
+    """
+    mapping: dict[str, Any] = {
         "created_at": record.created_at,
         "source_timestamp": record.source_timestamp,
         "metadata": record.metadata or {},
@@ -569,6 +612,109 @@ def _python_post_filter(filter_ast: FilterNode, target: str) -> Callable[[Mappin
 
 
 # --------------------------------------------------------------------------- #
+# Document-enumeration executor (one executor, four backends).
+# --------------------------------------------------------------------------- #
+#
+# The document-enumeration read path is uniformly split + post-filter on EVERY
+# backend, so — unlike the chunk surface — there is no per-backend executor here.
+# ``StorageCoordinator.scan_documents_page`` compiles the full AST once with
+# ``build_compile_context("documents", on_unsupported="split")`` and re-checks that
+# predicate over every scanned row, while all four relational stores compile their
+# server-side prefilter with a module-level ``_documents_compile_context()`` that is
+# also ``on_unsupported="split"``. Read output therefore equals the ``compile_python``
+# oracle by construction on postgres / sqlite / sqlite_lance / surrealdb alike, and no
+# backend raises :class:`RecallFilterUnsupportedError` on this surface — there is no
+# ``expect_unsupported`` leg to assert.
+#
+# What differs per backend is only WHICH leaves reach SQL, so the harness drives each
+# store in two modes (the ``forced_residual`` flag):
+#
+# * **natural** — hand ``filter_ast`` to ``scan_documents_page``: the backend pushes
+#   what it can and the coordinator's own post-filter narrows the rest. This is the
+#   production path, and it is also the ONLY mode that exercises the coordinator's
+#   post-filter — including its no-pushdown extreme, which a case whose leaves the
+#   backend defers wholesale (an ``$or`` over an undeclared key, a date key on the
+#   three non-Postgres tiers) already reaches.
+# * **residual** — withhold ``filter_ast``, so ``scan_documents_page`` performs RAW
+#   ENUMERATION (with no AST it compiles no post-filter and does no filtering at all),
+#   and apply the ``compile_python("documents")`` predicate externally, in-harness, to
+#   each returned :class:`~khora.core.models.Document`. **This is not a coordinator
+#   code path** — nothing inside the coordinator behaves this way, and reading it as
+#   "the residual branch" would be wrong. What it buys is a different thing: with SQL
+#   removed from the picture entirely, every leaf is forced to evaluate against each
+#   store's ROUND-TRIP document shape (raw-sqlite TEXT datetimes, SurrealDB's
+#   ``metadata_`` remap, SQLAlchemy's offset-discarding ``DATETIME``) rather than
+#   against the seed objects — so a round-trip that mangles a value cannot hide behind
+#   a pushdown that happened to reject the row for the right reason by accident.
+#   A ``SchemaCapabilities`` override cannot express this — ``scan_documents`` takes no
+#   context override — so withholding the AST is how the mode is realized.
+
+
+class DocumentsRunner(Protocol):
+    """Walk a seeded namespace's documents to exhaustion -> surviving seed ids.
+
+    ``@internal``. The injected seam :class:`DocumentsExecutor` calls. An
+    implementation drives :meth:`StorageCoordinator.scan_documents_page` over the
+    case's namespace until the page reports ``exhausted``, and maps the surviving
+    ``Document.id`` values back to their :class:`SeedRecord` ids.
+
+    * ``filter_ast`` — the canonical AST. Passed to ``scan_documents_page`` in
+      **natural** mode; withheld (``filter_ast=None``) in **residual** mode, which
+      makes that call a RAW ENUMERATION — with no AST the coordinator compiles no
+      post-filter and applies no narrowing whatsoever.
+    * ``post_filter`` — the ``compile_python`` predicate over the FULL AST, built with
+      the same ``build_compile_context("documents", on_unsupported="split")`` the
+      coordinator uses. In residual mode the runner MUST apply it to each returned
+      :class:`~khora.core.models.Document` — it is the ONLY filtering in that mode, and
+      it runs OUTSIDE the coordinator, not through any branch of it. In natural mode
+      the coordinator already applied its own identical copy, so the runner leaves it
+      alone.
+    * ``forced_residual`` — which of the two modes to drive.
+    """
+
+    def __call__(
+        self,
+        filter_ast: FilterNode,
+        post_filter: Callable[[Any], bool],
+        *,
+        forced_residual: bool,
+    ) -> frozenset[str]: ...
+
+
+class DocumentsExecutor:
+    """Drive the real ``scan_documents`` keyset primitive; run via an injected runner.
+
+    ``@internal``. The document-enumeration counterpart to the five chunk-surface
+    executors. It builds the production post-filter — ``compile_python`` over the FULL
+    AST with ``build_compile_context("documents", on_unsupported="split")``, the exact
+    call ``StorageCoordinator.scan_documents_page`` makes — and hands it, with the AST,
+    to the injected :class:`DocumentsRunner`.
+
+    Unlike the chunk executors this one does NOT compile a per-backend prefilter: on
+    this surface the backend compiles its own inside ``scan_documents``, from its
+    module-level ``_documents_compile_context()``. Driving the store through the real
+    coordinator method is what exercises that compiler, so the harness must not
+    duplicate it here.
+
+    ``records`` is ignored — the live rows are the truth, exactly as for the chunk
+    live-store executors, whose runners also read the seeded store rather than the
+    in-memory mappings.
+    """
+
+    def __init__(self, runner: DocumentsRunner, *, forced_residual: bool) -> None:
+        self._runner = runner
+        self._forced_residual = forced_residual
+
+    def survivors(
+        self,
+        filter_ast: FilterNode,
+        records: Sequence[tuple[str, Mapping[str, Any]]],
+    ) -> frozenset[str]:
+        post_filter = _python_post_filter(filter_ast, "documents")
+        return self._runner(filter_ast, post_filter, forced_residual=self._forced_residual)
+
+
+# --------------------------------------------------------------------------- #
 # Corpus runner.
 # --------------------------------------------------------------------------- #
 
@@ -626,6 +772,29 @@ def oracle_survivors(case: ConformanceCase) -> frozenset[str]:
     expectation to whatever it currently computes.
     """
     return run_case_for_backend(case, "python", executor=PythonExecutor())
+
+
+def documents_oracle_survivors(case: ConformanceCase) -> frozenset[str]:
+    """Run the Python oracle over a case's **document-row** mappings.
+
+    ``@internal``. The documents-target twin of :func:`oracle_survivors`: same real
+    validator + :func:`parse_to_ast` + :func:`compile_python` (``on_unsupported``
+    ``"raise"`` — the oracle must express the whole filter or surface the gap), but
+    over :func:`_documents_record_mapping` rather than the chunk mapping, so no
+    ``occurred_at`` is synthesized.
+
+    Every documents-target case is carried over from the chunk corpus with its
+    ``expected_ids`` UNCHANGED, on the claim that a filter which never reads
+    ``occurred_at`` selects the same records on either mapping
+    (:func:`_documents_eligible` enforces the antecedent). This function is what
+    makes that claim falsifiable: the unit leg asserts
+    ``documents_oracle_survivors(case) == case.expected_ids`` for the whole corpus,
+    so a carried-over expectation that does NOT survive the mapping change fails
+    there rather than looking like a backend bug on a live leg.
+    """
+    ctx = build_compile_context("documents", on_unsupported="raise")
+    predicate = compile_python(_resolve_ast(case.filter), ctx).predicate
+    return frozenset(rec.id for rec in case.seed_records if predicate(_documents_record_mapping(rec)))
 
 
 # --------------------------------------------------------------------------- #
@@ -811,6 +980,79 @@ async def seed_case(coord: StorageCoordinator, case: ConformanceCase) -> dict[st
     return id_map
 
 
+def _documents_case_namespace_id(case: ConformanceCase) -> UUID:
+    """Derive the deterministic namespace for a case's **documents** seed.
+
+    Namespaced apart from :func:`_case_namespace_id` (the ``"documents:"`` prefix)
+    because the two corpora share case ids and, on the Postgres leg, one database:
+    ``memory_namespaces`` carries ``UNIQUE (namespace_id, version)`` plus a unique
+    partial index on ``namespace_id WHERE is_active``, so seeding a documents case
+    under the same stable id as its chunk twin would violate both. Deterministic for
+    the same reason ``_case_namespace_id`` is — same case id → same namespace on
+    every xdist worker, distinct case ids never collide, never a random ``uuid4``.
+    """
+    return uuid5(_CONFORMANCE_NS_ROOT, f"documents:{case.id}")
+
+
+async def seed_documents_case(coord: StorageCoordinator, case: ConformanceCase) -> dict[str, UUID]:
+    """Seed a case's records as **documents**; return ``seed_id -> document UUID``.
+
+    ``@internal``. The document-enumeration counterpart to :func:`seed_case`, and
+    deliberately NOT a reuse of it: ``seed_case`` writes one Chunk per record and
+    groups records by ``external_id`` under a shared Document (production-NORMAL for
+    a chunked document). Enumeration filters the document ROW, so here every
+    :class:`SeedRecord` must be its own Document — a grouped write would collapse two
+    records into one enumerable row and silently change every ``expected_ids``.
+
+    Writes through the coordinator's **write API only**
+    (:meth:`create_namespace`, :meth:`create_document`) — never raw SQL/SurrealQL — so
+    each row is serialized by the path production writes take. No vector backend is
+    needed: enumeration reads the relational store alone, so a relational-only
+    coordinator suffices.
+
+    All nine enumerable system keys are native ``Document`` columns, so the mapping is
+    direct: the seven strings verbatim, ``metadata`` as the blob, and the two date
+    keys passed **only when set** so the dataclass default (``created_at``) or NULL
+    (``source_timestamp``) applies otherwise. ``occurred_at`` is ignored — it has no
+    document column, which is exactly why it is the rejected enumeration key.
+
+    The namespace row id is pinned to :func:`_documents_case_namespace_id` so a
+    read-only leg in a separate process (Postgres) can re-derive it without carrying
+    it through the seed-map artifact. A consequence worth knowing: re-running the
+    seed against an already-seeded database now fails loudly on the primary key
+    rather than quietly duplicating the corpus.
+    """
+    namespace_id = _documents_case_namespace_id(case)
+    ns = await coord.create_namespace(
+        MemoryNamespace(
+            id=namespace_id,
+            namespace_id=namespace_id,
+            metadata={"conformance_case": case.id, "conformance_target": "documents"},
+        )
+    )
+
+    id_map: dict[str, UUID] = {}
+    for record in case.seed_records:
+        kwargs: dict[str, Any] = {
+            "namespace_id": ns.id,
+            "content": record.content,
+            "metadata": dict(record.metadata),
+        }
+        for key in _DOC_STRING_KEYS:
+            kwargs[key] = getattr(record, key)
+        # Only stamp a date the record actually carries: an explicit ``None``
+        # ``created_at`` would defeat the dataclass default (the column is NOT NULL
+        # on both Alembic-managed tiers as of migration 056).
+        if record.created_at is not None:
+            kwargs["created_at"] = record.created_at
+        if record.source_timestamp is not None:
+            kwargs["source_timestamp"] = record.source_timestamp
+        document = Document(**kwargs)
+        await coord.create_document(document)
+        id_map[record.id] = document.id
+    return id_map
+
+
 # --------------------------------------------------------------------------- #
 # Case-family generators.
 # --------------------------------------------------------------------------- #
@@ -934,6 +1176,70 @@ def _drop_json_nulls(value: Any) -> Any:
 def _with_metadata(rec: SeedRecord, metadata: dict[str, Any]) -> SeedRecord:
     """A copy of ``rec`` with ``metadata`` replaced (for the null-drop probe)."""
     return replace(rec, metadata=metadata)
+
+
+def _documents_surreal_excluded(filter_: dict[str, Any] | RecallFilter, seed: tuple[SeedRecord, ...]) -> bool:
+    """Whether a case must be pruned from the **surreal documents** leg.
+
+    ``@internal``. Two of :func:`_surreal_excluded`'s three buckets carry over; the
+    third does not, and the difference is the whole point of this function.
+
+    Carried over — both are STORAGE-REPRESENTATION quirks, which no post-filter can
+    undo because they corrupt the row before the filter ever runs:
+
+    * **Metadata ``$date`` / datetime operand** — a metadata datetime round-trips
+      through the FLEXIBLE object column as a string and the operand binds as
+      ``.isoformat()`` (``+00:00``) against a possibly ``Z``-suffixed stored form, so
+      the pushed lexicographic compare can wrongly EXCLUDE a row. On a split surface a
+      prefilter may only over-return; a false exclude is unrecoverable. This bucket is
+      a **class-level** prune, deliberately coarser than what is measured. Of the 12
+      corpus cases it catches, 4 actually diverge today — ``F-COERCE-date-eq``,
+      ``F-DATES-md-date-eq``, ``F-DATES-naive-utc``, ``F-DATES-tz-by-instant`` — and
+      the pattern is legible rather than arbitrary: every one is an EQUALITY shape, and
+      every one diverges in natural mode only (it returns zero rows where the oracle
+      keeps one, and passes in residual). Equality is where a string compare is least
+      forgiving — two ISO renderings of the same instant differ byte-for-byte, so a
+      naive operand, a ``+02:00`` operand and a ``Z``-suffixed stored value all miss —
+      while a range compare still lands on the right side of the bound often enough to
+      pass on these seeds. The 8 surviving range shapes are pruned with them because
+      that is luck of the operand's form, not soundness. Natural-mode-only is also what
+      pins the PUSHDOWN, not the round-trip, as the cause. Same shape and same
+      rationale as the chunk-surface bucket in :func:`_surreal_excluded`, which is
+      declarative for the same reason.
+    * **Present-JSON-null metadata value the filter distinguishes from absent** —
+      SurrealDB drops an explicit ``null`` inside a FLEXIBLE object on WRITE, so the
+      stored document genuinely differs from the seed. Detected empirically by
+      :func:`_surreal_null_drop_diverges` (reused verbatim: it probes the oracle over a
+      null-coerced seed, and the ``occurred_at`` synthesis in the mapping it uses is
+      inert here because a documents-eligible case never reads that key). Measured: all
+      6 cases it catches diverge in BOTH modes — unlike the ``$date`` bucket, the row is
+      already wrong before any filter runs, so evaluating the whole predicate in memory
+      cannot rescue them either. That both-modes signature is the cleanest way to tell
+      a write-side corruption from a pushdown defect.
+
+    The two buckets are disjoint on the current corpus (12 + 6 = the 18 cases the
+    surreal leg drops, of which 10 are measured to diverge). Counts are a snapshot of
+    the corpus, not an invariant — the predicates above are the contract; re-measure
+    rather than trusting these numerals if the corpus grows.
+
+    DROPPED — the **unsafe metadata segment** bucket. On the chunk surface
+    ``compile_surrealdb`` runs with ``on_unsupported="raise"`` and its injection guard
+    turns a ``$``-prefixed / hyphenated segment into a ``CompileError``. The documents
+    context is ``on_unsupported="split"``, under which the same guard routes the leaf
+    to the unsupported path — placeholder, unconsumed, deferred to the post-filter.
+    Such a case is therefore an ORDINARY oracle-equal row-set case on this leg, not a
+    prune and not an ``expect_unsupported`` leg.
+    """
+    ast = _resolve_ast(filter_)
+    for leaf in iter_leaf_clauses(ast):
+        if not (leaf.path and leaf.path[0] == "metadata"):
+            continue
+        operand = leaf.operand
+        if isinstance(operand, (DateLiteral, datetime)):
+            return True
+        if isinstance(operand, (list, tuple)) and any(isinstance(x, (DateLiteral, datetime)) for x in operand):
+            return True
+    return _surreal_null_drop_diverges(ast, seed)
 
 
 # The system keys the skeleton SurrealDB ``temporal_chunk`` table does NOT back with
@@ -1313,6 +1619,128 @@ def f_op_cases() -> list[ConformanceCase]:
         cases.extend(_string_op_cases(key))
     cases.append(_metadata_op_case())
     return cases
+
+
+# --------------------------------------------------------------------------- #
+# Documents-target corpus (the enumerable-key subset of the chunk corpus).
+# --------------------------------------------------------------------------- #
+#
+# Document enumeration accepts NINE of the ten system keys plus ``metadata.*``. A
+# case is carried over from the chunk corpus UNCHANGED — same filter, same seed,
+# same ``expected_ids`` — because both are target-agnostic; only the surface the
+# records are written to changes. Two carry-over blockers exist, and each has its
+# own remedy rather than a silent skip:
+#
+# 1. ``occurred_at`` — not an enumerable key at all. Encoded as a REJECTION
+#    (:data:`_DOCUMENTS_REJECTED_FILTERS`), not as a row-set case.
+# 2. a seed with a duplicate ``external_id`` — ``documents`` carries
+#    ``UNIQUE (namespace_id, external_id)``, and ``seed_documents_case`` writes one
+#    document per record (it cannot group the way ``seed_case`` does), so such a seed
+#    is an ``IntegrityError`` rather than a divergence. Exactly one family trips this
+#    — the F-OP ``external_id`` seed ties ``-2``/``-3`` at ``"connection"`` so ``$eq``
+#    keeps a pair — and it gets a documents variant with five DISTINCT values.
+
+
+def _documents_eligible(case: ConformanceCase) -> bool:
+    """Whether a chunk-corpus case carries over to the documents target verbatim.
+
+    ``@internal``. Two gates, both above. A filter reading ``occurred_at`` at ANY
+    nesting depth is not an enumeration filter; a seed whose non-NULL ``external_id``
+    values are not distinct cannot be written one-document-per-record. Anything else
+    keeps its filter, seed and ``expected_ids`` untouched — the documents oracle
+    (:func:`documents_oracle_survivors`) is what proves that claim per case.
+    """
+    ast = _resolve_ast(case.filter)
+    if any(clause.path and clause.path[0] == "occurred_at" for clause in iter_leaf_clauses(ast)):
+        return False
+    external_ids = [rec.external_id for rec in case.seed_records if rec.external_id is not None]
+    return len(external_ids) == len(set(external_ids))
+
+
+# The five DISTINCT ``external_id`` values the documents variant seeds. ``-2`` and
+# ``-3`` are a minimal pair (``"connection"`` / ``"connexion"``) rather than the chunk
+# seed's tie, so ``$eq`` singles ONE row out instead of keeping a pair — the operator
+# still separates a known subset, and the UNIQUE constraint is satisfied. ``-5`` is
+# the NULL row (``external_id`` is nullable, and NULL never violates UNIQUE), so F1
+# negation coverage is preserved.
+_DOCUMENTS_EXTERNAL_IDS: tuple[str | None, ...] = ("library", "connection", "connexion", "direct", None)
+
+
+def _external_id_documents_op_cases() -> list[ConformanceCase]:
+    """The F-OP ``external_id`` family, re-seeded with five distinct values.
+
+    ``@internal``. The stock :func:`_string_op_cases` ``external_id`` seed ties two
+    records at one value, which ``seed_documents_case`` cannot write (one document per
+    record vs. ``UNIQUE (namespace_id, external_id)``). This variant keeps the same
+    operator set and the same five-record shape but draws from
+    :data:`_DOCUMENTS_EXTERNAL_IDS`, and recomputes every ``expected_ids`` BY
+    CONSTRUCTION from that seed — never by copying the chunk family's counts, which
+    the de-tie invalidates.
+
+    ``backends`` / ``expect_unsupported`` are left at the chunk-corpus defaults
+    (:func:`_backends_for_filter` / :func:`_surreal_unsupported`) so this reads as an
+    ordinary member of the corpus; the documents legs select on
+    :func:`_documents_eligible` and :func:`_documents_surreal_excluded`, not on
+    ``backends``.
+    """
+    key = "external_id"
+    seed = tuple(
+        SeedRecord(id=f"{key}-{i}", **({} if value is None else {key: value}))
+        for i, value in enumerate(_DOCUMENTS_EXTERNAL_IDS, start=1)
+    )
+    r1, r2, r3, r4, r5 = (rec.id for rec in seed)
+
+    def case(suffix: str, predicate: Any, expected: frozenset[str], op_tag: str) -> ConformanceCase:
+        filter_ = {key: predicate}
+        backends = _backends_for_filter(filter_, seed)
+        return ConformanceCase(
+            id=f"F-OP-{key}-documents-{suffix}",
+            filter=filter_,
+            seed_records=seed,
+            expected_ids=expected,
+            backends=backends,
+            expect_unsupported=_surreal_unsupported(filter_) & backends,
+            exercises=("F-OP", key, op_tag),
+        )
+
+    all_five = frozenset({r1, r2, r3, r4, r5})
+    return [
+        # "connection" is now unique to -2 (the chunk seed's -3 twin is "connexion").
+        case("eq", {"$eq": "connection"}, frozenset({r2}), "$eq"),
+        # F1: the NULL -5 row survives every negation.
+        case("ne", {"$ne": "direct"}, frozenset({r1, r2, r3, r5}), "$ne"),
+        case("in", {"$in": ["library", "direct"]}, frozenset({r1, r4}), "$in"),
+        case("in-empty", {"$in": []}, frozenset(), "$in"),
+        case("nin", {"$nin": ["connection"]}, frozenset({r1, r3, r4, r5}), "$nin"),
+        case("nin-empty", {"$nin": []}, all_five, "$nin"),
+        case("exists-true", {"$exists": True}, all_five, "$exists"),
+        # Bare-list ⇒ $eq exact-array ⇒ constant-false against a scalar column.
+        case("eq-barelist", ["library", "direct"], frozenset(), "$eq"),
+    ]
+
+
+def f_op_documents_cases() -> list[ConformanceCase]:
+    """The ``F-OP`` family as the documents target sees it.
+
+    ``@internal``. Every eligible chunk F-OP case verbatim, plus the re-seeded
+    ``external_id`` variant. The ten ``occurred_at`` cases drop out (that key is
+    rejected, not filtered) and the eight stock ``external_id`` cases are replaced;
+    everything else — the two remaining date keys, the six other string keys, the
+    metadata scalar — carries over untouched. The coverage meta-test reads the
+    ``exercises`` tags off this list and asserts it covers every enumerable key and
+    NOT ``occurred_at``.
+    """
+    return [c for c in f_op_cases() if _documents_eligible(c)] + _external_id_documents_op_cases()
+
+
+# Two filters the document-enumeration surface must REJECT rather than evaluate — a
+# bare ``occurred_at`` leaf and one buried inside an ``$and`` (the rejection walks
+# every leaf, at any depth). This is how ``occurred_at`` is represented in the
+# documents corpus: as a validation outcome, never as a row-set case.
+_DOCUMENTS_REJECTED_FILTERS: tuple[dict[str, Any], ...] = (
+    {"occurred_at": {"$gte": "2026-01-01T00:00:00Z"}},
+    {"$and": [{"source_name": "linear"}, {"occurred_at": {"$gt": "2026-01-01T00:00:00Z"}}]},
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -2759,3 +3187,63 @@ def f_impossible_cases() -> list[ConformanceCase]:
             ("F-IMPOSSIBLE", "metadata.flag", "bool"),
         ),
     ]
+
+
+# --------------------------------------------------------------------------- #
+# Documents-target corpus assembly.
+# --------------------------------------------------------------------------- #
+
+
+# The hand-authored families whose cases carry over to the documents target with no
+# edit at all — their filters and ``expected_ids`` are target-agnostic. ``f_op_cases``
+# is the one absentee, because it needs the ``external_id`` re-seed
+# (:func:`f_op_documents_cases`). Members of any family that read ``occurred_at`` prune
+# themselves through :func:`_documents_eligible`.
+#
+# ``f_dates_cases`` is INCLUDED, and the reasoning is worth keeping because the
+# tempting shortcut is wrong. Its ``$date`` range shapes do duplicate
+# ``f_coerce_cases``, but three of its cases carry coverage that exists nowhere else in
+# the documents corpus — ``lexicographic`` (a bare string operand is NOT date-parsed),
+# ``naive-utc`` and ``tz-instant`` (a naive and a non-UTC operand normalize to the same
+# instant). Those are precisely the metadata-datetime coercion shapes the residual mode
+# exists to pin against a store's round-trip: raw-sqlite's TEXT datetimes and
+# SQLAlchemy's offset-discarding ``DATETIME`` are where a "close enough" ISO form stops
+# being close enough. Dropping the family to avoid four redundant ``$date`` cases would
+# have forfeited them.
+#
+# What IS forfeited, unavoidably: the family's three ``occurred_at`` cases (two
+# ``boundary``, one ``and-compose``) auto-prune, so the documents corpus has no
+# system-date-key boundary case and no case composing two system date keys. That is a
+# consequence of ``occurred_at`` not being enumerable, not of this tuple — the
+# ``boundary`` shape is unreachable for it, and ``and-compose`` needs two of the three
+# date keys to be filterable at once. ``created_at`` / ``source_timestamp`` boundary
+# behaviour is still covered by the F-OP date families' ``$gt`` / ``$gte`` pair.
+_DOC_SHARED_FAMILIES: tuple[Callable[[], list[ConformanceCase]], ...] = (
+    f_coerce_cases,
+    f_polarity_cases,
+    f_array_cases,
+    f_exists_cases,
+    f_logic_cases,
+    f_sugar_cases,
+    f_dates_cases,
+    f_nullval_cases,
+    f_objeq_cases,
+    f_dotkey_cases,
+    f_sel_cases,
+    f_unsup_cases,
+    f_impossible_cases,
+)
+
+
+def documents_conformance_cases() -> list[ConformanceCase]:
+    """The full documents-target corpus: F-OP plus every eligible shared-family case.
+
+    ``@internal``. The single source of truth for *what the documents legs seed and
+    assert* — the seed entrypoint, the embedded runner modules, and the parametrized
+    test module all call this so they never drift. Every case runs on all four
+    relational stores in BOTH modes; the surreal leg additionally drops the two
+    storage-representation buckets :func:`_documents_surreal_excluded` names. Nothing
+    is skipped without one of those documented reasons.
+    """
+    shared = [c for family in _DOC_SHARED_FAMILIES for c in family() if _documents_eligible(c)]
+    return f_op_documents_cases() + shared

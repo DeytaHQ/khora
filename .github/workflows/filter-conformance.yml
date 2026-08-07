@@ -1,14 +1,27 @@
 name: Filter Conformance
 
 # ---------------------------------------------------------------------------
-# Recall-filter conformance matrix. One leg per engine; each leg provisions
+# Recall-filter conformance matrices. One leg per engine; each leg provisions
 # ONLY the live store it needs via an `if:`-guarded `docker run` (Postgres for
 # the postgres leg, Neo4j for the cypher leg, Weaviate for the weaviate leg),
 # so a leg that runs in-process never waits on an idle container.
 #
+# Two jobs, because there are two SURFACES with different corpora and different
+# contracts:
+#
+# * `conformance` — the chunk RECALL surface. Postgres/SurrealDB are total-exact
+#   there and a filter they cannot express RAISES, so the corpus carries
+#   `expect_unsupported` legs. Selected by KHORA_CONFORMANCE_BACKEND.
+# * `documents-conformance` — the document ENUMERATION surface. Uniformly split +
+#   post-filter on every backend, so nothing raises and every case is a plain
+#   row-set comparison; each case also runs in both a natural (backend pushdown)
+#   and a residual (post-filter-only) mode. Selected by
+#   KHORA_CONFORMANCE_DOC_BACKEND, and its Postgres leg has its own corpus, its
+#   own seed invocation and its own seed-map path.
+#
 # This file is intentionally separate from ci.yml: GitHub schedules a separate
-# workflow file as its own check, so this matrix runs concurrently with the
-# main `test` job and gates the PR on its own.
+# workflow file as its own check, so these matrices run concurrently with the
+# main `test` job and gate the PR on their own.
 # ---------------------------------------------------------------------------
 
 on:
@@ -325,3 +338,125 @@ jobs:
       - name: Stop Weaviate
         if: ${{ always() && matrix.weaviate }}
         run: docker rm -f khora-conformance-weaviate || true
+
+  documents-conformance:
+    # The document-ENUMERATION conformance matrix. Same per-leg provisioning
+    # discipline as the `conformance` job above, over a different corpus and a
+    # different read path: every leg drives the REAL
+    # `StorageCoordinator.scan_documents_page` keyset walk over documents seeded
+    # through the coordinator's write API, and asserts the row-set against the
+    # Python oracle. Every case runs TWICE — once natural (the AST reaches the
+    # backend, which pushes what it can) and once residual (the AST is withheld
+    # and the identical compile_python post-filter is applied in-harness, which
+    # is what pins the predicate against each store's round-trip document shape).
+    name: documents-conformance (${{ matrix.backend }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Raw `backend: sqlite` — the hand-written aiosqlite tier with its own
+          # `documents` DDL. In-process; the first conformance coverage of this
+          # backend at all (the chunk corpus reaches SQLite only via sqlite_lance).
+          - backend: sqlite
+          # Embedded sqlite_lance — the shared Alembic `documents` model over a
+          # tmp SQLite file migrated to head. In-process.
+          - backend: sqlite_lance
+          # Embedded SurrealDB `memory://` with the production schema. In-process.
+          - backend: surrealdb
+          # Live Postgres — the only tier whose date columns are real timestamptz,
+          # and therefore the only one that pushes the two date keys into SQL.
+          - backend: postgres
+            postgres: true
+    env:
+      KHORA_CONFORMANCE_DOC_BACKEND: ${{ matrix.backend }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          prune-cache: false
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        # crewai combo — matches ci.yml's `install` job (NEVER `--all-extras`:
+        # crewai/google-adk conflict on opentelemetry-api).
+        run: uv sync --all-extras --no-extra google-adk
+
+      # -- Per-leg Postgres -------------------------------------------------- #
+      # Same `if:`-guarded `docker run` pattern as the chunk job: only the
+      # postgres leg starts a container, so the three embedded legs never wait on
+      # an idle DB. Image, creds and host port mirror ci.yml / `make dev`.
+      - name: Start Postgres
+        if: matrix.postgres
+        run: |
+          docker run -d --name khora-docs-conformance-pg \
+            -e POSTGRES_USER=khora \
+            -e POSTGRES_PASSWORD=khora \
+            -e POSTGRES_DB=khora \
+            -p 5434:5432 \
+            --health-cmd "pg_isready -U khora -d khora" \
+            --health-interval 5s \
+            --health-timeout 5s \
+            --health-retries 10 \
+            pgvector/pgvector:pg17
+
+      - name: Wait for Postgres readiness
+        if: matrix.postgres
+        run: |
+          for i in $(seq 1 30); do
+            if pg_isready -h localhost -p 5434 -U khora >/dev/null 2>&1; then
+              echo "postgres ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "postgres did not become ready within 60s"
+          exit 1
+
+      - name: Apply database migrations
+        if: matrix.postgres
+        env:
+          KHORA_DATABASE_URL: postgresql://khora:khora@localhost:5434/khora
+        run: uv run alembic upgrade head
+
+      - name: Seed documents conformance corpus
+        if: matrix.postgres
+        # One-time seed, run ONCE before pytest, so the `-n auto` workers below
+        # only read. `documents-postgres` is its own seed-entrypoint backend (its
+        # own corpus and its own table), and it writes the per-case
+        # `seed_id -> document uuid` map to KHORA_CONFORMANCE_DOCS_SEED_MAP — a
+        # different artifact from the chunk leg's. Namespaces are derived
+        # deterministically, so re-running this step against an already-seeded
+        # database fails loudly rather than duplicating the corpus.
+        env:
+          KHORA_DATABASE_URL: postgresql://khora:khora@localhost:5434/khora
+          KHORA_CONFORMANCE_DOCS_SEED_MAP: ${{ github.workspace }}/.conformance_docs_seed_map.json
+        run: uv run python -m tests.integration.matrix._conformance_seed documents-postgres
+
+      # -- Documents conformance suite --------------------------------------- #
+      - name: Run documents conformance
+        # KHORA_PG_REQUIRED=1 (postgres only) makes tests/integration/conftest.py
+        # abort the session RED if Postgres is unreachable, so the postgres leg can
+        # never silently skip its cases. The three embedded legs set no service
+        # var and gate on their runner module's reachable().
+        env:
+          KHORA_DATABASE_URL: ${{ matrix.postgres && 'postgresql://khora:khora@localhost:5434/khora' || '' }}
+          KHORA_PG_REQUIRED: ${{ matrix.postgres && '1' || '' }}
+          KHORA_CONFORMANCE_DOCS_SEED_MAP: ${{ matrix.postgres && format('{0}/.conformance_docs_seed_map.json', github.workspace) || '' }}
+        run: |
+          uv run pytest \
+            tests/integration/matrix/test_documents_conformance.py \
+            -m "filter_conformance" -n auto --no-cov -v
+
+      - name: Stop Postgres
+        if: ${{ always() && matrix.postgres }}
+        run: docker rm -f khora-docs-conformance-pg || true
