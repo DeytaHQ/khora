@@ -172,6 +172,14 @@ DEFINE INDEX IF NOT EXISTS idx_chunk_namespace ON chunk FIELDS namespace;
 DEFINE INDEX IF NOT EXISTS idx_chunk_document ON chunk FIELDS document;
 DEFINE INDEX IF NOT EXISTS idx_chunk_doc_idx ON chunk FIELDS document, chunk_index;
 DEFINE INDEX IF NOT EXISTS idx_chunk_ns_session ON chunk FIELDS namespace_id, session_id;
+-- Single-field index on the scalar ``namespace_id`` so a chunk read scoped by
+-- namespace plans ``Iterate Index`` (#1592). Chunk reads scope with
+-- ``(namespace = $ns_rid OR namespace_id = $ns_str)``; a disjunction unions
+-- index scans only when EVERY disjunct is a comparison on a SINGLE-FIELD index,
+-- so the record-link leg needs ``idx_chunk_namespace`` and the scalar leg needs
+-- this one. The composite ``idx_chunk_ns_session`` leading column is NOT a
+-- reliable substitute across engine versions, so give the scalar its own index.
+DEFINE INDEX IF NOT EXISTS idx_chunk_namespace_id ON chunk FIELDS namespace_id;
 -- HNSW + BM25 indexes deferred to ensure_search_indexes() for bulk load performance
 
 -- Entity (with HNSW vector index and unique constraint)

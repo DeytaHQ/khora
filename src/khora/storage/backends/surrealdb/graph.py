@@ -141,6 +141,54 @@ def _row_to_relationship(row: dict[str, Any]) -> Relationship:
     )
 
 
+_LIVE_LEGS: tuple[str, str] = ("valid_until IS NONE", "valid_until > time::now()")
+"""The two OR-free legs of the ``(valid_until IS NONE OR valid_until > now)`` live
+filter, run separately and merged in Python (#1592).
+
+A disjunction anywhere in the ``WHERE`` collapses the SurrealDB 2.x planner to
+``Iterate Table`` and drops the namespace index prefix, so the recall reads
+(``list_entities`` / ``list_relationships``) would scan every row in the
+database, all tenants included. Each leg on its own is a plain conjunction that
+plans ``Iterate Index`` on the namespace index. The legs are disjoint on a
+single row's ``valid_until`` value (``NONE`` vs a future datetime), so the union
+is the original set; the merge de-duplicates by id anyway to stay correct if a
+concurrent dream-apply stamps ``valid_until`` between the two statements."""
+
+
+async def _query_live_ordered(
+    conn: SurrealDBConnection,
+    table: str,
+    base_conditions: list[str],
+    bindings: dict[str, Any],
+    *,
+    limit: int,
+    offset: int,
+) -> list[dict[str, Any]]:
+    """Run the ``valid_until`` live filter as two index-eligible legs, merged.
+
+    Each leg selects ``ORDER BY created_at DESC`` over the shared
+    ``base_conditions`` plus one live-filter conjunct, capped at ``offset +
+    limit`` rows — the global ``created_at``-DESC window of that size is a subset
+    of the union of each leg's own window, so fetching that many per leg and
+    slicing after the merge reproduces the single disjunctive statement exactly.
+    ``base_conditions`` must NOT contain a disjunction (that is the whole point).
+    """
+    window = offset + limit
+    merged: dict[str, dict[str, Any]] = {}
+    for leg in _LIVE_LEGS:
+        conds = " AND ".join([*base_conditions, leg])
+        sql = f"SELECT * FROM {table} WHERE {conds} ORDER BY created_at DESC LIMIT $__live_window"  # noqa: S608
+        rows = await conn.query(sql, {**bindings, "__live_window": window})
+        for row in rows:
+            merged[str(row.get("id"))] = row
+    ordered = sorted(
+        merged.values(),
+        key=lambda r: (_parse_dt(r.get("created_at")) or datetime.min.replace(tzinfo=UTC), str(r.get("id"))),
+        reverse=True,
+    )
+    return ordered[offset : offset + limit]
+
+
 def _row_to_episode(row: dict[str, Any]) -> Episode:
     """Map a SurrealDB result row to a domain :class:`Episode`."""
     episode_id = _parse_uuid(row.get("id", ""))
@@ -397,8 +445,12 @@ class SurrealDBGraphAdapter(GraphBackendBase):
         # (the P1-4 cross-store invariant). A future ``valid_until`` is still a
         # live temporal window; retirement stamps ``valid_until = now``, so the
         # ``> time::now()`` comparison hides it.
-        where = ["namespace = $ns_rid", "(valid_until IS NONE OR valid_until > time::now())"]
-        bindings: dict[str, Any] = {"ns_rid": ns_rid, "limit": limit, "offset": offset}
+        # The live filter is split into two OR-free legs merged in Python so the
+        # read plans ``Iterate Index`` instead of scanning every tenant's rows
+        # (#1592); see ``_query_live_ordered``. The narrowing below is shared
+        # by both legs.
+        where = ["namespace = $ns_rid"]
+        bindings: dict[str, Any] = {"ns_rid": ns_rid}
         if entity_type is not None:
             where.append("entity_type = $entity_type")
             bindings["entity_type"] = entity_type
@@ -408,8 +460,7 @@ class SurrealDBGraphAdapter(GraphBackendBase):
             where.append("source_chunk_ids CONTAINSANY $source_chunk_ids")
             bindings["source_chunk_ids"] = [str(c) for c in source_chunk_ids]
 
-        sql = f"SELECT * FROM entity WHERE {' AND '.join(where)} ORDER BY created_at DESC LIMIT $limit START $offset"  # noqa: S608
-        rows = await self._conn.query(sql, bindings)
+        rows = await _query_live_ordered(self._conn, "entity", where, bindings, limit=limit, offset=offset)
         return [_row_to_entity(r) for r in rows]
 
     @trace(
@@ -731,8 +782,11 @@ class SurrealDBGraphAdapter(GraphBackendBase):
         # on a soft-deleted edge, and recall must filter it out in lockstep with
         # the PG / Neo4j read filters so the stores agree on the live set (the
         # P1-4 cross-store invariant).
-        conditions = ["namespace_id = $ns", "(valid_until IS NONE OR valid_until > time::now())"]
-        bindings: dict[str, Any] = {"ns": str(namespace_id), "limit": limit, "offset": offset}
+        # Split the live filter into two OR-free legs merged in Python so the
+        # read plans ``Iterate Index`` rather than a cross-tenant table scan
+        # (#1592); see ``_query_live_ordered``.
+        conditions = ["namespace_id = $ns"]
+        bindings: dict[str, Any] = {"ns": str(namespace_id)}
 
         if relationship_type is not None:
             conditions.append("relationship_type = $rt")
@@ -744,11 +798,7 @@ class SurrealDBGraphAdapter(GraphBackendBase):
             conditions.append("in IN $between_eids AND out IN $between_eids")
             bindings["between_eids"] = [_rid("entity", e) for e in between_entity_ids]
 
-        sql = (
-            f"SELECT * FROM relates_to WHERE {' AND '.join(conditions)} "  # noqa: S608
-            "ORDER BY created_at DESC LIMIT $limit START $offset"
-        )
-        rows = await self._conn.query(sql, bindings)
+        rows = await _query_live_ordered(self._conn, "relates_to", conditions, bindings, limit=limit, offset=offset)
         return [_row_to_relationship(r) for r in rows]
 
     @trace(
