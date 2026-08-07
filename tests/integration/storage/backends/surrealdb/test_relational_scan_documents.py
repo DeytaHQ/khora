@@ -701,6 +701,12 @@ def test_a_non_uuid_record_id_has_no_position_and_says_so() -> None:
     with pytest.raises(ValueError, match="not a UUID"):
         _scan_key_from_row({"id": "document:not-a-uuid", "created_at": WHOLE_SECOND})
 
+    # A record id that only STARTS with a UUID must raise too: the record-id
+    # regex is start-anchored, so ``document:<uuid>suffix`` would partial-match
+    # and yield a cursor for the prefix — a position the full id does not equal.
+    with pytest.raises(ValueError, match="not a UUID"):
+        _scan_key_from_row({"id": f"document:{doc_id}suffix", "created_at": WHOLE_SECOND})
+
 
 async def test_a_hyphenated_metadata_key_in_a_deferred_subtree_does_not_raise(adapter, namespace) -> None:
     """The ``$or`` half of the deferral — reached through a different mechanism.

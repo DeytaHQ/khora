@@ -59,17 +59,27 @@ def _parse_uuid(record_id: str | dict | UUID | Any, *, strict: bool = False) -> 
     IDs (e.g. SurrealDB auto-generated RELATE IDs), generates a
     deterministic UUID5 from the string so callers always get a valid UUID.
 
-    Pass ``strict=True`` to reject a non-UUID record id with ``ValueError``
-    instead of deriving a UUID5. The derived value is well-formed but identifies
-    no stored row, so a caller that seats it in a keyset cursor (see
-    ``_scan_key_from_row``) would resume from a position no row holds; strict
-    mode exists for those callers.
+    Pass ``strict=True`` to reject a record id that is not *exactly* a bare UUID
+    with ``ValueError`` instead of deriving a UUID5 — and also instead of
+    accepting a UUID prefix with trailing content, which the start-anchored
+    ``_RECORD_ID_RE`` would otherwise partial-match. Both the derived value and
+    the prefix are well-formed UUIDs that identify no stored row, so a caller that
+    seats one in a keyset cursor (see ``_scan_key_from_row``) would resume from a
+    position no row holds; strict mode exists for those callers.
     """
     if isinstance(record_id, UUID):
         return record_id
     raw = str(record_id)
     m = _RECORD_ID_RE.match(raw)
     if m:
+        if strict and m.group(0) != raw:
+            # ``_RECORD_ID_RE`` is start-anchored but not end-anchored, so it
+            # partial-matches ``document:<uuid>suffix`` — extracting a UUID the
+            # full record id does not equal, i.e. a cursor for a row no table
+            # holds. In strict mode the whole id must be a bare UUID record id.
+            raise ValueError(
+                f"record id is not a UUID (trailing content after the id) and cannot seat a scan cursor: {raw!r}"
+            )
         return UUID(m.group(1))
     # Fall back: try treating the whole string as a UUID
     try:
