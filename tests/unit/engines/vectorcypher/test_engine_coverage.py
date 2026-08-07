@@ -536,10 +536,13 @@ class TestPassthroughOperations:
     async def test_list_documents(self) -> None:
         engine = _make_connected_engine()
         ns = uuid4()
-        engine._storage.list_documents = AsyncMock(return_value=[])
+        sentinel = MagicMock()
+        engine._storage.scan_documents_page = AsyncMock(return_value=sentinel)
         out = await engine.list_documents(ns, limit=10)
-        assert out == []
-        engine._storage.list_documents.assert_awaited_once_with(ns, limit=10)
+        assert out is sentinel
+        engine._storage.scan_documents_page.assert_awaited_once_with(
+            ns, filter_ast=None, status=None, updated_before=None, limit=10, after=None, scan_bound=None
+        )
 
 
 # ---------------------------------------------------------------------------

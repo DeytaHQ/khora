@@ -1495,16 +1495,25 @@ class TestConvenienceMethods:
 
     @pytest.mark.asyncio
     async def test_list_documents(self) -> None:
-        """list_documents delegates to engine with resolved namespace."""
+        """list_documents threads the enumeration args to the engine with a resolved namespace."""
         kb = _make_kb(connected=True)
         ns_id = uuid4()
 
-        mock_docs = [MagicMock(), MagicMock()]
-        kb._engine.list_documents = AsyncMock(return_value=mock_docs)
+        mock_page = MagicMock()
+        kb._engine.list_documents = AsyncMock(return_value=mock_page)
 
         result = await kb.list_documents(namespace=ns_id, limit=50)
-        assert result == mock_docs
-        kb._engine.list_documents.assert_awaited_once_with(_RESOLVE_ROW_ID, limit=50)
+        assert result is mock_page
+        # scan_bound = max(50 × 10, 1000) = 1000 (from the mock config knobs).
+        kb._engine.list_documents.assert_awaited_once_with(
+            _RESOLVE_ROW_ID,
+            filter_ast=None,
+            status=None,
+            updated_before=None,
+            limit=50,
+            after=None,
+            scan_bound=1000,
+        )
 
     @pytest.mark.asyncio
     async def test_search_entities(self) -> None:

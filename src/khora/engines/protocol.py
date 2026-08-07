@@ -10,11 +10,13 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from khora.core.models import Document, Entity, MemoryNamespace
+    from khora.core.models.document import DocumentPage
     from khora.extraction.chunkers import ChunkStrategy
     from khora.extraction.skills import ExpertiseConfig
     from khora.filter import FilterNode
     from khora.khora import BatchResult, RecallResult, RememberResult, Stats
     from khora.query import SearchMode
+    from khora.storage.backends.base import DocumentScanKey
 
 
 @runtime_checkable
@@ -322,16 +324,32 @@ class MemoryEngineProtocol(Protocol):
         self,
         namespace_id: UUID,
         *,
+        filter_ast: FilterNode | None = None,
+        status: str | None = None,
+        updated_before: datetime | None = None,
         limit: int = 100,
-    ) -> list[Document]:
-        """List documents in a namespace, newest first, ties broken by descending id.
+        after: DocumentScanKey | None = None,
+        scan_bound: int | None = None,
+    ) -> DocumentPage:
+        """Enumerate one keyset page of a namespace's documents, newest first.
+
+        A one-line delegation to the storage coordinator's keyset scan loop.
+        Engines thread the pre-resolved arguments through unchanged and MUST NOT
+        interpret ``filter_ast`` — the facade validated and lowered it, the
+        coordinator compiles and applies it.
 
         Args:
             namespace_id: Namespace UUID
-            limit: Maximum documents to return
+            filter_ast: Canonical recall-filter AST (already validated + scoped
+                by the facade), or ``None`` for an unfiltered enumeration.
+            status: Document status string, or ``None``.
+            updated_before: Half-open ``updated_at < bound``, or ``None``.
+            limit: Maximum matches per page.
+            after: Internal ``(created_at, id)`` keyset resume position, or ``None``.
+            scan_bound: Per-page raw-row scan budget, or ``None`` for the default.
 
         Returns:
-            List of Documents
+            The coordinator's ``DocumentPage`` unchanged.
         """
         ...
 

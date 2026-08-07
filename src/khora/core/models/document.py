@@ -6,10 +6,11 @@ for semantic search and retrieval.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
-from typing import Any
+from typing import Any, overload
 from uuid import UUID, uuid4
 
 
@@ -152,6 +153,81 @@ class Document:
         self.status = DocumentStatus.FAILED
         self.error_message = error
         self.updated_at = datetime.now(UTC)
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentCursor:
+    """An opaque keyset resume position for document enumeration: ``(created_at, id)``.
+
+    The public form of the internal ``DocumentScanKey`` — the position of a
+    single document in the ``(created_at DESC, id DESC)`` enumeration order. A
+    caller feeds the previous page's :attr:`DocumentPage.next_after` back in as
+    the next ``list_documents(after=...)`` to resume exactly-once.
+
+    The position is store-local (each backend round-trips ``created_at`` in the
+    shape it stores it). Treat it as opaque: do not reformat, adjust ``tzinfo``,
+    or carry a cursor from one backend to another.
+    """
+
+    created_at: datetime
+    id: UUID
+
+
+class DocumentPage(Sequence["Document"]):
+    """One page of a keyset document enumeration — a :class:`~collections.abc.Sequence` of documents.
+
+    Subclasses :class:`collections.abc.Sequence` so existing call sites that
+    iterate, ``len()``, index, or test truthiness on the result of
+    ``list_documents`` keep working unchanged. Beyond the sequence surface it
+    carries the walk-control metadata:
+
+    * :attr:`next_after` — the **last-scanned** keyset position to resume from,
+      or ``None`` when the scan is exhausted. ``None`` **iff** :attr:`exhausted`.
+    * :attr:`exhausted` — the scan bound was consumed and no rows remain past
+      the last one scanned. **The only sound termination signal** — a short (or
+      empty) page means nothing on its own, because a filter can reject an entire
+      scanned window.
+    * :attr:`post_filtered_keys` — the filter leaf keys the backend could NOT
+      push into SQL and that were therefore enforced by the in-memory
+      post-filter. A reporting signal; empty when there is no filter.
+
+    Distinct from the storage tier's offset-shaped ``PaginatedResult`` (which
+    carries ``items`` + ``total`` + ``offset``); a keyset walk has neither an
+    offset nor a total.
+    """
+
+    __slots__ = ("_documents", "next_after", "exhausted", "post_filtered_keys")
+
+    def __init__(
+        self,
+        documents: Iterable[Document],
+        *,
+        next_after: DocumentCursor | None,
+        exhausted: bool,
+        post_filtered_keys: tuple[str, ...] = (),
+    ) -> None:
+        self._documents: tuple[Document, ...] = tuple(documents)
+        self.next_after = next_after
+        self.exhausted = exhausted
+        self.post_filtered_keys = tuple(post_filtered_keys)
+
+    @overload
+    def __getitem__(self, index: int) -> Document: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> Sequence[Document]: ...
+
+    def __getitem__(self, index: int | slice) -> Document | Sequence[Document]:
+        return self._documents[index]
+
+    def __len__(self) -> int:
+        return len(self._documents)
+
+    def __repr__(self) -> str:
+        return (
+            f"DocumentPage(len={len(self._documents)}, exhausted={self.exhausted}, "
+            f"next_after={self.next_after!r}, post_filtered_keys={self.post_filtered_keys!r})"
+        )
 
 
 @dataclass(slots=True)

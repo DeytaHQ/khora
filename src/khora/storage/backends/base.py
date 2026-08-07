@@ -348,6 +348,28 @@ class RelationalBackendProtocol(Protocol):
         """List documents in a namespace, newest first, ties broken by descending id."""
         ...
 
+    async def scan_documents(
+        self,
+        namespace_id: UUID,
+        *,
+        filter_ast: FilterNode | None = None,
+        status: str | None = None,
+        updated_before: datetime | None = None,
+        after: DocumentScanKey | None = None,
+        scan_limit: int = 100,
+    ) -> DocumentScanStep:
+        """Scan one bounded keyset window of a namespace's documents. ``@internal``.
+
+        The keyset scan primitive the coordinator's ``scan_documents_page`` drives
+        one step at a time in ``(created_at DESC, id DESC)`` order, chaining
+        :attr:`DocumentScanStep.last_scanned` back in as ``after`` until
+        :attr:`DocumentScanStep.exhausted`. Not part of the public storage API and
+        not abstract: it is declared on the protocol only so the coordinator can
+        call it across the protocol boundary; the four relational stores own the
+        implementation. See :class:`DocumentScanStep` for the row/cursor contract.
+        """
+        ...
+
     @abstractmethod
     async def claim_orphaned_documents(
         self,

@@ -28,6 +28,8 @@ EXPECTED_PUBLIC_SURFACE = frozenset(
         "BatchHandle",
         "BatchResult",
         "DateOps",
+        "DocumentCursor",
+        "DocumentPage",
         "DocumentProjection",
         "DocumentResult",
         "DocumentSource",

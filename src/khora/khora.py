@@ -86,6 +86,41 @@ def _normalize_recall_bound(value: datetime | None) -> datetime | None:
     return value.astimezone(UTC)
 
 
+def _reject_non_enumerable_keys(filter_ast: Any) -> None:
+    """Reject a document-enumeration filter that references a non-enumerable key.
+
+    Document enumeration filters a document row, so it accepts the nine
+    enumerable system keys plus ``metadata.*`` — but NOT ``occurred_at``, the
+    event-time axis, which lives on chunks and has no column on a document row.
+    Any ``occurred_at`` leaf (at any nesting depth) raises
+    :class:`~khora.filter.RecallFilterValidationError` with the structured
+    ``key_not_enumerable`` code rather than silently matching nothing.
+    """
+    from khora.filter import SYSTEM_KEYS
+    from khora.filter.execute import iter_leaf_clauses
+    from khora.filter.model import FieldError, RecallFilterValidationError
+
+    if not any(clause.path == ("occurred_at",) for clause in iter_leaf_clauses(filter_ast)):
+        return
+
+    enumerable = sorted(SYSTEM_KEYS - {"occurred_at"})
+    raise RecallFilterValidationError(
+        [
+            FieldError(
+                path="occurred_at",
+                code="key_not_enumerable",
+                message=(
+                    "occurred_at is not an enumerable document key: it is the chunk event-time axis "
+                    "and a document row carries no such column. Filter enumeration on source_timestamp "
+                    "(the source/ingest-provided time) or created_at (the ingest time) instead — these are "
+                    "different time axes, not equivalent substitutes for occurred_at."
+                ),
+                allowed=enumerable,
+            )
+        ]
+    )
+
+
 def _safe_exc_summary(exc: BaseException, *, max_len: int = 200) -> str:
     """Return a bounded, safe one-line summary of *exc* for logging.
 
@@ -185,11 +220,13 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from khora.core.models import Relationship
+    from khora.core.models.document import DocumentCursor, DocumentPage, DocumentStatus
     from khora.engines.protocol import MemoryEngineProtocol
     from khora.extraction.chunkers import ChunkStrategy
     from khora.extraction.skills import ExpertiseConfig
     from khora.filter import RecallFilter
     from khora.storage import NamespaceDeletionResult, StorageConfig, StorageCoordinator
+    from khora.storage.backends.base import DocumentScanKey
 
 
 # LLMUsage is a public API type consumed by external cost-tracking integrations.
@@ -2889,19 +2926,86 @@ class Khora:
         self,
         *,
         namespace: str | UUID,
+        filter: RecallFilter | dict[str, Any] | None = None,
+        status: DocumentStatus | str | None = None,
+        updated_before: datetime | None = None,
         limit: int = 100,
-    ) -> list[Document]:
-        """List documents in a namespace, newest first, ties broken by descending id.
+        after: DocumentCursor | Document | None = None,
+    ) -> DocumentPage:
+        """Enumerate documents in a namespace by keyset, newest first (``created_at DESC, id DESC``).
+
+        Returns a :class:`~khora.core.models.document.DocumentPage` — a
+        ``Sequence[Document]`` (iteration / ``len`` / truthiness keep working)
+        carrying the keyset walk-control metadata (``next_after`` /
+        ``exhausted`` / ``post_filtered_keys``). Resume the next page by passing
+        the previous page's ``next_after`` (or any returned :class:`Document`)
+        back in as ``after``; ``exhausted`` is the only sound termination signal.
 
         Args:
-            namespace: Namespace UUID (as UUID or string)
-            limit: Maximum documents to return
+            namespace: Namespace UUID (as UUID or string).
+            filter: Optional deterministic recall filter — a
+                :class:`~khora.filter.RecallFilter` or its dict/wire form. The
+                event-time key ``occurred_at`` is NOT enumerable here (a document
+                row has no event-time column); referencing it raises
+                :class:`~khora.filter.RecallFilterValidationError`.
+            status: Optional :class:`~khora.core.models.document.DocumentStatus`
+                (or its string value). An unknown status raises ``ValueError``
+                rather than silently matching nothing.
+            updated_before: Optional half-open upper bound — ``updated_at < bound``.
+            limit: Maximum matches per page (default 100); a page may return fewer.
+            after: Keyset resume position — a
+                :class:`~khora.core.models.document.DocumentCursor` or a
+                :class:`Document` whose ``(created_at, id)`` is used. There is no
+                ``offset``.
 
         Returns:
-            List of Documents
+            A ``DocumentPage`` of matching documents.
+
+        Raises:
+            RecallFilterValidationError: If ``filter`` fails validation or
+                references ``occurred_at``.
+            RecallFilterUnsupportedError: If a backend cannot honor a predicate.
+            ValueError: If ``status`` is not a known ``DocumentStatus``.
         """
+        from khora.core.models.document import DocumentCursor as _DocumentCursor
+        from khora.core.models.document import DocumentStatus as _DocumentStatus
+
+        # --- filter: validate, lower, then the enumeration key-scope pass ------ #
+        filter_ast: Any = None
+        if filter is not None:
+            from khora.filter import RecallFilter as _RecallFilter
+            from khora.filter import parse_to_ast
+
+            recall_filter = filter if isinstance(filter, _RecallFilter) else _RecallFilter.model_validate(filter)
+            filter_ast = parse_to_ast(recall_filter)
+            _reject_non_enumerable_keys(filter_ast)
+
+        # --- status: enum-validate (never a silent zero-match query) ----------- #
+        status_value: str | None = None
+        if status is not None:
+            # DocumentStatus("bogus") raises ValueError on an unknown value; an
+            # already-typed status is passed through by its .value.
+            status_value = (status if isinstance(status, _DocumentStatus) else _DocumentStatus(status)).value
+
+        # --- after: normalize the public cursor to the internal keyset ---------- #
+        after_key: DocumentScanKey | None = None
+        if after is not None:
+            after_key = (after.created_at, after.id) if isinstance(after, (_DocumentCursor, Document)) else after
+
+        # --- scan bound: max(limit × multiplier, floor), config-overridable ----- #
+        q = self._config.query
+        scan_bound = max(limit * q.document_scan_overfetch_multiplier, q.document_scan_min_bound)
+
         namespace_id = await self._resolve_namespace(namespace)
-        return await self._get_engine().list_documents(namespace_id, limit=limit)
+        return await self._get_engine().list_documents(
+            namespace_id,
+            filter_ast=filter_ast,
+            status=status_value,
+            updated_before=updated_before,
+            limit=limit,
+            after=after_key,
+            scan_bound=scan_bound,
+        )
 
     async def search_entities(
         self,
