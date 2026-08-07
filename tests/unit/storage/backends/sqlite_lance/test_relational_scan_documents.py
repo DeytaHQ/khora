@@ -35,6 +35,7 @@ import sqlalchemy.exc
 
 from khora.core.models import MemoryNamespace, TenancyMode
 from khora.core.models.document import DocumentStatus
+from khora.filter import CompilerRegistry
 from khora.filter.compilers.python import compile_python
 from tests.test_helpers.document_scan import (
     SUPERSET_SHAPES,
@@ -44,6 +45,12 @@ from tests.test_helpers.document_scan import (
     to_filter_ast,
     walk_scan,
     write_document,
+)
+from tests.test_helpers.document_scan_spy import (
+    PROBE_VALUE,
+    assert_split_honest,
+    force_residual,
+    sqlalchemy_sql_log,
 )
 
 # Lives in the unit lane next to the rest of this adapter's tests, and also
@@ -397,6 +404,167 @@ async def test_pushdown_never_rejects_a_row_the_full_filter_would_keep(adapter, 
     assert oracle, "the shape matches no row in this corpus — `oracle <= window` cannot fail"
 
     assert oracle <= {d.id for d in step.documents}
+
+
+# --------------------------------------------------------------------------- #
+# Is the reported split HONEST?
+#
+# Everything above reads ``consumed_keys`` and believes it. These three drive the
+# same scans and check the report against the statement the driver actually ran —
+# the spy attaches a ``before_cursor_execute`` listener to this store's
+# ``AsyncEngine``. See :mod:`tests.test_helpers.document_scan_spy` for why the
+# assertion is on bound VALUES rather than on column names.
+# --------------------------------------------------------------------------- #
+
+
+async def _seed_probe_corpus(adapter, namespace_id) -> int:
+    """Seed the varied corpus with the probe literal on half the rows.
+
+    Returns how many rows carry it, so a test can assert the pushed leaf really
+    narrowed rather than trusting the ``i % 2`` arithmetic.
+    """
+    seed = scan_seed(6)
+    for i, (doc_id, created_at) in enumerate(seed.writes):
+        await write_document(
+            adapter,
+            namespace_id,
+            doc_id,
+            created_at,
+            source_type=PROBE_VALUE if i % 2 == 0 else "library",
+        )
+    return sum(1 for i in range(len(seed.writes)) if i % 2 == 0)
+
+
+async def test_a_pushed_leaf_really_reaches_the_statement(adapter, namespace) -> None:
+    """The perf-lie catch: a leaf reported as pushed must be bound in the SQL.
+
+    ``consumed_keys == {"source_type"}`` is satisfied just as well by a compiler
+    that reported the leaf and emitted nothing for it — the caller's post-filter
+    would return the same rows, and the pushdown's entire purpose (a narrowed
+    window) would be silently gone. The probe literal appearing among the bound
+    params is what distinguishes the two.
+    """
+    matching = await _seed_probe_corpus(adapter, namespace.id)
+    ast = to_filter_ast({"source_type": {"$eq": PROBE_VALUE}})
+
+    with sqlalchemy_sql_log(adapter._engine) as sql_log:  # noqa: SLF001 — the driver seam has no public accessor
+        step = await adapter.scan_documents(namespace.id, filter_ast=ast, scan_limit=10)
+
+    assert step.consumed_keys == frozenset({"source_type"})
+    assert_split_honest(sql_log, pushed_values=[PROBE_VALUE])
+    # And the pushdown narrowed for real: the window is the matching subset, not
+    # the corpus with a post-filter's worth of work still owed.
+    assert len(step.documents) == matching
+    assert {d.source_type for d in step.documents} == {PROBE_VALUE}
+
+
+async def test_a_naturally_deferred_leaf_never_reaches_the_statement(adapter, namespace) -> None:
+    """The correctness-lie catch WITHOUT monkeypatching anything.
+
+    The stronger of the two residual tests, and the reason it exists separately: it
+    needs no ``force_residual``, so it tests the store as it actually ships. The
+    filter is an ``$or`` mixing this store's unpushable ``created_at`` with a
+    pushable ``source_type``, which ``compile_lance``'s all-or-nothing gate defers
+    **as a whole** rather than pushing half a disjunction. So ``source_type`` — a
+    key this store normally pushes eagerly — must NOT be bound here.
+
+    That gate is exactly what the ``scan_documents`` docstrings name as the reason
+    the pushdown is superset-safe: a match-all placeholder left inside a negation
+    inverts into a match-nothing and silently EXCLUDES rows. This asserts the gate
+    at the seam, where a regression is visible as a bound operand rather than as a
+    row count nobody cross-checks.
+    """
+    await _seed_probe_corpus(adapter, namespace.id)
+    ast = to_filter_ast(
+        {"$or": [{"created_at": {"$gte": "2026-01-01T00:00:00+00:00"}}, {"source_type": {"$eq": PROBE_VALUE}}]}
+    )
+
+    with sqlalchemy_sql_log(adapter._engine) as sql_log:  # noqa: SLF001
+        step = await adapter.scan_documents(namespace.id, filter_ast=ast, scan_limit=10)
+
+    assert step.consumed_keys == frozenset()
+    assert_split_honest(sql_log, residual_values=[PROBE_VALUE])
+    # The whole disjunction deferred, so SQL narrowed nothing: the raw window is
+    # the entire corpus and the post-filter owns every leaf.
+    assert len(step.documents) == 6
+
+
+async def test_a_residual_leaf_never_reaches_the_statement(adapter, namespace, monkeypatch) -> None:
+    """The correctness-lie catch, on the same filter with the leaf forced residual.
+
+    ``force_residual`` drops ``source_type`` from this store's ``field_mapping``,
+    which is the pushdown whitelist — so the identical AST now defers. Two things
+    must follow together, and asserting either alone is weak: the report must say
+    the leaf was NOT consumed, and the operand must be absent from the statement.
+    A report/statement disagreement in this direction means SQL enforced a leaf the
+    split told the caller it owned.
+    """
+    await _seed_probe_corpus(adapter, namespace.id)
+    from khora.storage.backends.sqlite_lance import relational as lance_module
+
+    force_residual(monkeypatch, lance_module)
+    ast = to_filter_ast({"source_type": {"$eq": PROBE_VALUE}})
+
+    with sqlalchemy_sql_log(adapter._engine) as sql_log:  # noqa: SLF001
+        step = await adapter.scan_documents(namespace.id, filter_ast=ast, scan_limit=10)
+
+    assert step.consumed_keys == frozenset()
+    assert_split_honest(sql_log, residual_values=[PROBE_VALUE])
+    # Deferred means "narrowed nothing here": the raw window is the whole corpus,
+    # which is the only correct compilation of a leaf this context cannot push.
+    assert len(step.documents) == 6
+
+
+# The split this store reports, per AST shape. The expected set is PINNED as well
+# as recomputed, because the recompute alone is satisfiable by two compilers that
+# agree on the wrong answer — including the degenerate "consumes nothing ever",
+# which would make every comparison ``frozenset() == frozenset()``. The spread is
+# what makes the parametrization non-vacuous: a full push, a partial push where
+# this store's unpushable date key is the residual, a fully-pushed disjunction, a
+# wholly-deferred one, and a pushed metadata path (this store has JSON1).
+_SPLIT_SHAPES: dict[str, tuple[dict[str, Any], frozenset[str]]] = {
+    "pushed_whole": ({"source_type": {"$eq": PROBE_VALUE}}, frozenset({"source_type"})),
+    "date_key_is_the_residual": (
+        {"source_type": {"$eq": PROBE_VALUE}, "created_at": {"$gte": "2026-01-01T00:00:00+00:00"}},
+        frozenset({"source_type"}),
+    ),
+    "or_wholly_pushable": (
+        {"$or": [{"source_type": {"$eq": PROBE_VALUE}}, {"title": {"$eq": "doc-1"}}]},
+        frozenset({"source_type", "title"}),
+    ),
+    "or_wholly_deferred": (
+        {"$or": [{"created_at": {"$gte": "2026-01-01T00:00:00+00:00"}}, {"source_type": {"$eq": PROBE_VALUE}}]},
+        frozenset(),
+    ),
+    "metadata_path": ({"metadata.tier": {"$eq": "gold"}}, frozenset({"metadata.tier"})),
+}
+
+
+@pytest.mark.parametrize(("wire", "expected"), _SPLIT_SHAPES.values(), ids=_SPLIT_SHAPES.keys())
+async def test_reported_split_equals_a_fresh_compile_of_the_same_ast(adapter, namespace, wire, expected) -> None:
+    """``consumed_keys`` is the compiler's answer, verbatim — no store-side edits.
+
+    The scan is free to compile once and report; what it must not do is add or
+    drop keys on the way out (a store that unioned in the keys it *hoped* were
+    pushed, or that stripped one it found inconvenient, would still look
+    plausible on every row assertion here, because the coordinator re-checks the
+    full AST regardless). Recomputed with the SAME compiler and the SAME context
+    the scan uses, so a difference can only be the store's own editing.
+
+    This is also how ``created_at`` pushdown is covered. The date key's *value* is
+    deliberately out of the spy's scope — dialects bind datetimes and strings
+    differently, so a value probe there is a dialect quiz — but its membership in
+    the split is exactly what these two shapes compare, and this store withholding
+    it is the difference from the PostgreSQL sibling.
+    """
+    await _seed_probe_corpus(adapter, namespace.id)
+    ast = to_filter_ast(wire)
+
+    step = await adapter.scan_documents(namespace.id, filter_ast=ast, scan_limit=10)
+
+    assert step.consumed_keys == expected
+    compiler = CompilerRegistry.get("relational.sqlite_lance", "documents")
+    assert step.consumed_keys == compiler(ast, _documents_compile_context()).consumed_keys
 
 
 # --------------------------------------------------------------------------- #
