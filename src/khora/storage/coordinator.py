@@ -941,7 +941,7 @@ class StorageCoordinator:
         ``next_after`` is always a raw last-scanned position (never derived from a
         converted document), and exactly-once resume holds. Under a very selective
         filter the tail steps shrink; the total raw rows scanned per page is
-        capped at ``scan_bound`` (default ``max(limit × 10, 1000)``).
+        capped at ``scan_bound`` (default ``max(limit x 10, 1000)``).
 
         **Memory note:** ``scan_limit`` bounds *rows*, and the raw stores
         ``SELECT *``; a step over large documents is large in bytes even when the

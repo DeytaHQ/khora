@@ -200,12 +200,13 @@ async def test_filter_narrows_and_occurred_at_rejected(tmp_path: Path) -> None:
         # System-key filter narrows to the matching rows, still ordered.
         page = await kb.list_documents(namespace=ns.namespace_id, filter={"source_type": "report"}, limit=100)
         assert all(by_id[d.id].source_type == "report" for d in page)
-        assert {d.id for d in page} == {d.id for d in seeded if d.source_type == "report"}
+        # Compare ordered lists, not sets: a post-filter ordering regression must fail.
+        assert [d.id for d in page] == _expected_order([d for d in seeded if d.source_type == "report"])
         assert isinstance(page.post_filtered_keys, tuple)
 
         # Metadata filter — exercises the in-memory post-filter path.
         gold = await kb.list_documents(namespace=ns.namespace_id, filter={"metadata.tier": "gold"}, limit=100)
-        assert {d.id for d in gold} == {d.id for d in seeded if d.metadata.get("tier") == "gold"}
+        assert [d.id for d in gold] == _expected_order([d for d in seeded if d.metadata.get("tier") == "gold"])
 
         # occurred_at is not enumerable on a document row.
         with pytest.raises(RecallFilterValidationError) as exc_info:

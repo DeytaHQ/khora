@@ -23,7 +23,7 @@ def mock_config() -> MagicMock:
     mock_config.get_neo4j_database.return_value = None
     mock_config.storage.embedding_dimension = 1536
     # Document-enumeration scan-bound knobs (real ints so list_documents can
-    # compute max(limit × multiplier, floor) without a MagicMock comparison).
+    # compute max(limit x multiplier, floor) without a MagicMock comparison).
     mock_config.query.document_scan_overfetch_multiplier = 10
     mock_config.query.document_scan_min_bound = 1000
     mock_config.llm.model = "gpt-4o-mini"

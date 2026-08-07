@@ -202,7 +202,7 @@ class DocumentPage(Sequence["Document"]):
     offset nor a total.
     """
 
-    __slots__ = ("_documents", "next_after", "exhausted", "post_filtered_keys")
+    __slots__ = ("_documents", "exhausted", "next_after", "post_filtered_keys")
 
     def __init__(
         self,

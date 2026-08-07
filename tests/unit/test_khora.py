@@ -1504,7 +1504,7 @@ class TestConvenienceMethods:
 
         result = await kb.list_documents(namespace=ns_id, limit=50)
         assert result is mock_page
-        # scan_bound = max(50 × 10, 1000) = 1000 (from the mock config knobs).
+        # scan_bound = max(50 x 10, 1000) = 1000 (from the mock config knobs).
         kb._engine.list_documents.assert_awaited_once_with(
             _RESOLVE_ROW_ID,
             filter_ast=None,

@@ -2996,7 +2996,7 @@ class Khora:
         if after is not None:
             after_key = (after.created_at, after.id) if isinstance(after, (_DocumentCursor, Document)) else after
 
-        # --- scan bound: max(limit × multiplier, floor), config-overridable ----- #
+        # --- scan bound: max(limit x multiplier, floor), config-overridable ----- #
         q = self._config.query
         scan_bound = max(limit * q.document_scan_overfetch_multiplier, q.document_scan_min_bound)
 
