@@ -44,9 +44,11 @@ from khora.storage.temporal import TemporalVectorStore
 from khora.telemetry import trace, trace_span
 
 if TYPE_CHECKING:
+    from khora.core.models.document import DocumentPage
     from khora.extraction.chunkers import ChunkStrategy
     from khora.extraction.skills import ExpertiseConfig
     from khora.filter import FilterNode
+    from khora.storage.backends.base import DocumentScanKey
 
 
 class SkeletonConstructionEngine:
@@ -1193,10 +1195,23 @@ class SkeletonConstructionEngine:
         self,
         namespace_id: UUID,
         *,
+        filter_ast: FilterNode | None = None,
+        status: str | None = None,
+        updated_before: datetime | None = None,
         limit: int = 100,
-    ) -> list[Document]:
-        """List documents in a namespace."""
-        return await self._get_storage().list_documents(namespace_id, limit=limit)
+        after: DocumentScanKey | None = None,
+        scan_bound: int | None = None,
+    ) -> DocumentPage:
+        """Enumerate one keyset page of a namespace's documents (delegates to the coordinator)."""
+        return await self._get_storage().scan_documents_page(
+            namespace_id,
+            filter_ast=filter_ast,
+            status=status,
+            updated_before=updated_before,
+            limit=limit,
+            after=after,
+            scan_bound=scan_bound,
+        )
 
     async def search_entities(
         self,

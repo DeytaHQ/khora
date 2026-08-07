@@ -1578,6 +1578,20 @@ class QuerySettings(BaseSettings):
         default=0.05, ge=0.0, le=1.0, description="Minimum entity similarity threshold"
     )
 
+    # Document enumeration (list_documents) keyset scan bound. When a filter is
+    # active the coordinator over-fetches raw rows to absorb post-filter
+    # rejection before giving up on filling a page; this caps the total rows a
+    # single page may scan at ``max(limit × multiplier, min_bound)``. Not a
+    # public list_documents parameter — tuned here only. Raising the multiplier
+    # trades more scan work per page for fewer under-full pages under a very
+    # selective filter; the floor keeps small page limits from starving.
+    document_scan_overfetch_multiplier: int = Field(
+        default=10, ge=1, description="Per-page scan bound = max(limit × this, document_scan_min_bound)"
+    )
+    document_scan_min_bound: int = Field(
+        default=1000, ge=1, description="Floor for the per-page document enumeration scan bound"
+    )
+
     # Fusion weights. Wired onto the default VectorCypher engine in #1406
     # (previously dead there - the engine read only VectorCypherConfig). The
     # defaults were canonicalized to the values the engine already used
