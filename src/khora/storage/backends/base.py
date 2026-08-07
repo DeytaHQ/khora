@@ -115,11 +115,11 @@ class DocumentScanStep:
       unconditionally, and everything pushed down is a superset filter, so
       re-running a pushed leaf can only narrow.
 
-    :attr:`last_scanned` and :attr:`exhausted` are assembled by
-    :func:`build_scan_step`, which all four stores call. Key *extraction* is still
-    per store (the raw rows are three different shapes), but the two derivations
-    that are easy to get wrong are written once there — read its docstring before
-    changing either.
+    All four stores assemble their step through :func:`build_scan_step`, but be
+    precise about what that centralizes: the :attr:`exhausted` computation, and
+    nothing else. :attr:`last_scanned` is *passed in* — each store extracts the
+    key from its own raw row shape and the helper stores it verbatim. Read its
+    docstring before changing either derivation.
 
     **No store's ``scan_documents`` raises on a filter it cannot fully push.**
     An unpushable leaf becomes a match-all placeholder, stays out of
@@ -147,12 +147,13 @@ class DocumentScanStep:
     fall back on. Do not read this paragraph as licence to delete a raise site or
     to narrow ``_unsupported``.
 
-    The ``"split"`` half was checked by calling all four factories rather than by
-    reading the prose beside them, which had drifted before. **Nothing enforces
-    it**: a store flipping its documents context to ``"raise"`` would break this
-    paragraph with no test failing anywhere. A four-line parametrized assertion
-    over the four factories would close that, and is worth adding the next time
-    someone is in here with a reason to touch all four.
+    The ``"split"`` half is **enforced, not merely documented**:
+    ``tests/unit/filter/test_documents_compile_contexts.py::test_context_declares_the_physical_schema``
+    is parametrized over all four factories and asserts each one's
+    ``on_unsupported``. Flipping any store's documents context to ``"raise"``
+    fails it — measured, on the ``sqlite`` leg, along with four further tests in
+    that module. So this paragraph cannot rot silently; the test is what keeps it
+    true.
 
     SurrealDB used to be the exception, remapping the internal ``CompileError``
     to the public ``RecallFilterUnsupportedError`` for that metadata-segment case;
@@ -194,8 +195,16 @@ def build_scan_step(
     """Assemble a :class:`DocumentScanStep` from one raw window. ``@internal``.
 
     All four relational stores end ``scan_documents`` with the same four-field
-    assembly, and two of its fields are wrong in the same way if derived from the
-    obvious place. This exists so that derivation is written once.
+    assembly, and two of those fields are wrong in the same way if derived from
+    the obvious place. **What this helper actually centralizes is one of them:**
+    the ``exhausted`` computation, which it performs. For ``last_scanned`` it
+    guarantees nothing structurally — the key arrives as a parameter, already
+    extracted, and is stored verbatim. What it contributes there is the parameter
+    *name*: a caller wiring ``documents[-1]`` into something called
+    ``raw_row_count``'s neighbour has been told, at the call site, which row the
+    position is supposed to come from. That is an advisory guardrail, not an
+    enforced one, and the per-store extractors are where the rule is actually
+    kept.
 
     ``exhausted`` is computed from ``raw_row_count`` — how many rows **SQL
     returned** — and never from ``len(documents)``. Today those agree on every

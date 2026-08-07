@@ -185,11 +185,23 @@ _ALL_CONTEXTS: tuple[tuple[str, Callable[[], CompileContext], str, str], ...] = 
 )
 
 # The enumeration contract specifies ``"split"`` everywhere, and every context
-# now ships it. SurrealDB previously shipped ``"raise"`` as an interim posture,
-# because ``compile_surrealdb``'s unsupported-leaf placeholder inverted under
-# ``$not``/``$or``; the all-or-nothing gate in
-# :mod:`khora.filter.compilers._split` closed that, so the context is back on
-# ``"split"`` with the rest.
+# now ships it. SurrealDB took two fixes to get there, and both are worth naming
+# because each looked like the last one at the time.
+#
+# First, ``compile_surrealdb``'s unsupported-leaf placeholder inverted under
+# ``$not`` / ``$or`` — ``!(A OR true)`` is ``false``, matching zero rows while
+# ``consumed_keys`` claimed the leaf was pushed. The all-or-nothing gate in
+# :mod:`khora.filter.compilers._split` closed that, and the context moved to
+# ``"split"``.
+#
+# Second, a metadata path segment that is not a SurrealQL identifier
+# (``metadata.due-date`` — legal JSON, common in the wild) still RAISED under
+# split, so a caller's well-formed filter surfaced as an error rather than as
+# rows. ``compile_clause`` now diverts such a leaf to the unsupported path under
+# ``"split"``, sharing one ``_segments_safe`` test with the gate predicate so the
+# two cannot disagree; ``"raise"`` mode keeps the ``CompileError`` injection
+# guard. That is what makes the mode below true for SurrealDB rather than
+# merely intended.
 _EXPECTED_UNSUPPORTED_MODE: Mapping[str, str] = {
     "postgresql": "split",
     "sqlite": "split",
@@ -230,8 +242,8 @@ def test_context_declares_the_physical_schema(
     assert ctx.table_alias is None
     assert ctx.param_namespace == "f"
     # A document enumeration always has an in-memory post-filter available, so an
-    # unpushable leaf is normally left unconsumed rather than raising — except on
-    # SurrealDB, whose compiler is not yet sound under split (see the map above).
+    # unpushable leaf is left unconsumed rather than raising — on all four now,
+    # SurrealDB included (see the map above).
     assert ctx.on_unsupported == _EXPECTED_UNSUPPORTED_MODE[name]
 
     mapping = ctx.field_mapping
