@@ -1509,24 +1509,27 @@ class TestVectorAdapterChunkOps:
     async def test_delete_chunks_by_document(self) -> None:
         from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
 
+        # The count is derived from the rows DELETE ... RETURN BEFORE returns,
+        # de-duplicated by id (the namespace OR unions two index scans, so a
+        # separate count() would double-count — #1595).
         conn = _make_mock_conn()
-        conn.query_one = AsyncMock(return_value={"cnt": 3})
+        conn.query = AsyncMock(return_value=[{"id": f"chunk:{uuid4()}"} for _ in range(3)])
         adapter = SurrealDBVectorAdapter(conn)
 
         result = await adapter.delete_chunks_by_document(uuid4(), namespace_id=uuid4())
         assert result == 3
-        conn.execute.assert_awaited_once()
+        conn.query.assert_awaited_once()
+        assert "RETURN BEFORE" in conn.query.await_args.args[0]
 
     async def test_delete_chunks_by_document_zero(self) -> None:
         from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
 
         conn = _make_mock_conn()
-        conn.query_one = AsyncMock(return_value={"cnt": 0})
+        conn.query = AsyncMock(return_value=[])
         adapter = SurrealDBVectorAdapter(conn)
 
         result = await adapter.delete_chunks_by_document(uuid4(), namespace_id=uuid4())
         assert result == 0
-        conn.execute.assert_not_awaited()
 
     async def test_count_chunks(self) -> None:
         from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
@@ -2201,10 +2204,15 @@ class TestSurrealDBGraphAdapterEntity:
         from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
 
         ns_id = uuid4()
-        rows = [
-            _graph_entity_row(ns_id=ns_id, name="E1"),
-            _graph_entity_row(ns_id=ns_id, name="E2"),
-        ]
+        # The live filter runs as two OR-free legs merged in Python and re-sorted
+        # by created_at DESC (#1595), so give the rows distinct timestamps and
+        # assert newest-first ordering. The mock returns the same rows for both
+        # legs; the merge de-duplicates by id.
+        e1 = _graph_entity_row(ns_id=ns_id, name="E1")
+        e2 = _graph_entity_row(ns_id=ns_id, name="E2")
+        e1["created_at"] = datetime(2026, 3, 2, tzinfo=UTC).isoformat()
+        e2["created_at"] = datetime(2026, 3, 1, tzinfo=UTC).isoformat()
+        rows = [e1, e2]
 
         conn = _make_mock_conn()
         conn.query = AsyncMock(return_value=rows)
@@ -2214,6 +2222,10 @@ class TestSurrealDBGraphAdapterEntity:
         assert len(result) == 2
         assert result[0].name == "E1"
         assert result[1].name == "E2"
+        # Two legs issued, both namespace-scoped and OR-free.
+        assert conn.query.await_count == 2
+        for call in conn.query.await_args_list:
+            assert " OR " not in call.args[0].upper()
 
     async def test_list_entities_with_type_filter(self) -> None:
         from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
