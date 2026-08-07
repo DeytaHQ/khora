@@ -62,6 +62,46 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
+# Disjunctions and index selection
+#
+# **No ``document`` read in this module may contain an ``OR``.** Three of them
+# used to, and each one made the statement read every ``document`` row in the
+# database — all tenants included, not just the namespace asked for.
+#
+# The rule, measured on 2.x rather than assumed. SurrealDB *can* answer a
+# disjunction as a union of index scans, but only when EVERY disjunct is a
+# comparison on a field carried by a **single-field** index. A composite index
+# does not qualify, not even on its own leading column:
+#
+# * ``status = 'a' OR status = 'b'`` with a one-field ``status`` index — two
+#   ``Iterate Index`` operations, and it stays indexed when wrapped in an outer
+#   ``AND`` (three operations, the extra one serving the conjunct).
+# * ``checksum = $a OR checksum = $b`` with only the two-field
+#   ``idx_document_ns_checksum`` — ``Iterate Table``.
+#
+# When one disjunct cannot be served, the fallback is not scoped to that
+# disjunct: the whole statement becomes ``Iterate Table`` and the conjuncts
+# around it lose their indexes too. That is why the ``namespace_id`` scope
+# disappears along with the keyset — the tenant filter still *filters*, it just
+# stops *narrowing*, so correctness is unaffected and cost is not.
+#
+# ``document`` carries composite ``(namespace_id, …)`` indexes and nothing else,
+# by design: the one-field ``idx_document_namespace`` was dropped as a redundant
+# prefix of the sort index. So on this table the qualifying case cannot arise and
+# **every** ``OR`` scans, whatever its shape — verified over eight, including a
+# bare ``OR`` of two composite leading columns and an ``OR`` of two full
+# composite matches. Defining one-field indexes to buy the union back is not a
+# trade worth making: it is permanent write amplification on every ``document``
+# insert to salvage a predicate that splits into conjunctive legs for free.
+#
+# The measurements above are on ``memory://`` with the SDK-bundled core; the
+# adapter's three former ``OR`` sites were each confirmed ``Iterate Table``
+# before the split and ``Iterate Index`` per leg after. Any predicate added here
+# should be checked the same way — the plan tests re-issue every statement this
+# adapter sends with ``EXPLAIN`` appended, so a new ``OR`` fails there.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
 # Adapter
 # ---------------------------------------------------------------------------
 
@@ -70,8 +110,8 @@ def _none_if_empty(v: str | None) -> str | None:
     return v if v else None
 
 
-def _checksum_reingestable_clause(pending_stale_before: datetime | None) -> tuple[str, dict[str, Any]]:
-    """Build the checksum-dedup exclusion clause + binds for SurrealDB (#1464).
+def _checksum_reingestable_legs(pending_stale_before: datetime | None) -> list[tuple[str, dict[str, Any]]]:
+    """Build the checksum-dedup exclusion as OR-free, index-eligible legs.
 
     FAILED rows are always excluded (re-ingestable). When ``pending_stale_before``
     is given, PENDING rows older than that cutoff are also excluded so a
@@ -79,15 +119,43 @@ def _checksum_reingestable_clause(pending_stale_before: datetime | None) -> tupl
     preserving the concurrent in-flight guard. When ``None`` only FAILED is
     excluded (legacy behavior).
 
+    **Why legs rather than one clause.** The predicate this replaces was
+    ``status != 'failed' AND (status != 'pending' OR updated_at >= $cutoff)``. A
+    nested ``OR`` costs the whole statement its indexes on this table, the
+    ``namespace_id`` prefix included (see the disjunction note at the top of this
+    module), so a dedup probe read every ``document`` row in the database, all
+    namespaces included. Since ``pending_stale_before`` is set on the production
+    ingest path, that was every dedup probe. The same set is expressed as two
+    disjoint conjunctions:
+
+    * ``status != 'failed' AND status != 'pending'`` — neither failed nor pending
+    * ``status = 'pending' AND updated_at >= $cutoff`` — pending but still fresh
+
+    Their union is exactly the original predicate and their intersection is empty
+    (they disagree on ``status``), so a caller may concatenate leg results with no
+    comparator and no dedup. Each leg alone plans ``Iterate Index`` on
+    ``idx_document_ns_checksum`` / ``idx_document_ns_status``.
+
     The cutoff binds as a ``datetime`` object (see the datetime-binds note at the
     top of this module). Bound as an ISO string the ``>=`` compare is
-    unconditionally true, which makes the disjunct always hold and silently
-    disables the re-ingest — every PENDING row stays a dedup hit however stale.
+    unconditionally true, so the fresh-PENDING leg would match every PENDING row
+    however stale and silently disable the re-ingest.
+
+    Returns:
+        ``[(clause, binds), ...]`` — one entry when ``pending_stale_before`` is
+        ``None``, two otherwise. Legs are ordered non-pending first, matching the
+        precedence a single-row consumer wants: a settled row outranks an
+        in-flight one.
     """
     if pending_stale_before is None:
-        return "status != 'failed'", {}
-    clause = "status != 'failed' AND (status != 'pending' OR updated_at >= $pending_stale_before)"
-    return clause, {"pending_stale_before": pending_stale_before}
+        return [("status != 'failed'", {})]
+    return [
+        ("status != 'failed' AND status != 'pending'", {}),
+        (
+            "status = 'pending' AND updated_at >= $pending_stale_before",
+            {"pending_stale_before": pending_stale_before},
+        ),
+    ]
 
 
 def _scan_key_from_row(row: dict[str, Any]) -> DocumentScanKey:
@@ -118,6 +186,72 @@ def _scan_key_from_row(row: dict[str, Any]) -> DocumentScanKey:
     if created_at is None:
         raise ValueError(f"document row has no readable created_at; cannot build a scan cursor: {row.get('id')!r}")
     return (created_at, _parse_uuid(row["id"], strict=True))
+
+
+# Bind names :meth:`SurrealDBRelationalAdapter.scan_documents` owns. A compiled
+# filter fragment that emitted any of them would silently overwrite a scan bind —
+# a compiled ``ns`` would replace the tenant scope and return another namespace's
+# rows with no error anywhere — so the splice checks against this set rather than
+# against whichever optional binds happen to be present on the current call.
+_SCAN_RESERVED_BINDS: frozenset[str] = frozenset(
+    {"ns", "lim", "status", "updated_before", "after_created_at", "after_id"}
+)
+
+
+def _documents_where(
+    namespace_id: UUID,
+    *,
+    status: str | None,
+    updated_before: datetime | None,
+    filter_ast: FilterNode | None,
+) -> tuple[list[str], dict[str, Any], frozenset[str]]:
+    """Build the namespace/status/filter conjuncts shared by every scan statement.
+
+    :meth:`SurrealDBRelationalAdapter.scan_documents` issues up to two statements
+    per step and both must carry the identical narrowing, so the block lives here
+    once instead of being duplicated per statement. The cursor bound is NOT
+    included — it is the only part that differs between the two.
+
+    Returns ``(conditions, params, consumed_keys)``. ``conditions`` is a list of
+    ``AND``-joinable fragments; every fragment is parenthesized unless it is a
+    single comparison, so a caller may append its own conjunct without thinking
+    about operator precedence.
+
+    Raises ``ValueError`` when a compiled filter's binds collide with the scan's
+    own reserved names (see :data:`_SCAN_RESERVED_BINDS`).
+    """
+    conditions = ["namespace_id = $ns"]
+    params: dict[str, Any] = {"ns": str(namespace_id)}
+    if status:
+        conditions.append("status = $status")
+        params["status"] = status
+    if updated_before is not None:
+        conditions.append("updated_at < $updated_before")
+        params["updated_before"] = updated_before
+
+    consumed_keys: frozenset[str] = frozenset()
+    if filter_ast is not None:
+        compiler = CompilerRegistry.get("relational.surrealdb", "documents")
+        # No ``CompileError`` mapping here. Under this context's
+        # ``on_unsupported="split"``, an unrenderable metadata segment is a
+        # capability gap the compiler defers (see
+        # ``_documents_compile_context``), so the only ``CompileError`` left
+        # reaching this line would be a genuine compiler fault — which must
+        # escape as itself rather than be relabelled a caller input problem.
+        compiled = compiler(filter_ast, _documents_compile_context())
+        consumed_keys = compiled.consumed_keys
+        conditions.append(f"({compiled.predicate})")
+        # Compiled binds are ``{param_namespace}_{n}`` — ``f_0``, ``f_1``, … — and
+        # the scan's are the reserved set, so the two families are disjoint by
+        # construction. The invariant runs BOTH ways and neither direction is safe
+        # to break: never name a scan bind ``f_<n>``, and never set this context's
+        # ``param_namespace`` to anything that could produce a reserved name.
+        collisions = _SCAN_RESERVED_BINDS & compiled.params.keys()
+        if collisions:
+            raise ValueError(f"compiled filter binds collide with scan binds: {sorted(collisions)}")
+        params.update(compiled.params)
+
+    return conditions, params, consumed_keys
 
 
 class SurrealDBRelationalAdapter:
@@ -482,36 +616,48 @@ class SurrealDBRelationalAdapter:
         """Scan one bounded window of a namespace's documents by keyset.
 
         ``@internal``. Not part of the public storage API — the offset-based
-        :meth:`list_documents` is. One ``SELECT`` on this adapter's own
+        :meth:`list_documents` is. One or two ``SELECT``s on this adapter's own
         connection; a walk is the caller's job, chaining
         :attr:`DocumentScanStep.last_scanned` back in as ``after`` until the step
         reports ``exhausted``. No transaction spans steps and no consistent
         snapshot is claimed.
 
-        SurrealQL has no row-value comparison, so #1586's single
-        ``(created_at, id) < (…)`` expands to ``created_at < $ts OR (created_at =
-        $ts AND id < $id)``. **Every conjunct is parenthesized unless it is a
-        single comparison**, and there are two such sites at different
-        severities. This one is **live**: we write the ``OR`` rather than
-        inheriting it from a self-parenthesizing compiler, and it is reached on
-        every resumed step. Ungrouped, ``AND`` binds tighter, so the disjunction
-        splits the conjunct list at its own position: everything appended *before*
-        it (namespace, status, ``updated_before``) lands inside the left disjunct,
-        and the right one carries only the tie clause plus whatever is appended
-        *after* — today just the compiled fragment. Either way the right disjunct
-        has no namespace scope, so it returns other tenants' rows tied on the
-        cursor instant. Measured with no ``filter_ast``, where the right disjunct
-        is bare: 3 rows grouped against 7 ungrouped, 4 of them foreign. With a
-        fragment the leak is narrowed by that fragment rather than removed, so
-        the magnitude drops but the cross-tenant read does not. **The order of
-        the appends is therefore load-bearing to this paragraph, not to the
-        defect** — regrouping the list changes which conjuncts leak, never
-        whether they do. The compiled
-        fragment splice is the second site, a tripwire rather than a live hazard
-        (``compile_surrealdb`` self-groups every boolean node today) with an
-        identical failure mode, measured at 6 rows becoming 12. The inner
-        ``(created_at = $ts AND id < $id)`` keeps its parens too: we do not lean
-        on operator precedence for a predicate that fails cross-tenant.
+        **A resumed step is TWO statements, not one.** SurrealQL has no row-value
+        comparison, so the keyset bound ``(created_at, id) < (…)`` has to be
+        written out — and written as one predicate it needs an ``OR``, which is
+        exactly what this store's planner cannot take (see the complexity note
+        below). It is issued as two ``OR``-free statements instead, both carrying
+        the identical narrowing from ``_documents_where``:
+
+        * **Q1, the tie block** — ``created_at = $ts AND id < $id``, ordered
+          ``id DESC``. Every row it returns sits at the cursor instant.
+        * **Q2, strictly older** — ``created_at < $ts``, ordered
+          ``created_at DESC, id DESC``.
+
+        Their concatenation *is* the merged window, in order, with no comparator
+        and no dedup: under ``created_at DESC, id DESC`` every Q1 row (equal to
+        ``$ts``) sorts strictly before every Q2 row (below ``$ts``), and the two
+        sets are disjoint by the same equality. The result is byte-identical to
+        the single disjunctive window it replaces. Q2 runs with
+        ``LIMIT scan_limit - len(Q1)`` and is skipped outright when Q1 already
+        filled the window, so a step resumed deep inside a tie block costs one
+        statement rather than two. The **first** step (``after is None``) has no
+        tie block at all and is the single Q2 shape without the cursor bound —
+        unchanged from before.
+
+        **No transaction spans the two statements, and none is claimed.** A write
+        landing between Q1 and Q2 can change what Q2 sees. Contractually that
+        changes nothing: this method already promises no consistent snapshot, no
+        transaction spans steps, and a concurrent insert lands *above* the
+        descending cursor — in the region the walk has already passed and never
+        revisits. The observable difference against the old single statement is
+        the width of that race, not its existence.
+
+        **Every conjunct is parenthesized unless it is a single comparison.** With
+        the keyset disjunction gone, the compiled-fragment splice in
+        ``_documents_where`` is the only remaining site, and it is a tripwire
+        rather than a live hazard (``compile_surrealdb`` self-groups every boolean
+        node today) — measured at 6 rows becoming 12 if it ever stopped.
         ``created_at`` is a non-optional ``TYPE datetime`` (``schema.py``), so the
         engine rejects ``NONE`` by type and the keyset needs no null guard.
 
@@ -520,8 +666,9 @@ class SurrealDBRelationalAdapter:
         :meth:`list_documents`. See the datetime-binds note at the top of this
         module for why the ISO-string form would ship an ``updated_before``
         returning an empty walk that reports itself exhausted on the first call.
-        The narrowing is otherwise the shape #1586 ships; its NULL-``updated_at``
-        exclusion does not arise, the field being non-optional here.
+        The narrowing is otherwise the shape the raw-SQL siblings ship; its
+        NULL-``updated_at`` exclusion does not arise, the field being
+        non-optional here.
 
         ``filter_ast`` is compiled by the compiler registered for this store's
         ``documents`` target. Only the leaves in ``consumed_keys`` were pushed;
@@ -536,28 +683,36 @@ class SurrealDBRelationalAdapter:
         it is no latency bound. Because ``last_scanned`` is the last *raw* row, a
         resumed step never re-*returns* the rejected gap.
 
-        **It does not follow that a walk is O(namespace) on this store, and it
-        is not.** Any top-level ``OR`` in the ``WHERE`` collapses SurrealDB's
-        planner to a full table scan — measured on 2.x, the keyset disjunction
-        loses not only the ``created_at`` range but the ``namespace_id`` prefix,
-        so ``EXPLAIN`` reports ``Iterate Table`` where the same statement without
-        the disjunction reports ``Iterate Index`` on ``idx_document_ns_created``.
-        Every resumed step therefore re-examines every ``document`` row in the
-        database, **all namespaces included**, and sorts in memory. A full walk
-        is O(rows-in-table x steps), not O(namespace): measured 3.5x wall time
-        for a 2x namespace, and 13x per step from 5k foreign rows the caller can
-        never see. Cost tracks total corpus *bytes*, since a table scan
-        materializes whole records.
+        **A step is namespace-scoped, but it is not O(scan_limit).** Both
+        statements plan ``Iterate Index`` on ``idx_document_ns_created``
+        (``(namespace_id, created_at)``), so a step examines the namespace, not
+        the table: no other tenant's rows are read, and cost no longer tracks
+        total corpus size. What the index does *not* buy is a bounded step —
+        SurrealDB 2.x still materializes and sorts the qualifying set in memory
+        before applying ``LIMIT`` (see :mod:`.schema`), so a step is
+        O(rows-below-the-cursor-in-this-namespace), and a full walk is quadratic
+        in namespace size. ``scan_limit`` bounds rows returned, never rows
+        examined.
 
-        Two workarounds do not help, so do not re-try them: a ``WITH INDEX``
-        hint still plans ``Iterate Table``, and so does a redundant
-        ``created_at <= $ts`` guard alongside the disjunction. Restoring the
-        index means getting the ``OR`` out of the ``WHERE`` — two
-        index-eligible queries (the tie block by equality, then the strictly
-        below range) merged client-side and capped at ``scan_limit``. That buys
-        namespace scoping, not an O(scan_limit) step: 2.x still sorts the
-        qualifying set in memory (see :mod:`.schema`). Tracked as a follow-up;
-        this is a shipped-and-measured limitation, not an unknown.
+        The ``OR``-freedom is the whole mechanism and it is fragile: on this
+        table an ``OR`` anywhere in the ``WHERE``, nested inside a conjunct
+        included, collapses the plan to ``Iterate Table`` and takes the
+        ``namespace_id`` prefix down with it — a cross-tenant scan. The note at
+        the top of this module says exactly when a disjunction can be indexed and
+        why ``document`` never qualifies. Two near-miss workarounds were measured
+        and do **not** restore the index, so do not re-try them: a
+        ``WITH INDEX`` hint still plans ``Iterate Table``, and so does a redundant
+        ``created_at <= $ts`` range guard bracketing a disjunction. Nor does a
+        pure ``created_at <= $ts`` range with the tie resolved client-side: that
+        is index-eligible but re-reads the whole tie block on every step, which is
+        quadratic inside one.
+
+        **Out of scope, and still true:** a compiled filter fragment containing a
+        ``$or`` re-introduces a top-level ``OR`` and table-scans — including on
+        the very first step, which carries no cursor. Nothing here can prevent
+        that; whether an ``$or`` leaf is pushed down or deferred to the caller's
+        post-filter belongs to the compiler and its compile context. The
+        EXPLAIN-pinning tests therefore cover the no-filter shapes only.
 
         The raw-SQLite sibling has no such problem — its row-value keyset is
         consumed as an index range constraint, so there the total-work bound
@@ -589,8 +744,10 @@ class SurrealDBRelationalAdapter:
         stores nanoseconds; the Python SDK truncates to microseconds on read. So a
         cursor read back from a row stored at ``.0000015`` is ``.000001`` — below
         the row's own stored instant — and every row between the two is invisible
-        to both disjuncts at once: not ``created_at < $ts`` (they are above it), not
-        ``created_at = $ts`` (they are not equal to it). Measured on three rows at
+        to both statements at once: not Q2's ``created_at < $ts`` (they are above
+        it), not Q1's ``created_at = $ts`` (they are not equal to it). The split
+        neither introduces nor repairs this; it is the same two comparisons in two
+        statements instead of two disjuncts. Measured on three rows at
         ``.0000015`` / ``.0000012`` / ``.000001``, resuming from the first returned
         an EMPTY window: the walk reports itself exhausted and silently drops the
         entire remainder, rather than dropping one tie-mate. Unreachable through
@@ -600,7 +757,7 @@ class SurrealDBRelationalAdapter:
         Raises ``ValueError`` when ``scan_limit`` is below 1, before anything is
         compiled or executed, so a bad bound is never masked by a compile error;
         also when a compiled filter's binds collide with this method's own (see
-        the splice below), and when the final raw row carries no readable
+        ``_documents_where``), and when the final raw row carries no readable
         ``created_at`` to resume from.
 
         An unrenderable metadata path segment does NOT raise here. Under this
@@ -613,54 +770,58 @@ class SurrealDBRelationalAdapter:
         if scan_limit < 1:
             raise ValueError(f"scan_limit must be >= 1, got {scan_limit}")
 
-        conditions = ["namespace_id = $ns"]
-        params: dict[str, Any] = {"ns": str(namespace_id), "lim": scan_limit}
-        if status:
-            conditions.append("status = $status")
-            params["status"] = status
-        if updated_before is not None:
-            conditions.append("updated_at < $updated_before")
-            params["updated_before"] = updated_before
+        conditions, params, consumed_keys = _documents_where(
+            namespace_id,
+            status=status,
+            updated_before=updated_before,
+            filter_ast=filter_ast,
+        )
+        where = " AND ".join(conditions)
+
+        rows: list[dict[str, Any]] = []
+        remaining = scan_limit
         if after is not None:
             cursor_created_at, cursor_id = after
-            conditions.append("(created_at < $after_created_at OR (created_at = $after_created_at AND id < $after_id))")
-            params["after_created_at"] = cursor_created_at
-            params["after_id"] = _record_id("document", cursor_id)
+            # Q1 — the tie block at the cursor instant. ``ORDER BY id DESC`` is
+            # the whole sort: ``created_at`` is pinned by equality, so ordering on
+            # it too would be dead weight.
+            rows = await self._conn.query(
+                f"SELECT * FROM document WHERE {where} "  # noqa: S608
+                "AND created_at = $after_created_at AND id < $after_id "
+                "ORDER BY id DESC LIMIT $lim",
+                {
+                    **params,
+                    "after_created_at": cursor_created_at,
+                    "after_id": _record_id("document", cursor_id),
+                    "lim": scan_limit,
+                },
+            )
+            remaining = scan_limit - len(rows)
 
-        consumed_keys: frozenset[str] = frozenset()
-        if filter_ast is not None:
-            compiler = CompilerRegistry.get("relational.surrealdb", "documents")
-            # No ``CompileError`` mapping here. Under this context's
-            # ``on_unsupported="split"``, an unrenderable metadata segment is a
-            # capability gap the compiler defers (see
-            # ``_documents_compile_context``), so the only ``CompileError`` left
-            # reaching this line would be a genuine compiler fault — which must
-            # escape as itself rather than be relabelled a caller input problem.
-            compiled = compiler(filter_ast, _documents_compile_context())
-            consumed_keys = compiled.consumed_keys
-            conditions.append(f"({compiled.predicate})")
-            # Compiled binds are ``{param_namespace}_{n}`` — ``f_0``, ``f_1``, …
-            # — and this method's are ``ns`` / ``lim`` / ``status`` /
-            # ``updated_before`` / ``after_*``, so the two families are disjoint
-            # by construction. The invariant runs BOTH ways and neither direction
-            # is safe to break: never name a scan bind ``f_<n>``, and never set
-            # this context's ``param_namespace`` to anything that could produce
-            # ``ns`` / ``lim`` / ``status``. The check below is what stops a
-            # violation from being silent — a compiled ``ns`` bind would overwrite
-            # the tenant scope in ``params`` and return another namespace's rows
-            # with no error anywhere.
-            collisions = params.keys() & compiled.params.keys()
-            if collisions:
-                raise ValueError(f"compiled filter binds collide with scan binds: {sorted(collisions)}")
-            params.update(compiled.params)
+        if remaining > 0:
+            # Q2 — strictly below the cursor instant, or the whole namespace when
+            # there is no cursor. Skipped entirely when Q1 already filled the
+            # window, so a step resumed inside a large tie block costs one
+            # statement. Its own ``LIMIT`` is the shortfall, not ``scan_limit``,
+            # which is what makes ``len(Q1) + len(Q2) <= scan_limit`` hold by
+            # arithmetic — the concatenation needs no trailing slice.
+            older_where = where if after is None else f"{where} AND created_at < $after_created_at"
+            older_params: dict[str, Any] = {**params, "lim": remaining}
+            if after is not None:
+                older_params["after_created_at"] = after[0]
+            rows = rows + await self._conn.query(
+                f"SELECT * FROM document WHERE {older_where} "  # noqa: S608
+                "ORDER BY created_at DESC, id DESC LIMIT $lim",
+                older_params,
+            )
 
-        where = " AND ".join(conditions)
-        rows = await self._conn.query(
-            f"SELECT * FROM document WHERE {where} ORDER BY created_at DESC, id DESC LIMIT $lim",  # noqa: S608
-            params,
-        )
-        # ``last_scanned`` and ``exhausted`` both describe the RAW window: the
-        # final row scanned, and whether SurrealQL ran out of rows filling it.
+        # ``last_scanned`` and ``exhausted`` both describe the RAW window — now
+        # the MERGED one: the final row scanned across both statements, and
+        # whether the pair together ran out of rows filling ``scan_limit``.
+        # ``exhausted`` must be read off the merge and not off either leg: Q1
+        # returning fewer rows than asked is the normal case (a tie block is
+        # usually one row), and calling that exhausted would end every walk after
+        # its first resumed step.
         # Neither may be derived from a post-filtered subset — that would re-scan
         # the rejected gap on resume, and would call a full window exhausted. The
         # key comes from ``rows[-1]``, not from ``docs[-1]``: ``_row_to_document``
@@ -685,23 +846,61 @@ class SurrealDBRelationalAdapter:
         processing_before: datetime,
         limit: int = 100,
     ) -> list[Document]:
-        """Claim stale orphaned documents (no row locking - SurrealDB plain claim)."""
+        """Claim stale orphaned documents (no row locking - SurrealDB plain claim).
+
+        **Two statements, one per status/cutoff pair, merged client-side.** As a
+        single predicate the two pairs need a top-level ``OR``, which costs the
+        statement its indexes on this table, the ``namespace_id`` prefix included
+        (see the disjunction note at the top of this module) — the sweep read
+        every ``document`` row in the database, all namespaces included. Each leg
+        alone plans ``Iterate Index`` on ``idx_document_ns_status``.
+
+        The legs are disjoint by ``status``, so the union is exactly the original
+        row set. Unlike the keyset split in :meth:`scan_documents`, the
+        concatenation is **not** already ordered — either leg can supply any
+        position in ``updated_at`` order — so the merge re-sorts before applying
+        ``limit``. Both legs must therefore fetch the full ``limit``: either one
+        alone can own the whole claim. ``updated_at`` cannot be ``NONE`` on a
+        returned row, the leg predicates having compared it.
+
+        Rows returned, and their ``updated_at`` order, are unchanged. What *can*
+        differ from the single-statement form is which of several rows sharing one
+        ``updated_at`` instant lands inside ``limit`` — measured on a seeded
+        namespace, the two forms returned the same timestamp multiset with one id
+        swapped. The old ``ORDER BY updated_at`` had no secondary key either, so
+        that choice was already arbitrary and is not a contract; the merge's
+        stable sort now makes it at least deterministic, PENDING before
+        PROCESSING.
+
+        **The id de-duplication in the merge is not defensive padding — the split
+        created the race it closes.** At any single instant the legs are disjoint,
+        a row being either PENDING or PROCESSING and never both, so a reader
+        checking the predicates concludes no row can arrive twice. That holds for
+        one statement and not for two: nothing spans them, so a *concurrent*
+        claimer that flips a row PENDING -> PROCESSING between them makes the
+        first leg return it as pending and the second return the same row as
+        processing. Reproduced deterministically by interleaving that flip: a
+        namespace holding one document returned it twice, claiming it twice and
+        spending two of ``limit`` on one row. Keyed on the record id and
+        first-wins, so the row keeps the earlier leg's ``orphan_prior_status`` —
+        the status it actually held when this call observed it.
+        """
         ns_str = str(namespace_id)
-        rows = await self._conn.query(
-            "SELECT * FROM document WHERE namespace_id = $ns AND ("
-            "(status = $pending AND updated_at < $pending_before) OR "
-            "(status = $processing AND updated_at < $processing_before)"
-            ") ORDER BY updated_at LIMIT $lim",
-            {
-                "ns": ns_str,
-                "pending": DocumentStatus.PENDING.value,
-                "processing": DocumentStatus.PROCESSING.value,
-                "pending_before": pending_before,
-                "processing_before": processing_before,
-                "lim": limit,
-            },
+        legs = (
+            (DocumentStatus.PENDING.value, pending_before),
+            (DocumentStatus.PROCESSING.value, processing_before),
         )
-        docs = [self._row_to_document(r) for r in rows]
+        by_id: dict[str, dict[str, Any]] = {}
+        for status_value, cutoff in legs:
+            for row in await self._conn.query(
+                "SELECT * FROM document WHERE namespace_id = $ns "
+                "AND status = $status AND updated_at < $cutoff "
+                "ORDER BY updated_at LIMIT $lim",
+                {"ns": ns_str, "status": status_value, "cutoff": cutoff, "lim": limit},
+            ):
+                by_id.setdefault(str(row["id"]), row)
+        rows = sorted(by_id.values(), key=lambda r: _parse_dt(r["updated_at"]) or datetime.max.replace(tzinfo=UTC))
+        docs = [self._row_to_document(r) for r in rows[:limit]]
         if not docs:
             return []
         # Both cutoffs above and this stamp bind as ``datetime`` objects. As ISO
@@ -842,16 +1041,23 @@ class SurrealDBRelationalAdapter:
         older than that cutoff are also excluded so a crash-abandoned
         half-ingest (#1464) re-ingests; fresh PENDING rows stay a dedup hit,
         preserving the concurrent in-flight guard.
+
+        Probes one index-eligible leg at a time (see
+        ``_checksum_reingestable_legs``) and stops at the first hit, so the common
+        settled-document case costs one statement. The legs are disjoint, so which
+        one answers does not change the row set — only which of several rows
+        sharing a checksum an unordered ``LIMIT 1`` happens to surface, and that
+        was already unordered.
         """
         ns_str = str(namespace_id)
-        where, binds = _checksum_reingestable_clause(pending_stale_before)
-        row = await self._conn.query_one(
-            f"SELECT * FROM document WHERE namespace_id = $ns AND checksum = $checksum AND {where} LIMIT 1",  # noqa: S608
-            {"ns": ns_str, "checksum": checksum, **binds},
-        )
-        if row is None:
-            return None
-        return self._row_to_document(row)
+        for where, binds in _checksum_reingestable_legs(pending_stale_before):
+            row = await self._conn.query_one(
+                f"SELECT * FROM document WHERE namespace_id = $ns AND checksum = $checksum AND {where} LIMIT 1",  # noqa: S608
+                {"ns": ns_str, "checksum": checksum, **binds},
+            )
+            if row is not None:
+                return self._row_to_document(row)
+        return None
 
     async def get_document_by_external_id(self, external_id: str | None, *, namespace_id: UUID) -> Document | None:
         """Get a document by (namespace_id, external_id).
@@ -887,23 +1093,38 @@ class SurrealDBRelationalAdapter:
             checksums: List of content checksums to look up
             pending_stale_before: Cutoff for reclaiming stale PENDING half-ingests
 
+        One index-eligible statement per leg (see
+        ``_checksum_reingestable_legs``), accumulated into one mapping. Unlike the
+        single-row probe, both legs always run: a batch needs every checksum
+        answered, and the two legs cover different rows.
+
+        **First write wins, and that is what keeps this method agreeing with**
+        :meth:`get_document_by_checksum`. The legs are disjoint by ``status``, but
+        the *checksums* they return are not: ``(namespace_id, checksum)`` carries
+        no unique constraint, so one checksum can have both a settled row (leg A)
+        and a fresh-PENDING row (leg B). Under plain last-wins the later leg would
+        take it — handing the batch caller the in-flight row while the single-row
+        probe, which stops at its first hit, hands back the settled one. Two dedup
+        entry points disagreeing about the same checksum is the kind of split that
+        surfaces as a phantom duplicate ingest much later, so both resolve it the
+        same way: leg order is precedence, settled ahead of in-flight.
+
         Returns:
             Dictionary mapping checksum to Document (only for existing documents)
         """
         if not checksums:
             return {}
         ns_str = str(namespace_id)
-        where, binds = _checksum_reingestable_clause(pending_stale_before)
-        rows = await self._conn.query(
-            f"SELECT * FROM document WHERE namespace_id = $ns AND checksum IN $checksums AND {where}",  # noqa: S608
-            {"ns": ns_str, "checksums": checksums, **binds},
-        )
         result: dict[str, Document] = {}
-        for r in rows:
-            doc = self._row_to_document(r)
-            cs = r.get("checksum", "")
-            if cs:
-                result[cs] = doc
+        for where, binds in _checksum_reingestable_legs(pending_stale_before):
+            rows = await self._conn.query(
+                f"SELECT * FROM document WHERE namespace_id = $ns AND checksum IN $checksums AND {where}",  # noqa: S608
+                {"ns": ns_str, "checksums": checksums, **binds},
+            )
+            for r in rows:
+                cs = r.get("checksum", "")
+                if cs and cs not in result:
+                    result[cs] = self._row_to_document(r)
         return result
 
     async def get_documents_batch(self, document_ids: list[UUID], *, namespace_id: UUID) -> dict[UUID, Document]:

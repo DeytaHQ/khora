@@ -8,12 +8,17 @@ This leg is not a transcription of the SQLAlchemy pair (khora #1586). Three
 things are structurally different on this store and each gets its own coverage
 below:
 
-* **The keyset predicate is two clauses, not a row-value compare.** SurrealQL
-  has no ``(a, b) < (x, y)``, so the resume position is expressed as
-  ``created_at < $ts OR (created_at = $ts AND id < $id)`` — a top-level ``OR``
-  sitting in a ``WHERE`` that also carries the namespace scope. That makes
-  *grouping* a correctness property of this store rather than a style choice,
-  and it makes mid-tie resume the interesting case.
+* **The keyset predicate is two STATEMENTS, not a row-value compare.** SurrealQL
+  has no ``(a, b) < (x, y)``, and written out as one predicate the resume
+  position needs an ``OR`` — which this store's planner answers by dropping to a
+  full table scan, namespace prefix included. So a resumed step issues the tie
+  block (``created_at = $ts AND id < $id``) and the strictly-older range
+  (``created_at < $ts``) as two ``OR``-free queries and concatenates them; see
+  ``scan_documents``. Mid-tie resume is therefore the interesting case here, and
+  several tests below still reason in terms of the old single-``WHERE`` shape
+  because that is the hazard they were written against — their assertions are on
+  rows and hold either way. The plan-level guards live in
+  ``tests/unit/storage/backends/surrealdb/test_document_query_plans.py``.
 * **``id`` is a ``RecordID``, not a UUID column.** ``id < $rid`` is a record-id
   compare, and nothing outside these tests establishes that it agrees with the
   statement's own ``ORDER BY id DESC``. It was the ticket's highest-risk
@@ -1093,15 +1098,20 @@ async def test_ungrouped_or_fragment_cannot_absorb_the_namespace_scope(adapter, 
 
 
 async def test_ungrouped_keyset_disjunction_cannot_absorb_the_namespace_scope(adapter, namespace) -> None:
-    """The parentheses around the keyset disjunction are load-bearing too.
+    """A resumed step must not read another tenant's tie block.
 
-    This is the store-specific half of the same hazard. SurrealQL has no
-    row-value comparison, so the resume predicate is a top-level ``OR``:
-    ``created_at < $ts OR (created_at = $ts AND id < $id)``. Ungrouped, the
-    namespace scope is absorbed into the left disjunct and the right one —
-    ``created_at = $ts AND id < $cursor_id`` — reads every tenant's tie block.
-    The SQLAlchemy stores cannot have this bug at all; it exists only because the
-    predicate had to be written out by hand here.
+    **The name is historical and the mechanism it names is gone.** This was
+    written against a resume predicate that was a single top-level ``OR``
+    (``created_at < $ts OR (created_at = $ts AND id < $id)``), where the
+    parentheses were load-bearing: ungrouped, the namespace scope was absorbed
+    into the left disjunct and the right one — ``created_at = $ts AND
+    id < $cursor_id`` — read every tenant's tie block. There is no disjunction to
+    group any more; the resume is two ``OR``-free statements, each independently
+    namespace-scoped, so the shape this guards against is now unrepresentable
+    rather than merely avoided. What the assertions check is the outcome, not the
+    mechanism, so they are kept as-is: a future rewrite that reintroduces a
+    hand-written predicate is exactly what should trip here. The seed and the
+    mutation numbers below describe the pre-split code.
 
     The seed is built by :func:`_two_namespace_ladders` so the foreign ids sort
     BELOW the cursor deterministically. That is not cosmetic: measured, with the
