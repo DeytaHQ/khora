@@ -613,7 +613,7 @@ async def test_pushdown_never_rejects_a_row_the_full_filter_would_keep(backend, 
     **``oracle <= window`` is satisfied unconditionally by an empty oracle**, so a
     shape matching nothing in this corpus is not a weak parametrization — it is a
     green run asserting nothing, and it looks exactly like a real one. Two shapes
-    were in that state before khora #1588: ``pushable_exists`` read
+    were in that state before khora #1589: ``pushable_exists`` read
     ``{"source_url": {"$exists": False}}`` and ``source_url`` is a system key
     present on every row (oracle 0, now 6 under ``$exists: True``); and
     ``unpushable_key``, which cannot be fixed the same way because no document can
@@ -746,7 +746,7 @@ def test_a_row_with_no_created_at_has_no_position_and_says_so() -> None:
     public method would prove nothing and could not fail.
 
     **Raising is the whole point of the function, and the alternative is what the
-    #1588 review caught.** The rest of this store reads ``created_at`` through
+    #1589 review caught.** The rest of this store reads ``created_at`` through
     ``_parse_dt(...) or datetime.now(UTC)`` — right for a domain object, wrong for
     a cursor, because a ``now()`` position sorts above every row in the window it
     came from, so the next step re-reads the rows it just returned and the walk
@@ -785,7 +785,7 @@ async def test_last_scanned_carries_a_datetime_and_a_uuid(backend, namespace) ->
     standing between a TEXT key and a green suite.
 
     **What no test reaching through ``scan_documents`` can catch, stated rather
-    than left to be discovered:** khora #1588 moved this key off ``documents[-1]``
+    than left to be discovered:** khora #1589 moved this key off ``documents[-1]``
     and onto the raw row, and that change is invisible to every test in this
     module that goes through the public method — the mutant reverting it passes
     all of them, measured. It has to be: the only difference between the two is

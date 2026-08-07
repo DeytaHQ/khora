@@ -391,7 +391,7 @@ async def test_pushdown_never_rejects_a_row_the_full_filter_would_keep(adapter, 
     # unconditionally by an empty oracle, so a shape that matches nothing in this
     # corpus is not a weak parametrization — it is a green run that tests nothing,
     # indistinguishable from a real one. One shape here was exactly that until
-    # khora #1588 (``source_url $exists False``, constant-false on a system key
+    # khora #1589 (``source_url $exists False``, constant-false on a system key
     # present on every row). No shape in this dict is deliberately constant-empty,
     # so this holds for all of them.
     assert oracle, "the shape matches no row in this corpus — `oracle <= window` cannot fail"

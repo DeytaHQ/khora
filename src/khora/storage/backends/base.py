@@ -156,7 +156,7 @@ class DocumentScanStep:
 
     SurrealDB used to be the exception, remapping the internal ``CompileError``
     to the public ``RecallFilterUnsupportedError`` for that metadata-segment case;
-    khora #1588 moved it into the compiler's deferral path, so the four now agree.
+    khora #1589 moved it into the compiler's deferral path, so the four now agree.
     A ``CompileError`` reaching a scan today is a compiler fault, not a caller
     input problem, and must surface as itself.
 

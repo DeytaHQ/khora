@@ -195,7 +195,7 @@ async def seed_varied(store: Any, namespace_id: UUID, seed: ScanSeed) -> None:
 # assertion under test is ``oracle <= window``, which a constant-empty oracle
 # satisfies unconditionally — a vacuous shape is not a weak test, it is no test,
 # and it looks identical in a green run. ``pushable_exists`` is the cautionary
-# case: it read ``{"source_url": {"$exists": False}}`` until khora #1588, and
+# case: it read ``{"source_url": {"$exists": False}}`` until khora #1589, and
 # ``source_url`` is a system key present on every row, so its oracle was 0 on all
 # three stores.
 #
