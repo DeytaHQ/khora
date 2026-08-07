@@ -43,7 +43,7 @@ Example usage:
 """
 
 from .config import KhoraConfig
-from .core.models.document import DocumentSource
+from .core.models.document import DocumentCursor, DocumentPage, DocumentSource, DocumentStatus
 from .core.models.event import EventType
 from .core.recall_context import context_text
 from .dream import DreamConfig, DreamMode, DreamResult, DreamRunInfo, DreamScope, OpKind
@@ -103,6 +103,9 @@ __all__ = [
     "SearchMode",
     "KhoraConfig",
     "DocumentSource",
+    "DocumentPage",
+    "DocumentCursor",
+    "DocumentStatus",
     # Engine functions
     "create_engine",
     "list_engines",

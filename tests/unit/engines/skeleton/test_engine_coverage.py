@@ -558,11 +558,14 @@ class TestDelegatingMethods:
     @pytest.mark.asyncio
     async def test_list_documents_delegates(self) -> None:
         eng = _connected()
-        eng._storage.list_documents = AsyncMock(return_value=[])
+        sentinel = MagicMock()
+        eng._storage.scan_documents_page = AsyncMock(return_value=sentinel)
         ns = uuid4()
         out = await eng.list_documents(ns, limit=25)
-        assert out == []
-        eng._storage.list_documents.assert_awaited_once_with(ns, limit=25)
+        assert out is sentinel
+        eng._storage.scan_documents_page.assert_awaited_once_with(
+            ns, filter_ast=None, status=None, updated_before=None, limit=25, after=None, scan_bound=None
+        )
 
     @pytest.mark.asyncio
     async def test_search_entities_not_implemented(self) -> None:

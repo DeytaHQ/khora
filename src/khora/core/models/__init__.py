@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .document import Chunk, Document, DocumentSource
+from .document import Chunk, Document, DocumentCursor, DocumentPage, DocumentSource, DocumentStatus
 from .entity import CommunityNode, Entity, Episode, Relationship
 from .event import EventType, MemoryEvent
 from .recall import (
@@ -21,6 +21,9 @@ __all__ = [
     # Document
     "Document",
     "DocumentSource",
+    "DocumentCursor",
+    "DocumentPage",
+    "DocumentStatus",
     "Chunk",
     # Entity
     "CommunityNode",

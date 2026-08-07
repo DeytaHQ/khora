@@ -1495,16 +1495,41 @@ class TestConvenienceMethods:
 
     @pytest.mark.asyncio
     async def test_list_documents(self) -> None:
-        """list_documents delegates to engine with resolved namespace."""
+        """list_documents threads the enumeration args to the engine with a resolved namespace."""
         kb = _make_kb(connected=True)
         ns_id = uuid4()
 
-        mock_docs = [MagicMock(), MagicMock()]
-        kb._engine.list_documents = AsyncMock(return_value=mock_docs)
+        mock_page = MagicMock()
+        kb._engine.list_documents = AsyncMock(return_value=mock_page)
 
         result = await kb.list_documents(namespace=ns_id, limit=50)
-        assert result == mock_docs
-        kb._engine.list_documents.assert_awaited_once_with(_RESOLVE_ROW_ID, limit=50)
+        assert result is mock_page
+        # scan_bound = max(50 x 10, 1000) = 1000 (from the mock config knobs).
+        kb._engine.list_documents.assert_awaited_once_with(
+            _RESOLVE_ROW_ID,
+            filter_ast=None,
+            status=None,
+            updated_before=None,
+            limit=50,
+            after=None,
+            scan_bound=1000,
+        )
+
+    @pytest.mark.asyncio
+    async def test_list_documents_validates_before_engine_dispatch(self) -> None:
+        """occurred_at rejection and unknown-status ValueError fire before the engine is called."""
+        from khora.filter import RecallFilterValidationError
+
+        kb = _make_kb(connected=True)
+        kb._engine.list_documents = AsyncMock()
+        ns_id = uuid4()
+
+        with pytest.raises(RecallFilterValidationError):
+            await kb.list_documents(namespace=ns_id, filter={"occurred_at": {"$gte": "2020-01-01T00:00:00Z"}})
+        with pytest.raises(ValueError):
+            await kb.list_documents(namespace=ns_id, status="not-a-status")
+
+        kb._engine.list_documents.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_search_entities(self) -> None:

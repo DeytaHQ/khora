@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import time as _time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -31,10 +31,10 @@ from khora.core.models import (
     MemoryNamespace,
     Relationship,
 )
-from khora.core.models.document import DocumentSource
+from khora.core.models.document import DocumentCursor, DocumentPage, DocumentSource
 from khora.core.models.recall import DocumentProjection
 from khora.exceptions import GraphMirrorFailedAfterPGCommitError
-from khora.storage.backends.base import PaginatedResult
+from khora.storage.backends.base import DocumentScanKey, PaginatedResult
 from khora.storage.replace_mirror import apply_replace_mirror_payload, build_replace_mirror_payload
 from khora.telemetry import get_collector, metric_counter, trace_span
 
@@ -262,6 +262,19 @@ class NamespaceDeletionResult:
     def partial_failure(self) -> bool:
         """True when at least one backend purge failed."""
         return bool(self.degradations)
+
+
+def _cursor_from_key(key: DocumentScanKey | None) -> DocumentCursor | None:
+    """Lift an internal ``(created_at, id)`` scan key to the public cursor.
+
+    ``None`` maps to ``None`` (an exhausted or never-advanced walk). The key is
+    stored verbatim off the raw row by the scan primitive; this only re-wraps it,
+    it does not reshape ``created_at`` or ``id``.
+    """
+    if key is None:
+        return None
+    created_at, doc_id = key
+    return DocumentCursor(created_at=created_at, id=doc_id)
 
 
 @dataclass
@@ -893,6 +906,135 @@ class StorageCoordinator:
             raise RuntimeError("Relational backend not configured")
         return await self._relational.list_documents(
             namespace_id, status=status, updated_before=updated_before, limit=limit, offset=offset
+        )
+
+    async def scan_documents_page(
+        self,
+        namespace_id: UUID,
+        *,
+        filter_ast: FilterNode | None = None,
+        status: str | None = None,
+        updated_before: datetime | None = None,
+        limit: int = 100,
+        after: DocumentScanKey | None = None,
+        scan_bound: int | None = None,
+    ) -> DocumentPage:
+        """Enumerate one keyset page of a namespace's documents.
+
+        The keyset counterpart to the offset-based :meth:`list_documents`.
+        Drives the relational backend's ``scan_documents`` primitive one bounded
+        step at a time in ``(created_at DESC, id DESC)`` order, applies the
+        in-memory filter post-check to each step's rows, and accumulates matches
+        until the page is full, the scan bound is consumed, or the namespace is
+        exhausted. No transaction spans steps — each step is its own ``SELECT``.
+
+        ``filter_ast`` is compiled to an in-memory predicate **once** (not per
+        step) and re-checks the WHOLE filter over every scanned row: everything a
+        backend pushed into SQL is a superset filter, so re-running a pushed leaf
+        can only narrow. ``after`` is the internal ``(created_at, id)`` resume
+        position; callers thread the previous page's
+        :attr:`~khora.core.models.document.DocumentPage.next_after`.
+
+        Step sizing is the shortfall ``limit - len(matches)`` (bounded by the
+        remaining scan budget), so a step never returns more matches than the
+        page still needs — a page holds **at most** ``limit`` matches, its
+        ``next_after`` is always a raw last-scanned position (never derived from a
+        converted document), and exactly-once resume holds. Under a very selective
+        filter the tail steps shrink; the total raw rows scanned per page is
+        capped at ``scan_bound`` (default ``max(limit x 10, 1000)``).
+
+        **Memory note:** ``scan_limit`` bounds *rows*, and the raw stores
+        ``SELECT *``; a step over large documents is large in bytes even when the
+        row count is modest. The scan bound is a row count, not a byte budget.
+
+        Returns a :class:`~khora.core.models.document.DocumentPage`:
+        ``next_after`` is the last-scanned position (``None`` iff ``exhausted``),
+        ``exhausted`` is the only sound termination signal, and
+        ``post_filtered_keys`` are the filter leaf keys the backend could not push
+        and that the post-filter enforced (empty without a filter).
+        """
+        if not self._relational:
+            raise RuntimeError("Relational backend not configured")
+        if limit < 1:
+            raise ValueError(f"limit must be >= 1, got {limit}")
+
+        if scan_bound is None:
+            scan_bound = max(limit * 10, 1000)
+        if scan_bound < 1:
+            # Guards the ``next_after is None iff exhausted`` invariant: a
+            # non-positive bound would break before any step and return
+            # next_after=None with exhausted=False (silent truncation). The
+            # facade never passes this; a direct caller could.
+            raise ValueError(f"scan_bound must be >= 1, got {scan_bound}")
+
+        # Compile the post-filter ONCE per page. filter_leaf_keys is the
+        # left-hand side of the pushdown split reported per step in consumed_keys.
+        post_filter: Callable[[Any], bool] | None = None
+        leaf_keys: frozenset[str] = frozenset()
+        if filter_ast is not None:
+            from khora.filter.compilers.python import compile_python
+            from khora.filter.execute import build_compile_context, filter_leaf_keys
+
+            leaf_keys = filter_leaf_keys(filter_ast)
+            post_filter = compile_python(
+                filter_ast, build_compile_context("documents", on_unsupported="split")
+            ).predicate
+
+        matches: list[Document] = []
+        consumed_keys: frozenset[str] = frozenset()
+        cursor: DocumentScanKey | None = after
+        last_scanned: DocumentScanKey | None = None
+        remaining = scan_bound
+        exhausted = False
+
+        while True:
+            need = limit - len(matches)
+            if need <= 0:
+                break  # page full
+            # Size each step to the match shortfall, bounded by the remaining
+            # raw-row budget. This keeps a page at <= limit matches and makes
+            # next_after a raw last-scanned key (no truncation of an interior
+            # match, whose safe raw key the primitive does not expose). Trade-off:
+            # under a selective, non-pushed filter the tail steps shrink toward
+            # 1 row, so a page can cost up to scan_bound round-trips. Accepted —
+            # per-step over-fetch is a deliberate non-goal here because it would
+            # require deriving a resume cursor from a converted Document, which
+            # the scan primitive forbids (now()/uuid5 masking).
+            step_limit = min(need, remaining)
+            if step_limit <= 0:
+                break  # scan bound consumed
+            step = await self._relational.scan_documents(
+                namespace_id,
+                filter_ast=filter_ast,
+                status=status,
+                updated_before=updated_before,
+                after=cursor,
+                scan_limit=step_limit,
+            )
+            consumed_keys |= step.consumed_keys
+            rows = step.documents
+            if post_filter is not None:
+                rows = [doc for doc in rows if post_filter(doc)]
+            matches.extend(rows)
+            # Budget counts RAW rows scanned (scan_documents never post-filters,
+            # so len(step.documents) is the raw window size), not surviving matches.
+            remaining -= len(step.documents)
+            if step.last_scanned is not None:
+                last_scanned = step.last_scanned
+            if step.exhausted:
+                exhausted = True
+                break
+            cursor = step.last_scanned
+
+        # post_filtered_keys = leaf keys the backend did not push down. Unioning
+        # consumed_keys across steps is exact because the compile is deterministic
+        # for a fixed backend+dialect+filter, so every step reports the same set
+        # (the walk never switches backends mid-page).
+        return DocumentPage(
+            matches,
+            next_after=None if exhausted else _cursor_from_key(last_scanned),
+            exhausted=exhausted,
+            post_filtered_keys=tuple(sorted(leaf_keys - consumed_keys)) if filter_ast is not None else (),
         )
 
     @_record_storage_op("claim_orphaned_documents", "postgresql")
