@@ -323,6 +323,72 @@ async def test_list_entities_pagination_walks_every_live_row_once(seeded, record
     assert set(seen) == {e.id for e in full}, "pagination skipped a live entity"
 
 
+async def test_list_entities_pagination_survives_created_at_ties(seeded, recorder) -> None:
+    """Paging a tie group larger than the window must not drop or repeat a row.
+
+    This is the case the distinct-timestamp walk above cannot see: when many live
+    rows share one ``created_at`` (a batch that stamped a single ``time::now()``),
+    each leg's ``LIMIT window`` truncates the tie group, and without a secondary
+    ``id`` sort key in the SQL the truncated set diverges from the Python merge's
+    ``(created_at, id)`` order — consecutive offset pages then skip some tied rows
+    and repeat others. Seven live entities on one instant, paged two at a time.
+    """
+    graph, ns = seeded["graph"], seeded["ns"]
+    for i in range(7):
+        await graph.upsert_entities_batch(
+            ns,
+            [
+                Entity(
+                    namespace_id=ns,
+                    name=f"tie-{i}",
+                    entity_type="TIEGROUP",
+                    valid_until=None,
+                    created_at=_BASE + timedelta(hours=100),  # all identical, distinct from fixture rows
+                    updated_at=_BASE + timedelta(hours=100),
+                )
+            ],
+        )
+    tied = await graph.list_entities(ns, entity_type="TIEGROUP", limit=100)
+    assert len(tied) == 7, f"setup wrong: {len(tied)} tied entities"
+
+    seen: list[UUID] = []
+    for offset in range(0, 12, 2):
+        page = await graph.list_entities(ns, entity_type="TIEGROUP", limit=2, offset=offset)
+        seen.extend(e.id for e in page)
+        if not page:
+            break
+    assert len(seen) == len(set(seen)), f"a tied row was returned on more than one page: {seen}"
+    assert set(seen) == {e.id for e in tied}, "a tied row was never returned across the walk"
+
+
+async def test_search_similar_respects_min_similarity(seeded, recorder) -> None:
+    """The ``min_similarity`` floor filters low-scoring chunks across both legs.
+
+    The fixture chunks all embed ``_EMB`` (self-dot ≈ 0.95). Add one chunk whose
+    embedding scores ≈ 0.30 against the query; a floor between the two must drop
+    only the low one, and a zero floor must keep it.
+    """
+    vector, ns = seeded["vector"], seeded["ns"]
+    low = await vector.create_chunk(
+        Chunk(
+            namespace_id=ns,
+            document_id=seeded["doc"],
+            content="low-similarity chunk",
+            chunk_index=999,
+            start_char=0,
+            end_char=1,
+            embedding=[0.9, 0.3, 0.2, 0.1],
+            created_at=_BASE,
+        )
+    )
+    filtered = await vector.search_similar(ns, _EMB, limit=100, min_similarity=0.5)
+    assert low.id not in {c.id for c, _ in filtered}, "min_similarity did not drop the low-scoring chunk"
+    assert all(score >= 0.5 for _, score in filtered), "a below-floor score survived the filter"
+
+    unfiltered = await vector.search_similar(ns, _EMB, limit=100, min_similarity=0.0)
+    assert low.id in {c.id for c, _ in unfiltered}, "zero floor should include the low-scoring chunk"
+
+
 async def test_the_disjunctive_forms_really_table_scan(seeded, recorder) -> None:
     """The premise, pinned: the replaced OR shapes really do ``Iterate Table``.
 

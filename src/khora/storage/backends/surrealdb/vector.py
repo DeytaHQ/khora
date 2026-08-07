@@ -226,7 +226,17 @@ class SurrealDBVectorAdapter:
                 "ns_str": str(namespace_id),
             },
         )
-        return [self._row_to_chunk(r) for r in rows]
+        # De-duplicate by chunk id: on a remote core the ``namespace``/``namespace_id``
+        # OR can surface a row carrying both forms once per union leg. Preserve the
+        # chunk_index order the query established.
+        seen: set[UUID] = set()
+        result: list[Chunk] = []
+        for r in rows:
+            chunk = self._row_to_chunk(r)
+            if chunk.id not in seen:
+                seen.add(chunk.id)
+                result.append(chunk)
+        return result
 
     async def delete_chunks_by_document(self, document_id: UUID, *, namespace_id: UUID) -> int:
         """Delete all chunks for a document, scoped to ``namespace_id`` (IDOR family).
@@ -237,21 +247,24 @@ class SurrealDBVectorAdapter:
         doc_rid = _rid("document", document_id)
         ns_rid = _rid("memory_namespace", namespace_id)
         ns_str = str(namespace_id)
-        # Match the compound namespace predicate every sibling read method uses
-        # (the `namespace` record-link OR the scalar `namespace_id`), so the
-        # delete works for newly written rows and any pre-#1221 rows that carry
-        # only the record-link. The scalar leg replaces the former
-        # ``namespace.namespace_id`` record-traversal, which is unservable and
-        # collapsed the whole statement to ``Iterate Table`` (#1595); the
-        # scalar leg is index-eligible (``idx_chunk_namespace_id``) and covers
-        # the same rows.
+        # Scope by the record-link OR the scalar `namespace_id` — the same pair
+        # `count_chunks` / `list_chunks` already scope chunk reads by, so this is
+        # a superset of the coverage those shipped methods rely on. The scalar
+        # leg replaces the former ``namespace.namespace_id`` record-traversal,
+        # which is unservable and collapsed the statement to ``Iterate Table``
+        # (#1595); the scalar leg is index-eligible (``idx_chunk_namespace_id``).
+        # It covers the record-link + scalar forms written since #1221; it does
+        # NOT reproduce the traversal's dereference of a row-id-keyed namespace
+        # link, but neither do count_chunks/list_chunks, so no read path relies
+        # on that case today.
         bindings = {"doc_rid": doc_rid, "ns_rid": ns_rid, "ns_str": ns_str}
         # Delete and count what was actually removed via ``RETURN BEFORE`` rather
-        # than a separate ``count() ... GROUP ALL``: SurrealDB's aggregate count
-        # over an OR that unions two index scans double-counts rows matching both
-        # legs (a chunk carrying both namespace forms is counted per leg), so the
-        # old count query would over-report. The row set returned by DELETE is
-        # the real deletion, de-duplicated by id for the same union reason.
+        # than a separate ``count() ... GROUP ALL``: on the SurrealDB core the
+        # sweep was measured against (2.3.x), an aggregate count over an OR that
+        # unions two index scans double-counts rows matching both legs (a chunk
+        # carrying both namespace forms is counted per leg), so the old count
+        # query over-reported. The row set returned by DELETE is the real
+        # deletion, de-duplicated by id for the same union reason.
         del_sql = (
             "DELETE FROM chunk "
             "WHERE document = $doc_rid "
@@ -323,11 +336,10 @@ class SurrealDBVectorAdapter:
         created_before: datetime | None = None,
         metadata_filters: dict[str, Any] | None = None,
     ) -> list[tuple[Chunk, float]]:
-        """Semantic search using cosine similarity.
+        """Semantic search by vector similarity.
 
-        Computes cosine similarity via ``vector::similarity::cosine``
-        and sorts by descending similarity.  HNSW index accelerates
-        the distance computation when available.
+        Scores each candidate with ``vector::dot`` (equivalent to cosine for the
+        L2-normalised embeddings khora stores) and sorts by descending score.
         """
         # Build the shared narrowing WITHOUT the namespace disjunct. The
         # namespace scope must be run as two OR-free legs merged in Python
@@ -342,8 +354,6 @@ class SurrealDBVectorAdapter:
             "ns_rid": ns_rid,
             "ns_str": str(namespace_id),
             "query_embedding": list(query_embedding),
-            "limit": limit,
-            "ef": self._hnsw_ef_search,
         }
 
         if filter_document_ids:
@@ -454,7 +464,16 @@ class SurrealDBVectorAdapter:
                 logger.warning("BM25 index not available — run optimize_storage() to create search indexes")
                 return []
             raise
-        return [(self._row_to_chunk(row), float(row.get("rank", 0.0))) for row in rows]
+        # De-duplicate by chunk id (see get_chunks_by_document): the namespace OR
+        # can surface a dual-form row once per union leg on a remote core.
+        seen: set[UUID] = set()
+        results: list[tuple[Chunk, float]] = []
+        for row in rows:
+            chunk = self._row_to_chunk(row)
+            if chunk.id not in seen:
+                seen.add(chunk.id)
+                results.append((chunk, float(row.get("rank", 0.0))))
+        return results
 
     async def count_chunks(self, namespace_id: UUID) -> int:
         """Return the total number of chunks in a namespace."""

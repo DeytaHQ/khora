@@ -166,18 +166,24 @@ async def _query_live_ordered(
 ) -> list[dict[str, Any]]:
     """Run the ``valid_until`` live filter as two index-eligible legs, merged.
 
-    Each leg selects ``ORDER BY created_at DESC`` over the shared
+    Each leg selects ``ORDER BY created_at DESC, id DESC`` over the shared
     ``base_conditions`` plus one live-filter conjunct, capped at ``offset +
-    limit`` rows — the global ``created_at``-DESC window of that size is a subset
-    of the union of each leg's own window, so fetching that many per leg and
-    slicing after the merge reproduces the single disjunctive statement exactly.
-    ``base_conditions`` must NOT contain a disjunction (that is the whole point).
+    limit`` rows — the global window of that size under that total order is a
+    subset of the union of each leg's own window, so fetching that many per leg
+    and slicing after the merge reproduces the single disjunctive statement
+    exactly. The ``id DESC`` secondary key is load-bearing: without it a
+    ``created_at`` tie group larger than the window is truncated arbitrarily per
+    leg, and because the Python re-sort breaks ties by id, consecutive ``offset``
+    pages would drop some tied rows and repeat others. The SQL ``id DESC`` order
+    matches the Python ``str(id)`` reverse order (verified), so the fetched
+    window is a true prefix of the merge order. ``base_conditions`` must NOT
+    contain a disjunction (that is the whole point).
     """
     window = offset + limit
     merged: dict[str, dict[str, Any]] = {}
     for leg in _LIVE_LEGS:
         conds = " AND ".join([*base_conditions, leg])
-        sql = f"SELECT * FROM {table} WHERE {conds} ORDER BY created_at DESC LIMIT $__live_window"  # noqa: S608
+        sql = f"SELECT * FROM {table} WHERE {conds} ORDER BY created_at DESC, id DESC LIMIT $__live_window"  # noqa: S608
         rows = await conn.query(sql, {**bindings, "__live_window": window})
         for row in rows:
             merged[str(row.get("id"))] = row
