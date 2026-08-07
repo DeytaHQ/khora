@@ -960,6 +960,12 @@ class StorageCoordinator:
 
         if scan_bound is None:
             scan_bound = max(limit * 10, 1000)
+        if scan_bound < 1:
+            # Guards the ``next_after is None iff exhausted`` invariant: a
+            # non-positive bound would break before any step and return
+            # next_after=None with exhausted=False (silent truncation). The
+            # facade never passes this; a direct caller could.
+            raise ValueError(f"scan_bound must be >= 1, got {scan_bound}")
 
         # Compile the post-filter ONCE per page. filter_leaf_keys is the
         # left-hand side of the pushdown split reported per step in consumed_keys.
@@ -985,6 +991,15 @@ class StorageCoordinator:
             need = limit - len(matches)
             if need <= 0:
                 break  # page full
+            # Size each step to the match shortfall, bounded by the remaining
+            # raw-row budget. This keeps a page at <= limit matches and makes
+            # next_after a raw last-scanned key (no truncation of an interior
+            # match, whose safe raw key the primitive does not expose). Trade-off:
+            # under a selective, non-pushed filter the tail steps shrink toward
+            # 1 row, so a page can cost up to scan_bound round-trips. Accepted —
+            # per-step over-fetch is a deliberate non-goal here because it would
+            # require deriving a resume cursor from a converted Document, which
+            # the scan primitive forbids (now()/uuid5 masking).
             step_limit = min(need, remaining)
             if step_limit <= 0:
                 break  # scan bound consumed
@@ -1011,6 +1026,10 @@ class StorageCoordinator:
                 break
             cursor = step.last_scanned
 
+        # post_filtered_keys = leaf keys the backend did not push down. Unioning
+        # consumed_keys across steps is exact because the compile is deterministic
+        # for a fixed backend+dialect+filter, so every step reports the same set
+        # (the walk never switches backends mid-page).
         return DocumentPage(
             matches,
             next_after=None if exhausted else _cursor_from_key(last_scanned),

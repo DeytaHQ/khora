@@ -166,7 +166,10 @@ class DocumentCursor:
 
     The position is store-local (each backend round-trips ``created_at`` in the
     shape it stores it). Treat it as opaque: do not reformat, adjust ``tzinfo``,
-    or carry a cursor from one backend to another.
+    or carry a cursor from one backend to another. Feed back only a cursor — or a
+    :class:`Document` — produced by the *same* enumeration; a hand-constructed
+    position, or one taken from a document in a different namespace, resumes at
+    the wrong place and silently skips or repeats rows.
     """
 
     created_at: datetime
@@ -183,10 +186,13 @@ class DocumentPage(Sequence["Document"]):
 
     * :attr:`next_after` — the **last-scanned** keyset position to resume from,
       or ``None`` when the scan is exhausted. ``None`` **iff** :attr:`exhausted`.
-    * :attr:`exhausted` — the scan bound was consumed and no rows remain past
-      the last one scanned. **The only sound termination signal** — a short (or
-      empty) page means nothing on its own, because a filter can reject an entire
-      scanned window.
+    * :attr:`exhausted` — the underlying keyset scan reached the end of the
+      namespace (a scan window returned fewer raw rows than requested), so nothing
+      remains past :attr:`next_after`. **The only sound termination signal** — a
+      short (or empty) page means nothing on its own, because a filter can reject
+      an entire scanned window, and hitting the per-page scan-bound cutoff instead
+      leaves ``exhausted=False`` with a non-``None`` :attr:`next_after`. Loop on
+      ``while not page.exhausted``, never on ``len(page) < limit`` or ``if page``.
     * :attr:`post_filtered_keys` — the filter leaf keys the backend could NOT
       push into SQL and that were therefore enforced by the in-memory
       post-filter. A reporting signal; empty when there is no filter.

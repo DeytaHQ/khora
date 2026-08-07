@@ -30,6 +30,7 @@ EXPECTED_PUBLIC_SURFACE = frozenset(
         "DateOps",
         "DocumentCursor",
         "DocumentPage",
+        "DocumentStatus",
         "DocumentProjection",
         "DocumentResult",
         "DocumentSource",

@@ -1516,6 +1516,22 @@ class TestConvenienceMethods:
         )
 
     @pytest.mark.asyncio
+    async def test_list_documents_validates_before_engine_dispatch(self) -> None:
+        """occurred_at rejection and unknown-status ValueError fire before the engine is called."""
+        from khora.filter import RecallFilterValidationError
+
+        kb = _make_kb(connected=True)
+        kb._engine.list_documents = AsyncMock()
+        ns_id = uuid4()
+
+        with pytest.raises(RecallFilterValidationError):
+            await kb.list_documents(namespace=ns_id, filter={"occurred_at": {"$gte": "2020-01-01T00:00:00Z"}})
+        with pytest.raises(ValueError):
+            await kb.list_documents(namespace=ns_id, status="not-a-status")
+
+        kb._engine.list_documents.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_search_entities(self) -> None:
         """search_entities delegates to engine."""
         kb = _make_kb(connected=True)

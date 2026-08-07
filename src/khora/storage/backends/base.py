@@ -367,8 +367,14 @@ class RelationalBackendProtocol(Protocol):
         not abstract: it is declared on the protocol only so the coordinator can
         call it across the protocol boundary; the four relational stores own the
         implementation. See :class:`DocumentScanStep` for the row/cursor contract.
+
+        Not ``@abstractmethod`` (so nominal test doubles that never enumerate can
+        subclass the protocol without stubbing it), but the default body raises
+        rather than returning ``None`` — a backend that reaches the coordinator's
+        scan loop without implementing this fails loudly here instead of with a
+        downstream ``AttributeError`` on the returned ``None``.
         """
-        ...
+        raise NotImplementedError("scan_documents is not implemented by this relational backend")
 
     @abstractmethod
     async def claim_orphaned_documents(

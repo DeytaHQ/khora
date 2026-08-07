@@ -2955,16 +2955,20 @@ class Khora:
             limit: Maximum matches per page (default 100); a page may return fewer.
             after: Keyset resume position — a
                 :class:`~khora.core.models.document.DocumentCursor` or a
-                :class:`Document` whose ``(created_at, id)`` is used. There is no
+                :class:`Document` whose ``(created_at, id)`` is used. Pass one
+                produced by a previous page of THIS enumeration; a hand-built or
+                foreign-namespace position resumes at the wrong place. There is no
                 ``offset``.
 
         Returns:
-            A ``DocumentPage`` of matching documents.
+            A ``DocumentPage`` of matching documents. It is a ``Sequence`` but a
+            short page is NOT an end signal — drive the walk on
+            ``while not page.exhausted``, feeding ``page.next_after`` back as
+            ``after``.
 
         Raises:
             RecallFilterValidationError: If ``filter`` fails validation or
                 references ``occurred_at``.
-            RecallFilterUnsupportedError: If a backend cannot honor a predicate.
             ValueError: If ``status`` is not a known ``DocumentStatus``.
         """
         from khora.core.models.document import DocumentCursor as _DocumentCursor

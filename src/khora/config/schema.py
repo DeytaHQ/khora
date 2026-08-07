@@ -1586,10 +1586,10 @@ class QuerySettings(BaseSettings):
     # trades more scan work per page for fewer under-full pages under a very
     # selective filter; the floor keeps small page limits from starving.
     document_scan_overfetch_multiplier: int = Field(
-        default=10, ge=1, description="Per-page scan bound = max(limit × this, document_scan_min_bound)"
+        default=10, ge=1, le=1000, description="Per-page scan bound = max(limit × this, document_scan_min_bound)"
     )
     document_scan_min_bound: int = Field(
-        default=1000, ge=1, description="Floor for the per-page document enumeration scan bound"
+        default=1000, ge=1, le=1_000_000, description="Floor for the per-page document enumeration scan bound"
     )
 
     # Fusion weights. Wired onto the default VectorCypher engine in #1406
