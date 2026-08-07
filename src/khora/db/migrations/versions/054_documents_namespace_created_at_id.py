@@ -4,6 +4,27 @@ Revision ID: 054_documents_namespace_created_at_id
 Revises: 053_khora_chunks_bookkeeping_to_chunker_info
 Create Date: 2026-08-04
 
+Operational profile — read this first
+-------------------------------------
+* **This migration can be slow, and it holds the migration advisory lock for
+  the whole time it runs.** A btree ``CREATE INDEX CONCURRENTLY`` over a large
+  ``documents`` table takes as long as it takes, and ``run_migrations()`` takes
+  a session-scoped ``pg_advisory_lock`` *before* Alembic's transaction
+  demarcation and holds it for the entire run — including the autocommit
+  ``CREATE INDEX CONCURRENTLY`` block below.
+* **A concurrent caller gets 60s, then fails to boot.** It waits only 60s for
+  that lock before raising ``TimeoutError``, which surfaces as
+  ``MigrationResult(success=False)`` and then ``RuntimeError: Database
+  migration failed`` at startup. A concurrent build over a large ``documents``
+  table can easily exceed 60s, so on a large deployment every other service
+  booting with ``run_migrations=True`` would fail to start for the duration of
+  the build.
+* **Run this migration out-of-band on such deployments**, rather than during a
+  rolling deploy.
+* **Migration 029's BRIN build is not a precedent for "concurrent builds are
+  fine".** It does not carry this risk — BRIN indexes are KB-sized and build in
+  seconds.
+
 ``list_documents`` now pins a total order — ``ORDER BY created_at DESC, id
 DESC`` — across the relational backends so that offset pagination cannot drop
 or repeat a row when two documents share a ``created_at``. The pre-existing
@@ -30,27 +51,15 @@ added the 2-column index for ``get_last_activity_at()``'s
 query on its ``(namespace_id, created_at)`` prefix. The new index is created
 **before** the old one is dropped so that query never runs unindexed.
 
-Both dialects are handled. Postgres builds concurrently (see the caveats
-below); every other dialect takes the plain-DDL branch, which is what migration
-019 already did when it created the 2-column index unconditionally. That keeps
+Both dialects are handled. Postgres builds concurrently (see the operational
+profile above and the invalid-index caveat below); every other dialect takes the
+plain-DDL branch, which is what migration 019 already did when it created the
+2-column index unconditionally. That keeps
 the invariant simple: wherever 019 ran, 054 runs, so the ORM declaration and the
 physical schema agree on every backend. The embedded ``sqlite_lance`` stack runs
 this chain too, and its own full-drain pagination callers are the ones that
 motivated the change, so skipping SQLite would have left the regression in place
 on the stack it was measured on.
-
-Operational caveat — this migration can be slow, and it holds the migration
-advisory lock while it runs. ``run_migrations()`` takes a session-scoped
-``pg_advisory_lock`` *before* Alembic's transaction demarcation and holds it for
-the whole run, including the autocommit block below. A concurrent caller waits
-only 60s before raising ``TimeoutError``, which surfaces as
-``MigrationResult(success=False)`` and then ``RuntimeError: Database migration
-failed`` at startup. A btree ``CREATE INDEX CONCURRENTLY`` over a large
-``documents`` table can easily exceed that, so on a large deployment every other
-service booting with ``run_migrations=True`` would fail to start for the
-duration of the build. Run this migration out-of-band on such deployments rather
-than during a rolling deploy. (Migration 029's BRIN build does not carry this
-risk — BRIN indexes are KB-sized and build in seconds.)
 
 Invalid-index recovery — a failed ``CREATE INDEX CONCURRENTLY`` (deadlock,
 cancellation, connection loss) leaves an **INVALID** index behind: ignored by
