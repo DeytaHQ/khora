@@ -18,7 +18,7 @@ Three things live here, in increasing cost:
    ``backend: sqlite``, embedded ``sqlite_lance``, embedded SurrealDB), in BOTH modes.
    No Docker, no LLM, no embeddings.
 
-The smoke leg is a *slice*, not the corpus: the full 186-case × 2-mode × 4-backend
+The smoke leg is a *slice*, not the corpus: the full 193-case x 2-mode x 4-backend
 matrix belongs to ``tests/integration/matrix/test_documents_conformance.py`` behind the
 ``filter_conformance`` marker. What this leg buys is that the seam itself — seeder,
 walk, both modes, all three embedded stores — cannot rot unnoticed between runs of

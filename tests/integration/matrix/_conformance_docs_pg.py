@@ -161,6 +161,10 @@ def _coordinator() -> StorageCoordinator:
     """
 
     async def build() -> StorageCoordinator:
+        # TimeZone=UTC is load-bearing, not cosmetic: it fixes the tzinfo asyncpg
+        # attaches to timestamptz values, which residual mode feeds straight into the
+        # in-harness compile_python predicate. Dropping it changes residual-mode results
+        # on any server whose default TimeZone is not UTC.
         engine = create_async_engine(DATABASE_URL, connect_args={"server_settings": {"TimeZone": "UTC"}})
         coord = StorageCoordinator(relational=PostgreSQLBackend(DATABASE_URL, engine=engine))
         await coord.connect()

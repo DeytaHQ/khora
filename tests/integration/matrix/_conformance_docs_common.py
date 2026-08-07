@@ -47,6 +47,12 @@ SCAN_BOUND = 100_000
 # failure instead of a hung CI job.
 _MAX_PAGES = 1_000
 
+# Upper bound on any single submitted coroutine. The ``_MAX_PAGES`` guard only covers
+# a non-advancing walk, not a coroutine that stalls inside a store call; a bounded
+# wait converts a hung CI job into a named ``TimeoutError`` there too. Generous enough
+# for a full corpus seed on a cold store, short enough that a stalled store fails.
+_RUN_TIMEOUT_S = 600
+
 
 class _LoopThread:
     """A daemon thread running one asyncio loop; submit coroutines, block for results."""
@@ -57,7 +63,7 @@ class _LoopThread:
         self._thread.start()
 
     def run(self, coro: Any) -> Any:
-        return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
+        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout=_RUN_TIMEOUT_S)
 
 
 @lru_cache(maxsize=1)
