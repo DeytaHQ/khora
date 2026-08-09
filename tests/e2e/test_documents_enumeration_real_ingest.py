@@ -81,10 +81,17 @@ pytestmark = [pytest.mark.e2e, pytest.mark.slow]
 
 # --------------------------------------------------------------------------- #
 # Leg selection.
+#
+# The leg names ARE the parametrization ids, and they are the e2e workflow's lane
+# tokens rather than free-form labels: each CI leg selects its lane with
+# ``-k <lane>`` over the whole ``tests/e2e/`` directory, so a node id that does not
+# carry the lane token is silently deselected on every leg — collected nowhere, run
+# nowhere, green everywhere. Same convention as ``test_filter_report_invariant.py``'s
+# ``skeleton_pgvector-<case>`` ids. Renaming either key breaks that contract.
 # --------------------------------------------------------------------------- #
 
-_EMBEDDED = "embedded"
-_POSTGRES = "postgres"
+_EMBEDDED = "skeleton_sqlite_lance"
+_POSTGRES = "skeleton_pgvector"
 
 # leg name -> (Khora fixture, module owning that store's documents compile context).
 _LEGS: dict[str, tuple[str, str]] = {
@@ -410,6 +417,42 @@ async def _walk_documents(kb: Khora, namespace_id: UUID, **kwargs: Any) -> list[
     return assert_walk_compliant(pages)
 
 
+async def _walk_anchored(kb: Khora, corpus: _SeededCorpus, case: ConformanceCase) -> list[Any]:
+    """Walk one case over its seeded corpus, anchored to its own declared expectation."""
+    assert case.expected_ids is not None, f"{case.id}: case without expected_ids"
+    pages = await _walk_pages(kb, corpus.namespace_id, filter=case.filter)
+    return assert_walk_compliant(
+        pages,
+        _case_ast(case),
+        expected_ids=[corpus.doc_ids[seed_id] for seed_id in case.expected_ids],
+    )
+
+
+def _assert_walks_paged(cases: Sequence[ConformanceCase], paged: int) -> None:
+    """Assert EXACTLY the cases that should have paged did page.
+
+    A floor of one would be satisfied by a corpus that drifted down to a single
+    multi-page case, which is the same as not exercising the cursor at all. The
+    predictable count is the number of cases matching **at least** ``_WALK_LIMIT``
+    rows, and the boundary case is the interesting half: a page that fills to exactly
+    ``limit`` reports ``exhausted=False``, because the page-assembly loop stops as
+    soon as the page is full and never issues the step that would have discovered
+    there is nothing after it. So a match set of exactly ``limit`` costs a second,
+    empty page — the concrete reason a short page is not an end signal and
+    ``exhausted`` is the only sound one.
+
+    Asserting the count in both directions is what makes it a guard rather than a
+    tally: too few means a walk collapsed to one fetch when rows remained, too many
+    means a page came back short while more matches were still available.
+    """
+    expected = sum(len(case.expected_ids or ()) >= _WALK_LIMIT for case in cases)
+    assert paged == expected, (
+        f"{paged} walks spanned more than one page at limit={_WALK_LIMIT}, but {expected} cases match at least "
+        f"{_WALK_LIMIT} rows — a page came back short with matches remaining, or a walk that should have paged "
+        "collapsed into a single fetch"
+    )
+
+
 def _fail_with(failures: list[str], what: str) -> None:
     """Report an accumulated sweep failure list — the first few in full, then a roll-up.
 
@@ -439,11 +482,20 @@ async def test_generated_filter_sweep_over_real_ingest(leg: _Leg) -> None:
     * the WALK is compliant — ordered, exactly-once, correctly terminated, sound, and
       **complete** against the seeded ids the case expects (the only leg that can see
       a matching row the enumeration silently dropped); and
-    * the surviving SEED ids equal both ``case.expected_ids`` and the
-      implementation-blind oracle's recomputation of them from the seed records. That
-      is the seed-fidelity cross-check: it says the real ingest transform and the
-      write-API corpus the oracle describes are the same corpus, which is what makes
-      the first assertion's expectation trustworthy in the first place.
+    * the surviving SEED ids equal both ``case.expected_ids`` and the oracle's
+      recomputation of them. That second comparison is NOT a check on the ingested
+      rows — :func:`documents_oracle_survivors` reads ``case.seed_records``, the
+      DECLARED data, and never observes a stored document, so it can only catch a
+      corpus whose declared expectation drifted from its declared records. Kept
+      because it is free and localises that drift here rather than in a backend leg;
+      the check that the ingested rows match the declared ones is
+      :func:`_assert_round_trip`, which runs at seed time.
+
+    Nothing in the corpus is expected to RAISE on either of these two stores (the
+    unsupported-filter cases are surreal-only), so any exception is a finding, not a
+    control-flow signal: it is recorded against its case rather than aborting the
+    sweep, which on a first live run is the difference between one diagnosis and a
+    dead session.
     """
     cases = ingest_seedable_cases()
     _assert_sweep_is_not_vacuous(cases)
@@ -453,9 +505,9 @@ async def test_generated_filter_sweep_over_real_ingest(leg: _Leg) -> None:
     paged = 0
     for case in cases:
         corpus = corpora[_corpus_key(case.seed_records)]
-        assert case.expected_ids is not None, f"{case.id}: documents corpus case without expected_ids"
-        expected_docs = [corpus.doc_ids[seed_id] for seed_id in case.expected_ids]
         try:
+            assert case.expected_ids is not None, "documents corpus case without expected_ids"
+            expected_docs = [corpus.doc_ids[seed_id] for seed_id in case.expected_ids]
             pages = await _walk_pages(leg.kb, corpus.namespace_id, filter=case.filter)
             paged += len(pages) > 1
             docs = assert_walk_compliant(pages, _case_ast(case), expected_ids=expected_docs)
@@ -464,14 +516,11 @@ async def test_generated_filter_sweep_over_real_ingest(leg: _Leg) -> None:
             assert survivors == documents_oracle_survivors(case), (
                 f"survivors {sorted(survivors)} != oracle {sorted(documents_oracle_survivors(case))}"
             )
-        except AssertionError as exc:
-            failures.append(f"[{case.id}] filter={case.filter!r}\n{exc}")
+        except Exception as exc:  # noqa: BLE001 — an unexpected raise IS a per-case finding
+            failures.append(f"[{case.id}] filter={case.filter!r}\n{exc if isinstance(exc, AssertionError) else exc!r}")
 
     _fail_with(failures, f"of {len(cases)} generated cases failed on the {leg.name} leg")
-    assert paged, (
-        f"no case's match set spanned more than one page at limit={_WALK_LIMIT} — every walk above collapsed "
-        "to a single fetch, so the keyset cursor was never exercised"
-    )
+    _assert_walks_paged(cases, paged)
 
 
 # --------------------------------------------------------------------------- #
@@ -496,9 +545,12 @@ _EQUIVALENT_CASE_PAIRS: tuple[tuple[str, str], ...] = (
 async def test_equivalent_filter_spellings_walk_identically(leg: _Leg) -> None:
     """Row-equivalent filter spellings return identical walks — implicit-AND ≡ ``$and``.
 
-    Compared as sets of returned document ids, not against a declared expectation:
-    the point is that the two spellings agree with EACH OTHER on the same physical
-    corpus. Both members' agreement with the oracle is the sweep's job.
+    Each side is walked against its OWN expectation first, then the two returned sets
+    are compared. Agreement alone would be a weak claim: two spellings that drop the
+    same rows agree with each other perfectly, so a mutual comparison is exactly blind
+    to the failure mode both spellings share. Anchoring each side independently makes
+    the pair assertion meaningful — it then says "both correct AND mutually
+    consistent" rather than "consistently wrong is fine".
     """
     by_id = {case.id: case for case in ingest_seedable_cases()}
     missing = [cid for pair in _EQUIVALENT_CASE_PAIRS for cid in pair if cid not in by_id]
@@ -513,8 +565,8 @@ async def test_equivalent_filter_spellings_walk_identically(leg: _Leg) -> None:
             f"{left_id} / {right_id} no longer share a seed corpus — the comparison would span two namespaces"
         )
         corpus = corpora[_corpus_key(left.seed_records)]
-        left_docs = await _walk_documents(leg.kb, corpus.namespace_id, filter=left.filter)
-        right_docs = await _walk_documents(leg.kb, corpus.namespace_id, filter=right.filter)
+        left_docs = await _walk_anchored(leg.kb, corpus, left)
+        right_docs = await _walk_anchored(leg.kb, corpus, right)
         assert {doc.id for doc in left_docs} == {doc.id for doc in right_docs}, (
             f"{left_id} ({left.filter!r}) and {right_id} ({right.filter!r}) are declared row-equivalent but "
             f"returned {sorted(corpus.seed_ids[d.id] for d in left_docs)} vs "
@@ -527,12 +579,20 @@ async def test_equivalent_filter_spellings_walk_identically(leg: _Leg) -> None:
 # --------------------------------------------------------------------------- #
 
 
+# How many dash-separated segments of a case id name its shape bucket. Two segments
+# is the family (``F-OP``), which is far too coarse — it collapses the whole per-key
+# operator product into a single representative. Three keeps the family's subject
+# (``F-OP-source_name``, ``F-LOGIC-implicit``), which is the level at which two cases
+# genuinely differ in shape rather than in operand.
+_REPRESENTATIVE_ID_SEGMENTS = 3
+
+
 def _representative_cases() -> list[ConformanceCase]:
-    """One case per generated family — the widest shape spread at the smallest cost.
+    """One case per generated shape bucket — the widest spread at the smallest cost.
 
     The kwarg legs cost three more walks per case, so running them over the whole
     corpus would triple the sweep to re-prove the same conjunction. One case per
-    family instead, preferring a case whose match set is a PROPER non-empty subset of
+    bucket instead, preferring a case whose match set is a PROPER non-empty subset of
     its corpus: intersecting a kwarg with an all-or-nothing filter cannot distinguish
     "the kwarg was applied" from "the kwarg was ignored".
     """
@@ -540,7 +600,7 @@ def _representative_cases() -> list[ConformanceCase]:
     for case in ingest_seedable_cases():
         if case.expected_ids is None:
             continue
-        family = "-".join(case.id.split("-")[:2])
+        family = "-".join(case.id.split("-")[:_REPRESENTATIVE_ID_SEGMENTS])
         proper = 0 < len(case.expected_ids) < len(case.seed_records)
         incumbent = best.get(family)
         if incumbent is None:
@@ -592,8 +652,9 @@ async def test_filter_and_enumeration_kwargs_intersect(leg: _Leg) -> None:
             # The real intersection: filter AND updated_at < bound.
             pages = await _walk_pages(leg.kb, corpus.namespace_id, filter=case.filter, updated_before=bound)
             assert_walk_compliant(pages, _case_ast(case), expected_ids=list(matched & under_bound))
-        except AssertionError as exc:
-            failures.append(f"[{case.id}] filter={case.filter!r} updated_before={bound!r}\n{exc}")
+        except Exception as exc:  # noqa: BLE001 — an unexpected raise IS a per-case finding
+            detail = exc if isinstance(exc, AssertionError) else repr(exc)
+            failures.append(f"[{case.id}] filter={case.filter!r} updated_before={bound!r}\n{detail}")
         if 0 < len(matched & under_bound) < len(matched):
             informative += 1
 
@@ -782,8 +843,8 @@ async def test_write_api_corpus_walks_to_the_same_survivors(leg: _Leg) -> None:
 
     failures: list[str] = []
     for case in cases:
-        assert case.expected_ids is not None
         try:
+            assert case.expected_ids is not None, "documents corpus case without expected_ids"
             id_map = await seed_documents_case(coordinator, case)
             seed_of = {doc_id: seed_id for seed_id, doc_id in id_map.items()}
             pages = await _walk_pages(leg.kb, _documents_case_namespace_id(case), filter=case.filter)
@@ -794,7 +855,7 @@ async def test_write_api_corpus_walks_to_the_same_survivors(leg: _Leg) -> None:
             )
             survivors = frozenset(seed_of[doc.id] for doc in docs)
             assert survivors == case.expected_ids, f"survivors {sorted(survivors)} != {sorted(case.expected_ids)}"
-        except AssertionError as exc:
-            failures.append(f"[{case.id}] filter={case.filter!r}\n{exc}")
+        except Exception as exc:  # noqa: BLE001 — an unexpected raise IS a per-case finding
+            failures.append(f"[{case.id}] filter={case.filter!r}\n{exc if isinstance(exc, AssertionError) else exc!r}")
 
     _fail_with(failures, f"of {len(cases)} write-API cases disagreed with the declared survivors")
