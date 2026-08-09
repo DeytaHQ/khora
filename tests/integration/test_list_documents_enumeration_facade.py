@@ -31,7 +31,9 @@ except ImportError:
 
 from khora.core.models import Document
 from khora.core.models.document import DocumentPage, DocumentStatus
-from khora.filter import RecallFilterValidationError
+from khora.filter import RecallFilter, RecallFilterValidationError
+from khora.filter.ast import parse_to_ast
+from tests.test_helpers.document_page_oracle import assert_page_compliant, assert_walk_compliant
 
 pytestmark = [
     pytest.mark.integration,
@@ -39,6 +41,11 @@ pytestmark = [
 ]
 
 _BASE = datetime(2026, 1, 15, 9, 0, 0, tzinfo=UTC)
+
+
+def _ast(wire: dict):
+    """The canonical AST for a wire filter — what the oracle recompiles from."""
+    return parse_to_ast(RecallFilter.model_validate(wire))
 
 
 def _config(tmp_path: Path):
@@ -95,11 +102,13 @@ async def test_basic_walk_exactly_once_and_sequence_compat(tmp_path: Path) -> No
         expected = _expected_order(seeded)
 
         collected: list[UUID] = []
+        walked: list[DocumentPage] = []
         pages = 0
         after = None
         while True:
             page = await kb.list_documents(namespace=ns.namespace_id, limit=3, after=after)
             pages += 1
+            walked.append(page)
             assert isinstance(page, DocumentPage)
             assert len(page) <= 3
             collected.extend(d.id for d in page)  # Sequence iteration
@@ -113,6 +122,15 @@ async def test_basic_walk_exactly_once_and_sequence_compat(tmp_path: Path) -> No
         assert pages >= 3, "limit=3 over 7 rows must span multiple pages"
         assert collected == expected, "walk must be ordered and exactly-once"
         assert len(set(collected)) == len(collected), "no document returned twice"
+        # The reusable page-level oracle over the same walk: per-page total order,
+        # the next_after/exhausted pair, exactly-once, one descending run across the
+        # concatenation, and — via ``expected_ids`` — COMPLETENESS against the seed.
+        # That last one is the leg that matters: a dropped row never reaches the
+        # surface, so nothing else here (nor any per-returned-row predicate) can see
+        # it. The point of wiring it in is that the SAME helper is what the
+        # property-based walk fuzzer asserts with, so a divergence surfaces now.
+        flat = assert_walk_compliant(walked, expected_ids=expected)
+        assert [d.id for d in flat] == expected
 
 
 async def test_resume_from_returned_document(tmp_path: Path) -> None:
@@ -203,10 +221,15 @@ async def test_filter_narrows_and_occurred_at_rejected(tmp_path: Path) -> None:
         # Compare ordered lists, not sets: a post-filter ordering regression must fail.
         assert [d.id for d in page] == _expected_order([d for d in seeded if d.source_type == "report"])
         assert isinstance(page.post_filtered_keys, tuple)
+        # The oracle recompiles the filter and re-checks it against the RETURNED
+        # rows, so it fails on a returned row the filter excludes — independently of
+        # what ``post_filtered_keys`` claims about who enforced which leaf.
+        assert_page_compliant(page, _ast({"source_type": "report"}))
 
         # Metadata filter — exercises the in-memory post-filter path.
         gold = await kb.list_documents(namespace=ns.namespace_id, filter={"metadata.tier": "gold"}, limit=100)
         assert [d.id for d in gold] == _expected_order([d for d in seeded if d.metadata.get("tier") == "gold"])
+        assert_page_compliant(gold, _ast({"metadata.tier": "gold"}))
 
         # occurred_at is not enumerable on a document row.
         with pytest.raises(RecallFilterValidationError) as exc_info:
@@ -248,6 +271,7 @@ async def test_multistep_page_fill_and_short_page_not_exhausted(tmp_path: Path) 
         # the scan-bound-consumed short-page branch. Both complete exactly-once.
         for bound in (1000, 3):
             collected: list[UUID] = []
+            walked: list[DocumentPage] = []
             after = None
             exhausted = False
             steps = 0
@@ -257,6 +281,7 @@ async def test_multistep_page_fill_and_short_page_not_exhausted(tmp_path: Path) 
                 pg = await kb.storage.scan_documents_page(
                     row_ns, filter_ast=ast, limit=3, scan_bound=bound, after=after
                 )
+                walked.append(pg)
                 assert len(pg) <= 3
                 collected.extend(d.id for d in pg)
                 exhausted = pg.exhausted
@@ -265,6 +290,14 @@ async def test_multistep_page_fill_and_short_page_not_exhausted(tmp_path: Path) 
                     after = (pg.next_after.created_at, pg.next_after.id)
             assert collected == match_order, f"bound={bound}"
             assert len(set(collected)) == len(collected), f"bound={bound}"
+            # Same oracle, on the walk that actually exercises the residual: this
+            # filter is post-filtered rather than pushed, and the short-page branch
+            # (bound=3) is where the next_after/exhausted pair is easiest to get
+            # wrong. ``expected_ids`` is the load-bearing argument — it asserts the
+            # walk lost none of the 5 matches while re-stepping past rejected rows,
+            # which is precisely what a mis-sized intra-page step would break.
+            flat = assert_walk_compliant(walked, ast, expected_ids=match_order)
+            assert [d.id for d in flat] == match_order, f"bound={bound}"
 
         # scan_bound must be positive (guards the next_after/exhausted invariant).
         with pytest.raises(ValueError, match="scan_bound"):
@@ -287,18 +320,27 @@ async def test_walk_resumes_across_a_created_at_tie(tmp_path: Path) -> None:
         expected = _expected_order(seeded)
 
         collected: list[UUID] = []
+        walked: list[DocumentPage] = []
         after = None
         pages = 0
         while True:
             pages += 1
             assert pages < 20
             page = await kb.list_documents(namespace=ns.namespace_id, limit=2, after=after)  # boundary inside tie
+            walked.append(page)
             collected.extend(d.id for d in page)
             if page.exhausted:
                 break
             after = page.next_after
         assert collected == expected
         assert len(set(collected)) == len(collected)
+        # Both directions of the tie hazard, which is why this walk gets both legs:
+        # a boundary that RE-SERVED a tie-mate fails the strict total-order check and
+        # the exactly-once check, and one that SKIPPED a tie-mate fails only
+        # ``expected_ids`` — nothing about a page whose rows are all present and
+        # ordered reveals the row that is missing from it.
+        flat = assert_walk_compliant(walked, expected_ids=expected)
+        assert [d.id for d in flat] == expected
 
 
 async def test_empty_namespace_and_resume_past_end(tmp_path: Path) -> None:
