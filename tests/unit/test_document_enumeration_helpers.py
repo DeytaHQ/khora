@@ -255,6 +255,33 @@ class TestWalkCompliance:
         with pytest.raises(AssertionError, match="MISSING"):
             assert_walk_compliant([page], expected_ids=[page[0].id, _doc(0, "0002").id])
 
+    def test_a_walk_whose_last_page_is_not_exhausted_fails(self) -> None:
+        """A truncated walk proves nothing about completeness.
+
+        The final page is per-page compliant (a cursor is set, so
+        ``next_after is None`` matches ``exhausted=False``), yet the walk stopped
+        before the store signalled exhaustion — so any missing match could simply be
+        on a page the caller never fetched. Completeness is only well-defined once
+        ``exhausted`` is reached, so an unfinished walk must fail rather than pass on
+        whatever prefix it happened to collect.
+        """
+        cursor = DocumentCursor(created_at=_BASE, id=UUID(int=1))
+        unfinished = _page([_doc(1)], next_after=cursor, exhausted=False)
+        with pytest.raises(AssertionError, match="truncated walk"):
+            assert_walk_compliant([unfinished])
+
+    def test_a_page_after_an_exhausted_page_fails(self) -> None:
+        """``exhausted`` is the only termination signal, so nothing may follow it.
+
+        Both pages are per-page compliant; the violation is purely walk-level — a
+        page arrived after one that already reported ``exhausted=True``, which means
+        the caller kept fetching past the store's end-of-walk signal.
+        """
+        first = _page([_doc(1, "0001")])  # exhausted=True by default
+        second = _page([_doc(0, "0002")])
+        with pytest.raises(AssertionError, match="pages after exhaustion"):
+            assert_walk_compliant([first, second])
+
 
 class TestSplitHonestySpy:
     def test_flatten_walks_every_container_shape(self) -> None:

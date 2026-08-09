@@ -200,10 +200,17 @@ def assert_walk_compliant(
 ) -> list[Any]:
     """Assert a whole walk: every page compliant, exactly-once, one total order.
 
-    Checks each page individually, then the two properties that only exist across
-    pages — no document appears twice, and the concatenation is a single
-    descending run (a per-page order that resets at each boundary passes
-    :func:`assert_page_compliant` on every page and is still a broken walk).
+    Checks each page individually, then the properties that only exist across
+    pages: no document appears twice; the concatenation is a single descending run
+    (a per-page order that resets at each boundary passes
+    :func:`assert_page_compliant` on every page and is still a broken walk); and the
+    walk terminated correctly — nothing follows a page that reported
+    ``exhausted=True``, and (when any pages were supplied) the last page *is*
+    exhausted. That last rule is what makes the completeness leg meaningful: a walk
+    stopped early is a prefix of the match set, so judging it for completeness would
+    pass on rows that were simply never fetched. The per-page
+    ``next_after is None`` iff ``exhausted`` invariant is about a single page and
+    cannot see either termination property.
 
     ``expected_ids`` adds the completeness leg via
     :func:`assert_walk_matches_expected`. **Pass it whenever the test knows its
@@ -216,13 +223,23 @@ def assert_walk_compliant(
     """
     seen: set[UUID] = set()
     flat: list[Any] = []
+    saw_any = False
+    finished = False
     for page in pages:
+        assert not finished, "pages after exhaustion: a page followed one that already reported exhausted=True"
+        saw_any = True
         assert_page_compliant(page, filter_ast, backend_target=backend_target)
         for doc in page:
             doc_id = _as_uuid(doc.id)
             assert doc_id not in seen, f"exactly-once violated: {doc_id} repeated"
             seen.add(doc_id)
             flat.append(doc)
+        finished = page.exhausted
+    if saw_any:
+        assert finished, (
+            "walk did not finish: the last page reported exhausted=False — a truncated walk "
+            "proves nothing about completeness, since a missing match may simply be on a page never fetched"
+        )
     assert_total_order(flat)
     if expected_ids is not None:
         assert_walk_matches_expected(flat, expected_ids)
