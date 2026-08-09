@@ -517,7 +517,8 @@ async def test_generated_filter_sweep_over_real_ingest(leg: _Leg) -> None:
                 f"survivors {sorted(survivors)} != oracle {sorted(documents_oracle_survivors(case))}"
             )
         except Exception as exc:  # noqa: BLE001 — an unexpected raise IS a per-case finding
-            failures.append(f"[{case.id}] filter={case.filter!r}\n{exc if isinstance(exc, AssertionError) else exc!r}")
+            detail = str(exc) if isinstance(exc, AssertionError) else repr(exc)
+            failures.append(f"[{case.id}] filter={case.filter!r}\n{detail}")
 
     _fail_with(failures, f"of {len(cases)} generated cases failed on the {leg.name} leg")
     _assert_walks_paged(cases, paged)
@@ -786,8 +787,8 @@ async def test_occurred_at_is_not_enumerable(leg: _Leg, filter_: dict[str, Any])
     assert error.allowed == sorted(_ENUMERABLE_KEYS)
 
 
-@both_legs
-def test_backend_documents_field_mapping_matches_enumerable_keys(leg: _Leg) -> None:
+@pytest.mark.parametrize("backend_module", [module for _fixture, module in _LEGS.values()], ids=list(_LEGS))
+def test_backend_documents_field_mapping_matches_enumerable_keys(backend_module: str) -> None:
     """The leg's own documents compile context never maps a non-enumerable key.
 
     Binds the behavioural check above to the store-side declaration a filter is
@@ -804,8 +805,12 @@ def test_backend_documents_field_mapping_matches_enumerable_keys(leg: _Leg) -> N
     pushed, never what is enumerable — which is why the enumerable set is asserted
     behaviourally above and only the "nothing extra, nothing renamed" half is
     asserted here.
+
+    Parametrized directly on the backend module string (not the ``leg`` fixture): the
+    declaration is a pure import, so it needs no live store and runs on every lane —
+    including when Postgres is down — rather than skipping with the rest of the PG leg.
     """
-    context = importlib.import_module(leg.backend_module)._documents_compile_context()
+    context = importlib.import_module(backend_module)._documents_compile_context()
     mapping = dict(context.field_mapping)
     assert context.backend_target == "documents"
     assert mapping.pop("metadata", None) == "metadata", "the metadata root must remap to the physical column"
@@ -856,6 +861,7 @@ async def test_write_api_corpus_walks_to_the_same_survivors(leg: _Leg) -> None:
             survivors = frozenset(seed_of[doc.id] for doc in docs)
             assert survivors == case.expected_ids, f"survivors {sorted(survivors)} != {sorted(case.expected_ids)}"
         except Exception as exc:  # noqa: BLE001 — an unexpected raise IS a per-case finding
-            failures.append(f"[{case.id}] filter={case.filter!r}\n{exc if isinstance(exc, AssertionError) else exc!r}")
+            detail = str(exc) if isinstance(exc, AssertionError) else repr(exc)
+            failures.append(f"[{case.id}] filter={case.filter!r}\n{detail}")
 
     _fail_with(failures, f"of {len(cases)} write-API cases disagreed with the declared survivors")
