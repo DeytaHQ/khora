@@ -3801,7 +3801,11 @@ class VectorCypherRetriever:
                 # ADR-001 (#1574): this store call carries a title_weight too,
                 # so the hybrid path must report an inapplicable one even when
                 # the dedicated lexical channel is off. Deduped per recall.
-                self._record_title_weight_degradation(degradations)
+                # Gated on the blend: alpha None is SearchMode.VECTOR, where the
+                # store skips its internal BM25 entirely and never consumes the
+                # weight - reporting it unused there would be a false record.
+                if effective_alpha is not None:
+                    self._record_title_weight_degradation(degradations)
 
             chunk_results: list[tuple[Chunk, float]] = []
             _sorted_raw_cosines = sorted((r.similarity for r in results), reverse=True)
@@ -5019,6 +5023,13 @@ class VectorCypherRetriever:
             )
             # ADR-001 (#1574): the hybrid blend consumes the title weight, so an
             # inapplicable one degrades this channel too. Deduped per recall.
+            # Unconditional on purpose, unlike the ``_simple_retrieve`` site:
+            # ``effective_alpha`` is never None here (it falls back to the
+            # configured hybrid_alpha), so there is no pure-vector case to
+            # exclude. A caller passing ``hybrid_alpha_override=1.0`` does skip
+            # the blend, but that only happens when the lexical channel is
+            # active - which records the same fact genuinely - and the
+            # per-recall dedupe collapses the pair to one. Do not add a guard.
             self._record_title_weight_degradation(degradations)
 
             span.set_attribute("chunk_count", len(results))

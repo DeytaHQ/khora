@@ -22,6 +22,7 @@ These are pure-unit tests with a mocked storage coordinator / vector store
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -35,6 +36,7 @@ from khora.engines.vectorcypher.retriever import (
     VectorCypherRetriever,
 )
 from khora.engines.vectorcypher.router import QueryComplexity, RoutingDecision
+from khora.query import SearchMode
 
 pytestmark = pytest.mark.unit
 
@@ -564,6 +566,99 @@ async def test_the_record_is_deduped_to_one_per_recall() -> None:
     assert degradations[0]["component"] == "vectorcypher.bm25_title_weight"
     # The dedupe must not swallow OTHER components' records on the same list.
     assert [d["component"] for d in degradations] == ["vectorcypher.bm25_title_weight"]
+
+
+def _simple_routing() -> RoutingDecision:
+    return RoutingDecision(
+        complexity=QueryComplexity.SIMPLE,
+        use_graph=False,
+        graph_depth=0,
+        confidence=0.9,
+        reasoning="simple query",
+    )
+
+
+async def _simple_retrieve_degradations(
+    monkeypatch: pytest.MonkeyPatch, mode: SearchMode
+) -> tuple[list[Degradation], list[dict], _FulltextStore]:
+    """Run ``_simple_retrieve`` in ``mode``; return (degradations, bumps, store).
+
+    The store comes back so each case can prove the search actually ran — a
+    "no degradation" assertion is worthless if the path never reached the store.
+
+    The counter is a no-op object without logfire, so it cannot be read back.
+    Swapping the module-level counter for a recorder is what makes "the counter
+    did not move" an assertion rather than an inference from the record count —
+    the two are separate statements, and the guard has to satisfy both.
+    """
+    import khora.engines.vectorcypher.retriever as retriever_module
+
+    bumps: list[dict] = []
+    monkeypatch.setattr(
+        retriever_module,
+        "_BM25_TITLE_WEIGHT_DEGRADED_COUNTER",
+        SimpleNamespace(add=lambda amount, attributes=None: bumps.append(attributes or {})),
+    )
+
+    store = _FulltextStore(fts_has_title=False)
+    retriever = _title_weight_retriever(store, 2.0)
+    retriever._storage = None  # no coordinator fallback; keep the path to the store
+    degradations: list[Degradation] = []
+
+    await retriever._simple_retrieve(
+        query="floor panels dimensioned",
+        query_embedding=[0.1, 0.2, 0.3, 0.4],
+        namespace_id=uuid4(),
+        temporal_filter=None,
+        limit=10,
+        routing=_simple_routing(),
+        mode=mode,
+        degradations=degradations,
+    )
+    return degradations, bumps, store
+
+
+async def test_pure_vector_mode_does_not_record_an_unused_title_weight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SearchMode.VECTOR sets hybrid_alpha=None: the weight is never consumed.
+
+    The store skips its internal BM25 entirely on that call, so the missing
+    title column costs the query nothing. Recording it would put a degradation
+    on a recall that was not degraded — and on the deployment where someone set
+    the knob globally, EVERY pure-vector recall would carry one.
+    """
+    degradations, bumps, store = await _simple_retrieve_degradations(monkeypatch, SearchMode.VECTOR)
+
+    # Anti-vacuity: the search must have RUN and been handed the weight. Without
+    # this the test would also pass if the path short-circuited before the store.
+    assert len(store.search_calls) == 1, f"the vector search must still run, got {store.search_calls!r}"
+    assert store.search_calls[0].get("title_weight") == 2.0
+    assert store.search_calls[0].get("hybrid_alpha") is None, "VECTOR mode must ask for a pure-vector search"
+
+    title_records = [d for d in degradations if d["component"] == "vectorcypher.bm25_title_weight"]
+    assert title_records == [], f"pure vector must not report an unused weight, got {title_records!r}"
+    assert bumps == [], f"the counter must not move either, got {bumps!r}"
+
+
+async def test_hybrid_mode_on_the_same_setup_does_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The contrast half: identical store and weight, blend on -> one record.
+
+    Paired with the VECTOR case above deliberately. Alone, either test passes
+    for the wrong reason — a guard that never fires and a guard that always
+    fires each satisfy one of them. Only the pair pins the behavior to the
+    blend actually being in play.
+    """
+    degradations, bumps, store = await _simple_retrieve_degradations(monkeypatch, SearchMode.HYBRID)
+
+    assert store.search_calls[0].get("hybrid_alpha") is not None, "HYBRID must ask for a blend"
+
+    title_records = [d for d in degradations if d["component"] == "vectorcypher.bm25_title_weight"]
+    assert len(title_records) == 1, f"expected exactly one record, got {title_records!r}"
+    assert title_records[0]["reason"] == "fts_missing_title_column"
+    assert bumps == [{"reason": "fts_missing_title_column"}], f"expected one counter bump, got {bumps!r}"
 
 
 async def test_a_separate_recall_records_again() -> None:
