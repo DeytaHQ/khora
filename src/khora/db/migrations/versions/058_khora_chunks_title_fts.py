@@ -43,8 +43,18 @@ Nothing errors and nothing is corrupted — those rows are simply not
 title-searchable, and are repaired by any subsequent write to them (or by
 re-running this migration). Single-app-version deployments — the normal case —
 never enter this window. During a rolling deploy, keep it short by rolling
-forward promptly; it closes the moment the last old-version pod is gone and any
+forward promptly; it closes once the last old-version pod is gone and any
 new-version pod has connected.
+
+**It is not always a rolling-deploy artifact, though.** khora is a library, and
+it explicitly supports several downstream services on *different* khora
+versions sharing one database — that is what the skip-ahead logic in
+``run_migrations()`` exists for. A sibling service pinned to an old khora
+version reinstalls the content-only formula on **every** ``connect()``, so the
+two functions flap for as long as that pin stands and title tokens are lost
+intermittently rather than once. Rolling forward promptly does not help there;
+closing the window fully requires every service that connects to this database
+to be on the new khora version.
 
 Step order is load-bearing
 --------------------------
@@ -78,20 +88,33 @@ Step 3 updates every row in ``khora_chunks``:
 * ``content_tsv`` is GIN-indexed (``ix_khora_chunks_content_tsv``), so no update
   can be HOT — every row costs index maintenance too. This dominates the
   runtime.
-* The lock taken is ``ROW EXCLUSIVE``. **Concurrent reads are unaffected**;
-  concurrent writers to the *same rows* block until commit.
-* ``SET LOCAL lock_timeout = '5s'`` bounds how long the UPDATE waits to
-  *acquire* its lock. It does not bound how long the statement runs, nor how
-  long its locks are held once acquired.
+* **The transaction holds ``ACCESS EXCLUSIVE`` on ``khora_chunks`` for its
+  whole duration, and that blocks reads.** ``DROP TRIGGER`` (step 2) requires
+  that level — it was not part of PG 9.4's lock-level reduction — and Postgres
+  never releases a lock early, so it is taken *before* the long rewrite and
+  held to COMMIT. ``ACCESS EXCLUSIVE`` conflicts with the ``ACCESS SHARE``
+  every ``SELECT`` takes, so for the duration *no* query on ``khora_chunks``
+  proceeds — not merely writers to the same rows. Measured on PG: after
+  ``DROP TRIGGER`` the transaction holds ``AccessExclusiveLock``, and still
+  holds it while ``CREATE TRIGGER`` (``ShareRowExclusiveLock``) and the
+  ``UPDATE`` (``RowExclusiveLock``) stack their weaker levels on top.
+* ``SET LOCAL lock_timeout = '5s'`` bounds how long each statement waits to
+  *acquire* a lock. It does not bound how long a lock is held once acquired,
+  nor how long the rewrite runs.
 
-The compounding hazard is the advisory lock, not the table lock:
-``run_migrations()`` holds a session-scoped ``pg_advisory_lock`` for the entire
-run and a concurrent caller waits only 60s before raising ``TimeoutError``,
-which surfaces as ``RuntimeError: Database migration failed`` at startup. On a
-deployment with a large ``khora_chunks``, other services booting with
-``run_migrations=True`` will fail to start for as long as the rewrite takes.
-Run it out-of-band there rather than during a rolling deploy — the same
-guidance migrations 054 and 056 give for their own long statements.
+So there are two independent reasons to run this out-of-band rather than during
+a rolling deploy, not one:
+
+* The ``ACCESS EXCLUSIVE`` above makes ``khora_chunks`` unreadable for the
+  duration — recall stalls on every namespace, not just ingest.
+* ``run_migrations()`` holds a session-scoped ``pg_advisory_lock`` for the
+  entire run and a concurrent caller waits only 60s before raising
+  ``TimeoutError``, which surfaces as ``RuntimeError: Database migration
+  failed`` at startup. On a deployment with a large ``khora_chunks``, other
+  services booting with ``run_migrations=True`` will fail to start for as long
+  as the rewrite takes.
+
+Same guidance migrations 054 and 056 give for their own long statements.
 
 Re-running is safe but not cheap: the outcome is idempotent, the cost is not.
 There is no sentinel that distinguishes an already-recomputed row (both
@@ -108,15 +131,26 @@ existing rows were never recomputed. The trade is that the UPDATE's snapshot is
 open for the whole rewrite; that is the accepted cost of not shipping a
 half-applied formula.
 
-Ranking compatibility
----------------------
-Labelling content ``'B'`` changes nothing about ranking on its own *because*
+Ranking compatibility — per-token only, NOT the result set
+-----------------------------------------------------------
+The ``'B'`` relabel of content costs nothing on its own, because
 ``_bm25_search`` passes ``ts_rank_cd`` an explicit ``{D, C, B, A}`` weights
 vector rather than relying on the implicit default ``{0.1, 0.2, 0.4, 1.0}``.
 At the default ``title_weight=1.0`` it passes ``{0.1, 0.2, 0.1, 0.1}``, so a
 content hit scores exactly what it scored as an unlabelled (D) token before
 this revision. The match predicate ``content_tsv @@ tsquery`` is
 label-independent and is unchanged.
+
+Do not read that as "``title_weight=1.0`` preserves today's behaviour" — it
+preserves the *per-content-token score*, and nothing more. This revision folds
+``title`` into the vector **unconditionally**; ``title_weight`` only scales how
+much an ``'A'`` token contributes, it cannot switch one off. A chunk whose
+title matches the query therefore starts matching where it did not before, and
+enters and re-orders result sets at *every* ``title_weight``, including 1.0 and
+including 0.0 (a zero weight still yields a matching row, scored 0 from the
+title side). That is the point of the change, not a side effect — but it means
+the only way back to pre-#1574 retrieval is ``downgrade()``, not a config
+value.
 
 Dialect and embedded posture
 ----------------------------
@@ -157,8 +191,12 @@ Fully symmetric and complete: it reinstalls the pre-#1574 content-only
 function, recreates the trigger, and recomputes every row back to a
 content-only vector. Unlike 055 / 056 nothing here is irreversible — the vector
 is derived data, reconstructible in either direction from ``title`` and
-``content``, which are untouched. The downgrade pays the same full-table
-rewrite cost as the upgrade.
+``content``, which are untouched.
+
+It runs the identical three steps, so it carries the identical cost: a
+full-table rewrite under an ``ACCESS EXCLUSIVE`` lock held for the whole
+duration, blocking reads on ``khora_chunks`` throughout. Everything in the Cost
+section applies to this direction too — a downgrade is not the cheap way out.
 """
 
 from __future__ import annotations

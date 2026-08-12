@@ -1618,9 +1618,14 @@ class QuerySettings(BaseSettings):
         default=1.0,
         ge=0.0,
         le=10.0,
-        description="Query-time weight of chunk title vs content in the BM25 lexical channel "
-        "(1.0 = neutral). Values >1 rank title matches above body matches within the "
-        "lexical channel only; the channel's influence in fusion stays governed by keyword_weight.",
+        description="Query-time weight of chunk title vs content in the BM25 lexical channel. "
+        "1.0 leaves title and content weighted equally; values >1 rank title matches above body "
+        "matches within the lexical channel only, and the channel's influence in fusion stays "
+        "governed by keyword_weight. Note 1.0 does not mean 'no change': folding title into the "
+        "lexical index is a one-time schema change, so title-matching chunks become searchable "
+        "and can re-rank results at any value of this weight. Applied on the sqlite_lance and "
+        "pgvector temporal stores only - accepted but not applied on the surrealdb / turbopuffer / "
+        "weaviate stores and the Chronicle (legacy chunks) path (#1574 follow-up).",
     )
 
     # Lexical-channel selector (#1391). Picks which retriever fills the lexical

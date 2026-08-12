@@ -546,8 +546,12 @@ class PgVectorTemporalStore(TemporalVectorStore):
         coexist during the ``ChunkTemporalFilter`` deprecation window.
 
         ``title_weight`` scales the lexical rank contribution of a chunk's
-        ``title`` relative to its ``content`` (#1574); ``1.0`` weighs the two
-        equally and reproduces the pre-#1574 ranking exactly.
+        ``title`` relative to its ``content`` (#1574). At ``1.0`` a content
+        token scores exactly what it scored pre-#1574 (the D→B relabel is
+        pinned to 0.1), so per-content-token scoring is preserved. This does
+        NOT preserve the overall result set or ranking: migration 058 folds
+        ``title`` into the lexical index unconditionally, so title-matching
+        chunks newly match and can re-rank at any ``title_weight``.
         """
         with trace_span(
             "khora.temporal_store.search",
@@ -779,8 +783,12 @@ class PgVectorTemporalStore(TemporalVectorStore):
         filter and cannot return filter-violating chunks.
 
         ``title_weight`` scales the rank contribution of a chunk's ``title``
-        relative to its ``content`` (#1574); ``1.0`` weighs the two equally
-        and reproduces the pre-#1574 ranking exactly.
+        relative to its ``content`` (#1574). At ``1.0`` a content token scores
+        exactly what it scored pre-#1574 (the D→B relabel is pinned to 0.1),
+        so per-content-token scoring is preserved. This does NOT preserve the
+        overall result set or ranking: migration 058 folds ``title`` into the
+        lexical index unconditionally, so title-matching chunks newly match and
+        can re-rank at any ``title_weight``.
         """
         if not query_text or not query_text.strip():
             return []
@@ -901,9 +909,13 @@ class PgVectorTemporalStore(TemporalVectorStore):
         """Perform BM25-style full-text search using PostgreSQL ts_rank.
 
         ``title_weight`` scales the rank contribution of the ``'A'``-labelled
-        title tokens relative to the ``'B'``-labelled content tokens. ``1.0``
-        (the default) makes the two weigh the same, which reproduces the
-        pre-#1574 ranking exactly.
+        title tokens relative to the ``'B'``-labelled content tokens. At
+        ``1.0`` (the default) the two weigh the same and a content token
+        scores exactly what it scored pre-#1574 (the D→B relabel is pinned to
+        0.1), so per-content-token scoring is preserved. This does NOT preserve
+        the overall result set or ranking: migration 058 folds ``title`` into
+        the lexical index unconditionally, so title-matching chunks newly match
+        and can re-rank at any ``title_weight``.
         """
         # Create tsquery from query text
         # OR the query terms instead of plainto_tsquery's implicit AND: a full
@@ -918,8 +930,10 @@ class PgVectorTemporalStore(TemporalVectorStore):
         # (``{0.1, 0.2, 0.4, 1.0}``) would silently change ranking the moment
         # migration 058 relabels content from unlabelled (D, 0.1) to 'B' (0.4) —
         # a 4x jump on every content hit. Pinning D and B to the same 0.1 keeps
-        # a content match scoring exactly as it did before the relabel, so
-        # ``title_weight=1.0`` is numerically identical to today's ranking.
+        # a content match scoring exactly as it did before the relabel. That
+        # preserves per-content-token scoring only — NOT the result set: 058
+        # folds title into the index, so title-matching chunks newly match and
+        # can re-rank at any title_weight.
         # The literal is interpolated rather than bound because ``float`` under
         # ``:g`` can only render digits, ``.``, ``e`` and a sign — no injection
         # surface. The value originates from ``query.bm25_title_weight``, which

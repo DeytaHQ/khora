@@ -119,9 +119,13 @@ class TemporalVectorStore(Protocol):
                 leave it untouched.
             title_weight: Weight of a chunk's ``title`` relative to its
                 ``content`` in the lexical (BM25) half of a hybrid search
-                (#1574). ``1.0`` weighs the two equally and reproduces the
-                pre-#1574 ranking exactly. Backends without a title-aware
-                lexical index accept it and ignore it, as with ``filter_ast``.
+                (#1574). At ``1.0`` a content token scores exactly what it
+                scored pre-#1574, so per-content-token scoring is preserved;
+                this does NOT preserve the overall result set or ranking, since
+                folding ``title`` into the index means title-matching chunks
+                newly match and can re-rank at any ``title_weight``. Backends
+                without a title-aware lexical index accept it and ignore it, as
+                with ``filter_ast``.
 
         Returns:
             List of matching chunks with similarity scores
@@ -170,10 +174,12 @@ class TemporalVectorStore(Protocol):
         leaves it untouched.
 
         ``title_weight`` scales a chunk's ``title`` against its ``content`` in
-        the lexical ranking (#1574); ``1.0`` weighs the two equally and
-        reproduces the pre-#1574 ranking exactly. Backends whose fulltext index
-        does not cover ``title`` accept it and ignore it, as with
-        ``filter_ast``.
+        the lexical ranking (#1574). At ``1.0`` a content token scores exactly
+        what it scored pre-#1574, so per-content-token scoring is preserved;
+        this does NOT preserve the overall result set or ranking, since folding
+        ``title`` into the index means title-matching chunks newly match and
+        can re-rank at any ``title_weight``. Backends whose fulltext index does
+        not cover ``title`` accept it and ignore it, as with ``filter_ast``.
         """
         return []
 

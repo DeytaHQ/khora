@@ -658,7 +658,9 @@ class RetrieverConfig:
     bm25_weight: float = 0.3
     bm25_top_k: int = 50  # How many BM25 results to fetch
     # Issue #1574 - query-time weight of a chunk's title vs its content WITHIN
-    # the lexical channel (1.0 = neutral / pre-#1574 behavior). Distinct from
+    # the lexical channel. 1.0 weighs the two equally, reproducing the pre-#1574
+    # per-content-token score - not the pre-#1574 result set, which changes at
+    # every weight once title is folded into the index. Distinct from
     # bm25_weight, which is the channel's weight in RRF fusion. Part of the
     # recall-cache fingerprint: the cache key is repr() of this dataclass, so
     # declaring the field here is what keeps differently-weighted recalls from
@@ -3844,6 +3846,12 @@ class VectorCypherRetriever:
                     # leaks below-floor chunks).
                     if min_similarity > 0.0 and bm25_results:
                         try:
+                            # #1574: title_weight deliberately NOT threaded here,
+                            # unlike the hybrid/lexical sites. The gate runs pure
+                            # vector (hybrid_alpha=None) and only its id SET is
+                            # consumed - the returned order is discarded, hits stay
+                            # in BM25 order - so a lexical title weight cannot
+                            # change its outcome. Not an oversight; do not "fix".
                             gate_results = await self._vector_store.search(
                                 namespace_id=namespace_id,
                                 query_embedding=query_embedding,

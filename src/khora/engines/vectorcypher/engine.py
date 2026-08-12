@@ -595,9 +595,11 @@ class VectorCypherConfig:
     enable_bm25_channel: bool = False
     bm25_weight: float = 0.3
     bm25_top_k: int = 50
-    # Query-time weight of chunk title vs content INSIDE the lexical channel
-    # (1.0 = neutral, the pre-#1574 behavior). Distinct from bm25_weight,
-    # which governs the channel's influence in RRF fusion.
+    # Query-time weight of chunk title vs content INSIDE the lexical channel.
+    # 1.0 weighs the two equally, reproducing the pre-#1574 per-content-token
+    # ranking - NOT the pre-#1574 result set, which changes at every weight
+    # once title is folded into the index. Distinct from bm25_weight, which
+    # governs the channel's influence in RRF fusion.
     bm25_title_weight: float = 1.0
 
     # Session-aware parallel retrieval for cross-session temporal queries.
