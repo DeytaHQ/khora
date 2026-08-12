@@ -129,6 +129,29 @@ def test_bm25_title_weight_is_clamped_at_the_config_boundary() -> None:
             QuerySettings(bm25_title_weight=out_of_range)
 
 
+def test_bm25_title_weight_is_validated_on_direct_dataclass_construction() -> None:
+    """The bounds must hold on the path Pydantic never sees.
+
+    ``VectorCypherConfig`` is a plain dataclass, so a caller that constructs it
+    directly — a supported entry point, it is a public kwarg on the engine —
+    skips the ``QuerySettings`` validation asserted above. Without the
+    ``__post_init__`` check the two doors into the same knob disagree: -1 is
+    rejected through config and accepted through the dataclass, and the store
+    inlines the value into FTS5 SQL (it cannot be a bind parameter), which is
+    exactly the argument the config-side bounds exist to support.
+    """
+    from khora.engines.vectorcypher.engine import VectorCypherConfig
+
+    for out_of_range in (-1, 100):
+        with pytest.raises(ValueError, match="bm25_title_weight must be between 0 and 10"):
+            VectorCypherConfig(bm25_title_weight=out_of_range)
+
+    # Boundaries are legal on both sides — an exclusive check here would reject
+    # values QuerySettings accepts, which is the same divergence in reverse.
+    assert VectorCypherConfig(bm25_title_weight=0.0).bm25_title_weight == 0.0
+    assert VectorCypherConfig(bm25_title_weight=10.0).bm25_title_weight == 10.0
+
+
 def test_bm25_title_weight_changes_the_recall_cache_key() -> None:
     """Two weights must not share a cached result.
 

@@ -572,6 +572,12 @@ class VectorCypherConfig:
     def __post_init__(self) -> None:
         if self.max_chunks_in_flight is not None and self.max_chunks_in_flight < 1:
             raise ValueError(f"max_chunks_in_flight must be >= 1, got {self.max_chunks_in_flight}")
+        # Mirrors the [0, 10] contract Pydantic enforces on
+        # QuerySettings.bm25_title_weight. Direct construction of this dataclass
+        # bypasses that validation entirely, so without this the two entry
+        # points disagree on what a legal weight is (#1574).
+        if not 0.0 <= self.bm25_title_weight <= 10.0:
+            raise ValueError(f"bm25_title_weight must be between 0 and 10, got {self.bm25_title_weight}")
 
     # Streaming pipeline (A-1: batch entity storage across documents)
     streaming_pipeline: bool = True

@@ -21,12 +21,14 @@ These are pure-unit tests with a mocked storage coordinator / vector store
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
 
 from khora.core.diagnostics import Degradation
+from khora.core.temporal import TemporalChunk, TemporalSearchResult
 from khora.engines.vectorcypher.retriever import (
     RetrieverConfig,
     VectorCypherResult,
@@ -373,6 +375,7 @@ class _FulltextStore:
 
     def __init__(self, *, fts_has_title: bool | None = None) -> None:
         self.calls: list[dict] = []
+        self.search_calls: list[dict] = []
         if fts_has_title is not None:
             self.fts_has_title = fts_has_title
 
@@ -381,6 +384,28 @@ class _FulltextStore:
         chunk = MagicMock()
         chunk.id = uuid4()
         return [(chunk, 0.9)]
+
+    async def search(self, **kwargs):
+        """The hybrid channel's entry point — same store, same missing column.
+
+        Returns a real ``TemporalSearchResult`` rather than a mock because
+        ``_vector_search_chunks`` reads nine chunk attributes off it and builds
+        a domain ``Chunk``; a MagicMock would pass attribute access and fail
+        construction, hiding the assertion behind an unrelated error.
+        """
+        self.search_calls.append(kwargs)
+        return [
+            TemporalSearchResult(
+                chunk=TemporalChunk(
+                    id=uuid4(),
+                    namespace_id=uuid4(),
+                    document_id=uuid4(),
+                    content="floor panels dimensioned to the bay spacing",
+                    created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                ),
+                similarity=0.9,
+            )
+        ]
 
 
 def _title_weight_retriever(store: _FulltextStore, weight: float) -> VectorCypherRetriever:
@@ -476,3 +501,85 @@ async def test_no_degradation_sink_still_degrades_cleanly() -> None:
         limit=10,
     )
     assert len(results) == 1
+
+
+async def _hybrid_search(retriever: VectorCypherRetriever, degradations: list[Degradation]) -> list:
+    """One hybrid vector-channel call, sharing the caller's per-recall sink."""
+    return await retriever._vector_search_chunks(
+        query_embedding=[0.1, 0.2, 0.3, 0.4],
+        namespace_id=uuid4(),
+        temporal_filter=None,
+        query_text="floor panels dimensioned",
+        limit=10,
+        degradations=degradations,
+    )
+
+
+async def test_hybrid_path_records_the_title_weight_degradation() -> None:
+    """The hybrid vector channel hands the store a title_weight too.
+
+    Recording only on the dedicated lexical channel would leave the common
+    configuration — BM25 channel off, hybrid blend on — silently unweighted:
+    the store is asked for a title boost it cannot give, and nothing says so.
+    """
+    store = _FulltextStore(fts_has_title=False)
+    retriever = _title_weight_retriever(store, 2.0)
+    degradations: list[Degradation] = []
+
+    chunks = await _hybrid_search(retriever, degradations)
+
+    # Same distinction the lexical cases assert: rows still come back.
+    assert len(chunks) == 1, f"the hybrid channel must still return rows, got {chunks!r}"
+    assert store.search_calls[0].get("title_weight") == 2.0
+    assert len(degradations) == 1, f"expected one degradation, got {degradations!r}"
+    assert degradations[0]["component"] == "vectorcypher.bm25_title_weight"
+    assert degradations[0]["reason"] == "fts_missing_title_column"
+
+
+async def test_the_record_is_deduped_to_one_per_recall() -> None:
+    """One recall, many channels, one record — and one counter increment.
+
+    A recall runs the lexical channel and the hybrid channel against the SAME
+    store, and the session fan-out calls the hybrid channel repeatedly (once
+    per session, plus an unscoped fallback). Each observes the identical
+    missing column. Without the dedupe an operator would read a counter that
+    tracks channel invocations — so a fan-out over 8 sessions reports 9 —
+    and could not tell one broken deployment from nine. The counter is bumped
+    only on the append, so pinning the record count pins the metric too.
+    """
+    store = _FulltextStore(fts_has_title=False)
+    retriever = _title_weight_retriever(store, 2.0)
+    degradations: list[Degradation] = []
+
+    await retriever._bm25_search_chunks(
+        query="floor panels dimensioned",
+        namespace_id=uuid4(),
+        limit=10,
+        degradations=degradations,
+    )
+    await _hybrid_search(retriever, degradations)
+    await _hybrid_search(retriever, degradations)
+
+    assert len(degradations) == 1, f"one record per recall, not per channel; got {degradations!r}"
+    assert degradations[0]["component"] == "vectorcypher.bm25_title_weight"
+    # The dedupe must not swallow OTHER components' records on the same list.
+    assert [d["component"] for d in degradations] == ["vectorcypher.bm25_title_weight"]
+
+
+async def test_a_separate_recall_records_again() -> None:
+    """Dedupe is per-sink, not per-process.
+
+    The guard keys off the in-scope ``degradations`` list, so a fresh recall
+    starts clean. If it were memoized on the retriever instead, a long-lived
+    engine would report the fault once and then go quiet forever.
+    """
+    store = _FulltextStore(fts_has_title=False)
+    retriever = _title_weight_retriever(store, 2.0)
+
+    first: list[Degradation] = []
+    second: list[Degradation] = []
+    await _hybrid_search(retriever, first)
+    await _hybrid_search(retriever, second)
+
+    assert len(first) == 1
+    assert len(second) == 1

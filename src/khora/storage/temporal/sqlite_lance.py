@@ -242,7 +242,20 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
             row = await cur.fetchone()
             self._fts_has_title = bool(row and row[0] and "title" in row[0].lower())
         except Exception:
+            # Distinct failure mode from the legacy 1-column shape: there the
+            # probe SUCCEEDS and simply reports no title column, which
+            # ``_bm25_expr`` handles with its own throttled warning. Here the
+            # probe itself raised, so the shape is UNKNOWN. We keep the same
+            # conservative False, but that is now an assumption rather than a
+            # reading — hence the WARNING with ``exc_info`` (ADR-001 convention).
             self._fts_has_title = False
+            logger.warning(
+                "SQLiteLanceTemporalStore: FTS5 shape probe failed — could not read "
+                "khora_chunks_fts from sqlite_master. This is NOT the legacy "
+                "1-column-table case; the table's shape is unknown. Assuming no title "
+                "column, so title weighting is inert for the life of this store.",
+                exc_info=True,
+            )
 
         # Create the LanceDB vector table for khora_chunks. exist_ok keeps
         # this idempotent across processes/test runs.
