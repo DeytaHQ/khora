@@ -449,6 +449,7 @@ class WeaviateTemporalStore(TemporalVectorStore):
         query_text: str | None = None,
         filter_ast: FilterNode | None = None,
         filter_plan_out: list[ChannelPlan] | None = None,
+        title_weight: float = 1.0,
     ) -> list[TemporalSearchResult]:
         """Search for similar chunks with temporal filtering.
 
@@ -496,6 +497,9 @@ class WeaviateTemporalStore(TemporalVectorStore):
           (never a wrong row, only possibly fewer) and inherent to post-filtering;
           a caller needing exactly ``limit`` under heavy metadata selectivity must
           widen the candidate budget (raise ``limit`` upstream).
+
+        ``title_weight`` is accepted for interface uniformity; not applied —
+        tracked in the #1574 follow-up issue.
         """
         from weaviate.classes.query import HybridFusion, MetadataQuery
 
@@ -722,6 +726,7 @@ class WeaviateTemporalStore(TemporalVectorStore):
         created_before: datetime | None = None,
         filter_ast: FilterNode | None = None,
         filter_plan_out: list[ChannelPlan] | None = None,
+        title_weight: float = 1.0,
     ) -> list[tuple[Chunk, float]]:
         """BM25 keyword search over the Weaviate ``KhoraChunk`` collection.
 
@@ -731,6 +736,9 @@ class WeaviateTemporalStore(TemporalVectorStore):
 
         Returns ``(Chunk, score)`` tuples where ``score`` is the BM25
         relevance score from Weaviate's ``MetadataQuery(score=True)``.
+
+        ``title_weight`` is accepted for interface uniformity; not applied —
+        tracked in the #1574 follow-up issue.
         """
         from weaviate.classes.query import Filter, MetadataQuery
 

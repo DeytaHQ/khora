@@ -385,12 +385,16 @@ class SurrealDBTemporalStore(TemporalVectorStore):
         query_text: str | None = None,
         filter_ast: FilterNode | None = None,
         filter_plan_out: list[ChannelPlan] | None = None,
+        title_weight: float = 1.0,
     ) -> list[TemporalSearchResult]:
         """Search temporal chunks with optional hybrid (vector + BM25) ranking.
 
         ``filter_ast`` is the deterministic recall-filter AST. When provided it
         is compiled to a SurrealQL ``WHERE`` predicate and AND-ed alongside the
         legacy ``temporal_filter`` clauses.
+
+        ``title_weight`` is accepted for interface uniformity; not applied —
+        tracked in the #1574 follow-up issue.
         """
         with trace_span(
             "khora.temporal_store.search",
@@ -588,6 +592,7 @@ class SurrealDBTemporalStore(TemporalVectorStore):
         created_before: datetime | None = None,
         filter_ast: FilterNode | None = None,
         filter_plan_out: list[ChannelPlan] | None = None,
+        title_weight: float = 1.0,
     ) -> list[tuple[Chunk, float]]:
         """Public BM25 lookup over the SurrealDB temporal-chunk table.
 
@@ -598,6 +603,9 @@ class SurrealDBTemporalStore(TemporalVectorStore):
         ``filter_ast`` is the deterministic recall-filter AST. When provided it
         is compiled to a SurrealQL ``WHERE`` predicate and AND-ed into the BM25
         query alongside the namespace + temporal-bound clauses.
+
+        ``title_weight`` is accepted for interface uniformity; not applied —
+        tracked in the #1574 follow-up issue.
         """
         if not query_text or not query_text.strip():
             return []

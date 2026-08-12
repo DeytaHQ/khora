@@ -121,6 +121,29 @@ khora_chunks_table = Table(
 )
 
 
+# Body of the ``khora_chunks.content_tsv`` trigger function (#1574). The
+# vector is weighted: ``title`` tokens carry label ``'A'`` and ``content``
+# tokens label ``'B'``, so ``ts_rank_cd`` can score a title hit above a body hit
+# via an explicit weights vector (see ``_bm25_search``). ``coalesce`` because
+# ``title`` is nullable; ``to_tsvector`` of NULL is NULL and would annihilate
+# the whole concatenation.
+#
+# LOCKSTEP: this string MUST stay byte-identical to ``_TSV_FUNCTION_SQL`` in
+# ``khora/db/migrations/versions/058_khora_chunks_title_fts.py``. Both sites
+# issue ``CREATE OR REPLACE`` against the same function, so whichever runs last
+# wins — a drift between them makes the installed formula depend on boot order
+# (migration vs. store ``connect()``). Change both in the same commit. Same
+# convergence contract migration 044 has with the filter-index DDL above, and
+# 055 has with ``storage/optimize.py``.
+_TSV_FUNCTION_SQL = """CREATE OR REPLACE FUNCTION khora_chunks_content_tsv_trigger() RETURNS trigger AS $$
+BEGIN
+    NEW.content_tsv := setweight(to_tsvector('english', coalesce(NEW.title, '')), 'A')
+                    || setweight(to_tsvector('english', NEW.content), 'B');
+    RETURN NEW;
+END
+$$ LANGUAGE plpgsql"""
+
+
 # Legacy ``ChunkTemporalFilter.additional`` range-op names → the canonical filter Op,
 # so the deterministic-filter compiler can build a type-gated metadata compare.
 _LEGACY_RANGE_OPS: dict[str, Op] = {
@@ -290,16 +313,9 @@ class PgVectorTemporalStore(TemporalVectorStore):
 
             # Create trigger for auto-updating content_tsv
             # Note: Each statement must be executed separately (asyncpg limitation)
-            await conn.execute(
-                text("""
-                CREATE OR REPLACE FUNCTION khora_chunks_content_tsv_trigger() RETURNS trigger AS $$
-                BEGIN
-                    NEW.content_tsv := to_tsvector('english', NEW.content);
-                    RETURN NEW;
-                END
-                $$ LANGUAGE plpgsql
-                """)
-            )
+            # The function body lives in the module-level ``_TSV_FUNCTION_SQL``
+            # so it can be kept byte-identical to migration 058's copy.
+            await conn.execute(text(_TSV_FUNCTION_SQL))
             await conn.execute(text("DROP TRIGGER IF EXISTS khora_chunks_content_tsv_update ON khora_chunks"))
             await conn.execute(
                 text("""
@@ -512,6 +528,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
         query_text: str | None = None,
         filter_ast: FilterNode | None = None,
         filter_plan_out: list[ChannelPlan] | None = None,
+        title_weight: float = 1.0,
     ) -> list[TemporalSearchResult]:
         """Search for similar chunks with temporal filtering.
 
@@ -527,6 +544,10 @@ class PgVectorTemporalStore(TemporalVectorStore):
         provided it is compiled to a single-table ``khora_chunks`` WHERE predicate
         and AND-ed alongside the legacy ``temporal_filter`` conditions. The two
         coexist during the ``ChunkTemporalFilter`` deprecation window.
+
+        ``title_weight`` scales the lexical rank contribution of a chunk's
+        ``title`` relative to its ``content`` (#1574); ``1.0`` weighs the two
+        equally and reproduces the pre-#1574 ranking exactly.
         """
         with trace_span(
             "khora.temporal_store.search",
@@ -544,6 +565,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
                 query_text=query_text,
                 filter_ast=filter_ast,
                 filter_plan_out=filter_plan_out,
+                title_weight=title_weight,
             )
             _search_span.set_attribute("result_count", len(results))
             return results
@@ -560,6 +582,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
         query_text: str | None = None,
         filter_ast: FilterNode | None = None,
         filter_plan_out: list[ChannelPlan] | None = None,
+        title_weight: float = 1.0,
     ) -> list[TemporalSearchResult]:
         async with self._get_session() as session:
             # Build base conditions
@@ -612,6 +635,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
                     query_text,
                     conditions,
                     limit * 2,
+                    title_weight=title_weight,
                 )
 
                 # Fuse results using RRF. An explicit min_similarity floor
@@ -643,6 +667,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
                         query_text,
                         conditions,
                         needed + len(existing_ids),  # Fetch extra to account for overlap
+                        title_weight=title_weight,
                     )
 
                     # Add BM25 results that aren't already in vector results
@@ -736,6 +761,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
         created_before: datetime | None = None,
         filter_ast: FilterNode | None = None,
         filter_plan_out: list[ChannelPlan] | None = None,
+        title_weight: float = 1.0,
     ) -> list[tuple[Chunk, float]]:
         """Public BM25 / ts_rank lookup over ``khora_chunks`` for the
         StorageCoordinator dispatch path.
@@ -751,6 +777,10 @@ class PgVectorTemporalStore(TemporalVectorStore):
         AND-ed into the conditions — the SAME compile context the vector path
         uses (``_search_inner``), so the BM25 channel honors the identical
         filter and cannot return filter-violating chunks.
+
+        ``title_weight`` scales the rank contribution of a chunk's ``title``
+        relative to its ``content`` (#1574); ``1.0`` weighs the two equally
+        and reproduces the pre-#1574 ranking exactly.
         """
         if not query_text or not query_text.strip():
             return []
@@ -790,7 +820,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
         elif filter_plan_out is not None:
             filter_plan_out.append(ChannelPlan())
         async with self._get_session() as session:
-            results = await self._bm25_search(session, query_text, conditions, limit)
+            results = await self._bm25_search(session, query_text, conditions, limit, title_weight=title_weight)
         return [(temporal_chunk_to_chunk(r.chunk), float(r.bm25_score or 0.0)) for r in results]
 
     async def search_recent_chunks(
@@ -866,8 +896,15 @@ class PgVectorTemporalStore(TemporalVectorStore):
         query_text: str,
         conditions: list,
         limit: int,
+        title_weight: float = 1.0,
     ) -> list[TemporalSearchResult]:
-        """Perform BM25-style full-text search using PostgreSQL ts_rank."""
+        """Perform BM25-style full-text search using PostgreSQL ts_rank.
+
+        ``title_weight`` scales the rank contribution of the ``'A'``-labelled
+        title tokens relative to the ``'B'``-labelled content tokens. ``1.0``
+        (the default) makes the two weigh the same, which reproduces the
+        pre-#1574 ranking exactly.
+        """
         # Create tsquery from query text
         # OR the query terms instead of plainto_tsquery's implicit AND: a full
         # sentence rarely has every content word in one chunk, so AND matched
@@ -876,7 +913,19 @@ class PgVectorTemporalStore(TemporalVectorStore):
         if not terms:
             return []
         tsquery = func.to_tsquery("english", " | ".join(terms))
-        rank = func.ts_rank_cd(khora_chunks_table.c.content_tsv, tsquery).label("bm25_score")
+        # The weights vector is ALWAYS passed explicitly, in PostgreSQL's
+        # ``{D, C, B, A}`` order. Relying on ts_rank_cd's implicit default
+        # (``{0.1, 0.2, 0.4, 1.0}``) would silently change ranking the moment
+        # migration 058 relabels content from unlabelled (D, 0.1) to 'B' (0.4) —
+        # a 4x jump on every content hit. Pinning D and B to the same 0.1 keeps
+        # a content match scoring exactly as it did before the relabel, so
+        # ``title_weight=1.0`` is numerically identical to today's ranking.
+        # The literal is interpolated rather than bound because ``float`` under
+        # ``:g`` can only render digits, ``.``, ``e`` and a sign — no injection
+        # surface. The value originates from ``query.bm25_title_weight``, which
+        # Pydantic validates to [0.0, 10.0] at the config boundary.
+        weights = f"'{{0.1, 0.2, 0.1, {0.1 * title_weight:g}}}'::float4[]"
+        rank = func.ts_rank_cd(text(weights), khora_chunks_table.c.content_tsv, tsquery).label("bm25_score")
 
         _retrieval_cols_bm25 = [c for c in khora_chunks_table.c if c.name != "embedding"]
         stmt = (

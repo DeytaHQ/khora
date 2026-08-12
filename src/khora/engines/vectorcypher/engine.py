@@ -595,6 +595,10 @@ class VectorCypherConfig:
     enable_bm25_channel: bool = False
     bm25_weight: float = 0.3
     bm25_top_k: int = 50
+    # Query-time weight of chunk title vs content INSIDE the lexical channel
+    # (1.0 = neutral, the pre-#1574 behavior). Distinct from bm25_weight,
+    # which governs the channel's influence in RRF fusion.
+    bm25_title_weight: float = 1.0
 
     # Session-aware parallel retrieval for cross-session temporal queries.
     # Only activates when: Neo4j is connected, query is temporal, and entry
@@ -750,6 +754,9 @@ class VectorCypherEngine:
                 ("recency_weight", "temporal_recency_weight"),
                 ("recency_decay_days", "temporal_recency_decay_days"),
                 ("keyword_weight", "bm25_weight"),
+                # Issue #1574 - query-time title-vs-content weight inside the
+                # lexical channel (KHORA_QUERY_BM25_TITLE_WEIGHT).
+                ("bm25_title_weight", "bm25_title_weight"),
             ):
                 _query_val = getattr(query_cfg, _query_field, None)
                 if _query_val is None:
@@ -1019,6 +1026,7 @@ class VectorCypherEngine:
             enable_bm25_channel=self._vc_config.enable_bm25_channel,
             bm25_weight=self._vc_config.bm25_weight,
             bm25_top_k=self._vc_config.bm25_top_k,
+            bm25_title_weight=self._vc_config.bm25_title_weight,
             # Issue #1391 — lexical-channel selector (keyword_ppr vs bm25).
             # Read straight from KhoraConfig.query (bypasses VectorCypherConfig,
             # mirroring the PPR flags above). Default "bm25" = unchanged.

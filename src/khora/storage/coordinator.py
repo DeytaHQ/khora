@@ -1840,6 +1840,7 @@ class StorageCoordinator:
         created_after: datetime | None = None,
         created_before: datetime | None = None,
         filter_ast: FilterNode | None = None,
+        title_weight: float = 1.0,
     ) -> list[tuple[Chunk, float]]:
         """Search chunks using PostgreSQL full-text search.
 
@@ -1849,9 +1850,15 @@ class StorageCoordinator:
         REFUSES to return rows under an active filter rather than risk
         smuggling unfiltered chunks. The filtered BM25 path is the
         ``khora_chunks`` temporal store (``TemporalVectorStore.search_fulltext``).
+
+        ``title_weight`` is accepted for signature uniformity with the temporal
+        store and is deliberately NOT forwarded — see below.
         """
         if not self._vector:
             raise RuntimeError("Vector backend not configured")
+        # ``title_weight`` intentionally not forwarded: this is the legacy
+        # relational ``chunks`` FTS tier, which is out of scope for #1574 - it
+        # has no title column.
         return await self._vector.search_fulltext(
             namespace_id,
             query_text,

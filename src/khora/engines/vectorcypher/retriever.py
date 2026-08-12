@@ -226,6 +226,25 @@ _BM25_DEGRADED_COUNTER = metric_counter(
     ),
 )
 
+# BM25 title-weight degradation counter (#1574, ADR-001). A non-neutral
+# ``bm25_title_weight`` is silently inert against a lexical store whose FTS
+# index has no ``title`` column (a store built before the #1574 migration, or
+# a backend that accepts the kwarg and ignores it). The lexical channel still
+# returns rows - only the requested title boost is missing - so this is a
+# degradation, not a failure. NO namespace_id label - cardinality rule.
+_BM25_TITLE_WEIGHT_DEGRADED_COUNTER = metric_counter(
+    "khora.vectorcypher.bm25_title_weight.degraded_total",
+    unit="1",
+    description=(
+        "Issue #1574 (ADR-001). Incremented when bm25_title_weight != 1.0 but the "
+        "FTS store lacks the title column, so the requested title weight cannot "
+        "be applied and the lexical channel ranks on content alone. The same "
+        "event is also appended to RecallResult.engine_info['degradations']. "
+        "Labels: reason (fts_missing_title_column). NO namespace_id label - "
+        "cardinality rule."
+    ),
+)
+
 # ADR-001. When the recency channel's ``search_recent_chunks`` raises an
 # operational fault (DB / network), the channel returns [] and its
 # pool-augmentation contribution drops out of RRF. The catch site records a
@@ -638,6 +657,13 @@ class RetrieverConfig:
     enable_bm25_channel: bool = False
     bm25_weight: float = 0.3
     bm25_top_k: int = 50  # How many BM25 results to fetch
+    # Issue #1574 - query-time weight of a chunk's title vs its content WITHIN
+    # the lexical channel (1.0 = neutral / pre-#1574 behavior). Distinct from
+    # bm25_weight, which is the channel's weight in RRF fusion. Part of the
+    # recall-cache fingerprint: the cache key is repr() of this dataclass, so
+    # declaring the field here is what keeps differently-weighted recalls from
+    # sharing a cache entry.
+    bm25_title_weight: float = 1.0
 
     # Lexical-channel selector (#1391). "bm25" (default) keeps BM25 in the
     # lexical slot; "keyword_ppr" swaps in the experimental keyword-chunk
@@ -3759,6 +3785,7 @@ class VectorCypherRetriever:
                     query_text=query,
                     filter_ast=filter_ast,
                     filter_plan_out=vector_filter_plan_sink,
+                    title_weight=self._config.bm25_title_weight,
                 )
 
             chunk_results: list[tuple[Chunk, float]] = []
@@ -4961,6 +4988,7 @@ class VectorCypherRetriever:
                 query_text=query_text,
                 filter_ast=filter_ast,
                 filter_plan_out=filter_plan_out,
+                title_weight=self._config.bm25_title_weight,
             )
 
             span.set_attribute("chunk_count", len(results))
@@ -5308,7 +5336,10 @@ class VectorCypherRetriever:
             degradations: When provided, a structured ``Degradation`` is appended
                 if the search raises so the silently-dropped lexical channel is
                 observable (ADR-001, issue #1158). Recall continues with the
-                BM25 contribution absent from RRF rather than crashing.
+                BM25 contribution absent from RRF rather than crashing. A second
+                record (``fts_missing_title_column``, #1574) is appended when
+                a non-neutral ``bm25_title_weight`` cannot be applied because the
+                store's FTS index has no ``title`` column.
 
         Returns:
             List of (chunk_id, score, chunk) tuples
@@ -5339,7 +5370,30 @@ class VectorCypherRetriever:
                         limit=limit,
                         filter_ast=filter_ast,
                         filter_plan_out=filter_plan_out,
+                        title_weight=self._config.bm25_title_weight,
                     )
+                    # ADR-001 (#1574): a non-neutral title weight against a
+                    # store whose FTS index has no ``title`` column is silently
+                    # inert - the channel still returns rows, ranked on content
+                    # alone. Stores that can answer expose ``fts_has_title``;
+                    # absent the attribute (pgvector, mocks) we assume the
+                    # column is present and record nothing.
+                    if (
+                        self._config.bm25_title_weight != 1.0
+                        and getattr(self._vector_store, "fts_has_title", True) is False
+                    ):
+                        _BM25_TITLE_WEIGHT_DEGRADED_COUNTER.add(1, attributes={"reason": "fts_missing_title_column"})
+                        if degradations is not None:
+                            degradations.append(
+                                Degradation(
+                                    component="vectorcypher.bm25_title_weight",
+                                    reason="fts_missing_title_column",
+                                    detail=(
+                                        f"bm25_title_weight={self._config.bm25_title_weight} requested but the "
+                                        "FTS index has no title column; lexical ranking used content only"
+                                    ),
+                                )
+                            )
                     # Real backends return ``list[tuple[Chunk, float]]``; the
                     # ``isinstance`` check rejects the bare-AsyncMock case
                     # (and any other non-list return) so we fall through to

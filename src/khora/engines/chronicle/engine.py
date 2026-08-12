@@ -1791,6 +1791,11 @@ class ChronicleEngine:
             else DEFAULT_CHRONICLE_HALF_LIFE_HOURS
         )
         _enable_reinforcement = getattr(qs, "chronicle_enable_recall_reinforcement", False) if qs else False
+        # Issue #1574 - title-vs-content weight inside the lexical channel. Threaded
+        # through for uniformity; Chronicle's BM25 runs against the legacy
+        # relational ``chunks`` tier, which has no title column, so the value is
+        # accepted and not applied there.
+        _bm25_title_weight = getattr(qs, "bm25_title_weight", 1.0) if qs else 1.0
         overfetch_limit = limit * _overfetch
 
         # Resolve temporal references from query (fast dateparser, ~0.25ms)
@@ -1916,6 +1921,7 @@ class ChronicleEngine:
                     limit=overfetch_limit,
                     created_after=created_after,
                     created_before=created_before,
+                    title_weight=_bm25_title_weight,
                 )
             )
 

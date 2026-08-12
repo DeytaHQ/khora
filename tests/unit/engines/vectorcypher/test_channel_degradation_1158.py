@@ -344,3 +344,135 @@ async def test_retrieve_surfaces_bm25_channel_degradation() -> None:
     assert "vectorcypher.bm25" in components, f"degradations: {degradations!r}"
     bm25_deg = next(d for d in degradations if d.get("component") == "vectorcypher.bm25")
     assert bm25_deg["reason"] == "channel_exception"
+
+
+# ---------------------------------------------------------------------------
+# #1574 — an inapplicable ``bm25_title_weight``.
+#
+# This one degrades without anything going wrong: the lexical channel runs,
+# returns rows, and raises nothing. What is missing is only the requested title
+# boost, because the store's FTS index has no ``title`` column (an embedded
+# database built before #1574 — its DDL is ``IF NOT EXISTS``, so nothing ever
+# migrates it to the 2-column shape).
+#
+# It is worth a record precisely because it is invisible otherwise. SQLite does
+# not reject the surplus weight argument (measured on 3.53.4: extra bm25()
+# weights are silently ignored), so the operator who set the knob gets ranking
+# identical to not having set it, with nothing anywhere to say so.
+# ---------------------------------------------------------------------------
+
+
+class _FulltextStore:
+    """A minimal lexical store: only what the channel actually reaches for.
+
+    A ``MagicMock`` cannot express the third case below — the ``getattr`` probe
+    would auto-create a truthy ``fts_has_title`` — so the shape is spelled out.
+    ``fts_has_title`` is set as an *instance* attribute only when a case wants
+    one, leaving it genuinely absent otherwise.
+    """
+
+    def __init__(self, *, fts_has_title: bool | None = None) -> None:
+        self.calls: list[dict] = []
+        if fts_has_title is not None:
+            self.fts_has_title = fts_has_title
+
+    async def search_fulltext(self, namespace_id, query, **kwargs):
+        self.calls.append(kwargs)
+        chunk = MagicMock()
+        chunk.id = uuid4()
+        return [(chunk, 0.9)]
+
+
+def _title_weight_retriever(store: _FulltextStore, weight: float) -> VectorCypherRetriever:
+    return VectorCypherRetriever(
+        vector_store=store,
+        neo4j_driver=None,
+        embedder=AsyncMock(),
+        config=RetrieverConfig(bm25_title_weight=weight),
+        storage=MagicMock(),
+    )
+
+
+async def _degradations_for(store: _FulltextStore, weight: float) -> list[Degradation]:
+    retriever = _title_weight_retriever(store, weight)
+    degradations: list[Degradation] = []
+    results = await retriever._bm25_search_chunks(
+        query="floor panels dimensioned",
+        namespace_id=uuid4(),
+        limit=10,
+        degradations=degradations,
+    )
+    # Always: the channel is NOT broken. Rows still come back — that is what
+    # makes this a degradation rather than a failure, and asserting it here
+    # keeps every case below honest about the distinction.
+    assert len(results) == 1, f"the lexical channel must still return rows, got {results!r}"
+    return degradations
+
+
+async def test_title_weight_records_degradation_on_a_store_without_the_column() -> None:
+    """The #1574 record: weight requested, store cannot apply it."""
+    degradations = await _degradations_for(_FulltextStore(fts_has_title=False), 2.0)
+
+    assert len(degradations) == 1, f"expected one degradation, got {degradations!r}"
+    deg = degradations[0]
+    assert deg["component"] == "vectorcypher.bm25_title_weight"
+    assert deg["reason"] == "fts_missing_title_column"
+    # The detail has to name the value that was ignored — an operator reading
+    # this in a log needs to know which knob did nothing.
+    assert "2.0" in (deg.get("detail") or "")
+
+
+async def test_neutral_weight_on_the_same_store_does_not_degrade() -> None:
+    """1.0 asks for nothing, so nothing is being dropped.
+
+    Without this gate every recall on every un-upgraded embedded deployment
+    would emit a degradation and bump a public counter, for a default none of
+    them chose. That noise would make the signal above worthless.
+    """
+    assert await _degradations_for(_FulltextStore(fts_has_title=False), 1.0) == []
+
+
+async def test_capable_store_does_not_degrade_at_a_raised_weight() -> None:
+    """The weight applies, so there is nothing to report."""
+    assert await _degradations_for(_FulltextStore(fts_has_title=True), 2.0) == []
+
+
+async def test_store_without_the_probe_attribute_is_assumed_capable() -> None:
+    """No ``fts_has_title`` -> no claim either way -> no record.
+
+    Every non-embedded store is in this position: pgvector gets its title
+    coverage from migration 058 and exposes no probe, and neither do the
+    accept-and-ignore backends or a test double. Defaulting to "degraded" would
+    fire the counter on the *normal* Postgres path, where the weight works.
+    """
+    store = _FulltextStore()
+    assert not hasattr(store, "fts_has_title"), "the fixture must leave the attribute genuinely absent"
+
+    assert await _degradations_for(store, 2.0) == []
+
+
+async def test_title_weight_is_forwarded_to_the_store_on_every_call() -> None:
+    """The kwarg is passed unconditionally, including at the default.
+
+    Unconditional forwarding is what lets each backend decide for itself
+    (apply / ignore / probe-and-warn) instead of the retriever guessing — and it
+    is also the change that can break a hand-rolled test double with a strict
+    signature, so it is pinned rather than assumed.
+    """
+    store = _FulltextStore(fts_has_title=True)
+    await _degradations_for(store, 1.0)
+    await _degradations_for(store, 3.0)
+
+    assert [call.get("title_weight") for call in store.calls] == [1.0, 3.0]
+
+
+async def test_no_degradation_sink_still_degrades_cleanly() -> None:
+    """``degradations=None`` is the default; the guard must short-circuit."""
+    retriever = _title_weight_retriever(_FulltextStore(fts_has_title=False), 2.0)
+
+    results = await retriever._bm25_search_chunks(
+        query="floor panels dimensioned",
+        namespace_id=uuid4(),
+        limit=10,
+    )
+    assert len(results) == 1

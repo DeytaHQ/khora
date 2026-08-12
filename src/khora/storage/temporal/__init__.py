@@ -94,6 +94,7 @@ class TemporalVectorStore(Protocol):
         query_text: str | None = None,  # Required for hybrid search
         filter_ast: FilterNode | None = None,
         filter_plan_out: list[ChannelPlan] | None = None,
+        title_weight: float = 1.0,
     ) -> list[TemporalSearchResult]:
         """Search for similar chunks with temporal filtering.
 
@@ -116,6 +117,11 @@ class TemporalVectorStore(Protocol):
                 is race-free under concurrent recalls on a shared store — no mutable
                 instance state is involved. Backends that do not report pushdown
                 leave it untouched.
+            title_weight: Weight of a chunk's ``title`` relative to its
+                ``content`` in the lexical (BM25) half of a hybrid search
+                (#1574). ``1.0`` weighs the two equally and reproduces the
+                pre-#1574 ranking exactly. Backends without a title-aware
+                lexical index accept it and ignore it, as with ``filter_ast``.
 
         Returns:
             List of matching chunks with similarity scores
@@ -142,6 +148,7 @@ class TemporalVectorStore(Protocol):
         created_before: datetime | None = None,
         filter_ast: FilterNode | None = None,
         filter_plan_out: list[ChannelPlan] | None = None,
+        title_weight: float = 1.0,
     ) -> list[tuple[Chunk, float]]:
         """Full-text search over the temporal store's chunk table.
 
@@ -161,6 +168,12 @@ class TemporalVectorStore(Protocol):
         (sqlite_lance) reports the pushed/post-filtered partition its WHERE
         + in-memory re-check actually produced. The default (return ``[]``)
         leaves it untouched.
+
+        ``title_weight`` scales a chunk's ``title`` against its ``content`` in
+        the lexical ranking (#1574); ``1.0`` weighs the two equally and
+        reproduces the pre-#1574 ranking exactly. Backends whose fulltext index
+        does not cover ``title`` accept it and ignore it, as with
+        ``filter_ast``.
         """
         return []
 

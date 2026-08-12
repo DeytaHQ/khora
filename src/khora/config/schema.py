@@ -1614,6 +1614,14 @@ class QuerySettings(BaseSettings):
     enable_bm25_channel: bool = Field(
         default=False, description="Enable the independent BM25 lexical channel in fusion"
     )
+    bm25_title_weight: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=10.0,
+        description="Query-time weight of chunk title vs content in the BM25 lexical channel "
+        "(1.0 = neutral). Values >1 rank title matches above body matches within the "
+        "lexical channel only; the channel's influence in fusion stays governed by keyword_weight.",
+    )
 
     # Lexical-channel selector (#1391). Picks which retriever fills the lexical
     # recall slot: "bm25" (default, current behavior, byte-identical) or

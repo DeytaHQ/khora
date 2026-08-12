@@ -231,6 +231,11 @@ def _make_retriever(
         limit: int,
         filter_ast: FilterNode | None = None,
         filter_plan_out: list[ChannelPlan] | None = None,
+        # #1574: the retriever passes ``title_weight`` on EVERY call, default
+        # included. Spelled out rather than absorbed by a ``**kwargs`` so this
+        # double keeps mirroring the real ``search_fulltext`` signature — the
+        # point of it being an explicit callable rather than an AsyncMock.
+        title_weight: float = 1.0,
     ) -> list[Any]:
         if filter_ast is not None and filter_plan_out is not None:
             filter_plan_out.append(ChannelPlan(pushed_keys=filter_leaf_keys(filter_ast)))
@@ -1051,6 +1056,9 @@ def _simple_retriever(ns_id: UUID, *, enable_bm25: bool) -> VectorCypherRetrieve
         limit: int,
         filter_ast: FilterNode | None = None,
         filter_plan_out: list[ChannelPlan] | None = None,
+        # #1574: passed on every call, default included. See the sibling
+        # double above for why it is spelled out rather than swallowed.
+        title_weight: float = 1.0,
     ) -> list[Any]:
         # The temporal-store fulltext path records the bm25 plan from its compile.
         if filter_ast is not None and filter_plan_out is not None:
