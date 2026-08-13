@@ -94,6 +94,7 @@ class TemporalVectorStore(Protocol):
         query_text: str | None = None,  # Required for hybrid search
         filter_ast: FilterNode | None = None,
         filter_plan_out: list[ChannelPlan] | None = None,
+        title_weight: float = 1.0,
     ) -> list[TemporalSearchResult]:
         """Search for similar chunks with temporal filtering.
 
@@ -116,6 +117,15 @@ class TemporalVectorStore(Protocol):
                 is race-free under concurrent recalls on a shared store — no mutable
                 instance state is involved. Backends that do not report pushdown
                 leave it untouched.
+            title_weight: Weight of a chunk's ``title`` relative to its
+                ``content`` in the lexical (BM25) half of a hybrid search
+                (#1574). At ``1.0`` a content token scores exactly what it
+                scored pre-#1574, so per-content-token scoring is preserved;
+                this does NOT preserve the overall result set or ranking, since
+                folding ``title`` into the index means title-matching chunks
+                newly match and can re-rank at any ``title_weight``. Backends
+                without a title-aware lexical index accept it and ignore it, as
+                with ``filter_ast``.
 
         Returns:
             List of matching chunks with similarity scores
@@ -142,6 +152,7 @@ class TemporalVectorStore(Protocol):
         created_before: datetime | None = None,
         filter_ast: FilterNode | None = None,
         filter_plan_out: list[ChannelPlan] | None = None,
+        title_weight: float = 1.0,
     ) -> list[tuple[Chunk, float]]:
         """Full-text search over the temporal store's chunk table.
 
@@ -161,6 +172,14 @@ class TemporalVectorStore(Protocol):
         (sqlite_lance) reports the pushed/post-filtered partition its WHERE
         + in-memory re-check actually produced. The default (return ``[]``)
         leaves it untouched.
+
+        ``title_weight`` scales a chunk's ``title`` against its ``content`` in
+        the lexical ranking (#1574). At ``1.0`` a content token scores exactly
+        what it scored pre-#1574, so per-content-token scoring is preserved;
+        this does NOT preserve the overall result set or ranking, since folding
+        ``title`` into the index means title-matching chunks newly match and
+        can re-rank at any ``title_weight``. Backends whose fulltext index does
+        not cover ``title`` accept it and ignore it, as with ``filter_ast``.
         """
         return []
 

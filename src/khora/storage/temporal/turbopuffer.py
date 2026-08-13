@@ -333,6 +333,7 @@ class TurbopufferTemporalStore(TemporalVectorStore):
         query_text: str | None = None,
         filter_ast: FilterNode | None = None,
         filter_plan_out: list[ChannelPlan] | None = None,
+        title_weight: float = 1.0,
     ) -> list[TemporalSearchResult]:
         """Vector or hybrid (vector + BM25) search.
 
@@ -352,6 +353,9 @@ class TurbopufferTemporalStore(TemporalVectorStore):
         normalizes to, i.e. an AND root with no children) is a no-op and passes
         through to the normal search path unchanged. ``filter_ast.children`` is
         the "has real constraints" check (the root is always an AND ``FilterNode``).
+
+        ``title_weight`` is accepted for interface uniformity; not applied —
+        tracked in the #1574 follow-up issue.
         """
         if filter_ast is not None and filter_ast.children:
             raise RecallFilterUnsupportedError(
@@ -448,6 +452,7 @@ class TurbopufferTemporalStore(TemporalVectorStore):
         created_before: datetime | None = None,
         filter_ast: FilterNode | None = None,
         filter_plan_out: list[ChannelPlan] | None = None,
+        title_weight: float = 1.0,
     ) -> list[tuple[Chunk, float]]:
         """BM25 keyword search over the turbopuffer namespace.
 
@@ -461,6 +466,9 @@ class TurbopufferTemporalStore(TemporalVectorStore):
 
         ``created_after`` / ``created_before`` translate to turbopuffer
         ``created_at`` range filters using the same grammar as ``search()``.
+
+        ``title_weight`` is accepted for interface uniformity; not applied —
+        tracked in the #1574 follow-up issue.
         """
         if filter_ast is not None and filter_ast.children:
             raise RecallFilterUnsupportedError(

@@ -572,6 +572,12 @@ class VectorCypherConfig:
     def __post_init__(self) -> None:
         if self.max_chunks_in_flight is not None and self.max_chunks_in_flight < 1:
             raise ValueError(f"max_chunks_in_flight must be >= 1, got {self.max_chunks_in_flight}")
+        # Mirrors the [0, 10] contract Pydantic enforces on
+        # QuerySettings.bm25_title_weight. Direct construction of this dataclass
+        # bypasses that validation entirely, so without this the two entry
+        # points disagree on what a legal weight is (#1574).
+        if not 0.0 <= self.bm25_title_weight <= 10.0:
+            raise ValueError(f"bm25_title_weight must be between 0 and 10, got {self.bm25_title_weight}")
 
     # Streaming pipeline (A-1: batch entity storage across documents)
     streaming_pipeline: bool = True
@@ -595,6 +601,12 @@ class VectorCypherConfig:
     enable_bm25_channel: bool = False
     bm25_weight: float = 0.3
     bm25_top_k: int = 50
+    # Query-time weight of chunk title vs content INSIDE the lexical channel.
+    # 1.0 weighs the two equally, reproducing the pre-#1574 per-content-token
+    # ranking - NOT the pre-#1574 result set, which changes at every weight
+    # once title is folded into the index. Distinct from bm25_weight, which
+    # governs the channel's influence in RRF fusion.
+    bm25_title_weight: float = 1.0
 
     # Session-aware parallel retrieval for cross-session temporal queries.
     # Only activates when: Neo4j is connected, query is temporal, and entry
@@ -750,6 +762,9 @@ class VectorCypherEngine:
                 ("recency_weight", "temporal_recency_weight"),
                 ("recency_decay_days", "temporal_recency_decay_days"),
                 ("keyword_weight", "bm25_weight"),
+                # Issue #1574 - query-time title-vs-content weight inside the
+                # lexical channel (KHORA_QUERY_BM25_TITLE_WEIGHT).
+                ("bm25_title_weight", "bm25_title_weight"),
             ):
                 _query_val = getattr(query_cfg, _query_field, None)
                 if _query_val is None:
@@ -1019,6 +1034,7 @@ class VectorCypherEngine:
             enable_bm25_channel=self._vc_config.enable_bm25_channel,
             bm25_weight=self._vc_config.bm25_weight,
             bm25_top_k=self._vc_config.bm25_top_k,
+            bm25_title_weight=self._vc_config.bm25_title_weight,
             # Issue #1391 — lexical-channel selector (keyword_ppr vs bm25).
             # Read straight from KhoraConfig.query (bypasses VectorCypherConfig,
             # mirroring the PPR flags above). Default "bm25" = unchanged.

@@ -226,6 +226,29 @@ _BM25_DEGRADED_COUNTER = metric_counter(
     ),
 )
 
+# BM25 title-weight degradation counter (#1574, ADR-001). A non-neutral
+# ``bm25_title_weight`` is silently inert against a lexical store whose FTS
+# index has no ``title`` column - i.e. a store built before the #1574 migration.
+# The lexical channel still returns rows - only the requested title boost is
+# missing - so this is a degradation, not a failure. Scope: only stores that
+# expose ``fts_has_title`` can trip this. The backends that accept the kwarg
+# and ignore it (surrealdb / turbopuffer / weaviate) do NOT expose the probe,
+# so the ``getattr(..., True)`` default assumes a capable index and this never
+# fires for them - their no-op status is documented on the config field and
+# tracked in the #1574 follow-up. NO namespace_id label - cardinality rule.
+_BM25_TITLE_WEIGHT_DEGRADED_COUNTER = metric_counter(
+    "khora.vectorcypher.bm25_title_weight.degraded_total",
+    unit="1",
+    description=(
+        "Issue #1574 (ADR-001). Incremented when bm25_title_weight != 1.0 but the "
+        "FTS store lacks the title column, so the requested title weight cannot "
+        "be applied and the lexical channel ranks on content alone. The same "
+        "event is also appended to RecallResult.engine_info['degradations']. "
+        "Labels: reason (fts_missing_title_column). NO namespace_id label - "
+        "cardinality rule."
+    ),
+)
+
 # ADR-001. When the recency channel's ``search_recent_chunks`` raises an
 # operational fault (DB / network), the channel returns [] and its
 # pool-augmentation contribution drops out of RRF. The catch site records a
@@ -638,6 +661,15 @@ class RetrieverConfig:
     enable_bm25_channel: bool = False
     bm25_weight: float = 0.3
     bm25_top_k: int = 50  # How many BM25 results to fetch
+    # Issue #1574 - query-time weight of a chunk's title vs its content WITHIN
+    # the lexical channel. 1.0 weighs the two equally, reproducing the pre-#1574
+    # per-content-token score - not the pre-#1574 result set, which changes at
+    # every weight once title is folded into the index. Distinct from
+    # bm25_weight, which is the channel's weight in RRF fusion. Part of the
+    # recall-cache fingerprint: the cache key is repr() of this dataclass, so
+    # declaring the field here is what keeps differently-weighted recalls from
+    # sharing a cache entry.
+    bm25_title_weight: float = 1.0
 
     # Lexical-channel selector (#1391). "bm25" (default) keeps BM25 in the
     # lexical slot; "keyword_ppr" swaps in the experimental keyword-chunk
@@ -1976,6 +2008,7 @@ class VectorCypherRetriever:
                     # identical WHERE, so one representative capture is honest.
                     filter_plan_out=vector_filter_plan_sink,
                     raw_cosine_out=raw_cosine_by_id,
+                    degradations=degradations,
                 )
             )
 
@@ -2174,6 +2207,7 @@ class VectorCypherRetriever:
                                 min_similarity=min_similarity,
                                 filter_ast=filter_ast,
                                 raw_cosine_out=raw_cosine_by_id,
+                                degradations=degradations,
                             )
                         )
                     )
@@ -2204,6 +2238,7 @@ class VectorCypherRetriever:
                             filter_ast=filter_ast,
                             filter_plan_out=vector_filter_plan_sink,
                             raw_cosine_out=raw_cosine_by_id,
+                            degradations=degradations,
                         )
                     )
                 )
@@ -2551,6 +2586,7 @@ class VectorCypherRetriever:
                 # drops the temporal filter, so there is no caller filter to
                 # thread here.
                 raw_cosine_out=raw_cosine_by_id,
+                degradations=degradations,
             )
 
         # Await BM25 results (also launched in parallel at the beginning)
@@ -2595,6 +2631,7 @@ class VectorCypherRetriever:
                         min_similarity=min_similarity,
                         filter_ast=filter_ast,
                         raw_cosine_out=sub_raw_cosine,
+                        degradations=degradations,
                     )
                     for _cid, _cos in sub_raw_cosine.items():
                         raw_cosine_by_id.setdefault(_cid, _cos)
@@ -3759,7 +3796,16 @@ class VectorCypherRetriever:
                     query_text=query,
                     filter_ast=filter_ast,
                     filter_plan_out=vector_filter_plan_sink,
+                    title_weight=self._config.bm25_title_weight,
                 )
+                # ADR-001 (#1574): this store call carries a title_weight too,
+                # so the hybrid path must report an inapplicable one even when
+                # the dedicated lexical channel is off. Deduped per recall.
+                # Gated on the blend: alpha None is SearchMode.VECTOR, where the
+                # store skips its internal BM25 entirely and never consumes the
+                # weight - reporting it unused there would be a false record.
+                if effective_alpha is not None:
+                    self._record_title_weight_degradation(degradations)
 
             chunk_results: list[tuple[Chunk, float]] = []
             _sorted_raw_cosines = sorted((r.similarity for r in results), reverse=True)
@@ -3817,6 +3863,12 @@ class VectorCypherRetriever:
                     # leaks below-floor chunks).
                     if min_similarity > 0.0 and bm25_results:
                         try:
+                            # #1574: title_weight deliberately NOT threaded here,
+                            # unlike the hybrid/lexical sites. The gate runs pure
+                            # vector (hybrid_alpha=None) and only its id SET is
+                            # consumed - the returned order is discarded, hits stay
+                            # in BM25 order - so a lexical title weight cannot
+                            # change its outcome. Not an oversight; do not "fix".
                             gate_results = await self._vector_store.search(
                                 namespace_id=namespace_id,
                                 query_embedding=query_embedding,
@@ -4917,6 +4969,7 @@ class VectorCypherRetriever:
         filter_ast: FilterNode | None = None,
         filter_plan_out: list[ChannelPlan] | None = None,
         raw_cosine_out: dict[UUID, float] | None = None,
+        degradations: list[Degradation] | None = None,
     ) -> list[tuple[UUID, float, Chunk]]:
         """Direct vector search on chunks via pgvector.
 
@@ -4945,6 +4998,11 @@ class VectorCypherRetriever:
                 store's hybrid blend); the sink carries the true cosine so the
                 exit-time display score and abstention metadata are cosine-scale,
                 never store-RRF (#1433).
+            degradations: Per-recall degradation sink (ADR-001). This channel
+                hands the store a ``title_weight``, so an inapplicable one is
+                recorded here as well as on the lexical channel; the record is
+                deduped to one per recall, hence the SHARED list rather than a
+                fresh one (#1574).
 
         Returns:
             List of (chunk_id, score, chunk) tuples
@@ -4961,7 +5019,18 @@ class VectorCypherRetriever:
                 query_text=query_text,
                 filter_ast=filter_ast,
                 filter_plan_out=filter_plan_out,
+                title_weight=self._config.bm25_title_weight,
             )
+            # ADR-001 (#1574): the hybrid blend consumes the title weight, so an
+            # inapplicable one degrades this channel too. Deduped per recall.
+            # Unconditional on purpose, unlike the ``_simple_retrieve`` site:
+            # ``effective_alpha`` is never None here (it falls back to the
+            # configured hybrid_alpha), so there is no pure-vector case to
+            # exclude. A caller passing ``hybrid_alpha_override=1.0`` does skip
+            # the blend, but that only happens when the lexical channel is
+            # active - which records the same fact genuinely - and the
+            # per-recall dedupe collapses the pair to one. Do not add a guard.
+            self._record_title_weight_degradation(degradations)
 
             span.set_attribute("chunk_count", len(results))
             if raw_cosine_out is not None:
@@ -5263,6 +5332,50 @@ class VectorCypherRetriever:
             span.set_attribute("chunk_count", len(results))
             return results
 
+    def _record_title_weight_degradation(self, degradations: list[Degradation] | None) -> None:
+        """Record the #1574 title-weight degradation, at most once per recall.
+
+        A non-neutral ``bm25_title_weight`` against a store whose FTS index has
+        no ``title`` column is silently inert: the channel returns rows, ranked
+        on content alone, and nothing raises. Only stores that can answer the
+        question expose ``fts_has_title``; absent the attribute (pgvector, the
+        accept-and-ignore backends, mocks) we assume a capable index and record
+        nothing.
+
+        Called from every channel that hands the store a ``title_weight`` - the
+        dedicated lexical channel and both hybrid vector paths. They all probe
+        the SAME store, so they would each observe the same missing column and
+        report it separately. The ``degradations`` list is the per-recall sink
+        that reaches ``RecallResult.engine_info["degradations"]``, so an
+        existing record in it means this recall already reported the fact:
+        that is the dedupe key, and the counter is bumped only on the append
+        so the metric counts recalls, not channels.
+
+        With no sink (``degradations is None``) the one-per-recall invariant
+        cannot be enforced, so nothing is recorded - the counter would
+        otherwise double-count across channels. Every path that reaches a
+        ``RecallResult`` supplies a list; ``None`` only happens on direct calls.
+        """
+        if self._config.bm25_title_weight == 1.0:
+            return
+        if getattr(self._vector_store, "fts_has_title", True) is not False:
+            return
+        if degradations is None:
+            return
+        if any(d.get("component") == "vectorcypher.bm25_title_weight" for d in degradations):
+            return
+        _BM25_TITLE_WEIGHT_DEGRADED_COUNTER.add(1, attributes={"reason": "fts_missing_title_column"})
+        degradations.append(
+            Degradation(
+                component="vectorcypher.bm25_title_weight",
+                reason="fts_missing_title_column",
+                detail=(
+                    f"bm25_title_weight={self._config.bm25_title_weight} requested but the "
+                    "FTS index has no title column; lexical ranking used content only"
+                ),
+            )
+        )
+
     async def _bm25_search_chunks(
         self,
         query: str,
@@ -5308,7 +5421,10 @@ class VectorCypherRetriever:
             degradations: When provided, a structured ``Degradation`` is appended
                 if the search raises so the silently-dropped lexical channel is
                 observable (ADR-001, issue #1158). Recall continues with the
-                BM25 contribution absent from RRF rather than crashing.
+                BM25 contribution absent from RRF rather than crashing. A second
+                record (``fts_missing_title_column``, #1574) is appended when
+                a non-neutral ``bm25_title_weight`` cannot be applied because the
+                store's FTS index has no ``title`` column.
 
         Returns:
             List of (chunk_id, score, chunk) tuples
@@ -5339,7 +5455,13 @@ class VectorCypherRetriever:
                         limit=limit,
                         filter_ast=filter_ast,
                         filter_plan_out=filter_plan_out,
+                        title_weight=self._config.bm25_title_weight,
                     )
+                    # ADR-001 (#1574): a non-neutral title weight this store
+                    # cannot apply. Deduped to one record per recall by the
+                    # helper - the hybrid vector channel probes the same store
+                    # and would otherwise record the identical fact again.
+                    self._record_title_weight_degradation(degradations)
                     # Real backends return ``list[tuple[Chunk, float]]``; the
                     # ``isinstance`` check rejects the bare-AsyncMock case
                     # (and any other non-list return) so we fall through to

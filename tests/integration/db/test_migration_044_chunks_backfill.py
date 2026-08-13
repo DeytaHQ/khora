@@ -95,6 +95,10 @@ _MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "src" / "khora" / "db" /
 
 _PREV_REVISION = "043_khora_chunks_metadata_backfill"
 
+#: This module's revision under test. Only ``test_content_tsv_untouched_by_backfill``
+#: walks to it instead of ``head`` — see that test for why.
+_REVISION = "044_khora_chunks_backfill_denormalized"
+
 _TSV_TRIGGER = "khora_chunks_content_tsv_update"
 
 # The five filter indexes 044 builds CONCURRENTLY — names byte-identical to the
@@ -704,9 +708,20 @@ class TestMigration044OnPostgres:
         """The backfill UPDATE must not recompute ``content_tsv`` — proves the
         trigger was disabled across the backfill loop. We seed a row, capture
         its ``content_tsv``, run the backfill, and assert it is byte-identical
-        (the backfill never touches ``content``)."""
+        (the backfill never touches ``content``).
+
+        Targets 044 rather than ``head``, unlike its siblings in this class.
+        ``058_khora_chunks_title_fts`` sits later in the chain and *legitimately*
+        recomputes ``content_tsv`` into the title-weighted
+        ``setweight(title,'A') || setweight(content,'B')`` form, so walking to
+        head would break the byte-equality assertion for a reason that has
+        nothing to do with 044. The assertion is about 044's trigger handling, so
+        the walk is scoped to 044. (The siblings assert on the backfilled columns
+        and the trigger's enabled state, which 058 does not disturb — they stay
+        on ``head``.)
+        """
         cfg = _make_config(pg_url)
-        command.upgrade(cfg, "head")
+        command.upgrade(cfg, _REVISION)
 
         ns_id = uuid4()
         doc_id = uuid4()
@@ -750,23 +765,39 @@ class TestMigration044OnPostgres:
         # The seeded trigger populated content_tsv on INSERT.
         assert before, "seed precondition: content_tsv should be populated on INSERT"
 
-        command.upgrade(cfg, "head")  # backfill (trigger disabled across loop)
+        command.upgrade(cfg, _REVISION)  # backfill (trigger disabled across loop)
 
-        async def _capture_after() -> str:
+        async def _capture_after() -> tuple[str, str | None]:
             engine = create_async_engine(pg_url)
             try:
                 async with engine.connect() as conn:
-                    return (
+                    row = (
                         await conn.execute(
-                            sa.text("SELECT content_tsv::text FROM khora_chunks WHERE id = :id"),
+                            sa.text("SELECT content_tsv::text, source_type FROM khora_chunks WHERE id = :id"),
                             {"id": chunk_id},
                         )
-                    ).scalar()
+                    ).one()
+                    return row[0], row[1]
             finally:
                 await engine.dispose()
 
-        after = asyncio.run(_capture_after())
+        after, source_type = asyncio.run(_capture_after())
+        # The backfill must actually have run. Without this the assertion below
+        # is satisfied by 044 not executing at all — a live risk now that the
+        # walk stops at 044 instead of head. ``source_type`` was NULL on the
+        # seeded chunk and 'slack' on its parent document, so this is the
+        # cheapest available proof that the backfill loop touched the row.
+        assert source_type == "slack", f"044 did not run: source_type is {source_type!r}, expected 'slack'"
         assert after == before, "backfill recomputed content_tsv (trigger was not disabled)"
+
+        # Leave the shared database at head, like every sibling test in this
+        # class does (they end on their own ``upgrade(cfg, "head")``). Scoping
+        # the walk above to 044 is what makes this necessary: it stops the chain
+        # mid-way, and ``_step_version_back`` dropped ``chunks.occurred_at``,
+        # which only migration 046 puts back. The per-test ``pg_url`` fixture
+        # wipes and re-migrates anyway, so this is for whatever runs after the
+        # module, not for the next test.
+        command.upgrade(cfg, "head")
 
     def test_no_op_when_table_absent(self, pg_url: str) -> None:
         """Fresh DB with no ``khora_chunks``: the ``has_table`` guard

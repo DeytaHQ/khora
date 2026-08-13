@@ -12,7 +12,8 @@ Schema layout
   :meth:`connect` if absent (analogous to PgVectorTemporalStore which
   calls ``metadata.create_all`` in its connect()).
 * ``khora_chunks_fts`` (SQLite FTS5) — external-content virtual table
-  over ``khora_chunks.content``.  Triggers keep it in sync.
+  over ``khora_chunks.content`` (column 0) and ``khora_chunks.title``
+  (column 1).  Triggers keep it in sync.
 * ``khora_chunks_vec`` (LanceDB) — embeddings only.  Mirrors the
   ``chunks_vec`` Arrow schema used by the main vector adapter.
 
@@ -97,25 +98,27 @@ _KHORA_CHUNKS_SCHEMA: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS ix_khora_chunks_source ON khora_chunks(source_system)",
     """
     CREATE VIRTUAL TABLE IF NOT EXISTS khora_chunks_fts USING fts5(
-        content, content='khora_chunks', content_rowid='rowid', tokenize='porter'
+        content, title, content='khora_chunks', content_rowid='rowid', tokenize='porter'
     )
     """,
     """
     CREATE TRIGGER IF NOT EXISTS khora_chunks_ai AFTER INSERT ON khora_chunks BEGIN
-        INSERT INTO khora_chunks_fts(rowid, content) VALUES (new.rowid, new.content);
+        INSERT INTO khora_chunks_fts(rowid, content, title)
+        VALUES (new.rowid, new.content, new.title);
     END
     """,
     """
     CREATE TRIGGER IF NOT EXISTS khora_chunks_ad AFTER DELETE ON khora_chunks BEGIN
-        INSERT INTO khora_chunks_fts(khora_chunks_fts, rowid, content)
-        VALUES ('delete', old.rowid, old.content);
+        INSERT INTO khora_chunks_fts(khora_chunks_fts, rowid, content, title)
+        VALUES ('delete', old.rowid, old.content, old.title);
     END
     """,
     """
     CREATE TRIGGER IF NOT EXISTS khora_chunks_au AFTER UPDATE ON khora_chunks BEGIN
-        INSERT INTO khora_chunks_fts(khora_chunks_fts, rowid, content)
-        VALUES ('delete', old.rowid, old.content);
-        INSERT INTO khora_chunks_fts(rowid, content) VALUES (new.rowid, new.content);
+        INSERT INTO khora_chunks_fts(khora_chunks_fts, rowid, content, title)
+        VALUES ('delete', old.rowid, old.content, old.title);
+        INSERT INTO khora_chunks_fts(rowid, content, title)
+        VALUES (new.rowid, new.content, new.title);
     END
     """,
 )
@@ -184,6 +187,15 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         # compile_python post-filter. Tests may monkeypatch this to False to
         # exercise the fallback path.
         self._has_json1 = False
+        # Whether the live ``khora_chunks_fts`` table indexes ``title`` as a
+        # second column. Probed once in connect(); gates the weighted bm25()
+        # form. Defaults False so a pre-existing embedded DB built with the
+        # 1-column shape (the DDL is ``IF NOT EXISTS`` — never altered) is
+        # detected rather than scored with a weight that cannot apply.
+        self._fts_has_title = False
+        # One-shot latch for the title_weight-ignored degradation warning
+        # (ADR-001 throttle pattern, mirrors vectorcypher.version_filter).
+        self._title_weight_fallback_warned = False
         # LanceDB is a single-writer store — serialize add/delete on the
         # khora_chunks_vec table per-instance to mirror the main vector
         # adapter's policy.
@@ -218,6 +230,33 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         except Exception:
             self._has_json1 = False
 
+        # Probe the live FTS5 shape. The DDL above is ``IF NOT EXISTS``, so an
+        # embedded database created before ``title`` became a second FTS column
+        # keeps the 1-column table and its 1-column triggers (no ALTER, no
+        # backfill) — titles are simply not indexed there. SQLite does NOT
+        # reject the surplus weight argument on that shape (measured: 3.53.4
+        # silently ignores extra bm25() weights), so without this probe the
+        # no-op would be invisible. Hence: detect, degrade, and say so.
+        try:
+            cur = await sqlite.execute("SELECT sql FROM sqlite_master WHERE name = 'khora_chunks_fts'")
+            row = await cur.fetchone()
+            self._fts_has_title = bool(row and row[0] and "title" in row[0].lower())
+        except Exception:
+            # Distinct failure mode from the legacy 1-column shape: there the
+            # probe SUCCEEDS and simply reports no title column, which
+            # ``_bm25_expr`` handles with its own throttled warning. Here the
+            # probe itself raised, so the shape is UNKNOWN. We keep the same
+            # conservative False, but that is now an assumption rather than a
+            # reading — hence the WARNING with ``exc_info`` (ADR-001 convention).
+            self._fts_has_title = False
+            logger.warning(
+                "SQLiteLanceTemporalStore: FTS5 shape probe failed — could not read "
+                "khora_chunks_fts from sqlite_master. This is NOT the legacy "
+                "1-column-table case; the table's shape is unknown. Assuming no title "
+                "column, so title weighting is inert for the life of this store.",
+                exc_info=True,
+            )
+
         # Create the LanceDB vector table for khora_chunks. exist_ok keeps
         # this idempotent across processes/test runs.
         lance = self._handle.lance
@@ -237,6 +276,15 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         self._chunks_vec = None
         self._connected = False
         logger.info("SQLiteLanceTemporalStore disconnected")
+
+    @property
+    def fts_has_title(self) -> bool:
+        """Whether the live FTS5 table indexes ``title`` (probed in connect()).
+
+        False before ``connect()`` and on pre-existing embedded databases built
+        with the 1-column shape — ``title_weight`` is inert on those.
+        """
+        return self._fts_has_title
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -435,6 +483,7 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         query_text: str | None = None,
         filter_ast: FilterNode | None = None,
         filter_plan_out: list[ChannelPlan] | None = None,
+        title_weight: float = 1.0,
     ) -> list[TemporalSearchResult]:
         # ``filter_ast`` is the deterministic recall-filter AST. compile_lance
         # pushes what JSON1 supports into the SQLite WHERE; a compile_python
@@ -455,6 +504,7 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
                 query_text=query_text,
                 filter_ast=filter_ast,
                 filter_plan_out=filter_plan_out,
+                title_weight=title_weight,
             )
             _span.set_attribute("result_count", len(results))
             return results
@@ -471,6 +521,7 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         query_text: str | None,
         filter_ast: FilterNode | None = None,
         filter_plan_out: list[ChannelPlan] | None = None,
+        title_weight: float = 1.0,
     ) -> list[TemporalSearchResult]:
         # Build the compile_python post-filter ONCE per recall (it is
         # alias-independent — it runs on decoded TemporalChunks). The compile_lance
@@ -528,6 +579,7 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
                 limit * 2,
                 filter_ast,
                 post_filter,
+                title_weight=title_weight,
             )
             # An explicit min_similarity floor applies to the BM25 side too:
             # BM25-only chunks never passed the vector floor (#1404).
@@ -555,6 +607,7 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
                 needed + len(existing_ids),
                 filter_ast,
                 post_filter,
+                title_weight=title_weight,
             )
             for bm25_result in bm25_results:
                 cid = str(bm25_result.chunk.id)
@@ -660,6 +713,7 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         created_before: datetime | None = None,
         filter_ast: FilterNode | None = None,
         filter_plan_out: list[ChannelPlan] | None = None,
+        title_weight: float = 1.0,
     ) -> list[tuple[Chunk, float]]:
         """Public BM25 (SQLite FTS5) lookup over ``khora_chunks`` for the
         StorageCoordinator dispatch path. See :func:`temporal_chunk_to_chunk`
@@ -705,8 +759,48 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
                 created_after=created_after,
                 created_before=created_before,
             )
-        results = await self._bm25_search(namespace_id, query_text, temporal_filter, limit, filter_ast=filter_ast)
+        results = await self._bm25_search(
+            namespace_id,
+            query_text,
+            temporal_filter,
+            limit,
+            filter_ast=filter_ast,
+            title_weight=title_weight,
+        )
         return [(temporal_chunk_to_chunk(r.chunk), float(r.bm25_score or 0.0)) for r in results]
+
+    def _bm25_expr(self, title_weight: float) -> str:
+        """Build the ``bm25()`` scoring call for the current FTS5 shape.
+
+        ``title_weight == 1.0`` (the default) yields the bare, shape-agnostic
+        call — byte-identical to the pre-title SQL, and equivalent to an
+        all-ones weight vector. A non-default weight yields the per-column form
+        ``bm25(khora_chunks_fts, 1.0, <w>)`` (content is column 0, title is
+        column 1), but only when the live table actually indexes ``title``;
+        on the legacy 1-column shape it degrades back to the bare call with a
+        throttled warning (ADR-001), never an exception. The degradation is
+        real even though SQLite tolerates the surplus argument: that table has
+        no title terms to weight.
+
+        The weight is inlined rather than bound: FTS5 auxiliary-function
+        arguments must be literals, and the value is a Pydantic-clamped float
+        from config ([0, 10]) — never user text.
+        """
+        if title_weight == 1.0:
+            return "bm25(khora_chunks_fts)"
+        if not self._fts_has_title:
+            msg = (
+                "SQLiteLanceTemporalStore: khora_chunks_fts lacks the 'title' column, "
+                f"so title_weight={title_weight:g} is ignored and BM25 scores content only. "
+                "Recreate the embedded database and re-ingest to enable title weighting."
+            )
+            if not self._title_weight_fallback_warned:
+                self._title_weight_fallback_warned = True
+                logger.warning(msg)
+            else:
+                logger.debug(msg)
+            return "bm25(khora_chunks_fts)"
+        return f"bm25(khora_chunks_fts, 1.0, {title_weight:g})"
 
     async def _bm25_search(
         self,
@@ -716,6 +810,7 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         limit: int,
         filter_ast: FilterNode | None = None,
         post_filter: Callable[[TemporalChunk], bool] | None = None,
+        title_weight: float = 1.0,
     ) -> list[TemporalSearchResult]:
         # FTS5 MATCH; SQLite's bm25() is lower-is-better — negate so the
         # semantics match the PG/SurrealDB siblings.
@@ -723,7 +818,10 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         if not match_expr:
             return []
         sql_parts = [
-            "SELECT c.*, bm25(khora_chunks_fts) AS bm FROM khora_chunks_fts "
+            # noqa justification: the only interpolated value is _bm25_expr's
+            # own output — a fixed string, or a clamped config float rendered
+            # via {:g}. No caller input reaches the SQL text.
+            f"SELECT c.*, {self._bm25_expr(title_weight)} AS bm FROM khora_chunks_fts "  # noqa: S608
             "JOIN khora_chunks c ON c.rowid = khora_chunks_fts.rowid "
             "WHERE khora_chunks_fts MATCH ? AND c.namespace_id = ?"
         ]

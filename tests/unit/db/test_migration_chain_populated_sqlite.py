@@ -63,6 +63,7 @@ from typing import Any
 import pytest
 import sqlalchemy as sa
 
+from tests.test_helpers.alembic_head import current_head
 from tests.test_helpers.schema_drift import upgrade
 
 pytestmark = pytest.mark.unit
@@ -82,7 +83,15 @@ _START_REVISIONS = [
     "054_documents_namespace_created_at_id",
 ]
 
-_HEAD_REVISION = "057_drop_documents_created_at_index"
+#: Read from the bundled chain rather than spelled out. This is a *head*
+#: reference — the test walks to ``head`` and asserts it arrived — so pinning a
+#: literal only means every new migration breaks this file for a reason that has
+#: nothing to do with what it guards. (It did: migration 058 landed and all six
+#: parameterisations failed on the constant alone.) The start revisions above
+#: stay literals, because those name specific chain positions and must not drift
+#: forward. See ``tests/test_helpers/alembic_head.py``, which draws exactly this
+#: distinction; ``current_head()`` is called inside the test body per its
+#: contract, never at module scope.
 
 #: Dropped by ``010_flatten_namespace_hierarchy``. The only tables the chain
 #: removes on the walk from any revision above.
@@ -323,7 +332,7 @@ def test_populated_database_survives_the_upgrade_to_head(tmp_path: Path, start_r
     # which is what it is.
     upgrade(url, "head")
 
-    assert _head_revision(url) == _HEAD_REVISION, "the chain did not reach head"
+    assert _head_revision(url) == current_head(), "the chain did not reach head"
 
     after = _row_counts(url)
     disappeared = set(before) - set(after)

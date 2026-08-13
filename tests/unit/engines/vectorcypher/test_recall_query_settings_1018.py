@@ -82,6 +82,113 @@ def test_query_settings_defaults_match_retriever_defaults() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# #1574 — bm25_title_weight: config -> engine -> retriever, and the cache key.
+# --------------------------------------------------------------------------- #
+
+
+def test_bm25_title_weight_defaults_to_neutral() -> None:
+    """1.0 is the "behave exactly as before" value, on BOTH sides of the wiring.
+
+    Asserted on the config and the retriever separately: the engine copies the
+    field across, so a default that drifted on one side only would silently
+    change ranking for every deployment that never sets the knob.
+    """
+    cfg = _config()
+    assert cfg.query.bm25_title_weight == 1.0
+    assert _build_retriever_config(cfg).bm25_title_weight == 1.0
+
+
+def test_bm25_title_weight_flows_to_retriever_config() -> None:
+    """KHORA_QUERY_BM25_TITLE_WEIGHT reaches the retriever (the #1018 hazard).
+
+    ``recall()`` bypasses ``QueryEngine`` entirely, so a QuerySettings field
+    that is not explicitly copied in ``_assemble_retriever_config`` is inert —
+    settable, documented, and doing nothing. That is the failure this file
+    exists for.
+    """
+    rc = _build_retriever_config(_config(bm25_title_weight=2.5))
+    assert rc.bm25_title_weight == 2.5
+
+
+def test_bm25_title_weight_is_clamped_at_the_config_boundary() -> None:
+    """Pydantic bounds are what let the store inline the value into SQL.
+
+    The weight cannot be a bind parameter — FTS5 auxiliary-function arguments
+    must be literals — so "this float came from a validated [0, 10] field" is
+    the whole safety argument for the interpolation. Pinning the bounds here
+    keeps that argument true.
+    """
+    from pydantic import ValidationError
+
+    from khora.config.schema import QuerySettings
+
+    assert QuerySettings(bm25_title_weight=0.0).bm25_title_weight == 0.0
+    assert QuerySettings(bm25_title_weight=10.0).bm25_title_weight == 10.0
+    for out_of_range in (-0.1, 10.1):
+        with pytest.raises(ValidationError):
+            QuerySettings(bm25_title_weight=out_of_range)
+
+
+def test_bm25_title_weight_is_validated_on_direct_dataclass_construction() -> None:
+    """The bounds must hold on the path Pydantic never sees.
+
+    ``VectorCypherConfig`` is a plain dataclass, so a caller that constructs it
+    directly — a supported entry point, it is a public kwarg on the engine —
+    skips the ``QuerySettings`` validation asserted above. Without the
+    ``__post_init__`` check the two doors into the same knob disagree: -1 is
+    rejected through config and accepted through the dataclass, and the store
+    inlines the value into FTS5 SQL (it cannot be a bind parameter), which is
+    exactly the argument the config-side bounds exist to support.
+    """
+    from khora.engines.vectorcypher.engine import VectorCypherConfig
+
+    for out_of_range in (-1, 100):
+        with pytest.raises(ValueError, match="bm25_title_weight must be between 0 and 10"):
+            VectorCypherConfig(bm25_title_weight=out_of_range)
+
+    # Boundaries are legal on both sides — an exclusive check here would reject
+    # values QuerySettings accepts, which is the same divergence in reverse.
+    assert VectorCypherConfig(bm25_title_weight=0.0).bm25_title_weight == 0.0
+    assert VectorCypherConfig(bm25_title_weight=10.0).bm25_title_weight == 10.0
+
+
+def test_bm25_title_weight_changes_the_recall_cache_key() -> None:
+    """Two weights must not share a cached result.
+
+    The recall cache folds the retriever config in as ``repr()`` of the
+    dataclass, so a new field is captured only because it is *declared on the
+    dataclass*. A weight threaded through as a loose kwarg instead would have
+    served a 1.0-ranked result to a 2.0 query for the rest of the epoch — a
+    wrong answer with no error anywhere. Both links in that chain are asserted:
+    the repr differs, and the digest built from it differs.
+    """
+    from uuid import uuid4
+
+    from khora.engines.vectorcypher.recall_cache import RecallResultCache
+
+    neutral = RetrieverConfig(bm25_title_weight=1.0)
+    weighted = RetrieverConfig(bm25_title_weight=2.0)
+    assert repr(neutral) != repr(weighted), "the field must be declared on RetrieverConfig to be fingerprinted"
+
+    common = dict(
+        query="floor panels",
+        namespace_id=uuid4(),
+        epoch=0,
+        mode="hybrid",
+        limit=10,
+        min_similarity=0.0,
+        graph_depth=None,
+        hybrid_alpha=None,
+        recency_bias=None,
+        temporal_filter=None,
+        filter_ast=None,
+    )
+    assert RecallResultCache._digest(**common, config_fingerprint=repr(neutral)) != RecallResultCache._digest(
+        **common, config_fingerprint=repr(weighted)
+    )
+
+
+# --------------------------------------------------------------------------- #
 # #1018 — behavioral: HyDE / diversity / stage1 actually change retrieval.
 # --------------------------------------------------------------------------- #
 
@@ -399,3 +506,78 @@ async def test_hyde_always_fires_through_recall_stack(monkeypatch) -> None:
     never_calls = await _recall_completion_count("never")
     always_calls = await _recall_completion_count("always")
     assert always_calls > never_calls
+
+
+# --------------------------------------------------------------------------- #
+# #1574 — embedded end-to-end: a title-only query reaches the chunk through
+# the lexical channel.
+# --------------------------------------------------------------------------- #
+
+#: Verbatim from the #1574 repro. Doubles as a tokenizer guard: unicode61
+#: (wrapped by the ``porter`` tokenizer) splits on ``_``, so this must index as
+#: ``floor`` / ``panel`` / ``dimens`` / ``20260213``.
+_REPRO_TITLE = "Floor Panels_Dimensioned_20260213"
+#: Shares no vocabulary with the title — otherwise a content hit would be
+#: indistinguishable from a title hit and the test would prove nothing.
+_REPRO_BODY = "the assembly drawing revision notes for the north wing"
+
+#: A second document, to prove the title match is targeted rather than "the
+#: lexical channel returns whatever it has". Its title and body vocabularies are
+#: disjoint from each other AND from the first document's.
+_DECOY_TITLE = "Procurement Ledger"
+_DECOY_BODY = "quarterly stationery orders for the southern depot"
+
+
+@pytest.mark.embedded
+async def test_title_only_query_recalls_the_chunk_via_the_lexical_channel(monkeypatch) -> None:
+    """The #1574 repro, through the full ``Khora.recall()`` stack on sqlite_lance.
+
+    ``mode=KEYWORD`` is what makes this an honest test of the *lexical* channel:
+    per #833 it skips the vector store search entirely, so every returned chunk
+    came from BM25. Under HYBRID the hash-derived mock embeddings would surface
+    the only chunk in the namespace regardless, and the test would pass with the
+    title still unindexed.
+
+    Four queries against two documents:
+      * title-only words -> the titled chunk (the bug: this returned nothing);
+      * the bare numeric token -> same chunk (the half a tokenizer change would
+        lose to the surrounding underscores);
+      * the other document's title -> only that one (targeted, not indiscriminate);
+      * a word in neither -> nothing (the channel is not matching everything).
+    """
+    try:
+        import aiosqlite  # noqa: F401, PLC0415
+        import lancedb  # noqa: F401, PLC0415
+    except ImportError:
+        pytest.skip("sqlite_lance optional deps not installed")
+
+    from khora.search_mode import SearchMode  # noqa: PLC0415
+
+    embedded_khora, install_mock_llm = _import_embedded_helpers()
+
+    monkeypatch.setenv("KHORA_QUERY_ENABLE_BM25_CHANNEL", "true")
+    monkeypatch.setenv("KHORA_QUERY_ENABLE_RERANKING", "false")
+    install_mock_llm(dim=64)
+
+    async with embedded_khora(embedding_dimension=64) as kb:
+        ns = await kb.create_namespace()
+        for body, title in ((_REPRO_BODY, _REPRO_TITLE), (_DECOY_BODY, _DECOY_TITLE)):
+            await kb.remember(
+                body,
+                namespace=ns.namespace_id,
+                title=title,
+                entity_types=["PERSON"],
+                relationship_types=["MET"],
+            )
+
+        async def _keyword_recall(query: str) -> list[str]:
+            result = await kb.recall(query, namespace=ns.namespace_id, mode=SearchMode.KEYWORD)
+            # Happy path (title_weight=1.0, a store WITH the title column): the
+            # #1574 wiring must not manufacture a degradation (ADR-001).
+            assert_no_silent_degradation(result)
+            return [chunk.content for chunk in result.chunks]
+
+        assert await _keyword_recall("floor panels dimensioned") == [_REPRO_BODY]
+        assert await _keyword_recall("20260213") == [_REPRO_BODY]
+        assert await _keyword_recall("procurement ledger") == [_DECOY_BODY]
+        assert await _keyword_recall("bathymetry") == []

@@ -148,6 +148,7 @@ adding a new channel.
 | `khora.vectorcypher.cypher_expand.degraded_total`      | `RecallResult.engine_info`             |                                                 |
 | `khora.vectorcypher.entity_vector_search.degraded_total` | `RecallResult.engine_info`           |                                                 |
 | `khora.vectorcypher.bm25.degraded_total`               | `RecallResult.engine_info`             |                                                 |
+| `khora.vectorcypher.bm25_title_weight.degraded_total`  | `RecallResult.engine_info`             | Component `vectorcypher.bm25_title_weight`; reason `fts_missing_title_column`. A non-1.0 title weight requested against an FTS index with no `title` column (#1574) |
 | `khora.vectorcypher.community_projection.degraded_total` | `RecallResult.engine_info`           |                                                 |
 | `khora.vectorcypher.chunk_mirror.degraded_total`       | `RecallResult.engine_info`             |                                                 |
 | `khora.vectorcypher.temporal_semantic_fallback.degraded_total` | `RecallResult.engine_info`   |                                                 |

@@ -540,4 +540,8 @@ class TestSearchTelemetryWrapper:
             query_text="x",
             filter_ast=None,
             filter_plan_out=None,
+            # #1574: forwarded on every call, default included — the telemetry
+            # wrapper must not drop it, or the lexical half of a hybrid search
+            # would silently score on content alone.
+            title_weight=1.0,
         )
