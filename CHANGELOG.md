@@ -6,6 +6,21 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ## [Unreleased]
 
+## [0.26.1] - transitive dependency security bumps (sqlparse, nltk, banks, starlette, transformers)
+
+No khora source changes. Every change in this release is a transitive-dependency
+bump recorded in `uv.lock`; no direct dependency pin in `pyproject.toml` moved, and
+no public API, migration, or configuration surface changed. Upgrading from 0.26.0
+requires no action beyond reinstalling.
+
+### Changed
+
+- `sqlparse` 0.5.5 -> 0.6.0 (#1619). Fixes CVE-2026-59893 / GHSA-prg7-hcfm-mfcr: the lexer consumed CPU quadratically on statements containing many unclosed dollar-quoted literals or multiline comments, a denial-of-service vector. 0.6.0 also drops Python 3.8/3.9 support, which is below khora's own floor and therefore inert here.
+- `nltk` 3.10.0 -> 3.10.3 (#1618). Fixes CVE-2026-12252 and CVE-2026-12841 (unsandboxed Java execution in MaltParser and the Stanford JAR wrappers), plus a path-traversal / file-I/O hardening sweep (CWE-22 / CWE-59 / CWE-377, including a write-side symlink TOCTOU and a shared-temp squat) and algorithmic-complexity DoS bounds in the parsers and grammar transforms (CWE-400 / CWE-407 / CWE-674 / CWE-835).
+- `banks` 2.4.2 -> 2.4.5 (#1621). Validates prompt paths in `DirectoryPromptRegistry` and restricts media-filter file paths to the working directory, closing two path-escape holes.
+- `starlette` 0.52.1 -> 1.3.1 (#1617). `FormParser` now enforces `max_fields` and `max_part_size` in its parser callbacks. No CVE assigned. Transitive only, and khora ships no ASGI surface of its own.
+- `transformers` 5.8.0 -> 5.10.1 (#1620). Upstream feature release; 5.10.0 was yanked and 5.10.1 supersedes it. No CVE assigned. Reached only through the optional cross-encoder reranking path.
+
 ## [0.26.0] - chunk titles join the lexical channel (BM25/FTS), query-time title weight, dependency CVE bumps
 
 ### Added
