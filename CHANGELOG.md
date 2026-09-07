@@ -8,10 +8,12 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ## [0.26.1] - transitive dependency security bumps (sqlparse, nltk, banks, starlette, transformers)
 
-No khora source changes. Every change in this release is a transitive-dependency
-bump recorded in `uv.lock`; no direct dependency pin in `pyproject.toml` moved, and
-no public API, migration, or configuration surface changed. Upgrading from 0.26.0
-requires no action beyond reinstalling.
+No khora source changes. Every third-party dependency change in this release is a
+transitive bump recorded in `uv.lock` - no direct third-party pin in `pyproject.toml`
+moved, and no public API, migration, or configuration surface changed. The only
+`pyproject.toml` and `rust/khora-accel/Cargo.toml` edits are the routine khora-accel
+lockstep version pins that accompany every release. Upgrading from 0.26.0 requires no
+action beyond reinstalling.
 
 ### Changed
 
