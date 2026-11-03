@@ -287,15 +287,6 @@ wheels = [
 ]
 
 [[package]]
-name = "backoff"
-version = "2.2.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/47/d7/5bbeb12c44d7c4f2fb5b56abce497eb5ed9f34d85701de869acedd602619/backoff-2.2.1.tar.gz", hash = "sha256:03f829f5bb1923180821643f8753b0502c3b682293992485b0eef2807afa5cba", size = 17001, upload-time = "2022-10-05T19:19:32.061Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/df/73/b6e24bd22e6720ca8ee9a85a0c4a2971af8497d8f3193fa05390cbd46e09/backoff-2.2.1-py3-none-any.whl", hash = "sha256:63579f9a0628e06278f7e47b7d7d5b6ce20dc65c5e96a6f3ca99a6adca0396e8", size = 15148, upload-time = "2022-10-05T19:19:30.546Z" },
-]
-
-[[package]]
 name = "banks"
 version = "2.4.5"
 source = { registry = "https://pypi.org/simple" }
@@ -584,7 +575,7 @@ wheels = [
 
 [[package]]
 name = "chromadb"
-version = "1.1.1"
+version = "1.5.9"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "bcrypt" },
@@ -597,14 +588,14 @@ dependencies = [
     { name = "mmh3" },
     { name = "numpy" },
     { name = "onnxruntime" },
-    { name = "opentelemetry-api", version = "1.42.1", source = { registry = "https://pypi.org/simple" } },
-    { name = "opentelemetry-exporter-otlp-proto-grpc", version = "1.42.1", source = { registry = "https://pypi.org/simple" } },
-    { name = "opentelemetry-sdk", version = "1.42.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "opentelemetry-api", version = "1.45.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "opentelemetry-exporter-otlp-proto-grpc", version = "1.45.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "opentelemetry-sdk", version = "1.45.1", source = { registry = "https://pypi.org/simple" } },
     { name = "orjson" },
     { name = "overrides" },
-    { name = "posthog" },
     { name = "pybase64" },
     { name = "pydantic", version = "2.12.5", source = { registry = "https://pypi.org/simple" } },
+    { name = "pydantic-settings" },
     { name = "pypika" },
     { name = "pyyaml" },
     { name = "rich", version = "14.3.4", source = { registry = "https://pypi.org/simple" } },
@@ -615,13 +606,13 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "uvicorn", extra = ["standard"], marker = "extra == 'extra-5-khora-crewai'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/7f/48/11851dddeadad6abe36ee071fedc99b5bdd2c324df3afa8cb952ae02798b/chromadb-1.1.1.tar.gz", hash = "sha256:ebfce0122753e306a76f1e291d4ddaebe5f01b5979b97ae0bc80b1d4024ff223", size = 1338109, upload-time = "2025-10-05T02:49:14.834Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/92/d1/5e33b26985f0c7046a0be1cee2158ada1748ee700d2545057fde1468d74d/chromadb-1.5.9.tar.gz", hash = "sha256:5c20e62a455c28bacac927f26116a73fd8e1799e0d908be8e8a4f02197a54731", size = 2595635, upload-time = "2026-05-05T05:54:51.713Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/39/59/0d881a9b7eb63d8d2446cf67fcbb53fb8ae34991759d2b6024a067e90a9a/chromadb-1.1.1-cp39-abi3-macosx_10_12_x86_64.whl", hash = "sha256:27fe0e25ef0f83fb09c30355ab084fe6f246808a7ea29e8c19e85cf45785b90d", size = 19175479, upload-time = "2025-10-05T02:49:12.525Z" },
-    { url = "https://files.pythonhosted.org/packages/94/4f/5a9fa317c84c98e70af48f74b00aa25589626c03a0428b4381b2095f3d73/chromadb-1.1.1-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:95aed58869683f12e7dcbf68b039fe5f576dbe9d1b86b8f4d014c9d077ccafd2", size = 18267188, upload-time = "2025-10-05T02:49:09.236Z" },
-    { url = "https://files.pythonhosted.org/packages/45/1a/02defe2f1c8d1daedb084bbe85f5b6083510a3ba192ed57797a3649a4310/chromadb-1.1.1-cp39-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:06776dad41389a00e7d63d936c3a15c179d502becaf99f75745ee11b062c9b6a", size = 18855754, upload-time = "2025-10-05T02:49:03.299Z" },
-    { url = "https://files.pythonhosted.org/packages/5a/0d/80be82717e5dc19839af24558494811b6f2af2b261a8f21c51b872193b09/chromadb-1.1.1-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:bba0096a7f5e975875ead23a91c0d41d977fbd3767f60d3305a011b0ace7afd3", size = 19893681, upload-time = "2025-10-05T02:49:06.481Z" },
-    { url = "https://files.pythonhosted.org/packages/2d/6e/956e62975305a4e31daf6114a73b3b0683a8f36f8d70b20aabd466770edb/chromadb-1.1.1-cp39-abi3-win_amd64.whl", hash = "sha256:a77aa026a73a18181fd89bbbdb86191c9a82fd42aa0b549ff18d8cae56394c8b", size = 19844042, upload-time = "2025-10-05T02:49:16.925Z" },
+    { url = "https://files.pythonhosted.org/packages/dd/5b/3cced915244f43ed14b53fe9f63a37f05f865064f4e4fe7d9448d3f2a352/chromadb-1.5.9-cp39-abi3-macosx_10_12_x86_64.whl", hash = "sha256:60701011b5e6409647fa40d12c7c5a66b2b0bfcf33a52db2ad53a30a2abc4957", size = 22564540, upload-time = "2026-05-05T05:54:48.906Z" },
+    { url = "https://files.pythonhosted.org/packages/34/4c/adcef1f4e82a2ef69ccd3711d55fc289193d54c4c0ff7a0292a3631db46f/chromadb-1.5.9-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:814b9c95617377f6501e5757d63dfddb554a283a7739c87b9fa573850174e6f3", size = 21699698, upload-time = "2026-05-05T05:54:45.078Z" },
+    { url = "https://files.pythonhosted.org/packages/38/4e/937bc4d2e6f8ab9664ec79931fbbd69efff47e513ec2924b071e4b0ff774/chromadb-1.5.9-cp39-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:9192d111bd662241625867962333d99369a00769a50f8b2f58cb388731274d7e", size = 22680924, upload-time = "2026-05-05T05:54:36.25Z" },
+    { url = "https://files.pythonhosted.org/packages/e6/ec/0c42039e80b9acc534f67b73b7a42471948042859b3a64867b50a4a77fa3/chromadb-1.5.9-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:cc09b3df76e5a5cb386aed2715a2eea152e3949f9e1ba93c7119505377749929", size = 23316203, upload-time = "2026-05-05T05:54:41.157Z" },
+    { url = "https://files.pythonhosted.org/packages/eb/ce/0f7be6e5d0feafa2cda54b12e6542afeea7dea89d2d411e14da90f8abb96/chromadb-1.5.9-cp39-abi3-win_amd64.whl", hash = "sha256:4fd0b560e56761b7f3cb4d5c6205fd5f20814484b4a3e4e9af9038c2b428fc6c", size = 23542454, upload-time = "2026-05-05T05:54:54.942Z" },
 ]
 
 [[package]]
@@ -743,7 +734,7 @@ wheels = [
 
 [[package]]
 name = "crewai"
-version = "1.15.10"
+version = "1.15.30"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
@@ -759,13 +750,14 @@ dependencies = [
     { name = "json-repair" },
     { name = "json5" },
     { name = "jsonref" },
-    { name = "lancedb", version = "0.30.0", source = { registry = "https://pypi.org/simple" } },
-    { name = "mcp", version = "1.28.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "lancedb", version = "0.40.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "mcp" },
+    { name = "oauthlib" },
     { name = "openai" },
     { name = "openpyxl" },
-    { name = "opentelemetry-api", version = "1.42.1", source = { registry = "https://pypi.org/simple" } },
-    { name = "opentelemetry-exporter-otlp-proto-http", version = "1.42.1", source = { registry = "https://pypi.org/simple" } },
-    { name = "opentelemetry-sdk", version = "1.42.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "opentelemetry-api", version = "1.45.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "opentelemetry-exporter-otlp-proto-http", version = "1.45.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "opentelemetry-sdk", version = "1.45.1", source = { registry = "https://pypi.org/simple" } },
     { name = "pdfplumber" },
     { name = "portalocker" },
     { name = "pydantic", version = "2.12.5", source = { registry = "https://pypi.org/simple" } },
@@ -778,14 +770,14 @@ dependencies = [
     { name = "tomli" },
     { name = "tomli-w" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/4c/e3/8c8a2bfadbbaa6e9436792aa0a66ecb6de633dcbad3e377d023f4a8421d1/crewai-1.15.10.tar.gz", hash = "sha256:7d849df5642632b7437416e06499019f0556c0951b3208b8fbaed80e17080509", size = 7847190, upload-time = "2026-07-31T14:58:26.032Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ae/80/21a0ad4e38ab16b3294b1c62d5aae0c1340c95c0d8d39e0d59e5f76c0daf/crewai-1.15.30.tar.gz", hash = "sha256:17de4b7cc3f2c207033e9f82be4f7d749e540b0e415a3885a8d97bb43a90a318", size = 8333948, upload-time = "2026-10-24T01:56:45.131Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/17/b2/84009e43b5c95cb9c86b69fa511ca02224d0d96868a6fef1d1983ba8bd68/crewai-1.15.10-py3-none-any.whl", hash = "sha256:b22e4bc7f30012df0c78957e40d252150dba91eb3e357d2a734d3b60be211d83", size = 1105558, upload-time = "2026-07-31T14:58:24.189Z" },
+    { url = "https://files.pythonhosted.org/packages/c4/98/c83e7fdbb05f77dbf75d0fc0608b33bc1142b2912e65bd250929e7043115/crewai-1.15.30-py3-none-any.whl", hash = "sha256:a54909d778971a7ef21b6a1d52a59090fcc3e1c3fb09bb5ea5b117e6157e0e65", size = 1395154, upload-time = "2026-10-24T01:56:42.336Z" },
 ]
 
 [[package]]
 name = "crewai-cli"
-version = "1.15.10"
+version = "1.15.30"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "appdirs" },
@@ -805,22 +797,22 @@ dependencies = [
     { name = "tomli-w" },
     { name = "uv" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/32/b7/6f45907680b76142df6b86c7b26101c90b47e4bbedff4454f6cdc8138c01/crewai_cli-1.15.10.tar.gz", hash = "sha256:c919bc5c5f09e8bd5a4b38a962fdc4b5b0b402d54f446f76b6140c5991d2883b", size = 220304, upload-time = "2026-07-31T14:58:28.922Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/42/92/d9a4c179d2726cdafc7d76313a403721d27d38f27eb50578dd7bcb8c8afc/crewai_cli-1.15.30.tar.gz", hash = "sha256:929de5d42a68e3dcc3b4045d4481e65eb489acb08ce70cf2f8ab9febc638f55c", size = 357793, upload-time = "2026-10-24T01:56:48.705Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a4/ed/f2e200d560669d313a1e9b0190f97a22e18074ddb7b7969306519351d894/crewai_cli-1.15.10-py3-none-any.whl", hash = "sha256:4b4d0c7cc6188f6710f07b56ce8b9481763876ddca378b51962331a3267c1786", size = 189850, upload-time = "2026-07-31T14:58:27.702Z" },
+    { url = "https://files.pythonhosted.org/packages/db/a4/bdda89023d0c0975dad0004331e4a04ba480af5113fcdbfb4260d02a71fb/crewai_cli-1.15.30-py3-none-any.whl", hash = "sha256:88a69573ba893abcf8db24d05b86c6eff02a7462a24ffa0d473a550684cc852b", size = 251809, upload-time = "2026-10-24T01:56:46.898Z" },
 ]
 
 [[package]]
 name = "crewai-core"
-version = "1.15.10"
+version = "1.15.30"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "appdirs" },
     { name = "cryptography" },
     { name = "httpx" },
-    { name = "opentelemetry-api", version = "1.42.1", source = { registry = "https://pypi.org/simple" } },
-    { name = "opentelemetry-exporter-otlp-proto-http", version = "1.42.1", source = { registry = "https://pypi.org/simple" } },
-    { name = "opentelemetry-sdk", version = "1.42.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "opentelemetry-api", version = "1.45.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "opentelemetry-exporter-otlp-proto-http", version = "1.45.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "opentelemetry-sdk", version = "1.45.1", source = { registry = "https://pypi.org/simple" } },
     { name = "packaging" },
     { name = "portalocker" },
     { name = "pydantic", version = "2.12.5", source = { registry = "https://pypi.org/simple" } },
@@ -828,9 +820,9 @@ dependencies = [
     { name = "rich", version = "14.3.4", source = { registry = "https://pypi.org/simple" } },
     { name = "tomli" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ba/77/ee34f05bee47a20096061d9a51ed68127b2a7872a8f974f0bb57c70b14c6/crewai_core-1.15.10.tar.gz", hash = "sha256:f851776cb306c2528d8af7d343736b4d458045c01d625adfd68d5e8a7c46eb4e", size = 23436, upload-time = "2026-07-31T14:58:30.949Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a1/b0/530557bcc07b555e34f8020c1131dbbeff74567dc60d3663ae208e2aadbc/crewai_core-1.15.30.tar.gz", hash = "sha256:db353777b6d419cb45d621e2627cfeb090973a1bdc8804f4615a9cac7e7fef39", size = 1303903, upload-time = "2026-10-24T01:56:52.464Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/37/16/c6f1a5c37b9108e5302cc55170588958eeef409b297ebafd0f60f348a98e/crewai_core-1.15.10-py3-none-any.whl", hash = "sha256:d6fa8c01c4ad0cee56e115e59b4dabba629ebbe84ecc28496b7534abb2843112", size = 30986, upload-time = "2026-07-31T14:58:29.784Z" },
+    { url = "https://files.pythonhosted.org/packages/ef/b3/41be69b8b277c272f3423658b470fb318dd8c7032f082cae88cffeec74c4/crewai_core-1.15.30-py3-none-any.whl", hash = "sha256:ac4bb339a894caa68a3b4da785a27ef170daadee17b3aff0c82635755e183991", size = 1311015, upload-time = "2026-10-24T01:56:50.232Z" },
 ]
 
 [[package]]
@@ -1302,7 +1294,7 @@ dependencies = [
     { name = "graphviz" },
     { name = "httpx" },
     { name = "jsonschema" },
-    { name = "mcp", version = "1.29.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "mcp" },
     { name = "opentelemetry-api", version = "1.40.0", source = { registry = "https://pypi.org/simple" } },
     { name = "opentelemetry-exporter-gcp-logging" },
     { name = "opentelemetry-exporter-gcp-monitoring" },
@@ -2449,7 +2441,7 @@ dependencies = [
     { name = "neo4j" },
     { name = "numpy" },
     { name = "opentelemetry-api", version = "1.40.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "opentelemetry-api", version = "1.42.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-api", version = "1.45.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
     { name = "pgvector" },
     { name = "pydantic-settings" },
     { name = "pyyaml" },
@@ -2470,8 +2462,8 @@ all-backends = [
     { name = "aiosqlite", version = "0.22.1", source = { registry = "https://pypi.org/simple" }, marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
     { name = "asyncpg" },
     { name = "httpx" },
-    { name = "lancedb", version = "0.30.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai'" },
-    { name = "lancedb", version = "0.30.2", source = { registry = "https://pypi.org/simple" }, marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
+    { name = "lancedb", version = "0.30.2", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
+    { name = "lancedb", version = "0.40.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
     { name = "neo4j" },
     { name = "pgvector" },
     { name = "pyarrow" },
@@ -2501,8 +2493,8 @@ dev = [
 embedded = [
     { name = "aiosqlite", version = "0.21.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai'" },
     { name = "aiosqlite", version = "0.22.1", source = { registry = "https://pypi.org/simple" }, marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
-    { name = "lancedb", version = "0.30.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai'" },
-    { name = "lancedb", version = "0.30.2", source = { registry = "https://pypi.org/simple" }, marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
+    { name = "lancedb", version = "0.30.2", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
+    { name = "lancedb", version = "0.40.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
     { name = "pyarrow" },
 ]
 google-adk = [
@@ -2512,8 +2504,8 @@ graph-all = [
     { name = "neo4j" },
 ]
 lancedb = [
-    { name = "lancedb", version = "0.30.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai'" },
-    { name = "lancedb", version = "0.30.2", source = { registry = "https://pypi.org/simple" }, marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
+    { name = "lancedb", version = "0.30.2", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
+    { name = "lancedb", version = "0.40.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
     { name = "pyarrow" },
 ]
 langgraph = [
@@ -2523,7 +2515,8 @@ llamaindex = [
     { name = "llama-index-core" },
 ]
 logfire = [
-    { name = "logfire" },
+    { name = "logfire", version = "4.39.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
+    { name = "logfire", version = "5.4.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
 ]
 memgraph = [
     { name = "neo4j" },
@@ -2546,17 +2539,17 @@ openai-agents = [
 ]
 otel = [
     { name = "opentelemetry-exporter-otlp-proto-http", version = "1.40.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "opentelemetry-exporter-otlp-proto-http", version = "1.42.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-exporter-otlp-proto-http", version = "1.45.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
     { name = "opentelemetry-sdk", version = "1.40.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "opentelemetry-sdk", version = "1.42.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-sdk", version = "1.45.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
 ]
 otel-grpc = [
     { name = "opentelemetry-exporter-otlp-proto-grpc", version = "1.40.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "opentelemetry-exporter-otlp-proto-grpc", version = "1.42.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-exporter-otlp-proto-grpc", version = "1.45.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
     { name = "opentelemetry-exporter-otlp-proto-http", version = "1.40.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "opentelemetry-exporter-otlp-proto-http", version = "1.42.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-exporter-otlp-proto-http", version = "1.45.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
     { name = "opentelemetry-sdk", version = "1.40.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "opentelemetry-sdk", version = "1.42.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-sdk", version = "1.45.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
 ]
 parquet = [
     { name = "pyarrow" },
@@ -2581,8 +2574,8 @@ sqlite = [
 sqlite-lance = [
     { name = "aiosqlite", version = "0.21.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai'" },
     { name = "aiosqlite", version = "0.22.1", source = { registry = "https://pypi.org/simple" }, marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
-    { name = "lancedb", version = "0.30.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai'" },
-    { name = "lancedb", version = "0.30.2", source = { registry = "https://pypi.org/simple" }, marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
+    { name = "lancedb", version = "0.30.2", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
+    { name = "lancedb", version = "0.40.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
     { name = "pyarrow" },
 ]
 surrealdb = [
@@ -2600,11 +2593,12 @@ dev = [
     { name = "aiosqlite", version = "0.21.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai'" },
     { name = "aiosqlite", version = "0.22.1", source = { registry = "https://pypi.org/simple" }, marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
     { name = "hypothesis" },
-    { name = "logfire" },
+    { name = "logfire", version = "4.39.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
+    { name = "logfire", version = "5.4.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
     { name = "opentelemetry-exporter-otlp-proto-http", version = "1.40.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "opentelemetry-exporter-otlp-proto-http", version = "1.42.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-exporter-otlp-proto-http", version = "1.45.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
     { name = "opentelemetry-sdk", version = "1.40.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "opentelemetry-sdk", version = "1.42.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-sdk", version = "1.45.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
     { name = "prek" },
     { name = "psutil" },
     { name = "pyarrow" },
@@ -2774,32 +2768,6 @@ wheels = [
 
 [[package]]
 name = "lancedb"
-version = "0.30.0"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version >= '3.14'",
-    "python_full_version < '3.14'",
-]
-dependencies = [
-    { name = "deprecation", marker = "extra == 'extra-5-khora-crewai'" },
-    { name = "lance-namespace", marker = "extra == 'extra-5-khora-crewai'" },
-    { name = "numpy", marker = "extra == 'extra-5-khora-crewai'" },
-    { name = "packaging", marker = "extra == 'extra-5-khora-crewai'" },
-    { name = "pyarrow", marker = "extra == 'extra-5-khora-crewai'" },
-    { name = "pydantic", version = "2.12.5", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai'" },
-    { name = "tqdm", marker = "extra == 'extra-5-khora-crewai'" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/13/2f/1577778ad57dba0c55dc13d87230583e14541c82562483ecf8bb2f8e8a00/lancedb-0.30.0-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:be2a9a43a65c330ccfd08115afb26106cd8d16788522fe7693d3a1f4e01ad321", size = 41959907, upload-time = "2026-03-16T23:03:04.551Z" },
-    { url = "https://files.pythonhosted.org/packages/f1/ca/8c2a04ce499a2a97d1a0de2b7e84fa8166f988a9a495e1ada860110489c2/lancedb-0.30.0-cp39-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:be6a4ba2a1799a426cbf2ba5ea2559a7389a569e9a31f2409d531ceb59d42f35", size = 43873070, upload-time = "2026-03-16T23:11:01.352Z" },
-    { url = "https://files.pythonhosted.org/packages/16/68/e01bf7837454a5ce9e2f6773905e07b09a949bc88136c0773c8166ed7729/lancedb-0.30.0-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:0a967ec05f9930770aeb077bc5579769b1bedf559fcd03a592d9644084625918", size = 46891197, upload-time = "2026-03-16T23:14:39.18Z" },
-    { url = "https://files.pythonhosted.org/packages/43/d1/9085ad17abd98f3a180d7860df3190b2d76f99f533c76d7c7494cec4139d/lancedb-0.30.0-cp39-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:05c66f40f7d4f6f24208e786c40f84b87b1b8e55505305849dd3fed3b78431a3", size = 43877660, upload-time = "2026-03-16T23:11:00.837Z" },
-    { url = "https://files.pythonhosted.org/packages/ea/69/504ee25c57c3f23c80276b5b7b5e4c0f98a5197a7e9e51d3c50500d2b53a/lancedb-0.30.0-cp39-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:bdcd27d98554ed11b6f345b14d1307b0e2332d5654767e9ee2e23d9b2d6513d1", size = 46932144, upload-time = "2026-03-16T23:15:00.474Z" },
-    { url = "https://files.pythonhosted.org/packages/2c/85/d5550f22023e672af1945394f7a06a578fcab2980ecc6666acef3428a771/lancedb-0.30.0-cp39-abi3-win_amd64.whl", hash = "sha256:4751ff0446b90be4d4dccfe05f6c105f403a05f3b8531ab99eedc1c656aca950", size = 51121310, upload-time = "2026-03-16T23:43:23.89Z" },
-]
-
-[[package]]
-name = "lancedb"
 version = "0.30.2"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
@@ -2807,13 +2775,13 @@ resolution-markers = [
     "python_full_version < '3.14'",
 ]
 dependencies = [
-    { name = "deprecation", marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
-    { name = "lance-namespace", marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
-    { name = "numpy", marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
-    { name = "packaging", marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
-    { name = "pyarrow", marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
-    { name = "pydantic", version = "2.13.4", source = { registry = "https://pypi.org/simple" }, marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
-    { name = "tqdm", marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
+    { name = "deprecation", marker = "extra == 'extra-5-khora-google-adk'" },
+    { name = "lance-namespace", marker = "extra == 'extra-5-khora-google-adk'" },
+    { name = "numpy", marker = "extra == 'extra-5-khora-google-adk'" },
+    { name = "packaging", marker = "extra == 'extra-5-khora-google-adk'" },
+    { name = "pyarrow", marker = "extra == 'extra-5-khora-google-adk'" },
+    { name = "pydantic", version = "2.13.4", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
+    { name = "tqdm", marker = "extra == 'extra-5-khora-google-adk'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/7f/87/67b23006663be175c396ae8f7c6ac98bfa4728de5b5583016b8b8c54eb14/lancedb-0.30.2-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:3dd8cb9e2e25efb32c088b24b3fbc57f3f24a636f4b8ad4b287b1eb52f6b5075", size = 41720461, upload-time = "2026-03-31T22:42:32.853Z" },
@@ -2822,6 +2790,31 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/74/4b/5bfeacf948cfc3452b286a792dcbbfaf04649ef0820e1d3790d47bf5527e/lancedb-0.30.2-cp39-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:8b161cb1da04ae6ad45afe10093cfe4107821d93e7712b50200c435d6f4c8a20", size = 43641193, upload-time = "2026-03-31T22:51:13.63Z" },
     { url = "https://files.pythonhosted.org/packages/28/4c/a51af0ce1d18fd86afa3e8538a81abf5523d24632abe7665ce6795b8009d/lancedb-0.30.2-cp39-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:7fabc0f57944fd79ddef62ed8cf4df770654b172b1ad1019a999304fed3169f3", size = 46665361, upload-time = "2026-03-31T22:54:20.282Z" },
     { url = "https://files.pythonhosted.org/packages/88/d0/7e44e8143ac2dae8979ba882cc33d4af7b8da4741fb0361497e69b4a4379/lancedb-0.30.2-cp39-abi3-win_amd64.whl", hash = "sha256:531da53002c1c6fda829afccc8ced3056ef58eb036f09ddb2b94a06877ecc66c", size = 50940681, upload-time = "2026-03-31T23:25:52.35Z" },
+]
+
+[[package]]
+name = "lancedb"
+version = "0.40.0"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.14'",
+    "python_full_version < '3.14'",
+]
+dependencies = [
+    { name = "deprecation", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "lance-namespace", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "numpy", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "packaging", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "pyarrow", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "pydantic", version = "2.12.5", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai'" },
+    { name = "pydantic", version = "2.13.4", source = { registry = "https://pypi.org/simple" }, marker = "(extra != 'extra-5-khora-crewai' and extra != 'extra-5-khora-google-adk') or (extra == 'extra-5-khora-crewai' and extra == 'extra-5-khora-google-adk')" },
+    { name = "tqdm", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/27/2b/855ab90aea9cfd311842be596ca12dcc366df7b2e8209003f95cc8079f6d/lancedb-0.40.0-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:10e6fbacc9a9be5698c8e635f150ef4346e428db71d15b31bc1b79aec2a382ff", size = 67454352, upload-time = "2026-10-07T10:35:02.537Z" },
+    { url = "https://files.pythonhosted.org/packages/a1/07/bcdd8f581db0719a5e99be5abdf2a569c840f9b3b90069eff1181141b291/lancedb-0.40.0-cp310-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:e967577fe42980217e43f9b6ecbe042c5ae314370a34b88f1c54e825f96b26f0", size = 71651477, upload-time = "2026-10-07T10:35:06.644Z" },
+    { url = "https://files.pythonhosted.org/packages/82/f7/4a5b7bff8abf486d4dc43fc1cb06c5c08472a1aee760eb5d9d10bd7c770e/lancedb-0.40.0-cp310-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:aac9e08a710ba2071a8aefc4b4ef7d8534f5f7e4e4ce1761f11469d97c36f1e2", size = 75231099, upload-time = "2026-10-07T10:35:10.459Z" },
+    { url = "https://files.pythonhosted.org/packages/88/38/00ed271fd7fc51761b7d449856913a64951041881e68972602643eae7349/lancedb-0.40.0-cp310-abi3-win_amd64.whl", hash = "sha256:aaea68920b88e3d0b84a9ec84bc1585ad04239b9ca1bfcd1e491c2c12bffddc2", size = 83389723, upload-time = "2026-10-07T10:35:14.427Z" },
 ]
 
 [[package]]
@@ -3059,22 +3052,61 @@ wheels = [
 name = "logfire"
 version = "4.39.0"
 source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.14'",
+    "python_full_version < '3.14'",
+]
 dependencies = [
-    { name = "executing" },
+    { name = "executing", marker = "extra == 'extra-5-khora-google-adk'" },
     { name = "opentelemetry-exporter-otlp-proto-http", version = "1.40.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "opentelemetry-exporter-otlp-proto-http", version = "1.42.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
     { name = "opentelemetry-instrumentation", version = "0.61b0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "opentelemetry-instrumentation", version = "0.63b1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
     { name = "opentelemetry-sdk", version = "1.40.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "opentelemetry-sdk", version = "1.42.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
-    { name = "protobuf" },
-    { name = "rich", version = "14.3.4", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai'" },
-    { name = "rich", version = "15.0.0", source = { registry = "https://pypi.org/simple" }, marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
-    { name = "typing-extensions" },
+    { name = "protobuf", marker = "extra == 'extra-5-khora-google-adk'" },
+    { name = "rich", version = "15.0.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
+    { name = "typing-extensions", marker = "extra == 'extra-5-khora-google-adk'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/98/7d/9d04b6c716c7963cc0176b0aafee1b7becd0d3c3b2febe704dc9ae5a4318/logfire-4.39.0.tar.gz", hash = "sha256:7291ae695a145c21b4fa9baea2ffaf42b23c79a08e1f3edcef5a4cad41867a0d", size = 1242395, upload-time = "2026-07-24T18:31:34.698Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b0/57/b40307cdfd81d07433ad5ae38de70fe6e543f3fb7e764bdf6944695a386b/logfire-4.39.0-py3-none-any.whl", hash = "sha256:e6046e03ce45098c15a9dbf42ced8b95dfcb60cc1f3600a6250c8f515755be5f", size = 405126, upload-time = "2026-07-24T18:31:30.844Z" },
+]
+
+[[package]]
+name = "logfire"
+version = "5.4.0"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.14'",
+    "python_full_version < '3.14'",
+]
+dependencies = [
+    { name = "logfire-sdk", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/42/f8/91f1cad432053c3b738855b555d21cd63bc9a4baeae41c3eb82428524833/logfire-5.4.0.tar.gz", hash = "sha256:cdf55516ac34244a19dfe2dc9780c904839a2deb932d1b9676df2430583963eb", size = 3256, upload-time = "2026-10-26T15:17:53.151Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/64/6d/527e1193306920d2d067f55175ebab00518bc1a70993a1bb6f21de4efb8a/logfire-5.4.0-py3-none-any.whl", hash = "sha256:62141324530af622271070627316a9c3aca2bfbd2467144db31ec481d15d56d1", size = 3087, upload-time = "2026-10-26T15:17:48.326Z" },
+]
+
+[[package]]
+name = "logfire-sdk"
+version = "5.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "certifi", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "executing", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-api", version = "1.45.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-exporter-otlp-proto-http", version = "1.45.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-instrumentation", version = "0.66b1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-sdk", version = "1.45.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-semantic-conventions", version = "0.66b1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "protobuf", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "requests", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "rich", version = "14.3.4", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai'" },
+    { name = "rich", version = "15.0.0", source = { registry = "https://pypi.org/simple" }, marker = "(extra != 'extra-5-khora-crewai' and extra != 'extra-5-khora-google-adk') or (extra == 'extra-5-khora-crewai' and extra == 'extra-5-khora-google-adk')" },
+    { name = "typing-extensions", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0d/03/f55c252dfcf7b166f514ed8500da4a2e6492acb5210b7e5e8a6e8d479b9a/logfire_sdk-5.4.0.tar.gz", hash = "sha256:85556016008f824b3e72df85fd1ec7edab56f95394631eb88ed1bb7603862d14", size = 1461661, upload-time = "2026-10-26T15:17:55.754Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d8/1e/4cc2503ed7037bb21242900f078d6283c7c59ed0dae7ad2436f52c13c858/logfire_sdk-5.4.0-py3-none-any.whl", hash = "sha256:81901c0d7e44e1daaeec5b512e177d09489f35e52b6cc2ae717efa3250a061d1", size = 1001433, upload-time = "2026-10-26T15:17:51.662Z" },
 ]
 
 [[package]]
@@ -3247,60 +3279,28 @@ wheels = [
 
 [[package]]
 name = "mcp"
-version = "1.28.1"
+version = "1.30.0"
 source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version >= '3.14'",
-    "python_full_version < '3.14'",
-]
 dependencies = [
-    { name = "anyio", marker = "extra == 'extra-5-khora-crewai'" },
-    { name = "httpx", marker = "extra == 'extra-5-khora-crewai'" },
-    { name = "httpx-sse", marker = "extra == 'extra-5-khora-crewai'" },
-    { name = "jsonschema", marker = "extra == 'extra-5-khora-crewai'" },
+    { name = "anyio" },
+    { name = "httpx" },
+    { name = "httpx-sse" },
+    { name = "jsonschema" },
     { name = "pydantic", version = "2.12.5", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai'" },
-    { name = "pydantic-settings", marker = "extra == 'extra-5-khora-crewai'" },
-    { name = "pyjwt", extra = ["crypto"], marker = "extra == 'extra-5-khora-crewai'" },
-    { name = "python-multipart", marker = "extra == 'extra-5-khora-crewai'" },
-    { name = "pywin32", marker = "(sys_platform == 'win32' and extra == 'extra-5-khora-crewai') or (extra == 'extra-5-khora-crewai' and extra == 'extra-5-khora-google-adk')" },
-    { name = "sse-starlette", marker = "extra == 'extra-5-khora-crewai'" },
-    { name = "starlette", marker = "extra == 'extra-5-khora-crewai'" },
-    { name = "typing-extensions", marker = "extra == 'extra-5-khora-crewai'" },
-    { name = "typing-inspection", marker = "extra == 'extra-5-khora-crewai'" },
-    { name = "uvicorn", marker = "(sys_platform != 'emscripten' and extra == 'extra-5-khora-crewai') or (extra == 'extra-5-khora-crewai' and extra == 'extra-5-khora-google-adk')" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/6e/77/9450b8f251a13affb6281997d0523c4615f8a8b35d0b21ff30db3a5aac9d/mcp-1.28.1.tar.gz", hash = "sha256:d51e36a5f5644faea4f85ea649bfffa6bc6c26770d42798ad6a3de3d2ba69683", size = 638501, upload-time = "2026-06-26T12:57:29.093Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/e2/5e/d118fce19f87a2e7d8101c35c8ae0ec289098a4df0ff244cec23e415aca0/mcp-1.28.1-py3-none-any.whl", hash = "sha256:2726bca5e7193f61c5dde8b12500a6de2d9acf6d1a1c0be9e8c2e706437991df", size = 222620, upload-time = "2026-06-26T12:57:27.218Z" },
-]
-
-[[package]]
-name = "mcp"
-version = "1.29.0"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version >= '3.14'",
-    "python_full_version < '3.14'",
-]
-dependencies = [
-    { name = "anyio", marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
-    { name = "httpx", marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
-    { name = "httpx-sse", marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
-    { name = "jsonschema", marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
     { name = "pydantic", version = "2.13.4", source = { registry = "https://pypi.org/simple" }, marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
-    { name = "pydantic-settings", marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
-    { name = "pyjwt", extra = ["crypto"], marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
-    { name = "python-multipart", marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
-    { name = "pywin32", marker = "(sys_platform == 'win32' and extra != 'extra-5-khora-crewai') or (extra == 'extra-5-khora-crewai' and extra == 'extra-5-khora-google-adk')" },
-    { name = "sse-starlette", marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
-    { name = "starlette", marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
-    { name = "typing-extensions", marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
-    { name = "typing-inspection", marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
-    { name = "uvicorn", marker = "(sys_platform != 'emscripten' and extra != 'extra-5-khora-crewai') or (extra == 'extra-5-khora-crewai' and extra == 'extra-5-khora-google-adk')" },
+    { name = "pydantic-settings" },
+    { name = "pyjwt", extra = ["crypto"] },
+    { name = "python-multipart" },
+    { name = "pywin32", marker = "sys_platform == 'win32'" },
+    { name = "sse-starlette" },
+    { name = "starlette" },
+    { name = "typing-extensions" },
+    { name = "typing-inspection" },
+    { name = "uvicorn", marker = "sys_platform != 'emscripten'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/30/d3/f9acc21dfc886e4f78e2add1a47db46ce16884346afde53f8a064c02c891/mcp-1.29.0.tar.gz", hash = "sha256:52d01f334de1868cc3bb2d6604931126a67631f99a6c5d3b82ba47290315ec36", size = 643148, upload-time = "2026-07-28T13:41:41.939Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ba/93/0142dc84a666daf8ad51a34268f34c12fd6fda4f3810c4be2504eecc8212/mcp-1.30.0.tar.gz", hash = "sha256:445414625fce5c295faa505bb11bacece661ab6f4028d57c935db57820b7a3e4", size = 680511, upload-time = "2026-09-07T14:34:15.845Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/01/c8/248b201f6d753d69fd5d6506011abbb35a946d9142b2ae311a948fd0be3d/mcp-1.29.0-py3-none-any.whl", hash = "sha256:f5a075bb611f23d6f4d080c6a1699fa62772eebc562ba9e66b306ddde1c755f7", size = 223436, upload-time = "2026-07-28T13:41:40.337Z" },
+    { url = "https://files.pythonhosted.org/packages/f5/f4/e58bc33317c92a0203664daaf00bf6f41166cc0149e5d6870a03f7cd004a/mcp-1.30.0-py3-none-any.whl", hash = "sha256:666edb5009503e1047c9d60346a756f94b261f05cc2625f23d41c728ffc484d0", size = 234581, upload-time = "2026-09-07T14:34:14.266Z" },
 ]
 
 [[package]]
@@ -3780,11 +3780,11 @@ wheels = [
 
 [[package]]
 name = "oauthlib"
-version = "3.3.1"
+version = "4.0.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/0b/5f/19930f824ffeb0ad4372da4812c50edbd1434f678c90c2733e1188edfc63/oauthlib-3.3.1.tar.gz", hash = "sha256:0f0f8aa759826a193cf66c12ea1af1637f87b9b4622d46e866952bb022e538c9", size = 185918, upload-time = "2025-06-19T22:48:08.269Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/7a/d8/a1bcc8ba112a627f8ffbdc212a78ce18d3ac07e91a5ca65d27918eee25a1/oauthlib-4.0.0.tar.gz", hash = "sha256:efb274799819440f95b4ab3b818869f1ce9ae26c5beacba0201d1a1b76b54f86", size = 187232, upload-time = "2026-09-28T06:01:18.77Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/be/9c/92789c596b8df838baa98fa71844d84283302f7604ed565dafe5a6b5041a/oauthlib-3.3.1-py3-none-any.whl", hash = "sha256:88119c938d2b8fb88561af5f6ee0eec8cc8d552b7bb1f712743136eb7523b7a1", size = 160065, upload-time = "2025-06-19T22:48:06.508Z" },
+    { url = "https://files.pythonhosted.org/packages/d9/f4/78229a1066068ca14fc60fb26cf7381cabe4382261392b90e5f9552722d4/oauthlib-4.0.0-py3-none-any.whl", hash = "sha256:624c28c13a0a59cabf9747dfa52af63be3e512a7f2714df16e91b5b3a145e6cd", size = 159715, upload-time = "2026-09-28T06:01:17.008Z" },
 ]
 
 [[package]]
@@ -3841,8 +3841,7 @@ version = "0.17.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "griffelib" },
-    { name = "mcp", version = "1.28.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai'" },
-    { name = "mcp", version = "1.29.0", source = { registry = "https://pypi.org/simple" }, marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
+    { name = "mcp" },
     { name = "openai" },
     { name = "pydantic", version = "2.12.5", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai'" },
     { name = "pydantic", version = "2.13.4", source = { registry = "https://pypi.org/simple" }, marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
@@ -3887,7 +3886,7 @@ wheels = [
 
 [[package]]
 name = "opentelemetry-api"
-version = "1.42.1"
+version = "1.45.1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -3896,9 +3895,9 @@ resolution-markers = [
 dependencies = [
     { name = "typing-extensions", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b4/1c/125e1c936c0873796771b7f04f6c93b9f1bf5d424cea90fda94a99f61da8/opentelemetry_api-1.42.1.tar.gz", hash = "sha256:56c63bea9f77b62856be8c47600474acad853b2924b99b1687c4cb6297166716", size = 72296, upload-time = "2026-05-21T16:32:49.335Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/2e/02/6e0ae9cc61bd3169d401077b507b3ebc344745171e1051ab430be012dcd9/opentelemetry_api-1.45.1.tar.gz", hash = "sha256:aa38ed19bcc084ba42782a73255b3582283eced7ad6dddbd6695189e69adfb75", size = 72804, upload-time = "2026-10-06T17:32:58.133Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a3/ca/9520cc1f3dfbbd03ac5903bbf55833e257bc64b1cf30fa8b0d6df374d821/opentelemetry_api-1.42.1-py3-none-any.whl", hash = "sha256:51a69edacadbc03a8950ace1c4c21099cacc538820ac2c9e36277e78cebba714", size = 61311, upload-time = "2026-05-21T16:32:28.822Z" },
+    { url = "https://files.pythonhosted.org/packages/1e/41/f7dcf80b81ee8e71c1a2b59f14208bc723edbd89ed027a73b175abf6348e/opentelemetry_api-1.45.1-py3-none-any.whl", hash = "sha256:b31553efa588ae44bc306f863c785c5333a9ecc091248c6ee68b4b6c87fdedfb", size = 60256, upload-time = "2026-10-06T17:32:33.506Z" },
 ]
 
 [[package]]
@@ -3947,6 +3946,35 @@ wheels = [
 ]
 
 [[package]]
+name = "opentelemetry-exporter-http-transport"
+version = "0.66b1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "opentelemetry-api", version = "1.45.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/62/0c/e3ebdb4b507f66afcc905e6885a4946969bd75b45988492643356fbbdc63/opentelemetry_exporter_http_transport-0.66b1.tar.gz", hash = "sha256:443080203bf52586ce0b2ad901e8951c61833eab1aa539ae6f1f16fe9e8e7952", size = 11693, upload-time = "2026-10-06T17:32:59.65Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/04/69/6af86ff66492b481c6a4c05dcfd68beb47ed8ba046440a26a2aac76b95c7/opentelemetry_exporter_http_transport-0.66b1-py3-none-any.whl", hash = "sha256:2f95404bdee7f9d2d529c7de56c7bd86d014d774d8fbf137810e0167f8a492bf", size = 12155, upload-time = "2026-10-06T17:32:35.454Z" },
+]
+
+[package.optional-dependencies]
+requests = [
+    { name = "requests", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+]
+
+[[package]]
+name = "opentelemetry-exporter-otlp-common"
+version = "0.66b1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "opentelemetry-sdk", version = "1.45.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/cb/19/41de712173f43057e4532d42ece7d0c6d4210d353e5752433cb14987643f/opentelemetry_exporter_otlp_common-0.66b1.tar.gz", hash = "sha256:6b1403487a2185ac1feb45fd5546fdf8630ce71c36bcefaadf51e2130e9e23f9", size = 14325, upload-time = "2026-10-06T17:33:01.725Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fc/39/8c23d67665c762aa51840fa06f86e902e8f6f1693bc8d7e3d98cd6e2f753/opentelemetry_exporter_otlp_common-0.66b1-py3-none-any.whl", hash = "sha256:00ff8592c3a7cb729ff3fdc7ffa12372c243bdf2163e80c180994d0c7bd83ee9", size = 12385, upload-time = "2026-10-06T17:32:38.177Z" },
+]
+
+[[package]]
 name = "opentelemetry-exporter-otlp-proto-common"
 version = "1.40.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3964,18 +3992,18 @@ wheels = [
 
 [[package]]
 name = "opentelemetry-exporter-otlp-proto-common"
-version = "1.42.1"
+version = "1.45.1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.14'",
     "python_full_version < '3.14'",
 ]
 dependencies = [
-    { name = "opentelemetry-proto", version = "1.42.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-proto", version = "1.45.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/0e/9c/216acfeaedadf2e1937f4373929b20f73197c5c4a2546d4f584b7fa63813/opentelemetry_exporter_otlp_proto_common-1.42.1.tar.gz", hash = "sha256:04f1f01fb597c4249dfcd7f8b861c902c2102369d376d9d346ff38de4469a2ee", size = 21433, upload-time = "2026-05-21T16:32:55.526Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c1/8e/65e85e5137991a3c493b11682151d198638a5bc1dd4b4c5f67e013c57d7c/opentelemetry_exporter_otlp_proto_common-1.45.1.tar.gz", hash = "sha256:2e4adcc3a67bcf57804fc49514f0ef64974ca7590aa3491da389852b4a0628f6", size = 18873, upload-time = "2026-10-06T17:33:04.471Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d6/43/2375e7612e1121a4518c17603b6e0b03ad94f565aafad53f464dc5be2bf6/opentelemetry_exporter_otlp_proto_common-1.42.1-py3-none-any.whl", hash = "sha256:f48d395ab815b444da118868977e9798ea354c25737d5cf39578ae894011c140", size = 17327, upload-time = "2026-05-21T16:32:33.387Z" },
+    { url = "https://files.pythonhosted.org/packages/84/aa/92f225d353904e7f70b8b3e3c1b02db0cf56f744c2e83c581dc372e78873/opentelemetry_exporter_otlp_proto_common-1.45.1-py3-none-any.whl", hash = "sha256:2f446183ae7047b036226f1d846c41a834b0e8755ad13b51a51dd38952eb466c", size = 15393, upload-time = "2026-10-06T17:32:41.911Z" },
 ]
 
 [[package]]
@@ -4002,7 +4030,7 @@ wheels = [
 
 [[package]]
 name = "opentelemetry-exporter-otlp-proto-grpc"
-version = "1.42.1"
+version = "1.45.1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -4011,15 +4039,16 @@ resolution-markers = [
 dependencies = [
     { name = "googleapis-common-protos", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
     { name = "grpcio", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
-    { name = "opentelemetry-api", version = "1.42.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
-    { name = "opentelemetry-exporter-otlp-proto-common", version = "1.42.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
-    { name = "opentelemetry-proto", version = "1.42.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
-    { name = "opentelemetry-sdk", version = "1.42.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-api", version = "1.45.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-exporter-otlp-common", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-exporter-otlp-proto-common", version = "1.45.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-proto", version = "1.45.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-sdk", version = "1.45.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
     { name = "typing-extensions", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/87/87/ca7fc790dfdbcf4f9e9aab14a39ef1b7508ead13707e283de0b3131478d2/opentelemetry_exporter_otlp_proto_grpc-1.42.1.tar.gz", hash = "sha256:975c4461f167dd8ed8857d68d3b6b25f3d272eab896f6a9470d0f5b90e2faf15", size = 27140, upload-time = "2026-05-21T16:32:56.162Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d6/00/a82af0be959dc58495740b169c6669a86e0811f6cd353a01eda34d255db3/opentelemetry_exporter_otlp_proto_grpc-1.45.1.tar.gz", hash = "sha256:3b3dcfbfdcb4e35149fcf309972282054b45228f5c10547d0095d6578510a9a0", size = 25997, upload-time = "2026-10-06T17:33:05.114Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/89/2b/28ba5b128f47fe8c3bab541000d6feb4b5a9bd26623ca013406f01c0fb60/opentelemetry_exporter_otlp_proto_grpc-1.42.1-py3-none-any.whl", hash = "sha256:0ae1177e2038b18a929b3098215243631ef91136cba26b7e2b12790ceb7e87cc", size = 19617, upload-time = "2026-05-21T16:32:34.278Z" },
+    { url = "https://files.pythonhosted.org/packages/4d/46/2d1da202f1e17c81aae7efcf702898d524b46709e4d3e2bf1f7f8ca8fbc6/opentelemetry_exporter_otlp_proto_grpc-1.45.1-py3-none-any.whl", hash = "sha256:e42ecb789d2fc5d8145e3dadc3e2991c9f18cd166d7c7514e234702540274b76", size = 19492, upload-time = "2026-10-06T17:32:42.838Z" },
 ]
 
 [[package]]
@@ -4046,7 +4075,7 @@ wheels = [
 
 [[package]]
 name = "opentelemetry-exporter-otlp-proto-http"
-version = "1.42.1"
+version = "1.45.1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -4054,16 +4083,18 @@ resolution-markers = [
 ]
 dependencies = [
     { name = "googleapis-common-protos", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
-    { name = "opentelemetry-api", version = "1.42.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
-    { name = "opentelemetry-exporter-otlp-proto-common", version = "1.42.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
-    { name = "opentelemetry-proto", version = "1.42.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
-    { name = "opentelemetry-sdk", version = "1.42.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-api", version = "1.45.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-exporter-http-transport", extra = ["requests"], marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-exporter-otlp-common", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-exporter-otlp-proto-common", version = "1.45.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-proto", version = "1.45.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-sdk", version = "1.45.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
     { name = "requests", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
     { name = "typing-extensions", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/77/32/826bfa1d80ecea24f47808de03cd4a0d13c17ecc07712f45123f0f61e4ac/opentelemetry_exporter_otlp_proto_http-1.42.1.tar.gz", hash = "sha256:bf142a21035d7571ac3a09cb2e5639f49886f243972883cfe777ed3bf02b734d", size = 25406, upload-time = "2026-05-21T16:32:56.807Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1b/17/26487707ea4caa97b17e6e4b5fa72133a53512ffa2f5cf7a49ef284b29cb/opentelemetry_exporter_otlp_proto_http-1.45.1.tar.gz", hash = "sha256:45c218405ce3fd879596924b1874bf9a8f6880206d61065c5a912c8e5c297fb7", size = 28839, upload-time = "2026-10-06T17:33:05.713Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d3/96/82cb223a1502f0787d4bbff12907f5f8d870a50731febcd5818d93ef9555/opentelemetry_exporter_otlp_proto_http-1.42.1-py3-none-any.whl", hash = "sha256:00a16da1b312a1d6c7233d600d557c91df71125af73020f3b9a7765bd699d59d", size = 21793, upload-time = "2026-05-21T16:32:35.277Z" },
+    { url = "https://files.pythonhosted.org/packages/aa/1f/517eaa0187ba106a9da97160ce2add3a371812681dc440930b267f714e42/opentelemetry_exporter_otlp_proto_http-1.45.1-py3-none-any.whl", hash = "sha256:24a97cf3753c7fb52fad44a696e452ff371686339e2acf3309e2eda3d0230700", size = 22180, upload-time = "2026-10-06T17:32:43.946Z" },
 ]
 
 [[package]]
@@ -4087,21 +4118,21 @@ wheels = [
 
 [[package]]
 name = "opentelemetry-instrumentation"
-version = "0.63b1"
+version = "0.66b1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.14'",
     "python_full_version < '3.14'",
 ]
 dependencies = [
-    { name = "opentelemetry-api", version = "1.42.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
-    { name = "opentelemetry-semantic-conventions", version = "0.63b1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-api", version = "1.45.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-semantic-conventions", version = "0.66b1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
     { name = "packaging", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
     { name = "wrapt", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/da/6d/4de72d97ff54db1ed270c7a59c9b904b917c0ac7af429c086c388b824ddb/opentelemetry_instrumentation-0.63b1.tar.gz", hash = "sha256:32368d6ae52c8de20aa790a6ad86b10a76f09956092337ae37d675773990e541", size = 41081, upload-time = "2026-05-21T16:36:14.206Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a5/03/89e47ff8d52a4f83b343e6eb9ef1698ff45357216e5b6b2b21e0da5c5c7d/opentelemetry_instrumentation-0.66b1.tar.gz", hash = "sha256:e79a510f7d87c72d95e964ddb42193a0d9a75668c027d980eab032ea1322a5ce", size = 43308, upload-time = "2026-10-06T17:36:10.703Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/35/a1/9314e621c143e4d82a5bf7a43c2ff7a745d31023506336857607c8c543cc/opentelemetry_instrumentation-0.63b1-py3-none-any.whl", hash = "sha256:f1986716d52cc316ea5f60189098726a9071d8ecc0eee96c9ed110be08bade9c", size = 35577, upload-time = "2026-05-21T16:34:56.818Z" },
+    { url = "https://files.pythonhosted.org/packages/da/b2/d1413681ff43e13ac9860df27e1226d3199ab0b97b352ceea41abcc660a5/opentelemetry_instrumentation-0.66b1-py3-none-any.whl", hash = "sha256:4c4aa14dc9a24a02325a9d4c42c4d0208dbb1374c2b1b8fe6c9392d59f3e1008", size = 36904, upload-time = "2026-10-06T17:35:11.663Z" },
 ]
 
 [[package]]
@@ -4122,7 +4153,7 @@ wheels = [
 
 [[package]]
 name = "opentelemetry-proto"
-version = "1.42.1"
+version = "1.45.1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -4131,9 +4162,9 @@ resolution-markers = [
 dependencies = [
     { name = "protobuf", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b4/55/63eac3e1089b768ba014091fdd2ae8a9a440c821ef5e2b786909c94c8836/opentelemetry_proto-1.42.1.tar.gz", hash = "sha256:c6a51e6b4f05ae63565f3a113217f3d2bfaec68f78c02d7a6c85f9010d1cfca6", size = 45839, upload-time = "2026-05-21T16:33:03.937Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/4b/7f/15f014fb195da6c2dbb6c71399b8e76824878718e94de6454038488eed28/opentelemetry_proto-1.45.1.tar.gz", hash = "sha256:79e0fb95e4616691a469439238aa9224d75779b3e108e895d1aa125ab29ca77c", size = 46488, upload-time = "2026-10-06T17:33:11.49Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/41/9d/171c02c84a76940b7e601805b3bb536985aded9168fbcc9ba52f0a730fa2/opentelemetry_proto-1.42.1-py3-none-any.whl", hash = "sha256:dedb74cba2886c59c7789b227a7a670613025a07489040050aedff6e5c0fb43c", size = 71782, upload-time = "2026-05-21T16:32:44.867Z" },
+    { url = "https://files.pythonhosted.org/packages/ab/9a/42ec8180a769516ae757e893b69736826efceac7332553915b4528a91c6d/opentelemetry_proto-1.45.1-py3-none-any.whl", hash = "sha256:f38e2a8413053c180cd3d2637fbb279673ec2f6a6e09c995aafa2f452c52b46e", size = 72488, upload-time = "2026-10-06T17:32:53.057Z" },
 ]
 
 [[package]]
@@ -4171,20 +4202,20 @@ wheels = [
 
 [[package]]
 name = "opentelemetry-sdk"
-version = "1.42.1"
+version = "1.45.1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.14'",
     "python_full_version < '3.14'",
 ]
 dependencies = [
-    { name = "opentelemetry-api", version = "1.42.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
-    { name = "opentelemetry-semantic-conventions", version = "0.63b1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-api", version = "1.45.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-semantic-conventions", version = "0.66b1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
     { name = "typing-extensions", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/40/f7/b390bd9bfd703bf98a68fea1f27786c6872331fd617164a54b8a59bdc008/opentelemetry_sdk-1.42.1.tar.gz", hash = "sha256:8c834e8f8c9ba4171d4ec843d0cb8a67e4c7394d3f9e9297e582cbd9456ddbf7", size = 239262, upload-time = "2026-05-21T16:33:04.641Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a1/79/7392e21a1c8f0c61d90b223e31c7e48cb9d452e91a6b820ad24cca5f23c4/opentelemetry_sdk-1.45.1.tar.gz", hash = "sha256:63d24a6ca645019a631e6a51999c73e93adcac1196ca640b8ae78a7cc4762bf3", size = 218324, upload-time = "2026-10-06T17:33:13.26Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/8f/6b/4287766cfbde577ae2272e8884abac325aeaac0d64f41c61d5b8cc595105/opentelemetry_sdk-1.42.1-py3-none-any.whl", hash = "sha256:083cd4bbfaa5aa7b5a9e552430d9951219967cfb27aa61feb13a77aba1fc839d", size = 170907, upload-time = "2026-05-21T16:32:45.894Z" },
+    { url = "https://files.pythonhosted.org/packages/95/3c/87c42b4bd6dd297536f04cd9383d212ac557ecd49f2cbdcd46da1c9ef5c8/opentelemetry_sdk-1.45.1-py3-none-any.whl", hash = "sha256:c604c11dc429810812348989115fa44bd558772a3d7442afc43d024f2c250ca4", size = 140063, upload-time = "2026-10-06T17:32:55.04Z" },
 ]
 
 [[package]]
@@ -4206,19 +4237,19 @@ wheels = [
 
 [[package]]
 name = "opentelemetry-semantic-conventions"
-version = "0.63b1"
+version = "0.66b1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.14'",
     "python_full_version < '3.14'",
 ]
 dependencies = [
-    { name = "opentelemetry-api", version = "1.42.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-api", version = "1.45.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
     { name = "typing-extensions", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/93/99/4d7dd6df64795951413ce6e815f8cf1eb191daf7196ae86574589643d5f3/opentelemetry_semantic_conventions-0.63b1.tar.gz", hash = "sha256:3daf963611334b365e98a57438183eb012d3bfb40b2d931a9af613476b8701a9", size = 148340, upload-time = "2026-05-21T16:33:05.455Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/46/e4/dbbfb2a010c4db2224a5114638acede6fe563d33cc20fb1752cebcbe6298/opentelemetry_semantic_conventions-0.66b1.tar.gz", hash = "sha256:497ca63bf383723411e8eaf60c8779e9877633c936bb641080adab59d0eb6ec8", size = 150250, upload-time = "2026-10-06T17:33:14.073Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/cb/7a/7fe66f5f3682b1dd47d88cc4e11f1c6c0966b737de2d16671146e23c39a5/opentelemetry_semantic_conventions-0.63b1-py3-none-any.whl", hash = "sha256:dfe5ef4dee82586b746f522b818ceb298d00b3d59f660042bd79404bff8d0682", size = 203713, upload-time = "2026-05-21T16:32:47.016Z" },
+    { url = "https://files.pythonhosted.org/packages/bc/14/67f8aa798857f8cf686f515bf93d9bb877ce952ddc8efae0fa25b45ce0d6/opentelemetry_semantic_conventions-0.66b1-py3-none-any.whl", hash = "sha256:d4cddeb4315490b35213f55e2bdc9ac54bb1e4d318927475bed62b35545e581b", size = 206279, upload-time = "2026-10-06T17:32:56.103Z" },
 ]
 
 [[package]]
@@ -4469,22 +4500,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/1f/f8/969e6f280201b40b31bcb62843c619f343dcc351dff83a5891530c9dd60e/portalocker-2.7.0.tar.gz", hash = "sha256:032e81d534a88ec1736d03f780ba073f047a06c478b06e2937486f334e955c51", size = 20183, upload-time = "2023-01-18T23:36:14.436Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/8c/df/d4f711d168524f5aebd7fb30969eaa31e3048cf8979688cde3b08f6e5eb8/portalocker-2.7.0-py2.py3-none-any.whl", hash = "sha256:a07c5b4f3985c3cf4798369631fb7011adb498e2a46d8440efc75a8f29a0f983", size = 15502, upload-time = "2023-01-18T23:36:12.849Z" },
-]
-
-[[package]]
-name = "posthog"
-version = "5.4.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "backoff" },
-    { name = "distro" },
-    { name = "python-dateutil" },
-    { name = "requests" },
-    { name = "six" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/48/20/60ae67bb9d82f00427946218d49e2e7e80fb41c15dc5019482289ec9ce8d/posthog-5.4.0.tar.gz", hash = "sha256:701669261b8d07cdde0276e5bc096b87f9e200e3b9589c5ebff14df658c5893c", size = 88076, upload-time = "2025-06-20T23:19:23.485Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/4f/98/e480cab9a08d1c09b1c59a93dade92c1bb7544826684ff2acbfd10fcfbd4/posthog-5.4.0-py3-none-any.whl", hash = "sha256:284dfa302f64353484420b52d4ad81ff5c2c2d1d607c4e2db602ac72761831bd", size = 105364, upload-time = "2025-06-20T23:19:22.001Z" },
 ]
 
 [[package]]
@@ -6484,28 +6499,28 @@ wheels = [
 
 [[package]]
 name = "uv"
-version = "0.11.15"
+version = "0.13.6"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/da/34/609d5d01ba21dc8f0974610ca7802fbb2c946a0c38665cfe5c5aeddbefb5/uv-0.11.15.tar.gz", hash = "sha256:755f959ec6a2fd8ccb6ee76ad90ab759d2eb1f4797444078645dd1ee4bca92d6", size = 4159545, upload-time = "2026-05-18T19:57:48.133Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/08/d5/88d43310d425f6e3a43997ad771658ded3237d0ed78c16a89b2353eddf56/uv-0.13.6.tar.gz", hash = "sha256:d762215478854f6cf20c3faed8f1eb30c8101d568e7bc32a3abafc063929d5c5", size = 7545242, upload-time = "2026-10-27T00:45:57.605Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a6/7c/dcc230c5911884d8848145dabcac8fb95a5ed6f9fe1c57fae8242618f28a/uv-0.11.15-py3-none-linux_armv6l.whl", hash = "sha256:83b04ab49514a0a761ffedb36a748ee81f87746671e72088e5f32c9585e5f1a9", size = 23110183, upload-time = "2026-05-18T19:57:23.051Z" },
-    { url = "https://files.pythonhosted.org/packages/f4/f3/efd4e044b60eb9c3c12ee386be098d56c335538ccec7caa49349cfba9344/uv-0.11.15-py3-none-macosx_10_12_x86_64.whl", hash = "sha256:b6cae61f737be075b90be9e3f07d961072aed7019f4c9b8ed5c5d41c4d6cade3", size = 22637941, upload-time = "2026-05-18T19:57:26.752Z" },
-    { url = "https://files.pythonhosted.org/packages/a6/b8/48627f895a1569e576822e0a8416aa4797eb4a4551de21a4ad97b9b5819d/uv-0.11.15-py3-none-macosx_11_0_arm64.whl", hash = "sha256:9accae33619a9166e5c48531deb455d672cfb89f9357a00975e669c76b0bd49f", size = 21258803, upload-time = "2026-05-18T19:57:05.473Z" },
-    { url = "https://files.pythonhosted.org/packages/af/50/4bc8a148274feabee2d9c9f1fa15009e10c0228dfe57981ee3ea2ef1d481/uv-0.11.15-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.musllinux_1_1_aarch64.whl", hash = "sha256:c0cf52cd6d50bb9e05e2d968f45f80761107e4cbc8d4a26d9758f9d8274aaec1", size = 23066178, upload-time = "2026-05-18T19:57:33.058Z" },
-    { url = "https://files.pythonhosted.org/packages/a9/56/139fc3bec9a8b0a25bfe2196123adb9f16124da437bf4fbcf0d21cfcafb2/uv-0.11.15-py3-none-manylinux_2_17_armv7l.manylinux2014_armv7l.musllinux_1_1_armv7l.whl", hash = "sha256:49dc6ed70bff00937384f96cdc4b1a4742d18e5504ec2c4a1214dba2dee5687a", size = 22705332, upload-time = "2026-05-18T19:57:36.714Z" },
-    { url = "https://files.pythonhosted.org/packages/ca/b0/b18b3dd204f8c213236a1ebd148e009861637129a8cce34df0e9aa22ed40/uv-0.11.15-py3-none-manylinux_2_17_armv7l.manylinux2014_armv7l.whl", hash = "sha256:adb9a89352539fdd8f7cd5f9966cf9f94fc5b98e0ccdf5003a04123dc6423bec", size = 22707534, upload-time = "2026-05-18T19:58:04.117Z" },
-    { url = "https://files.pythonhosted.org/packages/76/36/3ca09f95572df99d361b49c96b1297149e96e120d8d1ecf074095a4b6da4/uv-0.11.15-py3-none-manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:40ff67e3f8e8a7533781a2e892a534975a93acb83ea35460e64e7b2bf2111774", size = 24096607, upload-time = "2026-05-18T19:58:11.625Z" },
-    { url = "https://files.pythonhosted.org/packages/64/be/3bdee21a296bbf5336a526e3613d0e7d4538dacc39c62d7fcba55d15f6b0/uv-0.11.15-py3-none-manylinux_2_17_ppc64le.manylinux2014_ppc64le.whl", hash = "sha256:c6463a299ed7e6b5a800ed6f108af8e1588352629424133ddef7572b0e1e1118", size = 25082562, upload-time = "2026-05-18T19:57:40.69Z" },
-    { url = "https://files.pythonhosted.org/packages/cd/73/f371f3689ffe741066468d001d85f739fc4b5574de83b639ef19b5e8a7f4/uv-0.11.15-py3-none-manylinux_2_17_s390x.manylinux2014_s390x.whl", hash = "sha256:68c1e62d4b78578b90b833553286b65d6a7e327537716441068583ba652ec4f5", size = 24253391, upload-time = "2026-05-18T19:57:18.47Z" },
-    { url = "https://files.pythonhosted.org/packages/d3/16/fe392d618af6b00c064b3e718d585dcf791546a77c5123a5bec07ce53a0a/uv-0.11.15-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:98edf1bdaf82447014852051d93e3ee95012509c567bf057fd117e6bdbd9a807", size = 24415871, upload-time = "2026-05-18T19:58:19.651Z" },
-    { url = "https://files.pythonhosted.org/packages/6e/24/2e92a052fb6334fcd746d1c7cb57847c204b118c84f5da53c0f9e129f7b7/uv-0.11.15-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:be8f76d25bcf4c92bb384240ac1bf9aa7f51063d0bdeca4c9cf0ec3ed8b145e0", size = 23159007, upload-time = "2026-05-18T19:57:10.653Z" },
-    { url = "https://files.pythonhosted.org/packages/3d/2e/6923d0658d164bb2c435ed1868aa2d49b3074594679917a001ff92dc95bb/uv-0.11.15-py3-none-manylinux_2_31_riscv64.musllinux_1_1_riscv64.whl", hash = "sha256:f9f4fbbf4fe485522054f3c7496c6e8e932d6436e4200ff3daf718db0b7c7bd5", size = 23769385, upload-time = "2026-05-18T19:58:15.856Z" },
-    { url = "https://files.pythonhosted.org/packages/a4/99/7e34cd949e57360814e8064cc9fb7104df445d0f6a663504e5f7473480aa/uv-0.11.15-py3-none-manylinux_2_31_riscv64.whl", hash = "sha256:0ed920e896b2fd13a35031707e307e42fbb2681458b967440a17272d86d49137", size = 23860973, upload-time = "2026-05-18T19:57:55.575Z" },
-    { url = "https://files.pythonhosted.org/packages/28/98/8fe1f5f9d816e94569a0298dd8e0936801097625fa1952162951f0d628b6/uv-0.11.15-py3-none-musllinux_1_1_i686.whl", hash = "sha256:41d907611f3e6a13262807fd7f0a17849f76285ca80f536f6b3943732bdc6656", size = 23431392, upload-time = "2026-05-18T19:57:59.814Z" },
-    { url = "https://files.pythonhosted.org/packages/cc/6b/76a1ce2fa860026913a5941700cdc7d715fce9c3277a3fa3489cf2523ca0/uv-0.11.15-py3-none-musllinux_1_1_x86_64.whl", hash = "sha256:e3b68f8bf1a4568710f77e5bda9182ce7682811d89a8e7468c22460e032b234d", size = 24519478, upload-time = "2026-05-18T19:57:51.165Z" },
-    { url = "https://files.pythonhosted.org/packages/43/60/1d58e8a05718cb50494763115710b73846cacb651fd735d285233fd72c59/uv-0.11.15-py3-none-win32.whl", hash = "sha256:8e2da3076761086a5b76869c3f38ef0509c836046ef41ddd19485dfd7271dca9", size = 22020178, upload-time = "2026-05-18T19:58:07.64Z" },
-    { url = "https://files.pythonhosted.org/packages/55/53/40fcefcb348af660488597ed3c01363df7344e60611f8883750dc596f5c6/uv-0.11.15-py3-none-win_amd64.whl", hash = "sha256:cc3915ab291a1ecaf31de05f5d8bd70d09c66fe9911a53f70d9efa62ff0dbd8a", size = 24668779, upload-time = "2026-05-18T19:57:44.894Z" },
-    { url = "https://files.pythonhosted.org/packages/e5/7d/fa3a9960c95af9bbe2a629048760d0b9b4fead8ccd4f2235af747ec7cdf0/uv-0.11.15-py3-none-win_arm64.whl", hash = "sha256:4f39426a13dee24897aed60c4b98058c66f18bd983885ac5f4a54a04b24fbddf", size = 23198178, upload-time = "2026-05-18T19:57:14.68Z" },
+    { url = "https://files.pythonhosted.org/packages/e4/05/74c9ae1b59e0aa49f1fa84f31ea4ee0ec930825681d3af8430c017faa848/uv-0.13.6-py3-none-linux_armv6l.whl", hash = "sha256:4d20de8a3ed6c3d39b4e2f8f7d0411cd13a3959f5191b2b5d0209344034ed056", size = 18118786, upload-time = "2026-10-27T00:45:02.635Z" },
+    { url = "https://files.pythonhosted.org/packages/33/55/ff10d3f756c39a239e492e57262bd22fcda412a9f85a268175447cf33b09/uv-0.13.6-py3-none-macosx_10_12_x86_64.whl", hash = "sha256:95f042b95e67ef8c3d3569bb6e9d895e592002c5e871cf3f1afe407c9d77a294", size = 17172613, upload-time = "2026-10-27T00:45:06.331Z" },
+    { url = "https://files.pythonhosted.org/packages/f4/14/77230cc4f6a73a31578cb8070a5f67f58a76946ead643ae8a4155620d6da/uv-0.13.6-py3-none-macosx_11_0_arm64.whl", hash = "sha256:51361029b7cf91185d0092c4b356d110b4ad629e9cb11593f1e006ac72a72ca9", size = 14344205, upload-time = "2026-10-27T00:45:09.125Z" },
+    { url = "https://files.pythonhosted.org/packages/05/3b/f78583af6504f1270da95fd0d0935e381f58330c007260f450e81a1e5e1b/uv-0.13.6-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.musllinux_1_1_aarch64.whl", hash = "sha256:7ec5486476d67a4214c460b5492393ee2300d84e1de17b293100a019b413568b", size = 17764510, upload-time = "2026-10-27T00:45:12.133Z" },
+    { url = "https://files.pythonhosted.org/packages/2b/c3/ee263d5c8e0f0bbd553b19692b1de2ce5860baf0f9653c6217535ff27833/uv-0.13.6-py3-none-manylinux_2_17_armv7l.manylinux2014_armv7l.musllinux_1_1_armv7l.whl", hash = "sha256:710c68ea4853aaf70ab2d0ccf2e147dee59449f035a1f8fe7759f087a31cdbf5", size = 17679194, upload-time = "2026-10-27T00:45:15.052Z" },
+    { url = "https://files.pythonhosted.org/packages/27/33/172e323f6e424f7bf4aef0480b514132dce6350b2acf14235d9b0671fa82/uv-0.13.6-py3-none-manylinux_2_17_armv7l.manylinux2014_armv7l.whl", hash = "sha256:d4d7026c7327dd11fc2c0d4bae4735ff6944293d370644f35d2e6e917cdcae04", size = 17699951, upload-time = "2026-10-27T00:45:18.118Z" },
+    { url = "https://files.pythonhosted.org/packages/96/e6/29fa137fe3699a9f61f0e05640caff4713ac485cdf09b005f99f9bd595d4/uv-0.13.6-py3-none-manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:46c2ef1f744f20007be0cdd66db3022bb1ddcac477c754efda875e401a48d810", size = 18467553, upload-time = "2026-10-27T00:45:21.104Z" },
+    { url = "https://files.pythonhosted.org/packages/2f/8c/bf3672027b68bd930e6764122147fcbd1f2dd9d76fc8e02707916c3e0727/uv-0.13.6-py3-none-manylinux_2_17_ppc64le.manylinux2014_ppc64le.whl", hash = "sha256:b2d25a49d135a441f688a6869d6d8062fb6f0a2e3e32e18b72c9de1d0eb9521e", size = 19763440, upload-time = "2026-10-27T00:45:25.536Z" },
+    { url = "https://files.pythonhosted.org/packages/a3/c0/77c56a78a94b488cf0b54e505df5ecfae65b90b08cddb8e018bb2ae66268/uv-0.13.6-py3-none-manylinux_2_17_s390x.manylinux2014_s390x.whl", hash = "sha256:b9f57153fc98b7aa41dd6720e3de7578747f60b7bff22f50b76dcc47205bdde3", size = 19616511, upload-time = "2026-10-27T00:45:28.505Z" },
+    { url = "https://files.pythonhosted.org/packages/5c/43/0688ff5142934238f2812e348f4a24e09b57d48bfb38dd8f850325a0d9de/uv-0.13.6-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:22759b8895e1103578de6fb4cd27e94b4399d021023378d29f01333717751fba", size = 17333810, upload-time = "2026-10-27T00:45:31.291Z" },
+    { url = "https://files.pythonhosted.org/packages/99/3a/451b544e105b3595b27f74535c0d6b1105b1b2dcb9b49ca5282dd27bcbc3/uv-0.13.6-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:2e9a99100abe4f99605366974c4f9fe27f236615e05de8e78c0f357e38f09f97", size = 16527707, upload-time = "2026-10-27T00:45:34.282Z" },
+    { url = "https://files.pythonhosted.org/packages/ab/59/9483985fadf5b2e60e64ca89e215f9e2da45a54d7323b9765ba03a5ebd80/uv-0.13.6-py3-none-manylinux_2_31_riscv64.musllinux_1_1_riscv64.whl", hash = "sha256:1cd4b0a35fa599b83da5437748150319ae0917c522da60898327645382942faa", size = 18014028, upload-time = "2026-10-27T00:45:37.33Z" },
+    { url = "https://files.pythonhosted.org/packages/8d/c9/a412c2aa0494b307fce8c9c8234827f2fedb888954d3b3c8930a32a047c9/uv-0.13.6-py3-none-manylinux_2_31_riscv64.whl", hash = "sha256:8542dcf118ce8a7cf2e4ba1fea7f5cc1638bc02b5b30dab1ead7e9034dc62fd3", size = 17906467, upload-time = "2026-10-27T00:45:40.424Z" },
+    { url = "https://files.pythonhosted.org/packages/28/51/4fecb1d7a32ebf5c444643a4da9d1ae0878de0c71284792dbcdaaf61a5b8/uv-0.13.6-py3-none-musllinux_1_1_i686.whl", hash = "sha256:feb0f1d555798f68f28719cab437ab1dfb5d918db86ab4554215cbf9d940f63b", size = 17822518, upload-time = "2026-10-27T00:45:43.335Z" },
+    { url = "https://files.pythonhosted.org/packages/3a/10/7a4c287b1d377353c939f451881529528c78815d57f36097a6607187ab1a/uv-0.13.6-py3-none-musllinux_1_1_x86_64.whl", hash = "sha256:d1efed1d15102ffdbf5e0fd49a440643dda2d921a2ad856792ae42ccd43c253f", size = 18932884, upload-time = "2026-10-27T00:45:46.227Z" },
+    { url = "https://files.pythonhosted.org/packages/c8/b3/288467a6d1fdd99aca73dec3d4a919b80c201ec0d680093cd494d5b8efc7/uv-0.13.6-py3-none-win32.whl", hash = "sha256:29135609166960c74539abdaf4264f9819a0381be18b224125418356d67dd208", size = 16215356, upload-time = "2026-10-27T00:45:49.078Z" },
+    { url = "https://files.pythonhosted.org/packages/7c/9d/714523188aea3054644d8e69ae8089aac70325a3cee2d3d05509d4f23398/uv-0.13.6-py3-none-win_amd64.whl", hash = "sha256:7c9bc35ccb65932d8dc10a0669f9c805eaa3c9827ce18ecbecb1bd67944b2cdf", size = 15334118, upload-time = "2026-10-27T00:45:52.086Z" },
+    { url = "https://files.pythonhosted.org/packages/6a/7d/5ebb4cccbb11ae9e10f6cda704ce382722ab9dc68c9280a5b810378aee3e/uv-0.13.6-py3-none-win_arm64.whl", hash = "sha256:722c7f96803f115e53918b8ee8858d1680ea6077c614b6db750747d709ab8d9a", size = 15533875, upload-time = "2026-10-27T00:45:55.013Z" },
 ]
 
 [[package]]
