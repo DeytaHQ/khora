@@ -81,7 +81,14 @@ def namespace_uuid(*, namespace_root: str, user_id: str) -> UUID:
     The root distinguishes adapters writing into the same khora deployment
     (``user_id``, ``thread_id``, ``app_id`` patterns) so naming collisions
     across apps don't fuse memories together.
+
+    ``namespace_root`` must not contain ``:``. That keeps the ``:``-joined
+    seed injective (the first ``:`` always splits root from user_id), so
+    distinct pairs can never derive the same UUID. ``user_id`` may contain
+    ``:`` freely.
     """
+    if ":" in namespace_root:
+        raise ValueError(f"namespace_root must not contain ':': {namespace_root!r}")
     return uuid5(_NAMESPACE_ROOT, f"{namespace_root}:{user_id}")
 
 
