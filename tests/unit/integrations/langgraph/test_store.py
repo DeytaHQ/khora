@@ -123,6 +123,18 @@ def test_construct_accepts_valid_user_id_and_derives_namespace_id():
     assert store.namespace_id != store3.namespace_id
 
 
+def test_construct_rejects_colon_in_namespace_root():
+    from khora.integrations.langgraph import KhoraStore
+
+    kb = _mk_kb()
+    # ("app:alice", "x-123456") and ("app", "alice:x-123456") both join to
+    # "app:alice:x-123456"; the guard keeps them from sharing a namespace.
+    with pytest.raises(ValueError, match="namespace_root must not contain ':'"):
+        KhoraStore(kb, user_id="x-123456", namespace_root="app:alice")
+    store = KhoraStore(kb, user_id="alice:x-123456", namespace_root="app")
+    assert isinstance(store.namespace_id, UUID)
+
+
 def test_construct_rejects_index_config_dim_mismatch():
     from khora.integrations.langgraph import KhoraStore
 
