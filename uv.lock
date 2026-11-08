@@ -792,7 +792,7 @@ dependencies = [
     { name = "json-repair" },
     { name = "json5" },
     { name = "jsonref" },
-    { name = "lancedb", version = "0.40.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "lancedb" },
     { name = "mcp" },
     { name = "oauthlib" },
     { name = "openai" },
@@ -2504,8 +2504,7 @@ all-backends = [
     { name = "aiosqlite", version = "0.22.1", source = { registry = "https://pypi.org/simple" }, marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
     { name = "asyncpg" },
     { name = "httpx" },
-    { name = "lancedb", version = "0.30.2", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "lancedb", version = "0.40.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "lancedb" },
     { name = "neo4j" },
     { name = "pgvector" },
     { name = "pyarrow" },
@@ -2535,8 +2534,7 @@ dev = [
 embedded = [
     { name = "aiosqlite", version = "0.21.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai'" },
     { name = "aiosqlite", version = "0.22.1", source = { registry = "https://pypi.org/simple" }, marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
-    { name = "lancedb", version = "0.30.2", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "lancedb", version = "0.40.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "lancedb" },
     { name = "pyarrow" },
 ]
 google-adk = [
@@ -2546,8 +2544,7 @@ graph-all = [
     { name = "neo4j" },
 ]
 lancedb = [
-    { name = "lancedb", version = "0.30.2", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "lancedb", version = "0.40.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "lancedb" },
     { name = "pyarrow" },
 ]
 langgraph = [
@@ -2557,8 +2554,7 @@ llamaindex = [
     { name = "llama-index-core" },
 ]
 logfire = [
-    { name = "logfire", version = "4.39.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "logfire", version = "5.4.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "logfire" },
 ]
 memgraph = [
     { name = "neo4j" },
@@ -2616,8 +2612,7 @@ sqlite = [
 sqlite-lance = [
     { name = "aiosqlite", version = "0.21.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai'" },
     { name = "aiosqlite", version = "0.22.1", source = { registry = "https://pypi.org/simple" }, marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
-    { name = "lancedb", version = "0.30.2", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "lancedb", version = "0.40.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "lancedb" },
     { name = "pyarrow" },
 ]
 surrealdb = [
@@ -2635,8 +2630,7 @@ dev = [
     { name = "aiosqlite", version = "0.21.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai'" },
     { name = "aiosqlite", version = "0.22.1", source = { registry = "https://pypi.org/simple" }, marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
     { name = "hypothesis" },
-    { name = "logfire", version = "4.39.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "logfire", version = "5.4.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "logfire" },
     { name = "opentelemetry-exporter-otlp-proto-http", version = "1.40.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
     { name = "opentelemetry-exporter-otlp-proto-http", version = "1.45.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
     { name = "opentelemetry-sdk", version = "1.40.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
@@ -2810,47 +2804,17 @@ wheels = [
 
 [[package]]
 name = "lancedb"
-version = "0.30.2"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version >= '3.14'",
-    "python_full_version < '3.14'",
-]
-dependencies = [
-    { name = "deprecation", marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "lance-namespace", marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "numpy", marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "packaging", marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "pyarrow", marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "pydantic", version = "2.13.4", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "tqdm", marker = "extra == 'extra-5-khora-google-adk'" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/7f/87/67b23006663be175c396ae8f7c6ac98bfa4728de5b5583016b8b8c54eb14/lancedb-0.30.2-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:3dd8cb9e2e25efb32c088b24b3fbc57f3f24a636f4b8ad4b287b1eb52f6b5075", size = 41720461, upload-time = "2026-03-31T22:42:32.853Z" },
-    { url = "https://files.pythonhosted.org/packages/78/68/b3b5f638f8de91de75751414114690cae9c294dc79d9ab2602f4562ed9df/lancedb-0.30.2-cp39-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:f083d50b257f645bd5c4b295d693648ffb37640ce1e9d72f55041b1382f0dbd6", size = 43626135, upload-time = "2026-03-31T22:50:28.577Z" },
-    { url = "https://files.pythonhosted.org/packages/ef/d1/ea8b74a8b56dd4925cc9cb9cc23c7d9675708a7f6b33d22136dc7bb34dbc/lancedb-0.30.2-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:3aef5538db9cd82af79c90831035b4d67e9aa182ef73095a1b919caddf9bb7a5", size = 46619289, upload-time = "2026-03-31T22:55:02.242Z" },
-    { url = "https://files.pythonhosted.org/packages/74/4b/5bfeacf948cfc3452b286a792dcbbfaf04649ef0820e1d3790d47bf5527e/lancedb-0.30.2-cp39-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:8b161cb1da04ae6ad45afe10093cfe4107821d93e7712b50200c435d6f4c8a20", size = 43641193, upload-time = "2026-03-31T22:51:13.63Z" },
-    { url = "https://files.pythonhosted.org/packages/28/4c/a51af0ce1d18fd86afa3e8538a81abf5523d24632abe7665ce6795b8009d/lancedb-0.30.2-cp39-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:7fabc0f57944fd79ddef62ed8cf4df770654b172b1ad1019a999304fed3169f3", size = 46665361, upload-time = "2026-03-31T22:54:20.282Z" },
-    { url = "https://files.pythonhosted.org/packages/88/d0/7e44e8143ac2dae8979ba882cc33d4af7b8da4741fb0361497e69b4a4379/lancedb-0.30.2-cp39-abi3-win_amd64.whl", hash = "sha256:531da53002c1c6fda829afccc8ced3056ef58eb036f09ddb2b94a06877ecc66c", size = 50940681, upload-time = "2026-03-31T23:25:52.35Z" },
-]
-
-[[package]]
-name = "lancedb"
 version = "0.40.0"
 source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version >= '3.14'",
-    "python_full_version < '3.14'",
-]
 dependencies = [
-    { name = "deprecation", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
-    { name = "lance-namespace", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
-    { name = "numpy", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
-    { name = "packaging", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
-    { name = "pyarrow", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "deprecation" },
+    { name = "lance-namespace" },
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "pyarrow" },
     { name = "pydantic", version = "2.12.5", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai'" },
-    { name = "pydantic", version = "2.13.4", source = { registry = "https://pypi.org/simple" }, marker = "(extra != 'extra-5-khora-crewai' and extra != 'extra-5-khora-google-adk') or (extra == 'extra-5-khora-crewai' and extra == 'extra-5-khora-google-adk')" },
-    { name = "tqdm", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "pydantic", version = "2.13.4", source = { registry = "https://pypi.org/simple" }, marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
+    { name = "tqdm" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/27/2b/855ab90aea9cfd311842be596ca12dcc366df7b2e8209003f95cc8079f6d/lancedb-0.40.0-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:10e6fbacc9a9be5698c8e635f150ef4346e428db71d15b31bc1b79aec2a382ff", size = 67454352, upload-time = "2026-10-07T10:35:02.537Z" },
@@ -3104,36 +3068,10 @@ wheels = [
 
 [[package]]
 name = "logfire"
-version = "4.39.0"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version >= '3.14'",
-    "python_full_version < '3.14'",
-]
-dependencies = [
-    { name = "executing", marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "opentelemetry-exporter-otlp-proto-http", version = "1.40.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "opentelemetry-instrumentation", version = "0.61b0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "opentelemetry-sdk", version = "1.40.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "protobuf", marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "rich", version = "15.0.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "typing-extensions", marker = "extra == 'extra-5-khora-google-adk'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/98/7d/9d04b6c716c7963cc0176b0aafee1b7becd0d3c3b2febe704dc9ae5a4318/logfire-4.39.0.tar.gz", hash = "sha256:7291ae695a145c21b4fa9baea2ffaf42b23c79a08e1f3edcef5a4cad41867a0d", size = 1242395, upload-time = "2026-07-24T18:31:34.698Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/b0/57/b40307cdfd81d07433ad5ae38de70fe6e543f3fb7e764bdf6944695a386b/logfire-4.39.0-py3-none-any.whl", hash = "sha256:e6046e03ce45098c15a9dbf42ced8b95dfcb60cc1f3600a6250c8f515755be5f", size = 405126, upload-time = "2026-07-24T18:31:30.844Z" },
-]
-
-[[package]]
-name = "logfire"
 version = "5.4.0"
 source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version >= '3.14'",
-    "python_full_version < '3.14'",
-]
 dependencies = [
-    { name = "logfire-sdk", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "logfire-sdk" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/42/f8/91f1cad432053c3b738855b555d21cd63bc9a4baeae41c3eb82428524833/logfire-5.4.0.tar.gz", hash = "sha256:cdf55516ac34244a19dfe2dc9780c904839a2deb932d1b9676df2430583963eb", size = 3256, upload-time = "2026-10-26T15:17:53.151Z" }
 wheels = [
@@ -3145,18 +3083,23 @@ name = "logfire-sdk"
 version = "5.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "certifi", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
-    { name = "executing", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "certifi" },
+    { name = "executing" },
+    { name = "opentelemetry-api", version = "1.40.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
     { name = "opentelemetry-api", version = "1.45.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-exporter-otlp-proto-http", version = "1.40.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
     { name = "opentelemetry-exporter-otlp-proto-http", version = "1.45.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-instrumentation", version = "0.61b0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
     { name = "opentelemetry-instrumentation", version = "0.66b1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-sdk", version = "1.40.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
     { name = "opentelemetry-sdk", version = "1.45.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "opentelemetry-semantic-conventions", version = "0.61b0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
     { name = "opentelemetry-semantic-conventions", version = "0.66b1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
-    { name = "protobuf", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
-    { name = "requests", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "protobuf" },
+    { name = "requests" },
     { name = "rich", version = "14.3.4", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai'" },
-    { name = "rich", version = "15.0.0", source = { registry = "https://pypi.org/simple" }, marker = "(extra != 'extra-5-khora-crewai' and extra != 'extra-5-khora-google-adk') or (extra == 'extra-5-khora-crewai' and extra == 'extra-5-khora-google-adk')" },
-    { name = "typing-extensions", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+    { name = "rich", version = "15.0.0", source = { registry = "https://pypi.org/simple" }, marker = "extra != 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
+    { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/0d/03/f55c252dfcf7b166f514ed8500da4a2e6492acb5210b7e5e8a6e8d479b9a/logfire_sdk-5.4.0.tar.gz", hash = "sha256:85556016008f824b3e72df85fd1ec7edab56f95394631eb88ed1bb7603862d14", size = 1461661, upload-time = "2026-10-26T15:17:55.754Z" }
 wheels = [
@@ -3871,11 +3814,11 @@ wheels = [
 
 [[package]]
 name = "oauthlib"
-version = "4.0.0"
+version = "4.0.1"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/7a/d8/a1bcc8ba112a627f8ffbdc212a78ce18d3ac07e91a5ca65d27918eee25a1/oauthlib-4.0.0.tar.gz", hash = "sha256:efb274799819440f95b4ab3b818869f1ce9ae26c5beacba0201d1a1b76b54f86", size = 187232, upload-time = "2026-09-28T06:01:18.77Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/33/17/2bb072de0b990303c985f26869fd47bb179024a051f47e7f9d208eb92f8e/oauthlib-4.0.1.tar.gz", hash = "sha256:3d73febdb6faa00f277c81fb04be7b7586fb96fc3b7f0b9c772dada69a25ede7", size = 191219, upload-time = "2026-10-31T09:52:58.008Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d9/f4/78229a1066068ca14fc60fb26cf7381cabe4382261392b90e5f9552722d4/oauthlib-4.0.0-py3-none-any.whl", hash = "sha256:624c28c13a0a59cabf9747dfa52af63be3e512a7f2714df16e91b5b3a145e6cd", size = 159715, upload-time = "2026-09-28T06:01:17.008Z" },
+    { url = "https://files.pythonhosted.org/packages/df/ef/3b8adde1b32a6f540758bff734d3442c621734c83708e5f02b0ba2f43b84/oauthlib-4.0.1-py3-none-any.whl", hash = "sha256:498a298876e996301950a5b053d12c31628bb7b895db03666430c69ce182eb61", size = 161934, upload-time = "2026-10-31T09:52:56.206Z" },
 ]
 
 [[package]]
