@@ -6,6 +6,24 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ## [Unreleased]
 
+## [0.27.0] - adapter namespace_uuid injectivity, certifi CA-revocation bump, dependency refresh
+
+Minor release. One behaviour change in the integrations layer (inputs that used to be accepted now raise), one security bump to the root-CA bundle, and a batch of dependabot lockfile refreshes. No migration, no storage-schema change, no change to `khora.__all__` and no configuration surface change. Apart from the adapter guard below, upgrading from 0.26.1 needs nothing beyond reinstalling.
+
+### Changed
+
+- **The LangGraph and Google ADK adapters now reject `:` in the leading identity field of `namespace_uuid()`** (#1643, PR #1646). Both adapters build a namespace UUID as `uuid5` of the identity fields joined with `:`. A `:` inside the leading field made that join ambiguous: `("a:b", "c")` and `("a", "b:c")` produced the same seed, so two distinct callers could resolve to **one shared khora namespace** and read and write each other's memory. No error was raised and nothing was logged. The leading field is now validated and a `:` raises `ValueError`. That field is `namespace_root` in `khora.integrations.langgraph` (checked in `KhoraStore.__init__`) and `app_name` in `khora.integrations.google_adk`, which previously validated nothing. The ADK check covers all three call sites: `add_session_to_memory`, `add_events_to_memory` and `search_memory`. Only the leading field needs the guard: once it has no `:`, the first separator always marks the boundary between the fields, so the join is injective. `user_id` may still contain `:` (`tenant:user` is a common shape), and conforming callers are unaffected. The derivation string itself is unchanged, so **no existing namespace re-keys and no data needs migrating.** **Operator impact:** a deployment that already uses a `:`-bearing `namespace_root` or `app_name` now fails at construction or on first use, where before it worked. Such a deployment may also already share a namespace with a colliding identity. That cannot be detected or untangled after the fact, because both identities hashed to the same UUID. Pick a colon-free root and re-ingest if isolation matters. The CrewAI, OpenAI Agents, LlamaIndex and Hermes adapters are not covered by this change.
+
+- `certifi` 2026.10.19+ (lock 2026.10.23; #1636). Fixes GHSA-6q48-6c7w-9gw2: earlier bundles shipped the emSign root CAs, whose intermediate CA keys were compromised, so TLS verification trusted certificates an attacker could mint. Added as a `constraint-dependencies` floor and exempted from the 7-day `exclude-newer` staging window (`exclude-newer-package`), because the fix was released inside that window. This affects every outbound HTTPS call khora makes through `requests`, `httpx` or `aiohttp`: LLM and embedding providers, and remote graph and vector backends.
+
+- Lockfile-only bumps below (`uv.lock`); no direct pin in `pyproject.toml` moved, except the routine khora-accel lockstep pin.
+- `litellm` 1.84.0 -> 1.100.4 (#1641). This is the LLM and embedding transport behind extraction, embedding, HyDE, chat and hooks Level 2, so watch provider error shapes and token accounting after upgrading. khora's `litellm>=1.84.0` floor is unchanged.
+- Major-version bumps of transitive or optional dependencies: `pillow` 12.3.0 -> 13.0.0 (#1637), `filelock` 3.29.0 -> 4.2.1 (#1644), `langgraph-sdk` 0.3.15 -> 0.4.4 (#1632; `langgraph` extra).
+- `sentence-transformers` 5.4.1 -> 5.6.0 (#1626; `rerank` extra, the cross-encoder reranking path), `langgraph` 1.2.12 -> 1.2.14 (#1648), `mcp` 1.28.1 -> 1.30.0 (#1642).
+- `aiohttp` 3.14.3 -> 3.14.4 (#1635), `urllib3` 2.7.0 -> 2.8.0 (#1628), `authlib` 1.7.2 -> 1.9.1 (#1640), `joserfc` 1.6.8 -> 1.7.6 (#1645), `pyjwt` 2.13.0 -> 2.15.0 (#1627), `oauthlib` 4.0.0 -> 4.0.1 (#1649), `pyasn1` 0.6.4 -> 0.6.5 (#1647).
+- `anyio` 4.13.0 -> 4.14.2 (#1624), `multidict` 6.7.1 -> 6.9.1 (#1633), `fsspec` 2026.4.0 -> 2026.6.0 (#1630), `mako` 1.3.12 -> 1.4.2 (#1629), `banks` 2.4.5 -> 2.5.1 (#1631), `nltk` 3.10.3 -> 3.10.4 (#1639), `tinytag` 2.2.1 -> 2.3.0 (#1634).
+- `rust/Cargo.lock` regenerated for khora-accel 0.27.0. It picks up semver-compatible updates within the existing `Cargo.toml` ranges, including `pyo3` 0.29.0 -> 0.29.3. The Rust source is unchanged.
+
 ## [0.26.1] - transitive dependency security bumps (sqlparse, nltk, banks, starlette, transformers)
 
 No khora source changes. Every third-party dependency change in this release is a
