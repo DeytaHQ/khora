@@ -82,6 +82,19 @@ def test_namespace_uuid_distinguishes_apps_and_users():
     assert len({a, b, c}) == 3
 
 
+def test_namespace_uuid_rejects_colon_in_app_name():
+    # ("a:b", "c-1234") and ("a", "b:c-1234") both join to "adk:a:b:c-1234".
+    with pytest.raises(ValueError, match="app_name must not contain ':'"):
+        namespace_uuid(app_name="a:b", user_id="c-1234")
+    namespace_uuid(app_name="a", user_id="b:c-1234")
+
+
+def test_namespace_uuid_allows_colon_in_user_id():
+    a = namespace_uuid(app_name="my_app", user_id="tenant:user-1")
+    b = namespace_uuid(app_name="my_app", user_id="tenant:user-2")
+    assert a != b
+
+
 def test_session_uuid_passes_uuid_strings_through():
     raw = uuid4()
     derived = session_uuid(str(raw))

@@ -61,7 +61,14 @@ def namespace_uuid(*, app_name: str, user_id: str) -> UUID:
     map to the same khora namespace, per the #618 canonical mapping
     (``adk:{app_name}:{user_id}``). Used to allocate per-user long-term
     memory without storing a separate registry.
+
+    ``app_name`` must not contain ``:``. That keeps the ``:``-joined seed
+    injective (the second ``:`` always splits app_name from user_id), so
+    distinct pairs can never derive the same UUID. ``user_id`` may contain
+    ``:`` freely.
     """
+    if ":" in app_name:
+        raise ValueError(f"app_name must not contain ':': {app_name!r}")
     return uuid5(_NAMESPACE_ROOT, f"adk:{app_name}:{user_id}")
 
 
